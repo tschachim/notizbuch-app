@@ -15,6 +15,17 @@ personenbezogenen Inhalte. Zugangsdaten (Fine-grained PAT, Anthropic-API-Key)
 trägt der Nutzer in der laufenden App ein; sie liegen nur im localStorage des
 jeweiligen Geräts.
 
+## Sicherheitshinweis
+
+Alle GitHub-Pages-Projektseiten eines Kontos teilen sich den Origin
+`<owner>.github.io` – und damit den localStorage. JavaScript aus jedem anderen
+Pages-Projekt desselben Kontos könnte die hier gespeicherten Zugangsdaten
+lesen. Deshalb: auf diesem Konto keine fremden oder ungeprüften Pages-Projekte
+hosten, den PAT strikt auf das Daten-Repo beschränken und für den
+Anthropic-Key ein Budgetlimit setzen. Wer das Risiko ganz ausschließen will,
+betreibt die App unter einer eigenen Domain (z. B. Cloudflare Pages) oder in
+einem separaten GitHub-Konto.
+
 ## Entwicklung
 
 ```bash
