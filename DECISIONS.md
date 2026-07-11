@@ -74,3 +74,30 @@ aus `referenz-app.jsx` übernommen.
     Backslash-Escapes des Serializers werden entfernt (der zeilenbasierte
     Renderer interpretiert keine). Speichern ohne inhaltliche Änderung erzeugt
     keinen Commit (Vergleich gegen die Serialisierung direkt nach dem Laden).
+
+15. **Erweiterte Formatierung** (v4.2, Nutzerwunsch): ~~durchgestrichen~~
+    (GFM), Schriftfarbe und Textmarker. Farben haben keine
+    Markdown-Entsprechung und liegen deshalb als Inline-HTML im Dokument
+    (`<span style="color:…">`, `<mark data-color="…">`); der Renderer
+    akzeptiert ausschließlich diese beiden Tags mit validierten Farbwerten
+    (kein XSS-Weg). Der System-Prompt weist das Modell an, diese
+    Auszeichnungen zu erhalten. Feste Paletten: 6 Schriftfarben, 5 Marker.
+    Bekannte Einschränkung: Der Editor läuft dafür mit `html: true` – nur
+    `<span>`/`<mark>` sind round-trip-sicher; sonstiger Text, der wie
+    HTML-Tags aussieht (außerhalb von Backticks), kann beim manuellen
+    Bearbeiten umgeformt oder entfernt werden. Die Ansicht zeigt ihn
+    weiterhin als Literaltext.
+
+16. **Checklisten & nummerierte Listen** (v4.2, Nutzerwunsch): GFM-Syntax
+    `- [ ]` / `- [x]` bzw. `1.`. Kästchen sind direkt in der Ansicht
+    klickbar; jeder Klick ändert genau die betroffene Markdown-Zeile und
+    erzeugt einen Commit („Erledigt: …“ / „Wieder offen: …“). Schnelle
+    Folge-Klicks werden client-seitig serialisiert. Der Parser merkt sich
+    dafür zu jeder Zeile ihren Original-Index im Dokument.
+
+17. **Abschnitts-Navigation** (v4.2, Nutzerwunsch): Tab-Leiste rechts neben
+    der Wissensbasis mit allen ##-Überschriften (OneNote-Seitenleisten-Stil).
+    Klick klappt den Abschnitt auf und springt hin (bewusst ohne
+    Smooth-Scroll: Animation und requestAnimationFrame laufen in
+    eingebetteten/Hintergrund-Browsern nicht zuverlässig); ein einfacher
+    Scroll-Spy markiert beim Scrollen den aktiven Abschnitt.
