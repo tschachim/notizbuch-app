@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   BookOpen, Send, Pencil, X, Check, History, Download, Copy,
   RotateCcw, GitCommit, ChevronDown, Loader2, Upload, ImagePlus,
@@ -7,7 +7,7 @@ import {
 
 import { applyOps, dispHead } from "./lib/ops.js";
 import { diffLines, contextize } from "./lib/diff.js";
-import { DocView, IMG_REF_RE } from "./lib/markdown.jsx";
+import { DocView, IMG_REF_RE, TASK_RE, parseTree } from "./lib/markdown.jsx";
 import {
   prepareImage, newImgId, extForMime, mimeForName, dataUrlParts, blobToDataURL,
 } from "./lib/images.js";
@@ -111,7 +111,13 @@ export default function NotizbuchApp() {
   const firstDoc = useRef(true);
   const failedImgs = useRef(new Set());
 
+  const [activeSec, setActiveSec] = useState(0);
+  const docScrollRef = useRef(null);
+
   const settingsRef = useRef(null);
+  const docRef = useRef(INITIAL_DOC);
+  const taskChain = useRef(Promise.resolve());
+  const taskEpoch = useRef(0);
   const connectedRef = useRef(false);
   const busyRef = useRef(false);
   const editingRef = useRef(false);
@@ -126,6 +132,7 @@ export default function NotizbuchApp() {
   const versionCache = useRef(new Map()); // Commit-SHA -> Dokumenttext
 
   useEffect(() => { connectedRef.current = connected; }, [connected]);
+  useEffect(() => { docRef.current = doc; }, [doc]);
   useEffect(() => { busyRef.current = busy; }, [busy]);
   useEffect(() => { editingRef.current = editing; }, [editing]);
   useEffect(() => { stateRef.current = { chat, model, collapsed }; }, [chat, model, collapsed]);
@@ -524,6 +531,74 @@ export default function NotizbuchApp() {
     });
   };
 
+  /* ---------- Checklisten: Abhaken direkt in der Ansicht ---------- */
+  // Ändert genau die betroffene Zeile im Markdown und committet sie.
+  // Schnelle Folge-Klicks werden über eine Kette serialisiert, damit
+  // jeder Commit mit der dann aktuellen SHA läuft.
+  const toggleTask = (lineIdx, checked) => {
+    const lines = docRef.current.split("\n");
+    const m = TASK_RE.exec(lines[lineIdx] || "");
+    if (!m) return;
+    lines[lineIdx] = m[1] + (checked ? "x" : " ") + m[3] + m[4];
+    const newText = lines.join("\n");
+    docRef.current = newText;
+    setDoc(newText);
+    if (connected && settingsRef.current) {
+      const label = m[4].replace(/<[^>]+>/g, "").replace(/[*_~`]/g, "").trim().slice(0, 40);
+      const msg = (checked ? "Erledigt: " : "Wieder offen: ") + (label || "Aufgabe");
+      const cfg = settingsRef.current;
+      const epoch = taskEpoch.current;
+      taskChain.current = taskChain.current
+        .then(async () => {
+          // Nach einem SHA-Konflikt basieren bereits eingereihte Commits auf
+          // einem verworfenen Stand – nicht mehr schreiben (Schutz bleibt intakt).
+          if (taskEpoch.current !== epoch) return;
+          const ok = await commitDoc(cfg, newText, msg);
+          if (!ok) taskEpoch.current++;
+        })
+        .catch(() => {});
+    }
+  };
+
+  /* ---------- Abschnitts-Navigation (Tabs rechts) ---------- */
+  const sections = useMemo(() => parseTree(doc).sections, [doc]);
+
+  const gotoSection = (si, title) => {
+    setCollapsed((prev) => {
+      if (!prev["s:" + title]) return prev;
+      const n = { ...prev };
+      delete n["s:" + title];
+      return n;
+    });
+    setActiveSec(si);
+    // Synchron scrollen: Das Aufklappen des Ziel-Abschnitts verschiebt dessen
+    // Kopfzeile nicht, und RAF/Smooth-Scroll laufen in eingebetteten
+    // Browsern (Hintergrund-Tabs) nicht zuverlässig.
+    const root = docScrollRef.current;
+    const el = document.getElementById("sec-" + si);
+    if (!root || !el) return;
+    root.scrollTop =
+      el.getBoundingClientRect().top - root.getBoundingClientRect().top + root.scrollTop - 4;
+  };
+
+  const onDocScroll = () => {
+    const root = docScrollRef.current;
+    if (!root) return;
+    let act = 0;
+    if (root.scrollTop + root.clientHeight >= root.scrollHeight - 2) {
+      // Ganz unten: letzter Abschnitt gilt als aktiv, auch wenn seine
+      // Überschrift die Oberkante nie erreicht.
+      act = sections.length - 1;
+    } else {
+      const rootTop = root.getBoundingClientRect().top;
+      for (let i = 0; i < sections.length; i++) {
+        const el = document.getElementById("sec-" + i);
+        if (el && el.getBoundingClientRect().top - rootTop <= 24) act = i;
+      }
+    }
+    setActiveSec(act);
+  };
+
   /* ---------- Manuelles Bearbeiten (WYSIWYG) ---------- */
   const startEdit = () => setEditing(true);
   const cancelEdit = () => setEditing(false);
@@ -774,7 +849,7 @@ export default function NotizbuchApp() {
       <header className="flex items-center gap-2 px-3 h-14 bg-white border-b border-slate-200">
         <BookOpen size={20} className="text-indigo-700" />
         <span className="font-semibold tracking-tight">Notizbuch</span>
-        <span className="font-mono text-xs text-slate-400">v4.1</span>
+        <span className="font-mono text-xs text-slate-400">v4.2</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -1010,14 +1085,40 @@ export default function NotizbuchApp() {
               saving={savingEdit}
             />
           ) : (
-            <div className="flex-1 min-h-0 overflow-y-auto px-4 pb-8">
-              <DocView
-                text={doc}
-                collapsed={collapsed}
-                onToggle={toggleCollapse}
-                imgMap={imgMap}
-                onImgClick={(src) => setLightbox(src)}
-              />
+            <div className="flex-1 min-h-0 flex">
+              <div
+                ref={docScrollRef}
+                onScroll={onDocScroll}
+                className="flex-1 min-h-0 overflow-y-auto px-4 pb-8"
+              >
+                <DocView
+                  text={doc}
+                  collapsed={collapsed}
+                  onToggle={toggleCollapse}
+                  imgMap={imgMap}
+                  onImgClick={(src) => setLightbox(src)}
+                  onToggleTask={toggleTask}
+                  anchorPrefix="sec-"
+                />
+              </div>
+              {/* Abschnitts-Tabs (wie OneNote-Seitenleiste): alle ##-Überschriften */}
+              {sections.length > 1 && (
+                <nav className="w-28 md:w-36 shrink-0 border-l border-slate-100 overflow-y-auto py-2 pl-1 pr-2">
+                  {sections.map((sec, si) => (
+                    <button
+                      key={si + sec.title}
+                      onClick={() => gotoSection(si, sec.title)}
+                      title={sec.title}
+                      className={"w-full text-left text-xs px-2 py-1.5 mb-1 rounded-r-lg border-l-2 truncate " +
+                        (activeSec === si
+                          ? "border-indigo-600 bg-indigo-50 text-indigo-800 font-medium"
+                          : "border-transparent text-slate-500 hover:bg-slate-50 hover:text-slate-700")}
+                    >
+                      {sec.title}
+                    </button>
+                  ))}
+                </nav>
+              )}
             </div>
           )}
         </section>
