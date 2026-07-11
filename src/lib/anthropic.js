@@ -219,7 +219,13 @@ export async function callClaude(apiKey, userText, doc, priorChat, modelId, img,
     } catch (e) {
       throw new Error("Keine Verbindung zur Anthropic-API – bitte Netzwerk prüfen");
     }
-    return response.json();
+    let data = null;
+    try { data = await response.json(); } catch (e) { /* keine JSON-Antwort */ }
+    if (!response.ok && (!data || !data.error)) {
+      // z. B. HTML-Fehlerseite eines Proxys – nicht als Formatfehler tarnen
+      throw new Error("Anthropic-API-Fehler " + response.status);
+    }
+    return data;
   };
 
   let data = await doPost(true);
