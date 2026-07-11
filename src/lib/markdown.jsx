@@ -82,7 +82,7 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix) {
       );
     } else if (/^#\s+/.test(line)) {
       flush();
-      blocks.push(<h1 key={kp + key++} className="font-serif text-2xl font-bold text-slate-900 mb-2">{line.replace(/^#\s+/, "")}</h1>);
+      blocks.push(<h1 key={kp + key++} className="text-xl font-bold text-slate-900 mb-2">{line.replace(/^#\s+/, "")}</h1>);
     } else if (/^\s*[-*]\s+/.test(line)) {
       const item = line.replace(/^\s*[-*]\s+/, "");
       if (!list) list = [];
@@ -104,7 +104,9 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix) {
 export function DocView({ text, collapsed, onToggle, imgMap, onImgClick }) {
   const { pre, sections } = parseTree(text);
   return (
-    <div className="font-serif">
+    // Gleiche Schriftart/-größe wie der Chat (Nutzerwunsch); Hierarchie nur
+    // noch über Größe/Gewicht der Überschriften.
+    <div className="font-sans text-sm">
       {renderBlocks(pre, imgMap, onImgClick, "pre")}
       {sections.map((sec, si) => {
         const key = "s:" + sec.title;
@@ -116,7 +118,7 @@ export function DocView({ text, collapsed, onToggle, imgMap, onImgClick }) {
               className="w-full flex items-center gap-1.5 text-left pb-1 border-b border-slate-200"
             >
               <ChevronDown size={16} className={"text-slate-400 " + (isC ? "-rotate-90" : "")} />
-              <span className="font-serif text-lg font-semibold text-slate-900">{sec.title}</span>
+              <span className="text-base font-semibold text-slate-900">{sec.title}</span>
             </button>
             {!isC && (
               <div className="pt-2">
@@ -128,7 +130,7 @@ export function DocView({ text, collapsed, onToggle, imgMap, onImgClick }) {
                     <div key={sk + bi} className="mt-3 pl-3 border-l-2 border-slate-100">
                       <button onClick={() => onToggle(sk)} className="flex items-center gap-1.5 text-left">
                         <ChevronDown size={14} className={"text-slate-400 " + (sc ? "-rotate-90" : "")} />
-                        <span className="font-serif text-base font-semibold text-slate-800">{sub.title}</span>
+                        <span className="text-sm font-semibold text-slate-800">{sub.title}</span>
                       </button>
                       {!sc && <div className="pt-1">{renderBlocks(sub.lines, imgMap, onImgClick, "s" + si + "b" + bi)}</div>}
                     </div>
