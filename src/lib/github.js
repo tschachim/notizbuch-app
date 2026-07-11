@@ -76,6 +76,18 @@ export async function ghGetFile(cfg, path, ref) {
   if (res.status === 404) return null;
   if (!res.ok) throw errorFor(res);
   const data = await res.json();
+  // Ab ~1 MB liefert die Contents API encoding "none" und leeren content.
+  // Dann den Inhalt über den raw-Medientyp nachladen, statt still leeren
+  // Text zurückzugeben (der beim nächsten Commit den Inhalt überschriebe).
+  if (data.encoding !== "base64" || (!data.content && data.size > 0)) {
+    const raw = await ghFetch(contentsUrl(cfg, path, ref), {
+      headers: { ...baseHeaders(cfg), Accept: "application/vnd.github.raw+json" },
+    });
+    if (!raw.ok) throw errorFor(raw);
+    // sha stammt aus dem ersten GET; ändert sich die Datei zwischen den beiden
+    // Requests, fängt der reguläre ShaConflictError das beim nächsten PUT ab.
+    return { text: await raw.text(), sha: data.sha };
+  }
   return { text: b64ToUtf8(data.content || ""), sha: data.sha };
 }
 
