@@ -94,8 +94,10 @@ export default function NotizbuchApp() {
 
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [busyLabel, setBusyLabel] = useState("strukturiert …");
   const [view, setView] = useState("chat");
   const [notesDirty, setNotesDirty] = useState(false);
+  const [chatDirty, setChatDirty] = useState(false);
   const [editing, setEditing] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
   const [saveState, setSaveState] = useState("off");
@@ -146,6 +148,7 @@ export default function NotizbuchApp() {
   const connectedRef = useRef(false);
   const busyRef = useRef(false);
   const editingRef = useRef(false);
+  const viewRef = useRef("chat");
   const stateRef = useRef({ chat: [], model: MODELS[0].id, collapsed: {} });
   const docSha = useRef(null);
   const stateSha = useRef(null);
@@ -160,6 +163,7 @@ export default function NotizbuchApp() {
   useEffect(() => { docRef.current = doc; }, [doc]);
   useEffect(() => { busyRef.current = busy; }, [busy]);
   useEffect(() => { editingRef.current = editing; }, [editing]);
+  useEffect(() => { viewRef.current = view; }, [view]);
   useEffect(() => { stateRef.current = { chat, model, collapsed }; }, [chat, model, collapsed]);
 
   /* ---------- Metadaten (Stand & Versionszahl) ---------- */
@@ -698,13 +702,71 @@ export default function NotizbuchApp() {
     setActiveSec(act);
   };
 
+  /* ---------- Feedback nach manuellen Änderungen ---------- */
+  // Gleiche Behandlung wie Chat-Eingaben (Nutzerwunsch): Nach einer manuellen
+  // Bearbeitung schaut das Modell einmal über die Änderung. Meldet es nichts
+  // („OK“), bleibt der Chat unberührt – kein erzwungenes Feedback.
+  const requestFeedback = async (oldDoc, newDoc) => {
+    const cfg = settingsRef.current;
+    if (!connectedRef.current || !cfg || !cfg.apiKey) return;
+    let diffText = "";
+    try {
+      const d = diffLines(oldDoc, newDoc);
+      if (d) {
+        diffText = contextize(d)
+          .map((r) =>
+            r.t === "gap" ? "···"
+            : r.t === "info" ? r.l
+            : (r.t === "a" ? "+ " : r.t === "d" ? "− " : "  ") + r.l)
+          .join("\n");
+      }
+    } catch (e) { /* Diff ist optional */ }
+    if (diffText.length > 8000) diffText = ""; // Token-Deckel bei Großumbauten
+    const trigger =
+      "[Systemhinweis: Der Nutzer hat die Wissensbasis soeben MANUELL bearbeitet, " +
+      "nicht über den Chat. Der neue Stand steht bereits oben im Dokument und ist so gewollt.\n" +
+      (diffText
+        ? "Diff der Änderung:\n" + diffText + "\n\n"
+        : "Die Änderung ist umfangreich (kein kompakter Diff verfügbar) – prüfe das Gesamtdokument.\n\n") +
+      "Prüfe die Änderung im Kontext des Gesamtdokuments gemäß deiner Aufgabe 3 " +
+      "(Verbindungen, Widersprüche, Dubletten, Lücken, nächste Schritte, verletzte Konventionen). " +
+      "Fällt dir etwas Nennenswertes auf, melde es kurz in reply. " +
+      "Fällt dir NICHTS Nennenswertes auf, antworte in reply exakt mit \"##OK##\" und sonst nichts. " +
+      "Lass ops in jedem Fall leer und commit null – das Dokument darf durch diese Prüfung nicht verändert werden.]";
+    setBusy(true);
+    setBusyLabel("prüft die Änderung …");
+    try {
+      const res = await callClaude(cfg.apiKey, trigger, newDoc, stateRef.current.chat, model, null, null);
+      const reply = (res.reply || "").trim();
+      // Sentinel bevorzugt; zusätzlich häufige „nichts zu melden“-Floskeln abfangen.
+      const norm = reply.toLowerCase().replace(/[#.!,\s]/g, "");
+      const nothing = !reply || norm === "ok" || norm === "okay" || reply === "Notiert." ||
+        /^(alles (konsistent|in ordnung|klar|gut)|keine auffälligkeiten|nichts auffälliges|passt so)/i.test(reply);
+      if (!nothing) {
+        // ops werden hier bewusst NIE angewendet – reine Rückmeldung.
+        setChat((prev) => [...prev,
+          { role: "user", info: true, ts: Date.now(), text: "Wissensbasis manuell bearbeitet" },
+          { role: "assistant", ts: Date.now(), text: reply },
+        ].slice(-80));
+        if (viewRef.current !== "chat") setChatDirty(true);
+      }
+    } catch (e) {
+      /* Feedback ist best effort – kein Fehler-Spam im Chat */
+    } finally {
+      setBusy(false);
+      setBusyLabel("strukturiert …");
+    }
+  };
+
   /* ---------- Manuelles Bearbeiten (WYSIWYG) ---------- */
   const startEdit = () => setEditing(true);
   const cancelEdit = () => setEditing(false);
   // Bekommt das fertige Markdown aus dem WYSIWYG-Editor.
   const saveEdit = async (md) => {
+    if (busy) return; // keine parallelen Prüf-/Sendeläufe
     const cleaned = md.trim() ? md.replace(/\n{3,}/g, "\n\n").trim() + "\n" : INITIAL_DOC;
     if (cleaned !== doc) {
+      const oldDoc = doc;
       setSavingEdit(true);
       try {
         if (connected && settingsRef.current) {
@@ -715,6 +777,9 @@ export default function NotizbuchApp() {
       } finally {
         setSavingEdit(false);
       }
+      setEditing(false);
+      requestFeedback(oldDoc, cleaned); // bewusst nicht awaited
+      return;
     }
     setEditing(false);
   };
@@ -948,7 +1013,7 @@ export default function NotizbuchApp() {
       <header className="flex items-center gap-2 px-3 h-14 bg-white border-b border-slate-200">
         <BookOpen size={20} className="text-indigo-700" />
         <span className="font-semibold tracking-tight">Notizbuch</span>
-        <span className="font-mono text-xs text-slate-400">v4.3</span>
+        <span className="font-mono text-xs text-slate-400">v4.4</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -1018,11 +1083,14 @@ export default function NotizbuchApp() {
       {/* Mobiler Umschalter */}
       <div className="md:hidden flex gap-1 m-2 p-1 bg-white border border-slate-200 rounded-xl">
         <button
-          onClick={() => setView("chat")}
-          className={"flex-1 py-1.5 rounded-lg text-sm font-medium " +
+          onClick={() => { setView("chat"); setChatDirty(false); }}
+          className={"relative flex-1 py-1.5 rounded-lg text-sm font-medium " +
             (view === "chat" ? "bg-slate-900 text-white" : "text-slate-600")}
         >
           Chat
+          {chatDirty && view !== "chat" && (
+            <span className="absolute top-1 right-3 w-2 h-2 bg-indigo-600 rounded-full" />
+          )}
         </button>
         <button
           onClick={() => { setView("notes"); setNotesDirty(false); }}
@@ -1046,7 +1114,14 @@ export default function NotizbuchApp() {
             " md:flex flex-col flex-1 md:flex-none md:w-[var(--chat-w)] min-w-0 bg-slate-50"}
         >
           <div className="flex-1 min-h-0 overflow-y-auto px-3 py-3 space-y-3">
-            {chat.map((m, i) => (
+            {chat.map((m, i) => m.info ? (
+              <div key={i} className="flex justify-center">
+                <span className="inline-flex items-center gap-1 text-xs text-slate-400 bg-slate-100 border border-slate-200 rounded-full px-2.5 py-0.5">
+                  <Pencil size={10} />
+                  {m.text}
+                </span>
+              </div>
+            ) : (
               <div key={i} className={"flex flex-col " + (m.role === "user" ? "items-end" : "items-start")}>
                 <div
                   className={
@@ -1083,7 +1158,7 @@ export default function NotizbuchApp() {
             {busy && (
               <div className="flex items-center gap-2 text-slate-400 text-sm px-1">
                 <Loader2 size={14} className="animate-spin" />
-                <span>strukturiert …</span>
+                <span>{busyLabel}</span>
               </div>
             )}
             <div ref={chatEndRef} />
@@ -1189,7 +1264,7 @@ export default function NotizbuchApp() {
               imgMap={imgMap}
               onSave={saveEdit}
               onCancel={cancelEdit}
-              saving={savingEdit}
+              saving={savingEdit || busy}
             />
           ) : (
             <div className="flex-1 min-h-0 flex">

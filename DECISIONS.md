@@ -114,3 +114,13 @@ aus `referenz-app.jsx` übernommen.
     Bewusst nicht ins Daten-Repo synchronisiert: Inhalte sind flüchtig und
     wandern per OK-Knopf als „Neue Schnellnotiz: …“ in den Chat-Prompt
     (nicht automatisch abgeschickt), die Notiz wird dabei gelöscht.
+
+20. **Feedback auch nach manuellem Bearbeiten** (v4.4, Nutzerwunsch): Nach
+    jedem Editor-Speichern prüft das Modell die Änderung (bekommt den Diff
+    plus das Gesamtdokument) und meldet Auffälligkeiten als Chat-Nachricht;
+    antwortet es „OK“, bleibt der Chat unberührt. Die Prüfung ändert das
+    Dokument nie (ops werden ignoriert). Checkbox-Klicks und Wiederherstellen
+    lösen bewusst keine Prüfung aus (trivial bzw. gewollter Rollback).
+    Zusätzlich wurde Aufgabe 3 des System-Prompts geschärft („sobald etwas
+    auffällt, sofort melden – aber nichts erzwingen“) und das Antwortlimit
+    für Hinweise von ~100 auf ~200 Wörter angehoben.
