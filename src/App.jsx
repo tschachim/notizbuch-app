@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   BookOpen, Send, Pencil, X, Check, History, Download, Copy,
   RotateCcw, GitCommit, ChevronDown, Loader2, Upload, ImagePlus,
-  Settings, AlertTriangle,
+  Settings, AlertTriangle, StickyNote,
 } from "lucide-react";
 
 import { applyOps, dispHead } from "./lib/ops.js";
@@ -19,6 +19,18 @@ import {
 import { loadSettings, saveSettings, clearSettings } from "./lib/settings.js";
 import SettingsDialog from "./components/SettingsDialog.jsx";
 import DocEditor from "./components/DocEditor.jsx";
+import QuickNotes from "./components/QuickNotes.jsx";
+
+/* Geräte-lokale UI-Einstellungen (Spaltenbreiten, Schnellnotizen) */
+const LAYOUT_KEY = "notizbuch:layout";
+const QUICKNOTES_KEY = "notizbuch:quicknotes";
+
+const loadLocal = (key, fallback) => {
+  try {
+    const v = JSON.parse(localStorage.getItem(key));
+    return v && typeof v === "object" ? v : fallback;
+  } catch (e) { return fallback; }
+};
 
 /* ------------------------------------------------------------------ */
 /* Konstanten (aus der Referenz-App übernommen)                        */
@@ -113,6 +125,19 @@ export default function NotizbuchApp() {
 
   const [activeSec, setActiveSec] = useState(0);
   const docScrollRef = useRef(null);
+  const mainRef = useRef(null);
+
+  const [layout, setLayout] = useState(() => {
+    const l = loadLocal(LAYOUT_KEY, {});
+    return {
+      chatPct: typeof l.chatPct === "number" ? Math.min(80, Math.max(20, l.chatPct)) : 50,
+      navW: typeof l.navW === "number" ? Math.min(360, Math.max(96, l.navW)) : 148,
+    };
+  });
+  const [quickNotes, setQuickNotes] = useState(() => {
+    const v = loadLocal(QUICKNOTES_KEY, []);
+    return Array.isArray(v) ? v : [];
+  });
 
   const settingsRef = useRef(null);
   const docRef = useRef(INITIAL_DOC);
@@ -560,6 +585,80 @@ export default function NotizbuchApp() {
     }
   };
 
+  /* ---------- Layout (Splitter) & Schnellnotizen: pro Gerät merken ---------- */
+  // Debounced: beim Ziehen/Tippen ändert sich der State bis zu 60×/s.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout)); } catch (e) { /* egal */ }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [layout]);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      try { localStorage.setItem(QUICKNOTES_KEY, JSON.stringify(quickNotes)); } catch (e) { /* egal */ }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [quickNotes]);
+
+  // Splitter: kind "chat" = Grenze Chat/Dokument (Prozent),
+  // kind "nav" = Grenze Dokument/Abschnittsleiste (Pixel von rechts).
+  const startSplit = (e, kind) => {
+    e.preventDefault();
+    const handle = e.currentTarget;
+    const rect = mainRef.current ? mainRef.current.getBoundingClientRect() : null;
+    if (!rect) return;
+    try { handle.setPointerCapture(e.pointerId); } catch (err) { /* ohne Capture weiter */ }
+    const up = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      handle.removeEventListener("pointercancel", up);
+    };
+    const move = (ev) => {
+      if (ev.buttons === 0) { up(); return; } // Taste außerhalb losgelassen
+      if (kind === "chat") {
+        const pct = ((ev.clientX - rect.left) / rect.width) * 100;
+        setLayout((l) => ({ ...l, chatPct: Math.min(80, Math.max(20, pct)) }));
+      } else {
+        const w = rect.right - ev.clientX;
+        setLayout((l) => ({ ...l, navW: Math.min(360, Math.max(96, w)) }));
+      }
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+    handle.addEventListener("pointercancel", up);
+  };
+
+  /* ---------- Schnellnotizen (Post-its) ---------- */
+  const addQuickNote = () => {
+    const n = quickNotes.length;
+    setQuickNotes((prev) => [...prev, {
+      id: newImgId(),
+      text: "",
+      x: 90 + (n % 5) * 32,
+      y: 90 + (n % 5) * 32,
+      w: 260,
+      h: 200,
+    }]);
+  };
+
+  const updateQuickNote = (id, patch) =>
+    setQuickNotes((prev) => prev.map((q) => (q.id === id ? { ...q, ...patch } : q)));
+
+  const removeQuickNote = (id) =>
+    setQuickNotes((prev) => prev.filter((q) => q.id !== id));
+
+  // OK: Inhalt in den Prompt übernehmen, Notiz löschen.
+  const submitQuickNote = (id) => {
+    const n = quickNotes.find((q) => q.id === id);
+    if (!n) return;
+    const text = n.text.trim();
+    if (text) {
+      setInput((prev) => (prev.trim() ? prev + "\n\n" : "") + "Neue Schnellnotiz:\n" + text);
+      setView("chat");
+    }
+    removeQuickNote(id);
+  };
+
   /* ---------- Abschnitts-Navigation (Tabs rechts) ---------- */
   const sections = useMemo(() => parseTree(doc).sections, [doc]);
 
@@ -849,7 +948,7 @@ export default function NotizbuchApp() {
       <header className="flex items-center gap-2 px-3 h-14 bg-white border-b border-slate-200">
         <BookOpen size={20} className="text-indigo-700" />
         <span className="font-semibold tracking-tight">Notizbuch</span>
-        <span className="font-mono text-xs text-slate-400">v4.2</span>
+        <span className="font-mono text-xs text-slate-400">v4.3</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -938,12 +1037,13 @@ export default function NotizbuchApp() {
       </div>
 
       {/* Hauptbereich */}
-      <main className="flex-1 min-h-0 flex">
+      <main ref={mainRef} className="flex-1 min-h-0 flex">
 
-        {/* ---------------- Chat (links, 50 %) ---------------- */}
+        {/* ---------------- Chat (links, Breite per Splitter) ---------------- */}
         <section
+          style={{ "--chat-w": layout.chatPct + "%" }}
           className={(view === "chat" ? "flex" : "hidden") +
-            " md:flex flex-col flex-1 min-w-0 bg-slate-50"}
+            " md:flex flex-col flex-1 md:flex-none md:w-[var(--chat-w)] min-w-0 bg-slate-50"}
         >
           <div className="flex-1 min-h-0 overflow-y-auto px-3 py-3 space-y-3">
             {chat.map((m, i) => (
@@ -1045,10 +1145,17 @@ export default function NotizbuchApp() {
           </div>
         </section>
 
-        {/* ---------------- Wissensbasis (rechts, 50 %) ---------------- */}
+        {/* Splitter Chat ↔ Dokument */}
+        <div
+          onPointerDown={(e) => startSplit(e, "chat")}
+          className="hidden md:block w-1.5 shrink-0 cursor-col-resize bg-slate-200 hover:bg-indigo-400 active:bg-indigo-500 transition-colors touch-none"
+          title="Breite anpassen"
+        />
+
+        {/* ---------------- Wissensbasis (rechts) ---------------- */}
         <section
           className={(view === "notes" ? "flex" : "hidden") +
-            " md:flex flex-col flex-1 min-w-0 bg-white md:border-l border-slate-200 " +
+            " md:flex flex-col flex-1 min-w-0 bg-white " +
             (flash ? "ring-2 ring-inset ring-indigo-300" : "")}
         >
           {/* Aktenkopf */}
@@ -1101,24 +1208,40 @@ export default function NotizbuchApp() {
                   anchorPrefix="sec-"
                 />
               </div>
+              {/* Splitter Dokument ↔ Abschnittsleiste */}
+              <div
+                onPointerDown={(e) => startSplit(e, "nav")}
+                className="hidden md:block w-1 shrink-0 cursor-col-resize bg-slate-100 hover:bg-indigo-400 active:bg-indigo-500 transition-colors touch-none"
+                title="Breite anpassen"
+              />
+
               {/* Abschnitts-Tabs (wie OneNote-Seitenleiste): alle ##-Überschriften */}
-              {sections.length > 1 && (
-                <nav className="w-28 md:w-36 shrink-0 border-l border-slate-100 overflow-y-auto py-2 pl-1 pr-2">
-                  {sections.map((sec, si) => (
-                    <button
-                      key={si + sec.title}
-                      onClick={() => gotoSection(si, sec.title)}
-                      title={sec.title}
-                      className={"w-full text-left text-xs px-2 py-1.5 mb-1 rounded-r-lg border-l-2 truncate " +
-                        (activeSec === si
-                          ? "border-indigo-600 bg-indigo-50 text-indigo-800 font-medium"
-                          : "border-transparent text-slate-500 hover:bg-slate-50 hover:text-slate-700")}
-                    >
-                      {sec.title}
-                    </button>
-                  ))}
-                </nav>
-              )}
+              <nav
+                style={{ "--nav-w": layout.navW + "px" }}
+                className="w-28 md:w-[var(--nav-w)] shrink-0 overflow-y-auto py-2 pr-2 bg-slate-50/60"
+              >
+                <button
+                  onClick={addQuickNote}
+                  className="w-full flex items-center gap-1.5 text-left text-xs font-medium pl-2.5 pr-2 py-2 mb-2 rounded-r-xl border border-l-0 border-amber-300 bg-gradient-to-r from-amber-50 to-amber-100 text-amber-900 shadow-sm hover:to-amber-200"
+                  title="Neue Schnellnotiz (Post-it)"
+                >
+                  <StickyNote size={13} className="shrink-0" />
+                  Schnellnotiz
+                </button>
+                {sections.map((sec, si) => (
+                  <button
+                    key={si + sec.title}
+                    onClick={() => gotoSection(si, sec.title)}
+                    title={sec.title}
+                    className={"w-full text-left text-xs pl-2.5 pr-2 py-1.5 mb-1.5 truncate rounded-r-xl border border-l-0 shadow-sm transition-colors " +
+                      (activeSec === si
+                        ? "bg-white border-indigo-300 text-indigo-900 font-medium shadow"
+                        : "bg-gradient-to-r from-slate-50 to-slate-100 border-slate-200 text-slate-600 hover:from-indigo-50 hover:to-indigo-100 hover:text-slate-900")}
+                  >
+                    {sec.title}
+                  </button>
+                ))}
+              </nav>
             </div>
           )}
         </section>
@@ -1293,6 +1416,14 @@ export default function NotizbuchApp() {
           </div>
         </div>
       )}
+
+      {/* ---------------- Schnellnotizen (Post-its) ---------------- */}
+      <QuickNotes
+        notes={quickNotes}
+        onChange={updateQuickNote}
+        onRemove={removeQuickNote}
+        onSubmit={submitQuickNote}
+      />
 
       {/* ---------------- Einstellungen ---------------- */}
       {showSettings && (

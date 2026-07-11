@@ -101,3 +101,16 @@ aus `referenz-app.jsx` übernommen.
     Smooth-Scroll: Animation und requestAnimationFrame laufen in
     eingebetteten/Hintergrund-Browsern nicht zuverlässig); ein einfacher
     Scroll-Spy markiert beim Scrollen den aktiven Abschnitt.
+
+18. **Verstellbare Spaltenbreiten** (v4.3, Nutzerwunsch): Splitter zwischen
+    Chat/Dokument (Prozent) und Dokument/Abschnittsleiste (Pixel), nur am
+    Desktop (mobil bleiben die umschaltbaren Vollbild-Ansichten). Ablage pro
+    Gerät im localStorage (`notizbuch:layout`) – Bildschirmbreiten sind
+    gerätespezifisch, ein Sync über state.json wäre kontraproduktiv.
+
+19. **Schnellnotizen** (v4.3, Nutzerwunsch): frei schwebende Post-its
+    (verschieb- und größenveränderbar, mehrere gleichzeitig), Ablage pro
+    Gerät im localStorage (`notizbuch:quicknotes`) inkl. Position/Größe.
+    Bewusst nicht ins Daten-Repo synchronisiert: Inhalte sind flüchtig und
+    wandern per OK-Knopf als „Neue Schnellnotiz: …“ in den Chat-Prompt
+    (nicht automatisch abgeschickt), die Notiz wird dabei gelöscht.
