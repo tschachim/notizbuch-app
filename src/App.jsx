@@ -118,6 +118,7 @@ export default function NotizbuchApp() {
   const docSha = useRef(null);
   const stateSha = useRef(null);
   const stateTimer = useRef(null);
+  const stateFlushing = useRef(0); // Zähler: auch überlappende Flushes abdecken
   const lastSavedState = useRef(null);
   const lastRefresh = useRef(0);
   const imgIndex = useRef({}); // id -> Pfad im Daten-Repo
@@ -221,6 +222,7 @@ export default function NotizbuchApp() {
 
   /* ---------- state.json speichern (debounced, Konflikt = Neuversuch) ---------- */
   const flushState = useCallback(async (cfg, payload) => {
+    stateFlushing.current += 1;
     try {
       try {
         const put = await ghPutFile(cfg, STATE_PATH, utf8ToB64(payload), "Chat & Einstellungen aktualisiert", stateSha.current || undefined);
@@ -239,6 +241,8 @@ export default function NotizbuchApp() {
     } catch (e) {
       setSaveState("error");
       setStorageError(e && e.message ? e.message : String(e));
+    } finally {
+      stateFlushing.current -= 1;
     }
   }, []);
 
@@ -329,8 +333,9 @@ export default function NotizbuchApp() {
           setDoc(f.text);
           refreshMeta(cfg);
         }
-        // Chat/Modell/Klappzustände nur übernehmen, wenn lokal nichts aussteht
-        if (!stateTimer.current) {
+        // Chat/Modell/Klappzustände nur übernehmen, wenn lokal weder eine
+        // Speicherung geplant ist noch gerade eine läuft
+        if (!stateTimer.current && !stateFlushing.current) {
           const st = await ghGetFile(cfg, STATE_PATH);
           if (st && st.sha !== stateSha.current) {
             stateSha.current = st.sha;
@@ -420,21 +425,23 @@ export default function NotizbuchApp() {
     setBusy(true);
 
     try {
-      // Bild zuerst als Datei ins Daten-Repo, damit die Dokument-Referenz
-      // auf allen Geräten auflösbar ist.
-      if (img && imgId) {
-        const parts = dataUrlParts(img.dataUrl);
-        if (!parts) throw new Error("Bilddaten unlesbar");
-        const path = "bilder/" + imgId + "." + extForMime(parts.mime);
-        await ghPutFile(cfg, path, parts.base64, "Bild " + imgId + " hinzugefügt");
-        imgIndex.current[imgId] = path;
-      }
+      // Formatprüfung vor dem (bezahlten) API-Call; hochgeladen wird erst danach.
+      const imgParts = img ? dataUrlParts(img.dataUrl) : null;
+      if (img && !imgParts) throw new Error("Bilddaten unlesbar");
 
       const res = await callClaude(cfg.apiKey, text, doc, chat, model, img, imgId);
 
+      // Bild erst nach erfolgreicher Antwort als Datei ins Daten-Repo legen
+      // (keine verwaisten Dateien bei API-Fehlern), aber vor dem Dokument-
+      // Commit, damit die Referenz auf allen Geräten auflösbar ist.
+      if (img && imgId) {
+        const path = "bilder/" + imgId + "." + extForMime(imgParts.mime);
+        await ghPutFile(cfg, path, imgParts.base64, "Bild " + imgId + " hinzugefügt");
+        imgIndex.current[imgId] = path;
+      }
+
       let newDoc = doc;
       let commit = null;
-      let newCollapsed = collapsed;
 
       if (res.ops.length) {
         const applied = applyOps(doc, res.ops);
@@ -442,9 +449,10 @@ export default function NotizbuchApp() {
           commit = res.commit || "Aktualisierung";
           const ok = await commitDoc(cfg, applied, commit);
           if (!ok) {
-            // SHA-Konflikt: Remote-Stand ist bereits geladen, Eingabe zurückgeben.
-            setInput(text);
-            if (img) setPendingImg(img);
+            // SHA-Konflikt: Remote-Stand ist bereits geladen, Eingabe zurückgeben
+            // (ohne eine inzwischen neu getippte Eingabe zu überschreiben).
+            setInput((prev) => (prev.trim() ? prev : text));
+            if (img) setPendingImg((prev) => prev || img);
             const aMsg = {
               role: "assistant",
               error: true,
@@ -471,7 +479,7 @@ export default function NotizbuchApp() {
                 hit = true;
               }
             });
-            if (hit) { newCollapsed = nc; setCollapsed(nc); }
+            if (hit) setCollapsed(nc);
           }
         }
       }
@@ -483,15 +491,23 @@ export default function NotizbuchApp() {
       setChat(finalChat);
       if (commit && view === "chat") setNotesDirty(true);
     } catch (e) {
+      // Eingabe wie im Konfliktpfad zurückgeben, ohne Neueres zu überschreiben.
+      setInput((prev) => (prev.trim() ? prev : text));
+      if (img) setPendingImg((prev) => prev || img);
+      // Wurde das Bild nicht hochgeladen, die img-Referenz aus der Nachricht
+      // nehmen, damit nach Reload/Sync kein unauflösbares img:… zurückbleibt.
+      const cleaned = img && imgId && !imgIndex.current[imgId]
+        ? chatWithUser.map((m) => (m === userMsg ? { ...m, imgId: null } : m))
+        : chatWithUser;
       const aMsg = {
         role: "assistant",
         error: true,
         ts: Date.now(),
         text:
           "Anfrage fehlgeschlagen: " + (e && e.message ? e.message : "unbekannter Fehler") +
-          ". Deine Nachricht ist nicht verloren – sende sie einfach noch einmal.",
+          ". Deine Nachricht steht wieder im Eingabefeld – sende sie einfach noch einmal.",
       };
-      setChat([...chatWithUser, aMsg].slice(-80));
+      setChat([...cleaned, aMsg].slice(-80));
     } finally {
       setBusy(false);
     }
