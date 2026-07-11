@@ -58,3 +58,19 @@ aus `referenz-app.jsx` übernommen.
 12. **Commit-Autor der App-Schreibzugriffe** ist der PAT-Inhaber (GitHub setzt
     ihn automatisch); die Commit-Message der Dokument-Commits ist die vom
     Modell gelieferte Message.
+
+13. **Schriftbild der Wissensbasis** (v4.1, Nutzerwunsch): Das Dokument nutzt
+    dieselbe Schriftart und -größe wie der Chat (sans, 14 px) statt des
+    Serif-Designs der Referenz. Abgeleitete Formatierungen (Überschriften-
+    Hierarchie, fett, kursiv, Code) bleiben erhalten, nur proportional
+    verkleinert. Ersetzt Punkt 1, soweit er „Serif fürs Dokument“ betraf.
+
+14. **Manuelles Bearbeiten als WYSIWYG** (v4.1, Nutzerwunsch): TipTap v2 mit
+    `tiptap-markdown` statt Markdown-Quelltext-Textarea. Der Editor ist auf
+    den Dialekt beschränkt, den der Renderer versteht (#/##/###, „- “-Listen,
+    fett/kursiv/Code, ---, Bilder); Codeblöcke, Zitate, nummerierte Listen und
+    Durchgestrichen sind deaktiviert. Bildreferenzen `img:<id>` werden beim
+    Öffnen auf data-URLs aufgelöst und beim Speichern zurückübersetzt.
+    Backslash-Escapes des Serializers werden entfernt (der zeilenbasierte
+    Renderer interpretiert keine). Speichern ohne inhaltliche Änderung erzeugt
+    keinen Commit (Vergleich gegen die Serialisierung direkt nach dem Laden).

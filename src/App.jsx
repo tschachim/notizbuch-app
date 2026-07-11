@@ -18,6 +18,7 @@ import {
 } from "./lib/github.js";
 import { loadSettings, saveSettings, clearSettings } from "./lib/settings.js";
 import SettingsDialog from "./components/SettingsDialog.jsx";
+import DocEditor from "./components/DocEditor.jsx";
 
 /* ------------------------------------------------------------------ */
 /* Konstanten (aus der Referenz-App übernommen)                        */
@@ -84,7 +85,7 @@ export default function NotizbuchApp() {
   const [view, setView] = useState("chat");
   const [notesDirty, setNotesDirty] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
   const [saveState, setSaveState] = useState("off");
   const [storageError, setStorageError] = useState(null);
   const [banner, setBanner] = useState(null); // { kind: "info"|"warn", text }
@@ -523,17 +524,23 @@ export default function NotizbuchApp() {
     });
   };
 
-  /* ---------- Manuelles Bearbeiten ---------- */
-  const startEdit = () => { setDraft(doc); setEditing(true); };
+  /* ---------- Manuelles Bearbeiten (WYSIWYG) ---------- */
+  const startEdit = () => setEditing(true);
   const cancelEdit = () => setEditing(false);
-  const saveEdit = async () => {
-    if (draft !== doc) {
-      const cleaned = draft.trim() ? draft.replace(/\n{3,}/g, "\n\n") : INITIAL_DOC;
-      if (connected && settingsRef.current) {
-        const ok = await commitDoc(settingsRef.current, cleaned, "Manuelle Bearbeitung");
-        if (!ok) return; // Konflikt: Editor offen lassen, Entwurf bleibt erhalten
+  // Bekommt das fertige Markdown aus dem WYSIWYG-Editor.
+  const saveEdit = async (md) => {
+    const cleaned = md.trim() ? md.replace(/\n{3,}/g, "\n\n").trim() + "\n" : INITIAL_DOC;
+    if (cleaned !== doc) {
+      setSavingEdit(true);
+      try {
+        if (connected && settingsRef.current) {
+          const ok = await commitDoc(settingsRef.current, cleaned, "Manuelle Bearbeitung");
+          if (!ok) return; // Konflikt: Editor offen lassen, Inhalt bleibt erhalten
+        }
+        setDoc(cleaned);
+      } finally {
+        setSavingEdit(false);
       }
-      setDoc(cleaned);
     }
     setEditing(false);
   };
@@ -767,7 +774,7 @@ export default function NotizbuchApp() {
       <header className="flex items-center gap-2 px-3 h-14 bg-white border-b border-slate-200">
         <BookOpen size={20} className="text-indigo-700" />
         <span className="font-semibold tracking-tight">Notizbuch</span>
-        <span className="font-mono text-xs text-slate-400">v4.0</span>
+        <span className="font-mono text-xs text-slate-400">v4.1</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -995,24 +1002,13 @@ export default function NotizbuchApp() {
           </div>
 
           {editing ? (
-            <div className="flex-1 min-h-0 flex flex-col px-4 pb-4 gap-2">
-              <textarea
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                className="flex-1 min-h-0 w-full resize-none rounded-lg border border-indigo-300 bg-white p-3 font-mono text-sm text-slate-800"
-              />
-              <div className="flex items-center gap-2">
-                <button onClick={saveEdit}
-                  className="px-3 py-1.5 rounded-lg bg-indigo-700 text-white text-sm font-medium hover:bg-indigo-800">
-                  Speichern
-                </button>
-                <button onClick={cancelEdit}
-                  className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-sm hover:bg-slate-50">
-                  Abbrechen
-                </button>
-                <span className="text-xs text-slate-400">Speichern legt eine neue Version an. Bildreferenzen ![…](img:…) nicht verändern.</span>
-              </div>
-            </div>
+            <DocEditor
+              initialDoc={doc}
+              imgMap={imgMap}
+              onSave={saveEdit}
+              onCancel={cancelEdit}
+              saving={savingEdit}
+            />
           ) : (
             <div className="flex-1 min-h-0 overflow-y-auto px-4 pb-8">
               <DocView
