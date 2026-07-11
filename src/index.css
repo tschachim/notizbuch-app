@@ -32,7 +32,39 @@
   padding-left: 1.25rem;
   margin-bottom: 0.75rem;
 }
+.tiptap-doc ol {
+  list-style: decimal;
+  padding-left: 1.25rem;
+  margin-bottom: 0.75rem;
+}
 .tiptap-doc li { margin-bottom: 0.25rem; }
+.tiptap-doc ul[data-type="taskList"] {
+  list-style: none;
+  padding-left: 0.25rem;
+}
+.tiptap-doc ul[data-type="taskList"] li {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+}
+.tiptap-doc ul[data-type="taskList"] li > label {
+  margin-top: 0.2rem;
+  flex-shrink: 0;
+}
+.tiptap-doc ul[data-type="taskList"] li > label input {
+  accent-color: var(--color-indigo-600);
+  cursor: pointer;
+}
+.tiptap-doc ul[data-type="taskList"] li > div { flex: 1; }
+.tiptap-doc ul[data-type="taskList"] li[data-checked="true"] > div {
+  text-decoration: line-through;
+  color: var(--color-slate-400);
+}
+.tiptap-doc s { color: var(--color-slate-400); }
+.tiptap-doc mark {
+  border-radius: 0.25rem;
+  padding: 0 0.125rem;
+}
 .tiptap-doc strong { font-weight: 600; color: var(--color-slate-900); }
 .tiptap-doc code {
   font-family: var(--font-mono);
