@@ -31,8 +31,29 @@ function unresolveImgs(md, imgMap) {
 // die vom Markdown-Serializer erzeugten daher entfernen.
 const unescapeMd = (md) => md.replace(/\\([\\`*_{}[\]()#+\-.!>])/g, "$1");
 
+// tiptap-markdown serialisiert Bilder mit dem Inline-Serializer von
+// prosemirror-markdown – ohne closeBlock klebt die Folgezeile direkt an der
+// Bildzeile und die App-Konvention „![…](img:…) allein auf einer Zeile“
+// (IMG_LINE_RE) bricht. Eigener Block-Serializer behebt das; allowBase64 ist
+// Pflicht, weil die Parse-Regel sonst keine data:-URLs übernimmt und die von
+// resolveImgs aufgelösten Bilder beim Öffnen aus dem Inhalt fielen.
+const BlockImage = Image.extend({
+  addStorage() {
+    return {
+      markdown: {
+        serialize(state, node) {
+          state.write("![" + state.esc(node.attrs.alt || "") + "](" + node.attrs.src + ")");
+          state.closeBlock(node);
+        },
+        parse: {},
+      },
+    };
+  },
+}).configure({ allowBase64: true });
+
 export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving }) {
   const baseline = useRef(null);
+  const [error, setError] = useState(null);
   // TipTap feuert Transaktionen ohne React-Re-Render; kleiner Zähler,
   // damit die Aktiv-Zustände der Toolbar-Knöpfe mitziehen.
   const [, setTick] = useState(0);
@@ -46,7 +67,7 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
         strike: false,
         orderedList: false,
       }),
-      Image,
+      BlockImage,
       Markdown.configure({ html: false, bulletListMarker: "-", tightLists: true }),
     ],
     content: resolveImgs(initialDoc, imgMap),
@@ -60,7 +81,18 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
     if (!editor || saving) return;
     const md = editor.storage.markdown.getMarkdown();
     if (md === baseline.current) { onCancel(); return; } // nichts geändert
-    onSave(unescapeMd(unresolveImgs(md, imgMap)));
+    const out = unescapeMd(unresolveImgs(md, imgMap));
+    // Sicherheitsnetz: Es darf keine data:-URL im Dokument landen (z. B. ein
+    // direkt in den Editor eingefügtes Bild ohne img:-Referenz).
+    if (out.includes("](data:")) {
+      setError(
+        "Das Dokument enthält ein Bild ohne Referenz (direkt eingefügt?). " +
+        "Bitte entferne es hier und füge Bilder über den Chat hinzu."
+      );
+      return;
+    }
+    setError(null);
+    onSave(out);
   };
 
   const btn = (active) =>
@@ -119,6 +151,11 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
         <EditorContent editor={editor} />
       </div>
 
+      {error && (
+        <div className="px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800">
+          {error}
+        </div>
+      )}
       <div className="flex items-center gap-2">
         <button onClick={save} disabled={saving}
           className={"px-3 py-1.5 rounded-lg bg-indigo-700 text-white text-sm font-medium " +
