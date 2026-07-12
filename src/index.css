@@ -76,11 +76,37 @@
 }
 .tiptap-doc img {
   max-height: 16rem;
+  max-width: 100%;
   border-radius: 0.5rem;
   border: 1px solid var(--color-slate-200);
   box-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
   margin: 0.75rem 0;
 }
+/* Bild-NodeView mit Anfasser zum Skalieren (unten rechts) */
+.tiptap-doc .img-resize-wrap {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+}
+.tiptap-doc .img-resize-wrap img { display: block; }
+.tiptap-doc .img-resize-handle {
+  position: absolute;
+  right: -7px;
+  bottom: 5px;
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: var(--color-indigo-600);
+  border: 2px solid white;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.3);
+  cursor: nwse-resize;
+  opacity: 0;
+  transition: opacity 0.15s;
+  touch-action: none;
+}
+.tiptap-doc .img-resize-wrap:hover .img-resize-handle,
+.tiptap-doc .img-resize-wrap.ProseMirror-selectednode .img-resize-handle { opacity: 1; }
+.tiptap-doc .img-resize-wrap.ProseMirror-selectednode img,
 .tiptap-doc img.ProseMirror-selectednode { outline: 2px solid var(--color-indigo-400); }
 .tiptap-doc hr {
   margin: 1rem 0;

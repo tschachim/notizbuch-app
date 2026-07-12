@@ -70,16 +70,115 @@ const unescapeMd = (md) => md.replace(/\\([\\`*_{}[\]()#+\-.!>~=])/g, "$1");
 // (IMG_LINE_RE) bricht. Eigener Block-Serializer behebt das; allowBase64 ist
 // Pflicht, weil die Parse-Regel sonst keine data:-URLs übernimmt und die von
 // resolveImgs aufgelösten Bilder beim Öffnen aus dem Inhalt fielen.
+// Größenänderung per Maus: Die Breite wird als "|w<px>"-Suffix im Alt-Text
+// persistiert (![Titel|w320](img:…)) – Markdown hat kein width-Attribut,
+// und nur der Alt-Text übersteht Roundtrip UND den zeilenbasierten Renderer.
 const BlockImage = Image.extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      alt: {
+        default: null,
+        parseHTML: (el) => (el.getAttribute("alt") || "").replace(/\|w\d+$/, "") || null,
+      },
+      width: {
+        default: null,
+        parseHTML: (el) => {
+          const m = /\|w(\d+)$/.exec(el.getAttribute("alt") || "");
+          if (m) return parseInt(m[1], 10);
+          const w = el.getAttribute("width");
+          return w ? parseInt(w, 10) : null;
+        },
+        renderHTML: (attrs) => (attrs.width ? { width: attrs.width } : {}),
+      },
+    };
+  },
   addStorage() {
     return {
       markdown: {
         serialize(state, node) {
-          state.write("![" + state.esc(node.attrs.alt || "") + "](" + node.attrs.src + ")");
+          const suffix = node.attrs.width ? "|w" + node.attrs.width : "";
+          state.write("![" + state.esc(node.attrs.alt || "") + suffix + "](" + node.attrs.src + ")");
           state.closeBlock(node);
         },
         parse: {},
       },
+    };
+  },
+  // Eigene NodeView mit Anfasser unten rechts (wie in gängigen Editoren).
+  addNodeView() {
+    return ({ node, editor, getPos }) => {
+      let cur = node;
+      const wrap = document.createElement("span");
+      wrap.className = "img-resize-wrap";
+      const img = document.createElement("img");
+      const apply = () => {
+        if (img.src !== cur.attrs.src) img.src = cur.attrs.src;
+        if (cur.attrs.alt) img.alt = cur.attrs.alt;
+        img.style.width = cur.attrs.width ? cur.attrs.width + "px" : "";
+        // Feste Breite + max-height würde das Seitenverhältnis verzerren
+        img.style.maxHeight = cur.attrs.width ? "none" : "";
+      };
+      apply();
+      wrap.appendChild(img);
+      const handle = document.createElement("span");
+      handle.className = "img-resize-handle";
+      handle.title = "Größe ändern";
+      wrap.appendChild(handle);
+
+      let startX = 0, startW = 0, dragging = false;
+      const widthFor = (e) =>
+        Math.round(Math.min(
+          Math.max(60, startW + (e.clientX - startX)),
+          wrap.parentElement ? wrap.parentElement.clientWidth : 4000
+        ));
+      const onMove = (e) => { if (dragging) img.style.width = widthFor(e) + "px"; };
+      const onUp = (e) => {
+        if (!dragging) return;
+        dragging = false;
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
+        const w = widthFor(e);
+        if (typeof getPos === "function") {
+          editor.chain().command(({ tr }) => {
+            tr.setNodeMarkup(getPos(), undefined, { ...cur.attrs, width: w });
+            return true;
+          }).run();
+        }
+      };
+      handle.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragging = true;
+        startX = e.clientX;
+        startW = img.getBoundingClientRect().width;
+        // Höhenkappung sofort lösen, sonst verzerrt die Live-Vorschau
+        img.style.maxHeight = "none";
+        window.addEventListener("pointermove", onMove);
+        window.addEventListener("pointerup", onUp);
+        window.addEventListener("pointercancel", onUp);
+      });
+
+      return {
+        dom: wrap,
+        // Style-Mutationen der Live-Vorschau sind keine Dokument-Änderungen
+        ignoreMutation: () => true,
+        // Nur Events des Anfassers abfangen – Klicks aufs Bild sollen die
+        // Node weiterhin selektieren.
+        stopEvent: (e) => e.target === handle,
+        update: (updated) => {
+          if (updated.type.name !== cur.type.name) return false;
+          cur = updated;
+          apply();
+          return true;
+        },
+        destroy: () => {
+          window.removeEventListener("pointermove", onMove);
+          window.removeEventListener("pointerup", onUp);
+          window.removeEventListener("pointercancel", onUp);
+        },
+      };
     };
   },
 }).configure({ allowBase64: true });

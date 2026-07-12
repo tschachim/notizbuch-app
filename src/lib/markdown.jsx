@@ -271,7 +271,11 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
       blocks.push(renderTable(tlines, kp + key++));
     } else if (imgM) {
       flush();
-      const [, alt, id] = imgM;
+      const [, altRaw, id] = imgM;
+      // Optionaler Größen-Suffix aus dem Editor: "Titel|w320" → 320 px breit.
+      const wM = /^(.*?)\|w(\d+)$/.exec(altRaw);
+      const alt = wM ? wM[1] : altRaw;
+      const width = wM ? parseInt(wM[2], 10) : null;
       const src = imgMap[id];
       blocks.push(
         <figure key={kp + key++} className="my-3">
@@ -280,7 +284,8 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
               src={src}
               alt={alt}
               onClick={() => onImgClick && onImgClick(src)}
-              className="max-h-64 rounded-lg border border-slate-200 shadow-sm cursor-pointer"
+              style={width ? { width: width + "px", maxWidth: "100%" } : undefined}
+              className={(width ? "" : "max-h-64 ") + "rounded-lg border border-slate-200 shadow-sm cursor-pointer"}
             />
           ) : (
             <div className="h-24 flex items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-xs text-slate-400 font-sans">

@@ -128,6 +128,7 @@ BILDER:
 *Kurze Bildunterschrift*
 - Die Bildunterschrift ist EIN knapper Satz in kursiv (*…*) – keine ausführliche Beschreibung, nichts fett. Erkenntnisse aus dem Bild (Werte, Fehler, Fakten) gehören stattdessen als normale Stichpunkte in den passenden Abschnitt.
 - Verwende ausschließlich die mitgelieferte Bild-ID, erfinde niemals eigene. Entferne Bildreferenzen nicht ohne Aufforderung.
+- Ein Größen-Suffix im Bildtitel (z. B. ![Titel|w320](img:…)) stammt vom Nutzer (manuell skaliert) – beim Umstrukturieren unverändert erhalten, niemals selbst hinzufügen.
 
 DATEIANHÄNGE:
 - Nutzernachrichten können Dateianhänge enthalten (<dateianhang name="…">Inhalt</dateianhang>). Lies den Inhalt und behandle ihn wie normalen Gesprächskontext: Fragen dazu beantworten, relevante Fakten ins passende Notizbuch übernehmen.
