@@ -4,6 +4,13 @@
    Codezeilen scrollen in ihren eigenen Containern. */
 html, body { overflow-x: hidden; }
 
+/* Mobiler Abschnitts-Drawer: von rechts hereingleiten */
+@keyframes drawer-in {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+.drawer-in { animation: drawer-in 0.18s ease-out; }
+
 /* WYSIWYG-Editor (TipTap): gleiche Optik wie die gerenderte Wissensbasis */
 .tiptap-doc {
   font-size: 0.875rem;

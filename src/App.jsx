@@ -3,7 +3,7 @@ import {
   BookOpen, Send, Pencil, X, Check, History, Download, Copy,
   RotateCcw, GitCommit, ChevronDown, Loader2, Upload, ImagePlus,
   Settings, AlertTriangle, StickyNote, Paperclip, Trash2, FileUp,
-  ArrowUp, ArrowDown, Plus,
+  ArrowUp, ArrowDown, Plus, ListTree,
 } from "lucide-react";
 
 import { applyOps, dispHead } from "./lib/ops.js";
@@ -145,6 +145,8 @@ export default function NotizbuchApp() {
   const [nbRenameValue, setNbRenameValue] = useState("");
   const [nbDeleteId, setNbDeleteId] = useState(null); // Lösch-Bestätigung offen
   const [nbAdminError, setNbAdminError] = useState(null);
+  const [navDrawer, setNavDrawer] = useState(false); // mobiler Abschnitts-Drawer
+  const edgeSwipe = useRef(null); // Startpunkt des Randwischens
   const [nbIcons, setNbIcons] = useState({}); // nbId -> dataURL („Smart Icons“)
   const iconShas = useRef({}); // nbId -> SHA von icons/<id>.png
   const iconInputRef = useRef(null);
@@ -1404,8 +1406,44 @@ export default function NotizbuchApp() {
     removeQuickNote(id);
   };
 
-  /* ---------- Abschnitts-Navigation (Tabs rechts) ---------- */
+  /* ---------- Abschnitts-Navigation (Tabs rechts / mobiler Drawer) ---------- */
   const sections = useMemo(() => parseTree(doc).sections, [doc]);
+
+  // Drawer per Escape schließen
+  useEffect(() => {
+    if (!navDrawer) return;
+    const onKey = (e) => { if (e.key === "Escape") setNavDrawer(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [navDrawer]);
+
+  // Gemeinsamer Inhalt für die Desktop-Leiste und den mobilen Drawer;
+  // das Schließen des Drawers ist am Desktop ein No-op.
+  const sectionNavContent = (
+    <>
+      <button
+        onClick={() => { addQuickNote(); setNavDrawer(false); }}
+        className="w-full flex items-center gap-1.5 text-left text-xs font-medium pl-2.5 pr-2 py-2 mb-2 rounded-r-xl border border-l-0 border-amber-300 bg-gradient-to-r from-amber-50 to-amber-100 text-amber-900 shadow-sm hover:to-amber-200"
+        title="Neue Schnellnotiz (Post-it)"
+      >
+        <StickyNote size={13} className="shrink-0" />
+        Schnellnotiz
+      </button>
+      {sections.map((sec, si) => (
+        <button
+          key={si + sec.title}
+          onClick={() => { gotoSection(si, sec.title); setNavDrawer(false); }}
+          title={sec.title}
+          className={"w-full text-left text-xs pl-2.5 pr-2 py-1.5 mb-1.5 truncate rounded-r-xl border border-l-0 shadow-sm transition-colors " +
+            (activeSec === si
+              ? "bg-white border-indigo-300 text-indigo-900 font-medium shadow"
+              : "bg-gradient-to-r from-slate-50 to-slate-100 border-slate-200 text-slate-600 hover:from-indigo-50 hover:to-indigo-100 hover:text-slate-900")}
+        >
+          {sec.title}
+        </button>
+      ))}
+    </>
+  );
 
   const gotoSection = (si, title) => {
     setCollapsedAll((prev) => {
@@ -1843,7 +1881,7 @@ export default function NotizbuchApp() {
         ) : (
           <span className="font-semibold tracking-tight">Notizbuch</span>
         )}
-        <span className="font-mono text-xs text-slate-400">v6.3</span>
+        <span className="font-mono text-xs text-slate-400">v6.4</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -2127,6 +2165,10 @@ export default function NotizbuchApp() {
             <div className="flex-1" />
             {!editing && (
               <>
+                <button onClick={() => setNavDrawer(true)} title="Abschnitte"
+                  className="md:hidden p-2 rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-50">
+                  <ListTree size={15} />
+                </button>
                 <button onClick={() => setShowKnowledge(true)} title="Hintergrundwissen (Dateien für dieses Notizbuch)"
                   className="relative p-2 rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-50">
                   <Paperclip size={15} />
@@ -2184,33 +2226,69 @@ export default function NotizbuchApp() {
                 title="Breite anpassen"
               />
 
-              {/* Abschnitts-Tabs (wie OneNote-Seitenleiste): alle ##-Überschriften */}
+              {/* Abschnitts-Tabs (wie OneNote-Seitenleiste): alle ##-Überschriften.
+                  Mobil ausgeblendet – dort übernimmt der Drawer (volle
+                  Dokumentbreite, Öffnen per Knopf oder Randwischen). */}
               <nav
                 style={{ "--nav-w": layout.navW + "px" }}
-                className="w-28 md:w-[var(--nav-w)] shrink-0 overflow-y-auto py-2 pr-2 bg-slate-50/60"
+                className="hidden md:block md:w-[var(--nav-w)] shrink-0 overflow-y-auto py-2 pr-2 bg-slate-50/60"
               >
-                <button
-                  onClick={addQuickNote}
-                  className="w-full flex items-center gap-1.5 text-left text-xs font-medium pl-2.5 pr-2 py-2 mb-2 rounded-r-xl border border-l-0 border-amber-300 bg-gradient-to-r from-amber-50 to-amber-100 text-amber-900 shadow-sm hover:to-amber-200"
-                  title="Neue Schnellnotiz (Post-it)"
-                >
-                  <StickyNote size={13} className="shrink-0" />
-                  Schnellnotiz
-                </button>
-                {sections.map((sec, si) => (
-                  <button
-                    key={si + sec.title}
-                    onClick={() => gotoSection(si, sec.title)}
-                    title={sec.title}
-                    className={"w-full text-left text-xs pl-2.5 pr-2 py-1.5 mb-1.5 truncate rounded-r-xl border border-l-0 shadow-sm transition-colors " +
-                      (activeSec === si
-                        ? "bg-white border-indigo-300 text-indigo-900 font-medium shadow"
-                        : "bg-gradient-to-r from-slate-50 to-slate-100 border-slate-200 text-slate-600 hover:from-indigo-50 hover:to-indigo-100 hover:text-slate-900")}
-                  >
-                    {sec.title}
-                  </button>
-                ))}
+                {sectionNavContent}
               </nav>
+
+              {/* Unsichtbarer Wisch-Streifen am rechten Rand (nur mobil).
+                  Leicht vom Rand abgerückt (OS-Back-Geste liegt direkt an der
+                  Kante); touch-pan-y lässt vertikales Scrollen durch. */}
+              <div
+                className="md:hidden fixed top-14 bottom-0 right-1.5 w-4 z-30 touch-pan-y"
+                onTouchStart={(e) => {
+                  const t = e.touches[0];
+                  edgeSwipe.current = { x: t.clientX, y: t.clientY };
+                }}
+                onTouchMove={(e) => {
+                  if (!edgeSwipe.current) return;
+                  const t = e.touches[0];
+                  const dx = t.clientX - edgeSwipe.current.x;
+                  const dy = t.clientY - edgeSwipe.current.y;
+                  if (dx < -24 && Math.abs(dx) > Math.abs(dy)) {
+                    setNavDrawer(true);
+                    edgeSwipe.current = null;
+                  }
+                }}
+                onTouchEnd={() => { edgeSwipe.current = null; }}
+              />
+
+              {/* Abschnitts-Drawer (nur mobil): von rechts, wie in OneNote/Docs */}
+              {/* z-[45]: über den Post-its (z-40), unter echten Modals (z-50) */}
+              {navDrawer && (
+                <div className="md:hidden fixed inset-0 z-[45]" onClick={() => setNavDrawer(false)}>
+                  <div className="absolute inset-0" style={{ backgroundColor: "rgba(15,23,42,0.35)" }} />
+                  <nav
+                    className="drawer-in absolute inset-y-0 right-0 w-60 max-w-[75vw] bg-slate-50 border-l border-slate-200 shadow-2xl overflow-y-auto py-3 pr-2 pl-1"
+                    onClick={(e) => e.stopPropagation()}
+                    onTouchStart={(e) => {
+                      const t = e.touches[0];
+                      edgeSwipe.current = { x: t.clientX, y: t.clientY };
+                    }}
+                    onTouchMove={(e) => {
+                      if (!edgeSwipe.current) return;
+                      const t = e.touches[0];
+                      const dx = t.clientX - edgeSwipe.current.x;
+                      const dy = t.clientY - edgeSwipe.current.y;
+                      if (dx > 32 && Math.abs(dx) > Math.abs(dy)) {
+                        setNavDrawer(false);
+                        edgeSwipe.current = null;
+                      }
+                    }}
+                    onTouchEnd={() => { edgeSwipe.current = null; }}
+                  >
+                    <div className="px-2.5 pb-2 text-xs font-semibold uppercase tracking-widest text-slate-400">
+                      Abschnitte
+                    </div>
+                    {sectionNavContent}
+                  </nav>
+                </div>
+              )}
             </div>
           )}
         </section>

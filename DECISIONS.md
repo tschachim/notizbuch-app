@@ -311,3 +311,13 @@ aus `referenz-app.jsx` übernommen.
     overflow-x:hidden auf html/body und Zeilenumbruch für lange
     Code-Tokens/URLs im Dokument; breite Inhalte (Tabellen) scrollen
     weiterhin in ihren eigenen Containern.
+
+35. **Mobiler Abschnitts-Drawer** (v6.4, Nutzerwunsch): Auf schmalen
+    Bildschirmen (< md) ist die Abschnitts-Leiste ausgeblendet – das
+    Dokument bekommt die volle Breite. Die Gliederung öffnet als
+    Off-Canvas-Drawer von rechts (marktübliches Muster, vgl.
+    OneNote-Mobil/Google-Docs-Gliederung): über den Gliederungs-Knopf im
+    Dokumentkopf oder per Wischgeste vom rechten Rand; Abschnitts-Tipp
+    springt hin und schließt, ebenso Tipp auf den Hintergrund oder
+    Zurückwischen. Der Schnellnotiz-Knopf wandert mit in den Drawer.
+    Desktop (≥ md) bleibt unverändert mit fester Leiste und Splitter.
