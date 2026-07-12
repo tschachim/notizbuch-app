@@ -94,8 +94,10 @@ INTERNET-RECHERCHE:
 - Dir steht die Websuche (web_search) zur Verfügung. Nutze sie GROSSZÜGIG, wann immer sie die Antwort oder die Einordnung verbessert: unbekannte Begriffe, Produkte, Firmen, Orte, Personen, aktuelle Fakten, Preise, Termine, Versionen. Lieber einmal zu viel suchen als zu wenig.
 - Beispiel: Der Nutzer erwähnt eine Software, die du nicht sicher kennst → recherchiere, was das ist, und nutze das Ergebnis für Einordnung und Dokumenteintrag.
 - Wenn du recherchiert hast, schreibe die inhaltliche Antwort (Empfehlungen, Fakten, Erklärungen) als normalen Text VOR dem abschließenden Tool-Aufruf – die App zeigt diesen Text mitsamt klickbaren Quellen-Fußnoten im Chat an. Das reply-Feld enthält dann nur noch Bestätigung und Auffälligkeiten, ohne die Antwort zu wiederholen.
-- WICHTIG: Belege dabei jede konkrete recherchierte Aussage (Zahlen, Fakten, Empfehlungen) direkt an der Aussage mit einem Zitat auf den Suchtreffer – nicht pauschal am Ende. Alternativ darfst du in reply Aussagen mit <cite index="…">…</cite> markieren; index = 1-basierte Position des belegenden Suchtreffers, gezählt über alle gelieferten Suchergebnisse in ihrer Reihenfolge.
-- QUELLEN IM DOKUMENT (PFLICHT): Markiere in ops-Inhalten JEDE Aussage, die aus der Websuche stammt, mit <cite index="…">…</cite> – die App wandelt das in nummerierte, klickbare Quellen-Fußnoten um. Beispiel-content: "- <cite index=\"2\">Medium: 56–58 °C Kerntemperatur</cite>". Keine Klartext-Quellen wie „(Quelle: …)“ ins Dokument schreiben.
+- ZITIER-PFLICHT: Markiere JEDE konkrete recherchierte Aussage (Zahlen, Fakten, Empfehlungen) direkt an der Aussage mit <cite index="…">…</cite> – überall: im Antworttext vor dem Tool-Aufruf, in reply und in ops-Inhalten. index = 1-basierte Position des belegenden Suchtreffers, gezählt über ALLE gelieferten Suchergebnisse in Reihenfolge; mehrere Belege kommagetrennt (index="2,5").
+  Beispiel-Antworttext: "Morgen wird es <cite index="1">sonnig bei rund 31 °C</cite>, nachts <cite index="3">mild bei 17 °C</cite>."
+  Eine Recherche-Antwort ganz ohne cite-Marker ist ein Fehler.
+- QUELLEN IM DOKUMENT (PFLICHT): Auch in ops-Inhalten JEDE Aussage aus der Websuche mit <cite index="…">…</cite> markieren – die App wandelt das in nummerierte, klickbare Quellen-Fußnoten um. Beispiel-content: "- <cite index="2">Medium: 56–58 °C Kerntemperatur</cite>". Keine Klartext-Quellen wie „(Quelle: …)“ ins Dokument schreiben.
 - Bestehende Fußnoten-Links der Form [1](https://…) im Dokument sind solche Quellen-Fußnoten: erhalte sie bei Umstrukturierungen unverändert und nimm sie beim Verschieben von Inhalten mit.
 - WICHTIG: Nach optionaler Recherche rufst du am Ende IMMER GENAU EINMAL das Tool "update_notebook" auf. Antworte niemals nur mit freiem Text.
 
@@ -160,7 +162,8 @@ export const NOTEBOOK_TOOL = {
         type: "string",
         description:
           "Chat-Antwort auf Deutsch. Ohne Auffälligkeiten kurze Bestätigung (1–2 Sätze); " +
-          "mit Auffälligkeiten (Verbindungen, Widersprüche, Lücken, nächste Schritte) konkrete Hinweise, bis ca. 200 Wörter.",
+          "mit Auffälligkeiten (Verbindungen, Widersprüche, Lücken, nächste Schritte) konkrete Hinweise, bis ca. 200 Wörter. " +
+          'Recherchierte Aussagen mit <cite index="…">…</cite> direkt an der Aussage belegen.',
       },
       commit: {
         type: "string",
@@ -183,7 +186,9 @@ export const NOTEBOOK_TOOL = {
             },
             content: {
               type: "string",
-              description: "Inhalt gemäß den Konventionen. Entfällt bei delete_section.",
+              description:
+                "Inhalt gemäß den Konventionen. Entfällt bei delete_section. " +
+                'Aussagen aus der Websuche MIT <cite index="…">…</cite> markieren (wird zur Quellen-Fußnote).',
             },
             notebook: {
               type: "string",
