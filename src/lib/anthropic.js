@@ -13,8 +13,57 @@ export const MODELS = [
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5 · schnell" },
 ];
 
-// notebooks: [{ name, doc }], activeName: Name des aktiven Notizbuchs
-export function buildSystem(notebooks, activeName) {
+// Server-seitige Websuche: Tool-Variante ist modellabhängig.
+// Sonnet 4.6 / Opus 4.8 / Fable 5 unterstützen die 20260209-Variante
+// (mit dynamischem Filtern); Haiku 4.5 nur die Basis-Variante.
+export function webSearchToolFor(modelId) {
+  const basic = String(modelId).startsWith("claude-haiku");
+  return {
+    type: basic ? "web_search_20250305" : "web_search_20260209",
+    name: "web_search",
+    max_uses: 8,
+  };
+}
+
+// Hintergrundwissen fürs Prompt aufbereiten: aktives Notizbuch komplett
+// (mit Deckeln), fremde Notizbücher nur als Dateiliste.
+const KNOW_PER_FILE_CAP = 80000;
+const KNOW_TOTAL_CAP = 200000;
+
+function knowledgeBlock(knowledge, escAttr) {
+  if (!knowledge) return "";
+  const parts = [];
+  let used = 0;
+  for (const f of knowledge.activeFiles || []) {
+    if (!f || typeof f.text !== "string" || !f.text.trim()) continue;
+    // Ausbruch aus dem Block verhindern (Dateiinhalte sind fremde Quellen)
+    let text = f.text.replace(/<\/wissensdatei/gi, "<\\/wissensdatei");
+    if (text.length > KNOW_PER_FILE_CAP) {
+      text = text.slice(0, KNOW_PER_FILE_CAP) + "\n\n[… gekürzt – Datei ist länger]";
+    }
+    if (used + text.length > KNOW_TOTAL_CAP) {
+      parts.push(`<wissensdatei name="${escAttr(f.name)}">\n[nicht geladen – Gesamtumfang des Hintergrundwissens überschritten]\n</wissensdatei>`);
+      continue;
+    }
+    used += text.length;
+    parts.push(`<wissensdatei name="${escAttr(f.name)}">\n${text}\n</wissensdatei>`);
+  }
+  const others = (knowledge.others || [])
+    .filter((o) => o && Array.isArray(o.files) && o.files.length)
+    .map((o) => `- Notizbuch „${o.notebook}“: ${o.files.join(", ")}`);
+  if (!parts.length && !others.length) return "";
+  return (
+    "\n\nHINTERGRUNDWISSEN (hinterlegte Dateien des AKTIVEN Notizbuchs, nutze sie zur Beantwortung und Einordnung):\n" +
+    (parts.length ? parts.join("\n\n") : "(keine Dateien im aktiven Notizbuch)") +
+    (others.length
+      ? "\n\nWeitere Wissensdateien existieren in anderen Notizbüchern (hier NICHT geladen – bei Bedarf den Nutzer bitten, dorthin zu wechseln):\n" + others.join("\n")
+      : "")
+  );
+}
+
+// notebooks: [{ name, doc }], activeName: Name des aktiven Notizbuchs,
+// knowledge (optional): { activeFiles: [{name, text}], others: [{notebook, files:[]}] }
+export function buildSystem(notebooks, activeName, knowledge) {
   const heute = new Date().toLocaleDateString("de-DE", {
     weekday: "long", year: "numeric", month: "2-digit", day: "2-digit",
   });
@@ -22,7 +71,10 @@ export function buildSystem(notebooks, activeName) {
     .replace(/&/g, "&amp;").replace(/</g, "&lt;")
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   const docsBlock = notebooks
-    .map((nb) => `<notizbuch name="${escAttr(nb.name)}">\n${nb.doc}\n</notizbuch>`)
+    .map((nb) => {
+      const doc = String(nb.doc || "").replace(/<\/notizbuch/gi, "<\\/notizbuch");
+      return `<notizbuch name="${escAttr(nb.name)}">\n${doc}\n</notizbuch>`;
+    })
     .join("\n\n");
   return (
     `Du bist der Assistent eines persönlichen Notizbuch-Systems. Links läuft ein Chat, rechts pflegst du strukturierte Wissensbasen als Markdown-Dokumente. Es gibt MEHRERE Notizbücher; eines davon ist gerade aktiv (sichtbar).
@@ -32,7 +84,13 @@ Heutiges Datum: ${heute}
 AKTIVES NOTIZBUCH: ${activeName}
 
 ALLE NOTIZBÜCHER:
-${docsBlock}
+${docsBlock}${knowledgeBlock(knowledge, escAttr)}
+
+INTERNET-RECHERCHE:
+- Dir steht die Websuche (web_search) zur Verfügung. Nutze sie GROSSZÜGIG, wann immer sie die Antwort oder die Einordnung verbessert: unbekannte Begriffe, Produkte, Firmen, Orte, Personen, aktuelle Fakten, Preise, Termine, Versionen. Lieber einmal zu viel suchen als zu wenig.
+- Beispiel: Der Nutzer erwähnt eine Software, die du nicht sicher kennst → recherchiere, was das ist, und nutze das Ergebnis für Einordnung und Dokumenteintrag.
+- Fasse recherchierte Kernfakten knapp in reply bzw. im Dokumenteintrag zusammen (mit Quellenangabe als Klartext, keine Links nötig).
+- WICHTIG: Nach optionaler Recherche rufst du am Ende IMMER GENAU EINMAL das Tool "update_notebook" auf. Antworte niemals nur mit freiem Text.
 
 DEINE AUFGABEN:
 1. Neue Informationen aus der Nutzernachricht sofort in das passende Notizbuch einarbeiten: Fakten, Ideen, Entscheidungen, Aufgaben, Termine, Bilder.
@@ -61,7 +119,7 @@ BILDER:
 - Verwende ausschließlich die mitgelieferte Bild-ID, erfinde niemals eigene. Entferne Bildreferenzen nicht ohne Aufforderung.
 
 ANTWORTFORMAT:
-- Antworte IMMER über das Tool "update_notebook" – niemals mit freiem Text.
+- Schließe JEDE Antwort mit genau einem Aufruf des Tools "update_notebook" ab – niemals nur mit freiem Text.
 - reply: Chat-Antwort auf Deutsch. Ohne Auffälligkeiten: nur kurze Bestätigung (1–2 Sätze). Mit Auffälligkeiten: benenne sie klar und konkret – dann dürfen es bis ca. 200 Wörter sein.
 - commit: sehr kurze Änderungsbeschreibung im Stil einer Git-Commit-Message; leer lassen, wenn keine Änderung.
 - Verwende im Dokumenttext typografische Anführungszeichen („…“) statt gerader Anführungszeichen (").
@@ -216,14 +274,22 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
   content.push({ type: "text", text });
   msgs.push({ role: "user", content });
 
-  const doPost = async (withTools) => {
+  // Modi: "search"  = Websuche + update_notebook, tool_choice auto
+  //       "forced"  = nur update_notebook, erzwungen (ohne Recherche)
+  //       "none"    = ganz ohne Tools (JSON aus Text, letzte Rettung)
+  // Erzwungenes tool_choice verhindert Server-Tool-Aufrufe – deshalb "auto"
+  // im Suchmodus, abgesichert über den Prompt und die Fallback-Kette.
+  const postOnce = async (messages, mode) => {
     const body = {
       model: modelId,
       max_tokens: 4000,
-      system: buildSystem(nbContext.notebooks, nbContext.activeName),
-      messages: msgs,
+      system: buildSystem(nbContext.notebooks, nbContext.activeName, nbContext.knowledge),
+      messages,
     };
-    if (withTools) {
+    if (mode === "search") {
+      body.tools = [webSearchToolFor(modelId), NOTEBOOK_TOOL];
+      body.tool_choice = { type: "auto" };
+    } else if (mode === "forced") {
       body.tools = [NOTEBOOK_TOOL];
       body.tool_choice = { type: "tool", name: "update_notebook" };
     }
@@ -251,10 +317,32 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     return data;
   };
 
-  let data = await doPost(true);
+  const doPost = async (mode) => {
+    let data = await postOnce(msgs, mode);
+    // Server-Tools (Websuche) können mit pause_turn unterbrechen: Assistant-
+    // Inhalt anhängen und fortsetzen lassen (max. 3 Fortsetzungen).
+    let convo = msgs;
+    let cont = 0;
+    while (data && !data.error && data.stop_reason === "pause_turn" && cont < 3) {
+      // Aufeinanderfolgende assistant-Turns zusammenführen (Rollen müssen
+      // alternieren; bei mehrfacher Pause entstünden sonst zwei in Folge).
+      const prev = convo[convo.length - 1];
+      convo = prev && prev.role === "assistant" && Array.isArray(prev.content)
+        ? [...convo.slice(0, -1), { role: "assistant", content: [...prev.content, ...(data.content || [])] }]
+        : [...convo, { role: "assistant", content: data.content }];
+      data = await postOnce(convo, mode);
+      cont++;
+    }
+    return data;
+  };
+
+  let data = await doPost("search");
+  if (data && data.error && /web_search|tool/i.test(String(data.error.message || data.error.type || ""))) {
+    // Websuche nicht verfügbar (Modell/Org): ohne Recherche, Tool erzwungen
+    data = await doPost("forced");
+  }
   if (data && data.error && /tool/i.test(String(data.error.message || data.error.type || ""))) {
-    // Falls die Umgebung keine eigenen Tools zulässt: einmal ohne Tools wiederholen
-    data = await doPost(false);
+    data = await doPost("none");
   }
   if (!data || data.error) {
     const type = data && data.error && data.error.type;
@@ -264,19 +352,31 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     throw new Error((data && data.error && data.error.message) || "API-Fehler");
   }
 
-  // 1. Bevorzugt: strukturierter Tool-Aufruf – Eingabe kommt bereits als Objekt an
-  const toolBlock = (data.content || []).find(
-    (b) => b.type === "tool_use" && b.input && typeof b.input === "object"
-  );
-  let parsed = toolBlock ? toolBlock.input : null;
-
-  // 2. Fallback: JSON aus einer Textantwort ziehen, inkl. Reparatur typischer Fehler
-  if (!parsed) {
-    const raw = (data.content || [])
+  const extractParsed = (d) => {
+    // 1. Bevorzugt: strukturierter update_notebook-Aufruf
+    const toolBlock = (d.content || []).find(
+      (b) => b.type === "tool_use" && b.name === "update_notebook" &&
+        b.input && typeof b.input === "object"
+    );
+    if (toolBlock) return toolBlock.input;
+    // 2. Fallback: JSON aus einer Textantwort ziehen, inkl. Reparatur
+    const raw = (d.content || [])
       .filter((b) => b.type === "text")
       .map((b) => b.text)
       .join("\n");
-    parsed = parseLooseJson(raw);
+    return parseLooseJson(raw);
+  };
+
+  let parsed = extractParsed(data);
+
+  // tool_choice "auto" kann trotz Anweisung ohne update_notebook enden:
+  // einmal ohne Recherche mit erzwungenem Tool nachfassen.
+  if ((!parsed || typeof parsed !== "object") && data.stop_reason !== "max_tokens") {
+    data = await doPost("forced");
+    if (!data || data.error) {
+      throw new Error((data && data.error && data.error.message) || "API-Fehler");
+    }
+    parsed = extractParsed(data);
   }
 
   if (!parsed || typeof parsed !== "object") {
