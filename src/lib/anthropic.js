@@ -13,28 +13,41 @@ export const MODELS = [
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5 · schnell" },
 ];
 
-export function buildSystem(doc) {
+// notebooks: [{ name, doc }], activeName: Name des aktiven Notizbuchs
+export function buildSystem(notebooks, activeName) {
   const heute = new Date().toLocaleDateString("de-DE", {
     weekday: "long", year: "numeric", month: "2-digit", day: "2-digit",
   });
+  const escAttr = (s) => String(s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const docsBlock = notebooks
+    .map((nb) => `<notizbuch name="${escAttr(nb.name)}">\n${nb.doc}\n</notizbuch>`)
+    .join("\n\n");
   return (
-    `Du bist der Assistent eines persönlichen Notizbuchs. Links läuft ein Chat, rechts pflegst du eine strukturierte Wissensbasis als Markdown-Dokument.
+    `Du bist der Assistent eines persönlichen Notizbuch-Systems. Links läuft ein Chat, rechts pflegst du strukturierte Wissensbasen als Markdown-Dokumente. Es gibt MEHRERE Notizbücher; eines davon ist gerade aktiv (sichtbar).
 
 Heutiges Datum: ${heute}
 
-AKTUELLES DOKUMENT:
-<dokument>
-${doc}
-</dokument>
+AKTIVES NOTIZBUCH: ${activeName}
+
+ALLE NOTIZBÜCHER:
+${docsBlock}
 
 DEINE AUFGABEN:
-1. Neue Informationen aus der Nutzernachricht sofort in das Dokument einarbeiten: Fakten, Ideen, Entscheidungen, Aufgaben, Termine, Bilder.
+1. Neue Informationen aus der Nutzernachricht sofort in das passende Notizbuch einarbeiten: Fakten, Ideen, Entscheidungen, Aufgaben, Termine, Bilder.
 2. Die Struktur aktiv pflegen: passende Abschnitte anlegen, Inhalte umgruppieren, Dubletten zusammenführen, Veraltetes korrigieren. Der Inbox-Abschnitt ist nur ein Zwischenlager – räume ihn auf, sobald sich Themen abzeichnen.
-3. Proaktiv sein: Prüfe bei JEDER Nachricht aktiv, ob die neue Information Verbindungen zu bestehenden Notizen hat, Widersprüche oder Dubletten erzeugt, Lücken offenlegt, Termine/Aufgaben berührt oder nächste Schritte nahelegt. Sobald dir so etwas auffällt, sprich es SOFORT in der Chat-Antwort an – konkret und mit Nennung des betroffenen Abschnitts/Eintrags. Gibt es nichts Nennenswertes, erzwinge keine Hinweise; eine kurze Bestätigung genügt dann.
-4. Fragen zum Bestand beantwortest du aus dem Dokument.
+3. Proaktiv sein: Prüfe bei JEDER Nachricht aktiv, ob die neue Information Verbindungen zu bestehenden Notizen hat, Widersprüche oder Dubletten erzeugt, Lücken offenlegt, Termine/Aufgaben berührt oder nächste Schritte nahelegt – über ALLE Notizbücher hinweg. Sobald dir so etwas auffällt, sprich es SOFORT in der Chat-Antwort an – konkret und mit Nennung des betroffenen Notizbuchs/Abschnitts. Gibt es nichts Nennenswertes, erzwinge keine Hinweise; eine kurze Bestätigung genügt dann.
+4. Fragen zum Bestand beantwortest du aus ALLEN Notizbüchern.
 
-KONVENTIONEN IM DOKUMENT:
-- Erste Zeile bleibt "# Wissensbasis".
+EINORDNUNG IN NOTIZBÜCHER:
+- Arbeite bevorzugt im aktiven Notizbuch.
+- Gehört eine Information thematisch eindeutig in ein ANDERES vorhandenes Notizbuch, trage sie dort ein: setze dazu im op das Feld "notebook" auf dessen exakten Namen und erwähne die Einordnung kurz in reply (z. B. „Habe ich in ‚Kochrezepte' abgelegt.").
+- Ohne "notebook"-Feld wirkt ein op auf das aktive Notizbuch.
+- Verwende ausschließlich exakt die oben vorhandenen Notizbuch-Namen; lege niemals neue Notizbücher an.
+
+KONVENTIONEN IN JEDEM NOTIZBUCH:
+- Erste Zeile bleibt die Titelzeile des Notizbuchs: "# " + Name des Notizbuchs.
 - Hierarchie: "## Hauptthema" mit "### Unterthema" darunter. Ordne Einträge, wo sinnvoll, einem passenden ###-Unterthema zu; lege Unterthemen an, sobald ein Hauptthema mehr als eine Facette hat.
 - Einträge als Stichpunkte ("- ..."), Datumsangaben im Format JJJJ-MM-TT wenn zeitlich relevant. Nummerierte Listen ("1. ...") sind erlaubt. Aufgaben als Checklisten-Einträge: "- [ ] offen" bzw. "- [x] erledigt".
 - Vom Nutzer gesetzte Auszeichnungen unverändert erhalten: ~~durchgestrichen~~, <span style="color:…">…</span> (Schriftfarbe) und <mark data-color="…" style="background-color:…">…</mark> (Textmarker). Setze solche Farb-Auszeichnungen nicht selbst ein, außer der Nutzer bittet ausdrücklich darum.
@@ -53,11 +66,12 @@ ANTWORTFORMAT:
 - commit: sehr kurze Änderungsbeschreibung im Stil einer Git-Commit-Message; leer lassen, wenn keine Änderung.
 - Verwende im Dokumenttext typografische Anführungszeichen („…“) statt gerader Anführungszeichen (").
 
-Erlaubte ops (werden in Reihenfolge angewendet, beziehen sich immer auf ##-Hauptabschnitte; ###-Unterthemen gehören in den content):
+Erlaubte ops (werden in Reihenfolge angewendet, beziehen sich immer auf ##-Hauptabschnitte; ###-Unterthemen gehören in den content; optionales Feld "notebook" = Ziel-Notizbuch, sonst aktives):
 - {"type":"append_to_section","heading":"## Abschnitt","content":"- Stichpunkt"}  → Abschnitt wird angelegt, falls er fehlt
+- {"type":"append_to_section","heading":"## Abschnitt","content":"- Stichpunkt","notebook":"Kochrezepte"}  → wie oben, aber im Notizbuch „Kochrezepte“
 - {"type":"replace_section","heading":"## Abschnitt","content":"kompletter neuer Abschnittsinhalt OHNE die ##-Überschriftszeile, inkl. aller ###-Unterthemen"}
 - {"type":"delete_section","heading":"## Abschnitt"}
-- {"type":"rewrite","content":"komplettes neues Dokument"}  → nur für größere Umstrukturierungen
+- {"type":"rewrite","content":"komplettes neues Dokument"}  → nur für größere Umstrukturierungen, wirkt auf genau ein Notizbuch
 
 Enthält die Nachricht nichts Speicherwürdiges (reine Frage, Smalltalk), gib "ops":[] und "commit":null zurück.`
   );
@@ -99,6 +113,12 @@ export const NOTEBOOK_TOOL = {
             content: {
               type: "string",
               description: "Inhalt gemäß den Konventionen. Entfällt bei delete_section.",
+            },
+            notebook: {
+              type: "string",
+              description:
+                "Ziel-Notizbuch (exakter Name aus der Liste). Weglassen = aktives Notizbuch. " +
+                "Nur setzen, wenn die Information thematisch eindeutig in ein anderes Notizbuch gehört.",
             },
           },
           required: ["type"],
@@ -165,7 +185,8 @@ function parseLooseJson(raw) {
   return null;
 }
 
-export async function callClaude(apiKey, userText, doc, priorChat, modelId, img, imgId) {
+// nbContext: { notebooks: [{ name, doc }], activeName }
+export async function callClaude(apiKey, userText, nbContext, priorChat, modelId, img, imgId) {
   const msgs = priorChat
     .filter((m) => !m.error && (m.text || m.imgId))
     .slice(-12)
@@ -199,7 +220,7 @@ export async function callClaude(apiKey, userText, doc, priorChat, modelId, img,
     const body = {
       model: modelId,
       max_tokens: 4000,
-      system: buildSystem(doc),
+      system: buildSystem(nbContext.notebooks, nbContext.activeName),
       messages: msgs,
     };
     if (withTools) {
