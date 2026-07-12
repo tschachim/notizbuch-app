@@ -546,7 +546,11 @@ export default function NotizbuchApp() {
       lastRefresh.current = Date.now();
       try {
         // Alle Notizbuch-Dateien nachziehen: neue entdecken, geänderte laden.
-        const entries = [{ id: ROOT_NB_ID, path: "wissensbasis.md", sha: null }];
+        // Die Root-SHA kommt aus dem Wurzel-Listing – so lädt der Poll das
+        // Root-Dokument nur bei echter Änderung statt bei jedem Durchgang.
+        const rootList = await ghListDir(cfg, "");
+        const rootEntry = rootList.find((f) => f.name === "wissensbasis.md");
+        const entries = [{ id: ROOT_NB_ID, path: "wissensbasis.md", sha: rootEntry ? rootEntry.sha : null }];
         const nbFiles = await ghListDir(cfg, "notizbuecher");
         for (const f of nbFiles) {
           const m = /^([a-z0-9-]+)\.md$/i.exec(f.name);
@@ -666,9 +670,16 @@ export default function NotizbuchApp() {
     const onVis = () => { if (document.visibilityState === "visible") maybeRefresh(); };
     window.addEventListener("visibilitychange", onVis);
     window.addEventListener("focus", onVis);
+    // Zusätzlich aktives Polling: Fokus-Events feuern nicht, wenn die Seite
+    // durchgehend sichtbar bleibt (z. B. PC-Monitor, während am Handy
+    // gearbeitet wird). GitHub bietet keinen Browser-Push (WebSocket) –
+    // Polling alle 25 s ist der ehrlichste Ersatz; die 15-s-Drossel und die
+    // busy/editing-Guards in maybeRefresh gelten weiter.
+    const poll = setInterval(onVis, 25000);
     return () => {
       window.removeEventListener("visibilitychange", onVis);
       window.removeEventListener("focus", onVis);
+      clearInterval(poll);
     };
   }, [refreshMeta]);
 
@@ -1883,7 +1894,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v6.6</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v6.7</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -1983,7 +1994,7 @@ export default function NotizbuchApp() {
           className={(view === "chat" ? "flex" : "hidden") +
             " md:flex flex-col flex-1 md:flex-none md:w-[var(--chat-w)] min-w-0 bg-slate-50"}
         >
-          <div className="flex-1 min-h-0 overflow-y-auto px-3 py-3 space-y-3">
+          <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-3 py-3 space-y-3">
             {chat.map((m, i) => m.info ? (
               <div key={i} className="flex justify-center">
                 <span className="inline-flex items-center gap-1 text-xs text-slate-400 bg-slate-100 border border-slate-200 rounded-full px-2.5 py-0.5">
@@ -2009,7 +2020,7 @@ export default function NotizbuchApp() {
                         src={imgMap[m.imgId]}
                         alt="Angehängtes Bild"
                         onClick={() => setLightbox(imgMap[m.imgId])}
-                        className={"max-h-40 rounded-lg border border-slate-300 cursor-pointer " + (m.text ? "mb-2" : "")}
+                        className={"max-h-40 max-w-full rounded-lg border border-slate-300 cursor-pointer " + (m.text ? "mb-2" : "")}
                       />
                     ) : (
                       <span className="block text-xs opacity-70 mb-1">[Bild]</span>

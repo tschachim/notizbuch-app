@@ -339,3 +339,16 @@ aus `referenz-app.jsx` übernommen.
     anfassen, bezahlte [API]-Fälle höchstens einmal pro Lauf.
     Beim Testschreiben gefundener echter Bug: safeFileName konnte für
     Dateinamen aus lauter Punkten das Pfadsegment „..“ erzeugen – behoben.
+
+37. **Geräte-Sync per Polling statt WebSocket** (v6.7, Nutzerwunsch):
+    Alle Änderungen gehen sofort ins Daten-Repo (Dokument: ein Commit pro
+    Änderung; Chat/Schnellnotizen/State: 2,5 s entprellt). Für die
+    Gegenrichtung gibt es ohne eigenen Server keinen Push – GitHub bietet
+    Browsern kein WebSocket/SSE für Repo-Änderungen. Deshalb pollt jeder
+    Client zusätzlich zum Fokus-Refresh alle 25 s (nur bei sichtbarer
+    Seite; 15-s-Drossel und busy/editing-Guards bleiben). Änderungen vom
+    Handy erscheinen am PC damit ohne Reload nach spätestens ~25 s.
+    Die Root-Dokument-SHA kommt jetzt aus dem Wurzel-Listing, damit der
+    Poll nur bei echten Änderungen Inhalte lädt (~4 leichte Requests/
+    Minute – weit unter dem GitHub-Limit von 5000/h). Außerdem Chat
+    gegen Querscrollen gehärtet (overflow-x-hidden, Bilder max-w-full).
