@@ -209,3 +209,18 @@ aus `referenz-app.jsx` übernommen.
     ohne eigenes `\|`-Escaping zerfielen Zellen mit Pipe im Text beim
     nächsten Öffnen. Der System-Prompt erlaubt dem Modell explizit
     GFM-Tabellen für strukturierte Daten.
+
+26. **Quellen-Fußnoten im Dokument** (v5.3, Nutzerwunsch): Das Modell
+    markiert recherchierte Aussagen jetzt auch in ops-Inhalten mit
+    cite-Tags; die App wandelt sie in Markdown-Links der Form
+    `[n](https://…)` direkt hinter der belegten Aussage um. Die Nummer
+    vergibt renumberCitations bei jedem Schreiben dokumentweit neu
+    (gleiche URL = gleiche Nummer, Reihenfolge = erste Fundstelle im
+    Dokument) – Einfügungen renummerieren automatisch. Der Renderer
+    zeigt die Links als kleine hochgestellte Zahl (klickbar); der
+    Editor erhält sie über die TipTap-Link-Extension (ohne Autolink).
+    Bewusst ein normaler Markdown-Link statt eigener Syntax: er
+    übersteht Editor-Roundtrip und markdown-it ohne Sonderbehandlung.
+    Im Chat werden konsultierte Quellen zudem auch ohne Inline-Zitat
+    unter der Nachricht gelistet (dedupliziert, max. 6), damit sichtbar
+    ist, dass recherchiert wurde.

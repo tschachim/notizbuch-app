@@ -9,6 +9,7 @@ import { Color } from "@tiptap/extension-color";
 import Highlight from "@tiptap/extension-highlight";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
+import Link from "@tiptap/extension-link";
 import Table from "@tiptap/extension-table";
 import TableRow from "@tiptap/extension-table-row";
 import TableHeader from "@tiptap/extension-table-header";
@@ -166,6 +167,11 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
       Highlight.configure({ multicolor: true }),
       TaskList,
       TaskItem.configure({ nested: false }),
+      // Quellen-Fußnoten [n](url) müssen den Roundtrip überstehen; ohne
+      // Link-Extension würde TipTap den Link beim Öffnen zu Klartext
+      // reduzieren. Auto-Verlinken bleibt aus (Links entstehen nur über
+      // die Recherche, nicht beim Tippen).
+      Link.configure({ openOnClick: false, autolink: false, linkOnPaste: false }),
       // Keine Zellen-Verbünde anbieten: nur einfache Tabellen sind als
       // GFM-Markdown serialisierbar (sonst fiele der Serializer auf HTML
       // zurück, das der Renderer nicht darstellt).

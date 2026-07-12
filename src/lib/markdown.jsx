@@ -46,8 +46,38 @@ export function parseTree(text) {
 // Nur echte Farbwerte in Inline-Styles übernehmen (kein Weg für XSS).
 const COLOR_OK = /^(#[0-9a-fA-F]{3,8}|rgba?\([\d\s.,%]+\))$/;
 
+// _-Emphase nur an Wortgrenzen (wie GFM): Unterstriche mitten im Wort –
+// etwa in URLs von Quellen-Fußnoten – sind keine Auszeichnung.
 const INLINE_TOKEN_RE =
-  /(\*\*[^*\n]+\*\*|~~[^~\n]+~~|\*[^*\n]+\*|_[^_\n]+_|`[^`\n]+`|<(?:span|mark)\b[^>]*>)/;
+  /(\*\*[^*\n]+\*\*|~~[^~\n]+~~|\*[^*\n]+\*|(?<![\w\d])_[^_\n]+_(?![\w\d])|`[^`\n]+`|\[\d+\]\(https?:\/\/(?:[^\s()]|\([^\s()]*\))+\)|<(?:span|mark)\b[^>]*>)/;
+
+/* ---------------- Quellen-Fußnoten im Dokument ---------------- */
+/* Konvention: [n](https://…) direkt hinter der belegten Aussage – ein
+   Markdown-Link mit reiner Zahl als Text. Er übersteht den WYSIWYG-
+   Roundtrip (Link-Extension) und wird hier als hochgestellte Zahl
+   gerendert. Die Nummern vergibt renumberCitations dokumentweit.
+   Die URL darf eine Ebene runder Klammern enthalten (Wikipedia!). */
+
+const CITE_LINK_RE = /\[(\d+)\]\((https?:\/\/(?:[^\s()]|\([^\s()]*\))+)\)/g;
+
+// Fußnoten von Dokumentanfang bis -ende durchnummerieren: gleiche URL =
+// gleiche Nummer (erste Fundstelle bestimmt die Reihenfolge). Wird bei
+// jedem Schreiben angewendet, damit Einfügungen sauber umnummerieren.
+// Codespans bleiben unangetastet (der Renderer zeigt sie literal).
+export function renumberCitations(md) {
+  const numByUrl = new Map();
+  return String(md)
+    .split(/(`[^`\n]+`)/)
+    .map((seg, i) =>
+      i % 2
+        ? seg
+        : seg.replace(CITE_LINK_RE, (m, num, url) => {
+            if (!numByUrl.has(url)) numByUrl.set(url, numByUrl.size + 1);
+            return "[" + numByUrl.get(url) + "](" + url + ")";
+          })
+    )
+    .join("");
+}
 
 // Passendes schließendes Tag finden (gleichnamige Verschachtelung mitzählen).
 function findClose(text, from, tag) {
@@ -122,7 +152,23 @@ function renderInline(text) {
       continue;
     }
 
-    if (tok.startsWith("**")) {
+    if (tok.startsWith("[")) {
+      const cm = /^\[(\d+)\]\((https?:\/\/(?:[^\s()]|\([^\s()]*\))+)\)$/.exec(tok);
+      if (!cm) { parts.push(tok); s = s.slice(after); continue; }
+      parts.push(
+        <sup key={k++} className="ml-0.5">
+          <a
+            href={cm[2]}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={cm[2]}
+            className="text-indigo-600 hover:underline font-medium no-underline"
+          >
+            [{cm[1]}]
+          </a>
+        </sup>
+      );
+    } else if (tok.startsWith("**")) {
       parts.push(<strong key={k++} className="font-semibold text-slate-900">{renderInline(tok.slice(2, -2))}</strong>);
     } else if (tok.startsWith("~~")) {
       parts.push(<s key={k++} className="text-slate-400">{renderInline(tok.slice(2, -2))}</s>);

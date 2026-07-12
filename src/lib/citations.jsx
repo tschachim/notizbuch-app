@@ -73,8 +73,34 @@ export function renderWithCites(text, sources) {
   return { nodes, footnotes };
 }
 
-// cite-Tags restlos entfernen (für Dokument-Inhalte: dort gehören
-// Quellen als Klartext hin, nicht als Markup).
+// cite-Tags restlos entfernen (für Kontexte ohne Fußnoten, z. B. die
+// API-History oder unauflösbare Tags).
 export function stripCiteTags(s) {
   return typeof s === "string" ? s.replace(/<\/?cite[^>]*>/gi, "") : s;
+}
+
+// cite-Tags in Dokument-Inhalten (ops) in Fußnoten-Links der Form
+// [0](https://…) umwandeln – die Nummer ist ein Platzhalter, die
+// dokumentweite Durchnummerierung übernimmt renumberCitations beim
+// Schreiben. Unauflösbare Tags werden gestrippt (Text bleibt).
+export function citeTagsToDocLinks(s, sources) {
+  if (typeof s !== "string") return s;
+  let out = "";
+  let rest = s;
+  while (rest.length) {
+    const open = OPEN_RE.exec(rest);
+    if (!open) { out += stripCiteTags(rest); break; }
+    out += stripCiteTags(rest.slice(0, open.index));
+    const after = rest.slice(open.index + open[0].length);
+    const close = CLOSE_RE.exec(after);
+    const inner = close ? after.slice(0, close.index) : after;
+    // Marker vor abschließendem Weißraum/Zeilenende der markierten Stelle
+    const cut = inner.length - /\s*$/.exec(inner)[0].length;
+    const links = resolveSources(open[1], sources || [])
+      .map((src) => "[0](" + src.url + ")")
+      .join("");
+    out += stripCiteTags(inner.slice(0, cut)) + links + inner.slice(cut);
+    rest = close ? after.slice(close.index + close[0].length) : "";
+  }
+  return out;
 }

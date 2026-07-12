@@ -6,7 +6,7 @@
 /* max_tokens 4000 statt 1000.                                         */
 /* ------------------------------------------------------------------ */
 
-import { stripCiteTags } from "./citations.jsx";
+import { stripCiteTags, citeTagsToDocLinks } from "./citations.jsx";
 
 export const MODELS = [
   { id: "claude-sonnet-4-6", label: "Sonnet 4.6 · Standard" },
@@ -92,7 +92,9 @@ INTERNET-RECHERCHE:
 - Dir steht die Websuche (web_search) zur Verfügung. Nutze sie GROSSZÜGIG, wann immer sie die Antwort oder die Einordnung verbessert: unbekannte Begriffe, Produkte, Firmen, Orte, Personen, aktuelle Fakten, Preise, Termine, Versionen. Lieber einmal zu viel suchen als zu wenig.
 - Beispiel: Der Nutzer erwähnt eine Software, die du nicht sicher kennst → recherchiere, was das ist, und nutze das Ergebnis für Einordnung und Dokumenteintrag.
 - Wenn du recherchiert hast, schreibe die inhaltliche Antwort (Empfehlungen, Fakten, Erklärungen) als normalen Text VOR dem abschließenden Tool-Aufruf – die App zeigt diesen Text mitsamt klickbaren Quellen-Fußnoten im Chat an. Das reply-Feld enthält dann nur noch Bestätigung und Auffälligkeiten, ohne die Antwort zu wiederholen.
-- Alternativ darfst du in reply Aussagen mit <cite index="…">…</cite> markieren; index = 1-basierte Position des belegenden Suchtreffers, gezählt über alle gelieferten Suchergebnisse in ihrer Reihenfolge. In ops-Inhalten (Dokument) KEINE cite-Tags: dort Quellen als Klartext nennen (z. B. „(Quelle: hersteller.de)“).
+- Alternativ darfst du in reply Aussagen mit <cite index="…">…</cite> markieren; index = 1-basierte Position des belegenden Suchtreffers, gezählt über alle gelieferten Suchergebnisse in ihrer Reihenfolge.
+- QUELLEN IM DOKUMENT: Markiere recherchierte Aussagen auch in ops-Inhalten mit <cite index="…">…</cite> – die App wandelt das in nummerierte Quellen-Fußnoten um. Keine Klartext-Quellen wie „(Quelle: …)“ mehr ins Dokument schreiben.
+- Bestehende Fußnoten-Links der Form [1](https://…) im Dokument sind solche Quellen-Fußnoten: erhalte sie bei Umstrukturierungen unverändert und nimm sie beim Verschieben von Inhalten mit.
 - WICHTIG: Nach optionaler Recherche rufst du am Ende IMMER GENAU EINMAL das Tool "update_notebook" auf. Antworte niemals nur mit freiem Text.
 
 DEINE AUFGABEN:
@@ -504,9 +506,14 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     };
   }
 
-  // cite-Tags gehören nicht ins Dokument – dort Quellen als Klartext.
+  // cite-Tags in Dokument-Inhalten werden zu Fußnoten-Links [0](url)
+  // aufgelöst (Platzhalter-Nummer; die dokumentweite Durchnummerierung
+  // passiert beim Schreiben). Ohne Recherche gibt es keine Quellen –
+  // dann werden die Tags wie bisher gestrippt.
   const ops = (Array.isArray(parsed.ops) ? parsed.ops : []).map((op) =>
-    op && typeof op === "object" ? { ...op, content: stripCiteTags(op.content) } : op
+    op && typeof op === "object"
+      ? { ...op, content: citeTagsToDocLinks(op.content, usedSearch ? sources : []) }
+      : op
   );
 
   // Roh-reply übergeben (ohne "Notiert."-Default): der Default soll nicht
@@ -515,6 +522,14 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
   const chat = usedSearch
     ? buildChatReply({ content: textBlocks }, sources, toolReply)
     : { reply: toolReply, sources: [] };
+  // Recherchiert, aber nichts inline zitiert: die konsultierten Quellen
+  // trotzdem anzeigen (dedupliziert, gedeckelt), statt sie zu verschweigen.
+  if (usedSearch && !chat.sources.length && sources.length) {
+    const seen = new Set();
+    chat.sources = sources
+      .filter((s) => !seen.has(s.url) && seen.add(s.url))
+      .slice(0, 6);
+  }
   return {
     reply: chat.reply || "Notiert.",
     ops,

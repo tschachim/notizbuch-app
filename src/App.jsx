@@ -7,7 +7,7 @@ import {
 
 import { applyOps, dispHead } from "./lib/ops.js";
 import { diffLines, contextize } from "./lib/diff.js";
-import { DocView, IMG_REF_RE, TASK_RE, parseTree } from "./lib/markdown.jsx";
+import { DocView, IMG_REF_RE, TASK_RE, parseTree, renumberCitations } from "./lib/markdown.jsx";
 import {
   prepareImage, newImgId, extForMime, mimeForName, dataUrlParts, blobToDataURL,
 } from "./lib/images.js";
@@ -651,7 +651,9 @@ export default function NotizbuchApp() {
         let conflict = false;
         for (const [nbId, ops] of groups) {
           const before = docCache.current[nbId] || "";
-          const applied = applyOps(before, ops);
+          // Nach dem Anwenden dokumentweit durchnummerieren: neue Quellen-
+          // Fußnoten kommen als [0](url)-Platzhalter aus den ops.
+          const applied = renumberCitations(applyOps(before, ops));
           if (applied === before) continue;
           const nb = notebooksRef.current.find((n) => n.id === nbId);
           const ok = await commitDocNb(cfg, nbId, applied, res.commit || "Aktualisierung");
@@ -1168,7 +1170,9 @@ export default function NotizbuchApp() {
   // Bekommt das fertige Markdown aus dem WYSIWYG-Editor.
   const saveEdit = async (md) => {
     if (busy) return; // keine parallelen Prüf-/Sendeläufe
-    const cleaned = md.trim() ? md.replace(/\n{3,}/g, "\n\n").trim() + "\n" : INITIAL_DOC;
+    const cleaned = md.trim()
+      ? renumberCitations(md.replace(/\n{3,}/g, "\n\n").trim() + "\n")
+      : INITIAL_DOC;
     if (cleaned !== doc) {
       const oldDoc = doc;
       const nbId = activeNbRef.current;
@@ -1485,7 +1489,7 @@ export default function NotizbuchApp() {
         ) : (
           <span className="font-semibold tracking-tight">Notizbuch</span>
         )}
-        <span className="font-mono text-xs text-slate-400">v5.2</span>
+        <span className="font-mono text-xs text-slate-400">v5.3</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -1619,14 +1623,21 @@ export default function NotizbuchApp() {
                   )}
                   {(() => {
                     if (m.role !== "assistant" || m.error) return m.text;
-                    // cite-Tags der Websuche → klickbare Fußnoten
+                    // cite-Tags der Websuche → klickbare Fußnoten. Wurde
+                    // recherchiert, aber nichts inline zitiert, die
+                    // konsultierten Quellen trotzdem auflisten.
                     const { nodes, footnotes } = renderWithCites(m.text, m.sources || []);
+                    const list = footnotes.length
+                      ? footnotes
+                      : (m.sources || [])
+                          .filter((s) => /^https?:\/\//i.test(s.url)) // wie resolveSources
+                          .map((s, i) => ({ num: i + 1, url: s.url, title: s.title || s.url }));
                     return (
                       <>
                         {nodes}
-                        {footnotes.length > 0 && (
+                        {list.length > 0 && (
                           <span className="block mt-2 pt-1.5 border-t border-slate-200 whitespace-normal">
-                            {footnotes.map((f) => (
+                            {list.map((f) => (
                               <span key={f.num} className="block text-xs text-slate-400 truncate">
                                 [{f.num}]{" "}
                                 <a
