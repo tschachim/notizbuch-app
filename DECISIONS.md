@@ -147,3 +147,27 @@ aus `referenz-app.jsx` übernommen.
     (Artifact, ins aktive Notizbuch) und v2 (Abgleich über Namen).
     Der Fokus-Refresh lässt das aktive Notizbuch bewusst lokal (kein
     Überraschungs-Wechsel durch andere Geräte).
+
+22. **Internet-Recherche in jedem KI-Aufruf** (v5.1, Nutzerwunsch): Server-
+    seitige Anthropic-Websuche (`web_search_20260209`; Basis-Variante für
+    Haiku) mit `max_uses: 8` und großzügiger „lieber zu oft suchen“-Anweisung.
+    Konsequenz: `tool_choice` kann nicht mehr auf `update_notebook` erzwungen
+    werden (erzwungene Tools verhindern Server-Tool-Aufrufe) → `auto` plus
+    Prompt-Pflicht („am Ende genau ein update_notebook“) plus Fallback-Kette:
+    liefert eine Antwort kein update_notebook, wird einmal OHNE Suche mit
+    erzwungenem Tool nachgefasst; Text-JSON-Parsing bleibt als letzte Stufe.
+    `pause_turn` (Server-Tool-Unterbrechung) wird mit bis zu 3 Fortsetzungen
+    behandelt. Kosten: ~10 USD pro 1000 Suchen zusätzlich zu Tokens.
+
+23. **Hintergrundwissen pro Notizbuch** (v5.1, Nutzerwunsch): Dateien
+    (pdf, md, txt, csv, xlsx, docx) liegen unter `wissen/<nbId>/` im
+    Daten-Repo. Der Text wird EINMALIG beim Upload client-seitig extrahiert
+    (pdf.js, mammoth, SheetJS – lazy geladen, Hauptbundle unverändert) und
+    als `<name>.extrakt.md` daneben abgelegt; Prompts verwenden nur den
+    Extrakt. Bewusst kein PDF-Block pro Prompt (würde jede Nachricht um den
+    vollen Dateiinhalt verteuern); gescannte PDFs ohne Textebene werden mit
+    klarer Meldung abgelehnt. Ins Prompt geht das Wissen des AKTIVEN
+    Notizbuchs (Deckel: 80k Zeichen/Datei, 200k gesamt, mit Kürzungsvermerk);
+    von fremden Notizbüchern nur die Dateinamen. SheetJS kommt als 0.20.3
+    vom offiziellen CDN (npm-Version hat eine bekannte ReDoS-Schwachstelle).
+    Uploads anderer Geräte erscheinen nach dem nächsten Verbinden/Reload.

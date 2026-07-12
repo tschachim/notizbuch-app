@@ -150,6 +150,20 @@ export function ghPutFile(cfg, path, base64Content, message, sha) {
   });
 }
 
+// Datei löschen (z. B. Wissensdatei). Läuft durch dieselbe Warteschlange.
+export function ghDeleteFile(cfg, path, message, sha) {
+  return enqueue(async () => {
+    const res = await ghFetch(contentsUrl(cfg, path), {
+      method: "DELETE",
+      headers: { ...baseHeaders(cfg), "Content-Type": "application/json" },
+      body: JSON.stringify({ message: message || "Datei gelöscht", sha }),
+    });
+    if (res.status === 409) throw new ShaConflictError();
+    if (!res.ok && res.status !== 404) throw errorFor(res);
+    return true;
+  });
+}
+
 /* --- Historie (echte Git-Commits) --- */
 
 // Commits, die eine Datei berührt haben – neueste zuerst.

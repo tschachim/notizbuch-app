@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   BookOpen, Send, Pencil, X, Check, History, Download, Copy,
   RotateCcw, GitCommit, ChevronDown, Loader2, Upload, ImagePlus,
-  Settings, AlertTriangle, StickyNote,
+  Settings, AlertTriangle, StickyNote, Paperclip, Trash2, FileUp,
 } from "lucide-react";
 
 import { applyOps, dispHead } from "./lib/ops.js";
@@ -14,8 +14,12 @@ import {
 import { MODELS, callClaude } from "./lib/anthropic.js";
 import {
   ShaConflictError, utf8ToB64, ghGetFile, ghGetBlob, ghListDir, ghPutFile,
-  ghListCommits, ghCommitMeta, ghCheckRepo,
+  ghDeleteFile, ghListCommits, ghCommitMeta, ghCheckRepo,
 } from "./lib/github.js";
+import {
+  KNOWLEDGE_EXTS, knowledgeDir, safeFileName, extractPathFor, isExtractPath,
+  extractText, fileToBase64,
+} from "./lib/knowledge.js";
 import { loadSettings, saveSettings, clearSettings } from "./lib/settings.js";
 import SettingsDialog from "./components/SettingsDialog.jsx";
 import DocEditor from "./components/DocEditor.jsx";
@@ -127,6 +131,9 @@ export default function NotizbuchApp() {
   const [newNbName, setNewNbName] = useState("");
   const [creatingNb, setCreatingNb] = useState(false);
   const [nbError, setNbError] = useState(null);
+  const [showKnowledge, setShowKnowledge] = useState(false);
+  const [knowledgeBusy, setKnowledgeBusy] = useState(null); // Fortschrittstext
+  const [, setKnowledgeVersion] = useState(0); // Render-Trigger für Ref-Änderungen
 
   const collapsed = collapsedAll[activeNb] || {};
 
@@ -187,6 +194,9 @@ export default function NotizbuchApp() {
   const activeNbRef = useRef(ROOT_NB_ID);
   const docCache = useRef({}); // nbId -> Text
   const docShas = useRef({});  // nbId -> Content-SHA
+  const knowledgeIndex = useRef({}); // nbId -> [{ name, path, extractPath }]
+  const knowledgeTexts = useRef({}); // extractPath -> extrahierter Text
+  const knowledgeFileRef = useRef(null);
   const taskChain = useRef(Promise.resolve());
   const taskEpoch = useRef(0);
   const connectedRef = useRef(false);
@@ -288,6 +298,18 @@ export default function NotizbuchApp() {
       imgIndex.current = idx;
       failedImgs.current = new Set();
       versionCache.current = new Map();
+
+      // Hintergrundwissen entdecken: wissen/<nbId>/ pro Notizbuch (parallel)
+      const kIdx = {};
+      await Promise.all(nbs.map(async (nb) => {
+        const kFiles = await ghListDir(cfg, knowledgeDir(nb.id));
+        const items = kFiles
+          .filter((f) => !isExtractPath(f.name))
+          .map((f) => ({ name: f.name, path: f.path, extractPath: extractPathFor(f.path) }));
+        if (items.length) kIdx[nb.id] = items;
+      }));
+      knowledgeIndex.current = kIdx;
+      knowledgeTexts.current = {};
 
       lastSavedState.current = serializeState(nChat, nModel, nCollapsedAll, active);
       setNotebooks(nbs);
@@ -598,10 +620,7 @@ export default function NotizbuchApp() {
       const imgParts = img ? dataUrlParts(img.dataUrl) : null;
       if (img && !imgParts) throw new Error("Bilddaten unlesbar");
 
-      const nbCtx = {
-        notebooks: notebooksRef.current.map((n) => ({ name: n.name, doc: docCache.current[n.id] || "" })),
-        activeName: activeNotebook().name,
-      };
+      const nbCtx = await buildNbCtx();
       const res = await callClaude(cfg.apiKey, text, nbCtx, chat, model, img, imgId);
 
       // Bild erst nach erfolgreicher Antwort als Datei ins Daten-Repo legen
@@ -740,6 +759,122 @@ export default function NotizbuchApp() {
       else cur[key] = true;
       return { ...prev, [id]: cur };
     });
+  };
+
+  /* ---------- Hintergrundwissen (Dateien pro Notizbuch) ---------- */
+  // Extrahierte Texte des Notizbuchs laden (mit Cache).
+  const ensureKnowledge = async (nbId) => {
+    const cfg = settingsRef.current;
+    if (!cfg || !connectedRef.current) return [];
+    const items = knowledgeIndex.current[nbId] || [];
+    await Promise.all(items.map(async (it) => {
+      if (knowledgeTexts.current[it.extractPath] !== undefined) return;
+      try {
+        const f = await ghGetFile(cfg, it.extractPath);
+        knowledgeTexts.current[it.extractPath] = f ? f.text : "";
+      } catch (e) {
+        knowledgeTexts.current[it.extractPath] = "";
+      }
+    }));
+    return items
+      .map((it) => ({ name: it.name, text: knowledgeTexts.current[it.extractPath] }))
+      .filter((f) => f.text);
+  };
+
+  // Kompletter KI-Kontext: alle Notizbücher + Wissen des aktiven.
+  const buildNbCtx = async () => {
+    const activeId = activeNbRef.current;
+    const activeFiles = await ensureKnowledge(activeId);
+    const others = notebooksRef.current
+      .filter((n) => n.id !== activeId)
+      .map((n) => ({
+        notebook: n.name,
+        files: (knowledgeIndex.current[n.id] || []).map((i) => i.name),
+      }))
+      .filter((o) => o.files.length);
+    return {
+      notebooks: notebooksRef.current.map((n) => ({ name: n.name, doc: docCache.current[n.id] || "" })),
+      activeName: activeNotebook().name,
+      knowledge: { activeFiles, others },
+    };
+  };
+
+  const uploadKnowledge = async (ev) => {
+    const files = [...(ev.target.files || [])];
+    ev.target.value = "";
+    if (!files.length) return;
+    if (!connectedRef.current || !settingsRef.current) { setShowSettings(true); return; }
+    const cfg = settingsRef.current;
+    const nbId = activeNbRef.current;
+    const errors = [];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const step = `(${i + 1}/${files.length})`;
+      try {
+        if (file.size > 25 * 1024 * 1024) throw new Error("größer als 25 MB");
+        const name = safeFileName(file.name);
+        if ((knowledgeIndex.current[nbId] || []).some((it) => it.name === name)) {
+          throw new Error("Datei mit diesem Namen existiert bereits – erst löschen");
+        }
+        setKnowledgeBusy(`${file.name}: Text wird extrahiert … ${step}`);
+        const text = await extractText(file);
+        const path = knowledgeDir(nbId) + "/" + name;
+        const extractPath = extractPathFor(path);
+        setKnowledgeBusy(`${file.name}: Original wird hochgeladen … ${step}`);
+        const putOrig = await ghPutFile(cfg, path, await fileToBase64(file), "Wissen: " + name + " hinzugefügt");
+        setKnowledgeBusy(`${file.name}: Extrakt wird hochgeladen … ${step}`);
+        try {
+          await ghPutFile(cfg, extractPath, utf8ToB64(text), "Wissen: Extrakt zu " + name);
+        } catch (e) {
+          // Kein Original ohne Extrakt zurücklassen (wäre eine stumme Waise)
+          try { await ghDeleteFile(cfg, path, "Wissen: Upload zurückgerollt (" + name + ")", putOrig.sha); } catch (e2) { /* best effort */ }
+          throw e;
+        }
+        knowledgeTexts.current[extractPath] = text;
+        knowledgeIndex.current = {
+          ...knowledgeIndex.current,
+          [nbId]: [...(knowledgeIndex.current[nbId] || []), { name, path, extractPath }],
+        };
+      } catch (e) {
+        errors.push(file.name + ": " + (e && e.message ? e.message : e));
+      }
+    }
+    setKnowledgeBusy(null);
+    setKnowledgeVersion((v) => v + 1);
+    if (errors.length) {
+      setBanner({ kind: "warn", text: "Wissen-Upload teilweise fehlgeschlagen – " + errors.join("; ") });
+    }
+  };
+
+  const deleteKnowledge = async (item) => {
+    if (!connectedRef.current || !settingsRef.current) return;
+    const cfg = settingsRef.current;
+    const nbId = activeNbRef.current;
+    setKnowledgeBusy(item.name + " wird gelöscht …");
+    try {
+      // Aktuelle Blob-SHAs holen (DELETE verlangt die SHA)
+      const files = await ghListDir(cfg, knowledgeDir(nbId));
+      const shaFor = (p) => { const f = files.find((x) => x.path === p); return f ? f.sha : null; };
+      // Extrakt ZUERST löschen: scheitert danach das Original, bleibt ein
+      // sichtbarer Eintrag zum erneuten Löschen (statt unsichtbarer Waise).
+      const exSha = shaFor(item.extractPath);
+      if (exSha) {
+        await ghDeleteFile(cfg, item.extractPath, "Wissen: Extrakt zu " + item.name + " gelöscht", exSha);
+        delete knowledgeTexts.current[item.extractPath];
+      }
+      const sha = shaFor(item.path);
+      if (sha) await ghDeleteFile(cfg, item.path, "Wissen: " + item.name + " gelöscht", sha);
+      knowledgeIndex.current = {
+        ...knowledgeIndex.current,
+        [nbId]: (knowledgeIndex.current[nbId] || []).filter((it) => it.path !== item.path),
+      };
+      delete knowledgeTexts.current[item.extractPath];
+    } catch (e) {
+      setBanner({ kind: "warn", text: "Löschen fehlgeschlagen: " + (e && e.message ? e.message : e) });
+    } finally {
+      setKnowledgeBusy(null);
+      setKnowledgeVersion((v) => v + 1);
+    }
   };
 
   /* ---------- Notizbuch wechseln / anlegen ---------- */
@@ -992,10 +1127,7 @@ export default function NotizbuchApp() {
     setBusy(true);
     setBusyLabel("prüft die Änderung …");
     try {
-      const nbCtx = {
-        notebooks: notebooksRef.current.map((n) => ({ name: n.name, doc: docCache.current[n.id] || "" })),
-        activeName: nb.name,
-      };
+      const nbCtx = await buildNbCtx();
       const res = await callClaude(cfg.apiKey, trigger, nbCtx, stateRef.current.chat, model, null, null);
       const reply = (res.reply || "").trim();
       // Sentinel bevorzugt; zusätzlich häufige „nichts zu melden“-Floskeln abfangen.
@@ -1341,7 +1473,7 @@ export default function NotizbuchApp() {
         ) : (
           <span className="font-semibold tracking-tight">Notizbuch</span>
         )}
-        <span className="font-mono text-xs text-slate-400">v5.0</span>
+        <span className="font-mono text-xs text-slate-400">v5.1</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -1570,6 +1702,15 @@ export default function NotizbuchApp() {
             <div className="flex-1" />
             {!editing && (
               <>
+                <button onClick={() => setShowKnowledge(true)} title="Hintergrundwissen (Dateien für dieses Notizbuch)"
+                  className="relative p-2 rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-50">
+                  <Paperclip size={15} />
+                  {(knowledgeIndex.current[activeNb] || []).length > 0 && (
+                    <span className="absolute -top-1 -right-1 min-w-3.5 h-3.5 px-0.5 text-[9px] leading-none bg-indigo-600 text-white rounded-full flex items-center justify-center">
+                      {(knowledgeIndex.current[activeNb] || []).length}
+                    </span>
+                  )}
+                </button>
                 <button onClick={copyMd} title="Markdown kopieren"
                   className="p-2 rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-50">
                   {copied ? <Check size={15} className="text-emerald-600" /> : <Copy size={15} />}
@@ -1816,6 +1957,88 @@ export default function NotizbuchApp() {
           <div className="bg-white rounded-2xl shadow-xl px-6 py-5 flex items-center gap-3">
             <Loader2 size={18} className="animate-spin text-indigo-700" />
             <span className="text-sm text-slate-700">{importing}</span>
+          </div>
+        </div>
+      )}
+
+      {/* ---------------- Hintergrundwissen ---------------- */}
+      {showKnowledge && (
+        <div className="fixed inset-0 z-50 flex items-end md:items-center justify-center">
+          <div
+            className="absolute inset-0"
+            style={{ backgroundColor: "rgba(15,23,42,0.45)" }}
+            onClick={() => !knowledgeBusy && setShowKnowledge(false)}
+          />
+          <div className="relative bg-white w-full md:max-w-lg max-h-full rounded-t-2xl md:rounded-2xl shadow-xl flex flex-col" style={{ maxHeight: "85vh" }}>
+            <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-200">
+              <Paperclip size={16} className="text-indigo-700" />
+              <span className="font-semibold">Hintergrundwissen</span>
+              <span className="font-mono text-xs text-slate-400 truncate">{activeName}</span>
+              <div className="flex-1" />
+              <button onClick={() => !knowledgeBusy && setShowKnowledge(false)}
+                className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100">
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-slate-100">
+              {!connected && (
+                <div className="p-6 text-sm text-slate-500">
+                  Nicht verbunden – Wissensdateien liegen im Daten-Repo.
+                </div>
+              )}
+              {connected && !(knowledgeIndex.current[activeNb] || []).length && (
+                <div className="p-6 text-sm text-slate-500">
+                  Noch keine Dateien. Hinterlege hier Hintergrundwissen zu diesem
+                  Notizbuch (z. B. ein Handbuch als PDF) – es wird bei jedem Prompt
+                  in diesem Notizbuch berücksichtigt.
+                </div>
+              )}
+              {(knowledgeIndex.current[activeNb] || []).map((item) => (
+                <div key={item.path} className="flex items-center gap-2 px-4 py-2.5">
+                  <Paperclip size={14} className="text-slate-400 shrink-0" />
+                  <span className="text-sm text-slate-800 flex-1 truncate">{item.name}</span>
+                  <button
+                    onClick={() => deleteKnowledge(item)}
+                    disabled={!!knowledgeBusy}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-rose-700 hover:bg-rose-50"
+                    title="Datei und Extrakt löschen"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            {knowledgeBusy && (
+              <div className="flex items-center gap-2 px-4 py-2 border-t border-slate-200 text-xs text-slate-500">
+                <Loader2 size={13} className="animate-spin text-indigo-700" />
+                {knowledgeBusy}
+              </div>
+            )}
+
+            <div className="flex items-center gap-2 px-4 py-3 border-t border-slate-200">
+              <button
+                onClick={() => knowledgeFileRef.current && knowledgeFileRef.current.click()}
+                disabled={!connected || !!knowledgeBusy}
+                className={"inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 text-slate-700 text-sm " +
+                  (!connected || knowledgeBusy ? "opacity-40" : "hover:bg-slate-50")}
+              >
+                <FileUp size={14} />
+                Dateien hinzufügen
+              </button>
+              <input
+                ref={knowledgeFileRef}
+                type="file"
+                multiple
+                accept={KNOWLEDGE_EXTS.map((e) => "." + e).join(",")}
+                onChange={uploadKnowledge}
+                className="hidden"
+              />
+              <span className="hidden md:inline text-xs text-slate-400">
+                {KNOWLEDGE_EXTS.join(", ")} · Text wird beim Upload extrahiert
+              </span>
+            </div>
           </div>
         </div>
       )}
