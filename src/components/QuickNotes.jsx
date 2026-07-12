@@ -20,6 +20,9 @@ function QuickNote({ note, onChange, onRemove, onOk }) {
   const y = clamp(note.y, 4, Math.max(4, window.innerHeight - 40));
 
   const startGesture = (e, mode) => {
+    // Klicks auf Knöpfe im Kopfbalken (X) nicht als Drag-Start abfangen –
+    // preventDefault + Pointer-Capture würden den Klick sonst verschlucken.
+    if (e.target.closest("button")) return;
     e.preventDefault();
     const el = e.currentTarget;
     try { el.setPointerCapture(e.pointerId); } catch (err) { /* ohne Capture weiter */ }
