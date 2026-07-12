@@ -14,6 +14,8 @@ export const IMG_REF_RE = /!\[[^\]]*\]\(img:([a-zA-Z0-9]+)\)/g;
 export const TASK_RE = /^(\s*[-*]\s+\[)( |x|X)(\]\s+)(.*)$/;
 const OL_RE = /^\s*\d+[.)]\s+(.*)$/;
 const UL_RE = /^\s*[-*]\s+(.*)$/;
+const TABLE_LINE_RE = /^\s*\|.*\|\s*$/;
+const TABLE_SEP_RE = /^\s*\|(\s*:?-+:?\s*\|)+\s*$/;
 
 /* Zeilen behalten ihren Original-Index im Dokument, damit z. B. das
    Abhaken einer Checkbox die richtige Zeile im Markdown ändern kann. */
@@ -138,6 +140,53 @@ function Inline({ text }) {
   return <>{renderInline(text)}</>;
 }
 
+/* ---------------- Tabellen (GFM-Pipe-Format) ---------------- */
+
+// Zelle: an unescapten Pipes trennen, \| in Zellen bleibt ein Pipe.
+const splitRow = (line) =>
+  line.trim().replace(/^\|/, "").replace(/\|\s*$/, "")
+    .split(/(?<!\\)\|/)
+    .map((c) => c.trim().replace(/\\\|/g, "|"));
+
+function renderTable(tlines, key) {
+  let header = null;
+  let bodyLines = tlines;
+  if (tlines.length >= 2 && TABLE_SEP_RE.test(tlines[1])) {
+    header = splitRow(tlines[0]);
+    bodyLines = tlines.slice(2);
+  }
+  let body = bodyLines.filter((l) => !TABLE_SEP_RE.test(l)).map(splitRow);
+  // Wie GFM: Datenzeilen auf die Kopfbreite bringen (kürzen bzw. mit
+  // Leerzellen auffüllen), sonst verrutschen die Spalten.
+  if (header) {
+    body = body.map((row) =>
+      row.length > header.length
+        ? row.slice(0, header.length)
+        : [...row, ...Array(header.length - row.length).fill("")]
+    );
+  }
+  const thCls = "border border-slate-200 bg-slate-50 px-2 py-1 text-left font-semibold text-slate-800";
+  const tdCls = "border border-slate-200 px-2 py-1 text-slate-700 align-top";
+  return (
+    <div key={key} className="overflow-x-auto my-3">
+      <table className="border-collapse text-sm">
+        {header && (
+          <thead>
+            <tr>{header.map((c, i) => <th key={i} className={thCls}><Inline text={c} /></th>)}</tr>
+          </thead>
+        )}
+        <tbody>
+          {body.map((row, ri) => (
+            <tr key={ri}>
+              {row.map((c, ci) => <td key={ci} className={tdCls}><Inline text={c} /></td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 /* ---------------- Block-Rendering ---------------- */
 
 function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
@@ -162,10 +211,19 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
     if (!list || list.type !== type) { flush(); list = { type, items: [] }; }
   };
 
-  for (const { text: line, idx } of lines) {
+  for (let li = 0; li < lines.length; li++) {
+    const { text: line, idx } = lines[li];
     const imgM = IMG_LINE_RE.exec(line.trim());
     const taskM = TASK_RE.exec(line);
-    if (imgM) {
+    if (TABLE_LINE_RE.test(line)) {
+      flush();
+      const tlines = [line];
+      while (li + 1 < lines.length && TABLE_LINE_RE.test(lines[li + 1].text)) {
+        li++;
+        tlines.push(lines[li].text);
+      }
+      blocks.push(renderTable(tlines, kp + key++));
+    } else if (imgM) {
       flush();
       const [, alt, id] = imgM;
       const src = imgMap[id];

@@ -171,3 +171,33 @@ aus `referenz-app.jsx` übernommen.
     von fremden Notizbüchern nur die Dateinamen. SheetJS kommt als 0.20.3
     vom offiziellen CDN (npm-Version hat eine bekannte ReDoS-Schwachstelle).
     Uploads anderer Geräte erscheinen nach dem nächsten Verbinden/Reload.
+
+24. **Zitat-Fußnoten** (v5.2, Nutzerwunsch): Das Modell markiert recherchierte
+    Aussagen in reply mit `<cite index="D-P">…</cite>`; die Quellen (URL +
+    Titel) werden aus den web_search_tool_result-Blöcken der API-Antwort in
+    Trefferreihenfolge gesammelt und an der Chat-Nachricht gespeichert –
+    bewusst OHNE Dedup, damit die index-Nummern positionsstabil bleiben
+    (dedupliziert wird erst bei der Fußnotenvergabe). Gerendert wird der
+    Zitattext plus hochgestellter klickbarer Fußnote ([1], [2], …) mit
+    Quellenliste am Nachrichtenende. Die D-Nummer wird 1-basiert (Fallback
+    0-basiert) auf die Trefferliste abgebildet – best effort; der Prompt gibt
+    dem Modell die 1-basierte Zählung über alle Treffer vor. Nicht
+    auflösbare Zitate und Quellen ohne http(s)-URL zeigen nur den Text;
+    fehlerhafte/verwaiste cite-Tags werden aus der Anzeige gestrippt statt
+    als Rohmarkup zu erscheinen. In ops-Inhalte (Dokument) gelangen
+    cite-Tags nie (werden gestrippt, Prompt verlangt dort Klartext-Quellen).
+
+25. **Tabellen** (v5.2, Nutzerwunsch): GFM-Pipe-Tabellen im Renderer
+    (Kopf-/Trennzeile optional, `\|` in Zellen als Literal, Datenzeilen
+    werden wie bei GFM auf die Kopfbreite gekürzt/aufgefüllt, horizontales
+    Scrollen bei Überbreite) und im Editor (TipTap-Table mit Einfüge-Grid
+    „auf Größe ziehen“, Zeile/Spalte einfügen/löschen, Tabelle löschen).
+    Bewusst ohne Zellen-Verbund und Spaltenbreiten: nur einfache Tabellen
+    sind als GFM-Markdown serialisierbar – sonst fiele tiptap-markdown auf
+    HTML zurück, das der Renderer nicht darstellt. Aus demselben Grund ist
+    die Kopfzeile im Editor nicht löschbar. Eigener Table-Serializer
+    (MdTable): tiptap-markdown verlässt sich beim Escapen von Pipes auf
+    prosemirror-markdown, dessen installierte Version das nicht mehr tut –
+    ohne eigenes `\|`-Escaping zerfielen Zellen mit Pipe im Text beim
+    nächsten Öffnen. Der System-Prompt erlaubt dem Modell explizit
+    GFM-Tabellen für strukturierte Daten.

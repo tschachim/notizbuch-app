@@ -1,5 +1,7 @@
 import { useRef, useState } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
+import { getHTMLFromFragment } from "@tiptap/core";
+import { Fragment } from "@tiptap/pm/model";
 import StarterKit from "@tiptap/starter-kit";
 import Image from "@tiptap/extension-image";
 import TextStyle from "@tiptap/extension-text-style";
@@ -7,10 +9,14 @@ import { Color } from "@tiptap/extension-color";
 import Highlight from "@tiptap/extension-highlight";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
+import Table from "@tiptap/extension-table";
+import TableRow from "@tiptap/extension-table-row";
+import TableHeader from "@tiptap/extension-table-header";
+import TableCell from "@tiptap/extension-table-cell";
 import { Markdown } from "tiptap-markdown";
 import {
   Bold, Italic, Code, List, ListOrdered, ListChecks, Heading2, Heading3,
-  Minus, Undo2, Redo2, Strikethrough, Palette, Highlighter,
+  Minus, Undo2, Redo2, Strikethrough, Palette, Highlighter, Table as TableIcon,
 } from "lucide-react";
 
 /* WYSIWYG-Editor für die manuelle Bearbeitung der Wissensbasis.
@@ -77,10 +83,72 @@ const BlockImage = Image.extend({
   },
 }).configure({ allowBase64: true });
 
+// tiptap-markdown setzt beim Serialisieren zwar state.inTable, aber die
+// installierte prosemirror-markdown-Version escaped Pipes nicht mehr selbst –
+// eine Zelle mit "|" im Text zerfiele beim nächsten Öffnen in zwei Spalten.
+// Daher eigener Serializer (Kopie des Originals), der esc() um Pipe-Escaping
+// ergänzt. Nicht als GFM darstellbare Tabellen (verbundene Zellen oder mehrere
+// Absätze in einer Zelle – nur per Paste erreichbar) landen wie im Original
+// als HTML, damit beim nächsten Öffnen nichts verloren geht.
+const cellHasSpan = (cell) => cell.attrs.colspan > 1 || cell.attrs.rowspan > 1;
+function gfmSerializable(table) {
+  let ok = true;
+  table.forEach((row, _o, i) => {
+    row.forEach((cell) => {
+      const headerOk = i === 0
+        ? cell.type.name === "tableHeader"
+        : cell.type.name !== "tableHeader";
+      if (!headerOk || cellHasSpan(cell) || cell.childCount > 1) ok = false;
+    });
+  });
+  return ok;
+}
+const MdTable = Table.extend({
+  addStorage() {
+    return {
+      markdown: {
+        serialize(state, node) {
+          if (!gfmSerializable(node)) {
+            state.write(getHTMLFromFragment(Fragment.from(node), node.type.schema));
+            state.closeBlock(node);
+            return;
+          }
+          state.inTable = true; // lässt harte Umbrüche in Zellen als <br> serialisieren
+          const esc = state.esc.bind(state);
+          state.esc = (str, startOfLine) => esc(str, startOfLine).replace(/\|/g, "\\|");
+          try {
+            node.forEach((row, _o, i) => {
+              state.write("| ");
+              row.forEach((cell, _o2, j) => {
+                if (j) state.write(" | ");
+                if (cell.firstChild && cell.firstChild.textContent.trim()) {
+                  state.renderInline(cell.firstChild);
+                }
+              });
+              state.write(" |");
+              state.ensureNewLine();
+              if (!i) {
+                state.write("| " + Array.from({ length: row.childCount }, () => "---").join(" | ") + " |");
+                state.ensureNewLine();
+              }
+            });
+          } finally {
+            state.esc = esc;
+            state.inTable = false;
+          }
+          state.closeBlock(node);
+        },
+        parse: {},
+      },
+    };
+  },
+});
+
 export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving }) {
   const baseline = useRef(null);
   const [error, setError] = useState(null);
-  const [picker, setPicker] = useState(null); // null | "color" | "highlight"
+  const [picker, setPicker] = useState(null); // null | "color" | "highlight" | "table"
+  const [tableHover, setTableHover] = useState({ r: 0, c: 0 });
   // TipTap feuert Transaktionen ohne React-Re-Render; kleiner Zähler,
   // damit die Aktiv-Zustände der Toolbar-Knöpfe mitziehen.
   const [, setTick] = useState(0);
@@ -98,6 +166,13 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
       Highlight.configure({ multicolor: true }),
       TaskList,
       TaskItem.configure({ nested: false }),
+      // Keine Zellen-Verbünde anbieten: nur einfache Tabellen sind als
+      // GFM-Markdown serialisierbar (sonst fiele der Serializer auf HTML
+      // zurück, das der Renderer nicht darstellt).
+      MdTable.configure({ resizable: false }),
+      TableRow,
+      TableHeader,
+      TableCell,
       // html:true ist nötig, damit Schriftfarbe/Textmarker (Marks ohne
       // Markdown-Entsprechung) als <span>/<mark> serialisiert und beim
       // Öffnen wieder eingelesen werden.
@@ -232,6 +307,78 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
           className={btn(false)} title="Trennlinie">
           <Minus size={15} />
         </button>
+
+        <div className="relative">
+          <button
+            onClick={() => { setPicker(picker === "table" ? null : "table"); setTableHover({ r: 0, c: 0 }); }}
+            className={btn(editor.isActive("table"))}
+            title="Tabelle einfügen"
+          >
+            <TableIcon size={15} />
+          </button>
+          {picker === "table" && (
+            <div className="absolute z-10 top-full left-0 mt-1 p-2 bg-white border border-slate-200 rounded-lg shadow-lg">
+              <div className="grid grid-cols-6 gap-0.5">
+                {Array.from({ length: 6 * 6 }, (_, i) => {
+                  const r = Math.floor(i / 6) + 1;
+                  const c = (i % 6) + 1;
+                  const hot = r <= tableHover.r && c <= tableHover.c;
+                  return (
+                    <div
+                      key={i}
+                      onMouseEnter={() => setTableHover({ r, c })}
+                      onClick={() => {
+                        editor.chain().focus().insertTable({ rows: r + 1, cols: c, withHeaderRow: true }).run();
+                        setPicker(null);
+                      }}
+                      className={"w-4 h-4 rounded-[2px] border cursor-pointer " +
+                        (hot ? "bg-indigo-500 border-indigo-600" : "bg-slate-100 border-slate-200")}
+                    />
+                  );
+                })}
+              </div>
+              <div className="mt-1 text-center text-[10px] text-slate-500 font-mono">
+                {tableHover.r > 0 ? tableHover.c + " Spalten × " + tableHover.r + " Zeilen" : "Größe wählen"}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {editor.isActive("table") && (
+          <>
+            <span className="mx-1 w-px h-5 bg-slate-200" />
+            <button onClick={() => editor.chain().focus().addRowAfter().run()}
+              className="px-2 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 text-xs"
+              title="Zeile unterhalb einfügen">
+              +Zeile
+            </button>
+            <button onClick={() => editor.chain().focus().addColumnAfter().run()}
+              className="px-2 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 text-xs"
+              title="Spalte rechts einfügen">
+              +Spalte
+            </button>
+            {/* Die Kopfzeile ist nicht löschbar: ohne sie wäre die Tabelle
+                kein GFM mehr und fiele auf HTML-Serialisierung zurück, die
+                die Leseansicht nicht darstellt. */}
+            <button onClick={() => editor.chain().focus().deleteRow().run()}
+              disabled={editor.isActive("tableHeader")}
+              className={"px-2 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-600 text-xs " +
+                (editor.isActive("tableHeader") ? "opacity-40" : "hover:bg-slate-50")}
+              title={editor.isActive("tableHeader") ? "Kopfzeile kann nicht gelöscht werden" : "Aktuelle Zeile löschen"}>
+              −Zeile
+            </button>
+            <button onClick={() => editor.chain().focus().deleteColumn().run()}
+              className="px-2 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 text-xs"
+              title="Aktuelle Spalte löschen">
+              −Spalte
+            </button>
+            <button onClick={() => editor.chain().focus().deleteTable().run()}
+              className="px-2 py-1.5 rounded-lg border border-rose-200 bg-white text-rose-700 hover:bg-rose-50 text-xs"
+              title="Ganze Tabelle löschen">
+              ✕Tabelle
+            </button>
+          </>
+        )}
         <div className="flex-1" />
         <button onClick={() => editor.chain().focus().undo().run()}
           disabled={!editor.can().undo()}
