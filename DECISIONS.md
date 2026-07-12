@@ -186,6 +186,14 @@ aus `referenz-app.jsx` übernommen.
     fehlerhafte/verwaiste cite-Tags werden aus der Anzeige gestrippt statt
     als Rohmarkup zu erscheinen. In ops-Inhalte (Dokument) gelangen
     cite-Tags nie (werden gestrippt, Prompt verlangt dort Klartext-Quellen).
+    Wichtig: Bei aktiver Websuche schreibt das Modell die inhaltliche
+    Antwort meist als Textblöcke VOR dem Tool-Aufruf (nur dort hängt die
+    API echte Zitate an); das reply-Feld enthält dann bloß die Bestätigung.
+    Beide Teile werden deshalb zur Chat-Nachricht kombiniert, API-Zitate
+    als cite-Marker hinter dem jeweiligen Block kodiert und alle Indizes
+    auf eine kompakte Liste NUR der tatsächlich zitierten Quellen
+    umnummeriert – nur diese wird an der Nachricht gespeichert (hält
+    state.json klein und macht die Auflösung exakt statt best effort).
 
 25. **Tabellen** (v5.2, Nutzerwunsch): GFM-Pipe-Tabellen im Renderer
     (Kopf-/Trennzeile optional, `\|` in Zellen als Literal, Datenzeilen

@@ -91,7 +91,8 @@ ${docsBlock}${knowledgeBlock(knowledge, escAttr)}
 INTERNET-RECHERCHE:
 - Dir steht die Websuche (web_search) zur Verfügung. Nutze sie GROSSZÜGIG, wann immer sie die Antwort oder die Einordnung verbessert: unbekannte Begriffe, Produkte, Firmen, Orte, Personen, aktuelle Fakten, Preise, Termine, Versionen. Lieber einmal zu viel suchen als zu wenig.
 - Beispiel: Der Nutzer erwähnt eine Software, die du nicht sicher kennst → recherchiere, was das ist, und nutze das Ergebnis für Einordnung und Dokumenteintrag.
-- In reply darfst du recherchierte Aussagen mit <cite index="…">…</cite> markieren – die App macht daraus klickbare Fußnoten. Als index gib die 1-basierte Position des belegenden Suchtreffers an, gezählt über alle gelieferten Suchergebnisse in ihrer Reihenfolge (z. B. index="3" für den dritten Treffer insgesamt). In ops-Inhalten (Dokument) KEINE cite-Tags: dort Quellen als Klartext nennen (z. B. „(Quelle: hersteller.de)“).
+- Wenn du recherchiert hast, schreibe die inhaltliche Antwort (Empfehlungen, Fakten, Erklärungen) als normalen Text VOR dem abschließenden Tool-Aufruf – die App zeigt diesen Text mitsamt klickbaren Quellen-Fußnoten im Chat an. Das reply-Feld enthält dann nur noch Bestätigung und Auffälligkeiten, ohne die Antwort zu wiederholen.
+- Alternativ darfst du in reply Aussagen mit <cite index="…">…</cite> markieren; index = 1-basierte Position des belegenden Suchtreffers, gezählt über alle gelieferten Suchergebnisse in ihrer Reihenfolge. In ops-Inhalten (Dokument) KEINE cite-Tags: dort Quellen als Klartext nennen (z. B. „(Quelle: hersteller.de)“).
 - WICHTIG: Nach optionaler Recherche rufst du am Ende IMMER GENAU EINMAL das Tool "update_notebook" auf. Antworte niemals nur mit freiem Text.
 
 DEINE AUFGABEN:
@@ -246,14 +247,80 @@ function parseLooseJson(raw) {
   return null;
 }
 
+// Bei Websuche steht die inhaltliche Antwort meist in den Textblöcken VOR
+// dem Tool-Aufruf (dort hängt die API echte Zitate mit URL+Titel an); das
+// reply-Feld enthält dann nur die Bestätigung. Beides zur Chat-Nachricht
+// kombinieren: API-Zitate werden als <cite index="…">-Marker hinter den
+// jeweiligen Textblock kodiert, anschließend werden alle cite-Indizes auf
+// eine kompakte Liste NUR der tatsächlich zitierten Quellen umnummeriert
+// (klein zu speichern, und 1-basiert exakt auflösbar).
+// Exportiert für Tests. data.content = akkumulierte Textblöcke aller
+// Antwortsegmente; hits = Roh-Trefferliste, wird nicht verändert.
+export function buildChatReply(data, hits, toolReply) {
+  const sources = [...hits];
+  const parts = [];
+  for (const b of (data && data.content) || []) {
+    if (b.type !== "text" || typeof b.text !== "string" || !b.text) continue;
+    // Payload-Heuristik: Antwortet das Modell (fälschlich) mit dem Tool-JSON
+    // als Text, ist das die Nutzlast für parseLooseJson – keine Antwortprosa.
+    if (/^\s*(\{|```)/.test(b.text)) continue;
+    let t = b.text;
+    if (Array.isArray(b.citations) && b.citations.length) {
+      const idxs = [];
+      for (const c of b.citations) {
+        if (!c || !c.url) continue;
+        let i = sources.findIndex((s) => s.url === c.url);
+        if (i < 0) { sources.push({ url: c.url, title: c.title || c.url }); i = sources.length - 1; }
+        if (!idxs.includes(i + 1)) idxs.push(i + 1);
+      }
+      if (idxs.length) {
+        // Marker vor dem abschließenden Weißraum einsetzen, damit die
+        // Fußnote direkt am zitierten Text klebt (Blöcke enden teils mitten
+        // im Satz – deshalb Blöcke unverändert aneinanderfügen).
+        const cut = t.length - /\s*$/.exec(t)[0].length;
+        t = t.slice(0, cut) + '<cite index="' + idxs.join(",") + '"></cite>' + t.slice(cut);
+      }
+    }
+    parts.push(t);
+  }
+  const combined = parts.join("").trim();
+  const tr = typeof toolReply === "string" ? toolReply.trim() : "";
+  // Exakter Vergleich statt includes: eine kurze legitime Bestätigung darf
+  // nicht unterdrückt werden, nur weil sie zufällig als Teilstring vorkommt.
+  const reply = combined
+    ? combined + (tr && combined !== tr ? "\n\n" + tr : "")
+    : tr;
+
+  // Indizes (auch modellgeschriebene wie "3-1") auf die kompakte Liste der
+  // zitierten Quellen umschreiben; Unauflösbares wird zu index="" (die
+  // Anzeige lässt dann nur den Text stehen).
+  const cited = [];
+  const remapped = reply.replace(/(<cite\s+index=")([^"]*)(")/gi, (m0, pre, attr, post) => {
+    const mapped = [];
+    for (const part of String(attr).split(",")) {
+      const n = parseInt(part.split("-")[0], 10);
+      const src = Number.isFinite(n) ? (sources[n - 1] || sources[n] || null) : null;
+      if (!src) continue;
+      let i = cited.findIndex((s) => s.url === src.url);
+      if (i < 0) { cited.push({ url: src.url, title: src.title }); i = cited.length - 1; }
+      if (!mapped.includes(String(i + 1))) mapped.push(String(i + 1));
+    }
+    return pre + mapped.join(",") + post;
+  });
+  return { reply: remapped, sources: cited };
+}
+
 // nbContext: { notebooks: [{ name, doc }], activeName }
 export async function callClaude(apiKey, userText, nbContext, priorChat, modelId, img, imgId) {
+  // cite-Marker aus dem Verlauf strippen: ihre Indizes sind auf die pro
+  // Nachricht gespeicherte Quellenliste umnummeriert und für das Modell
+  // ohne Bedeutung – es soll sie nicht nachahmen.
   const msgs = priorChat
     .filter((m) => !m.error && (m.text || m.imgId))
     .slice(-12)
     .map((m) => ({
       role: m.role,
-      content: (m.imgId ? "[Bild " + m.imgId + "] " : "") + (m.text || ""),
+      content: (m.imgId ? "[Bild " + m.imgId + "] " : "") + stripCiteTags(m.text || ""),
     }));
 
   const content = [];
@@ -325,9 +392,15 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
   // Nummern des Modells positionsstabil auf die Treffer abgebildet werden
   // (dedupliziert wird erst bei der Fußnotenvergabe in citations.jsx).
   const sources = [];
+  // Ob wirklich recherchiert wurde (auch bei 0 Treffern): nur dann werden
+  // Textblöcke mit ins Chat-reply kombiniert – sonst bliebe eine belanglose
+  // Preamble vor dem Tool-Aufruf nicht mehr wie bisher unsichtbar.
+  let usedSearch = false;
   const collectSources = (d) => {
     for (const b of (d && d.content) || []) {
-      if (b.type !== "web_search_tool_result" || !Array.isArray(b.content)) continue;
+      if (b.type !== "web_search_tool_result") continue;
+      usedSearch = true;
+      if (!Array.isArray(b.content)) continue;
       for (const r of b.content) {
         if (r && r.type === "web_search_result" && r.url) {
           sources.push({ url: r.url, title: r.title || r.url });
@@ -336,9 +409,21 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     }
   };
 
+  // Recherche-Prosa über ALLE Antwortsegmente einsammeln: pause_turn-
+  // Fortsetzungen und der forced-Retry überschreiben data, die Textblöcke
+  // früherer Segmente gingen sonst verloren. Nur im Suchmodus – in den
+  // Fallback-Modi wäre Text die JSON-Nutzlast, keine Antwortprosa.
+  const textBlocks = [];
+  const collectText = (d) => {
+    for (const b of (d && d.content) || []) {
+      if (b.type === "text" && typeof b.text === "string" && b.text) textBlocks.push(b);
+    }
+  };
+
   const doPost = async (mode) => {
     let data = await postOnce(msgs, mode);
     collectSources(data);
+    if (mode === "search") collectText(data);
     // Server-Tools (Websuche) können mit pause_turn unterbrechen: Assistant-
     // Inhalt anhängen und fortsetzen lassen (max. 3 Fortsetzungen).
     let convo = msgs;
@@ -352,6 +437,7 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
         : [...convo, { role: "assistant", content: data.content }];
       data = await postOnce(convo, mode);
       collectSources(data);
+      if (mode === "search") collectText(data);
       cont++;
     }
     return data;
@@ -423,10 +509,16 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     op && typeof op === "object" ? { ...op, content: stripCiteTags(op.content) } : op
   );
 
+  // Roh-reply übergeben (ohne "Notiert."-Default): der Default soll nicht
+  // an eine vollständige Recherche-Antwort angehängt werden.
+  const toolReply = typeof parsed.reply === "string" ? parsed.reply : "";
+  const chat = usedSearch
+    ? buildChatReply({ content: textBlocks }, sources, toolReply)
+    : { reply: toolReply, sources: [] };
   return {
-    reply: typeof parsed.reply === "string" && parsed.reply ? parsed.reply : "Notiert.",
+    reply: chat.reply || "Notiert.",
     ops,
     commit: typeof parsed.commit === "string" && parsed.commit.trim() ? parsed.commit.trim() : null,
-    sources,
+    sources: chat.sources,
   };
 }

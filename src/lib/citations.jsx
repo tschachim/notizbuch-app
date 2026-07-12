@@ -11,14 +11,18 @@
 const OPEN_RE = /<cite\s+index="([^"]*)"[^>]*>/i;
 const CLOSE_RE = /<\/cite>/i;
 
-// Quelle zu einem index-Attribut auflösen (best effort, 1-basiert mit
-// 0-basiertem Fallback).
-function resolveSource(indexAttr, sources) {
-  const a = parseInt(String(indexAttr).split("-")[0], 10);
-  if (!Number.isFinite(a)) return null;
-  const src = sources[a - 1] || sources[a] || null;
-  // Defense-in-Depth: nur http(s)-Quellen verlinken (kein javascript:-Schema).
-  return src && /^https?:\/\//i.test(src.url) ? src : null;
+// Quellen zu einem index-Attribut auflösen (best effort): kommagetrennte
+// Einträge, je Eintrag 1-basiert ("D" oder "D-P", Fallback 0-basiert).
+function resolveSources(indexAttr, sources) {
+  const out = [];
+  for (const part of String(indexAttr).split(",")) {
+    const a = parseInt(part.split("-")[0], 10);
+    if (!Number.isFinite(a)) continue;
+    const src = sources[a - 1] || sources[a] || null;
+    // Defense-in-Depth: nur http(s)-Quellen verlinken (kein javascript:-Schema).
+    if (src && /^https?:\/\//i.test(src.url) && !out.includes(src)) out.push(src);
+  }
+  return out;
 }
 
 // Zerlegt den Text in React-Knoten und liefert die Fußnoten-Liste.
@@ -48,8 +52,7 @@ export function renderWithCites(text, sources) {
     const close = CLOSE_RE.exec(rest);
     const inner = close ? rest.slice(0, close.index) : rest;
     nodes.push(stripCiteTags(inner));
-    const src = resolveSource(open[1], sources || []);
-    if (src) {
+    for (const src of resolveSources(open[1], sources || [])) {
       const num = footnoteFor(src);
       nodes.push(
         <sup key={"c" + k++} className="ml-0.5">
