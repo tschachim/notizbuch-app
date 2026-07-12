@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+/* Nie seitlich scrollen (Handy/WebView): breite Inhalte wie Tabellen und
+   Codezeilen scrollen in ihren eigenen Containern. */
+html, body { overflow-x: hidden; }
+
 /* WYSIWYG-Editor (TipTap): gleiche Optik wie die gerenderte Wissensbasis */
 .tiptap-doc {
   font-size: 0.875rem;

@@ -291,3 +291,23 @@ aus `referenz-app.jsx` übernommen.
     das Icon des aktiven Notizbuchs, ohne eigenes Icon das Standard-Logo.
     Beim Löschen eines Notizbuchs wird sein Icon mit entfernt. Icons
     anderer Geräte erscheinen nach dem nächsten Verbinden/Reload.
+
+33. **Schnellnotizen wandern mit** (v6.3, Nutzerwunsch; ersetzt die
+    Ablage-Entscheidung aus Punkt 19): Schnellnotizen liegen jetzt als
+    quicknotes-Feld in state.json im Daten-Repo und erscheinen damit auf
+    allen Geräten (inkl. Position/Größe; Last-Writer-Wins wie der übrige
+    State, Übernahme auch im Fokus-Refresh). Beim Übernehmen wird pro
+    Notizbuch gemergt: Remote gewinnt, lokale Notizbücher ohne
+    Remote-Eintrag behalten ihre Notizen – so verliert bei der Migration
+    auch das zweite Gerät nichts. localStorage bleibt als Offline-Fallback
+    und für die Migration: Hat state.json noch kein quicknotes-Feld,
+    werden die lokalen Notizen beim nächsten Speichern übernommen statt
+    verworfen.
+
+34. **Kein Horizontal-Scroll auf Mobilgeräten** (v6.3, Nutzerwunsch): Die
+    Android-WebView erlaubt keinen Pinch-/Doppeltipp-Zoom mehr (gezoomter
+    Inhalt ließ sich seitlich verschieben – die App soll sich wie eine
+    native App an die Gerätebreite schmiegen). Web-seitig zusätzlich
+    overflow-x:hidden auf html/body und Zeilenumbruch für lange
+    Code-Tokens/URLs im Dokument; breite Inhalte (Tabellen) scrollen
+    weiterhin in ihren eigenen Containern.

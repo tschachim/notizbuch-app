@@ -106,9 +106,13 @@ const fmtStamp = (ts) =>
 
 // collapsedAll: { notizbuchId: { sectionKey: true } }
 // order: Notizbuch-IDs in Dropdown-Reihenfolge (Admin-Seite)
-const serializeState = (chat, model, collapsedAll, active, order) =>
+// quicknotes: { notizbuchId: [{ id, text, x, y, w, h }] } – wandert mit
+const serializeState = (chat, model, collapsedAll, active, order, quicknotes) =>
   JSON.stringify(
-    { v: 2, active: active || ROOT_NB_ID, chat, model, collapsed: collapsedAll || {}, order: order || [] },
+    {
+      v: 2, active: active || ROOT_NB_ID, chat, model,
+      collapsed: collapsedAll || {}, order: order || [], quicknotes: quicknotes || {},
+    },
     null, 2
   );
 
@@ -218,7 +222,7 @@ export default function NotizbuchApp() {
   const busyRef = useRef(false);
   const editingRef = useRef(false);
   const viewRef = useRef("chat");
-  const stateRef = useRef({ chat: [], model: MODELS[0].id, collapsedAll: {} });
+  const stateRef = useRef({ chat: [], model: MODELS[0].id, collapsedAll: {}, quickNotesAll: {} });
   const stateSha = useRef(null);
   const stateTimer = useRef(null);
   const stateFlushing = useRef(0); // Zähler: auch überlappende Flushes abdecken
@@ -234,7 +238,7 @@ export default function NotizbuchApp() {
   useEffect(() => { viewRef.current = view; }, [view]);
   useEffect(() => { notebooksRef.current = notebooks; }, [notebooks]);
   useEffect(() => { activeNbRef.current = activeNb; }, [activeNb]);
-  useEffect(() => { stateRef.current = { chat, model, collapsedAll }; }, [chat, model, collapsedAll]);
+  useEffect(() => { stateRef.current = { chat, model, collapsedAll, quickNotesAll }; }, [chat, model, collapsedAll, quickNotesAll]);
 
   /* ---------- Metadaten (Stand & Versionszahl des aktiven Notizbuchs) ---------- */
   const refreshMeta = useCallback(async (cfg, path) => {
@@ -258,6 +262,10 @@ export default function NotizbuchApp() {
       let nCollapsedAll = {};
       let wantActive = null;
       let wantOrder = [];
+      // null = state.json kennt noch keine Schnellnotizen → lokale
+      // (localStorage-)Notizen bleiben und werden beim nächsten Write
+      // migriert; sonst gilt der Repo-Stand.
+      let nQuick = null;
       const st = await ghGetFile(cfg, STATE_PATH);
       stateSha.current = st ? st.sha : null;
       if (st) {
@@ -274,6 +282,12 @@ export default function NotizbuchApp() {
           }
           if (typeof data.active === "string") wantActive = data.active;
           if (Array.isArray(data.order)) wantOrder = data.order.filter((x) => typeof x === "string");
+          if (data.quicknotes && typeof data.quicknotes === "object" && !Array.isArray(data.quicknotes)) {
+            // Nur wohlgeformte Einträge (Arrays) übernehmen
+            nQuick = Object.fromEntries(
+              Object.entries(data.quicknotes).filter(([, v]) => Array.isArray(v))
+            );
+          }
         } catch (e) { /* defekter State → Defaults */ }
       }
 
@@ -350,7 +364,12 @@ export default function NotizbuchApp() {
       knowledgeIndex.current = kIdx;
       knowledgeTexts.current = {};
 
-      lastSavedState.current = serializeState(nChat, nModel, nCollapsedAll, active, nbs.map((n) => n.id));
+      // Merge statt hartem Ersetzen: Remote gewinnt pro Notizbuch, lokale
+      // Notizbücher ohne Remote-Eintrag behalten ihre Notizen (wichtig bei
+      // der Migration mehrerer Geräte). lastSavedState spiegelt den
+      // Remote-Stand – weicht der Merge ab, pusht der Save-Effect ihn.
+      lastSavedState.current = serializeState(nChat, nModel, nCollapsedAll, active, nbs.map((n) => n.id), nQuick || {});
+      if (nQuick) setQuickNotesAll((loc) => ({ ...loc, ...nQuick }));
       setNotebooks(nbs);
       notebooksRef.current = nbs;
       setActiveNb(active);
@@ -430,7 +449,7 @@ export default function NotizbuchApp() {
 
   useEffect(() => {
     if (!connected || !settingsRef.current) return;
-    const payload = serializeState(chat, model, collapsedAll, activeNb, notebooks.map((n) => n.id));
+    const payload = serializeState(chat, model, collapsedAll, activeNb, notebooks.map((n) => n.id), quickNotesAll);
     if (payload === lastSavedState.current) {
       // Zurück auf dem letzten gespeicherten Stand: geplanten Write verwerfen,
       // sonst schriebe der laufende Timer einen inzwischen veralteten Zustand.
@@ -445,7 +464,7 @@ export default function NotizbuchApp() {
       stateTimer.current = null;
       flushState(cfg, payload);
     }, 2500);
-  }, [chat, model, collapsedAll, activeNb, notebooks, connected, flushState]);
+  }, [chat, model, collapsedAll, activeNb, notebooks, quickNotesAll, connected, flushState]);
 
   /* ---------- Notizbuch committen (genau 1 Commit pro Änderung) ---------- */
   // Liefert true bei Erfolg. Bei SHA-Konflikt: Remote-Stand laden, Nutzer
@@ -555,6 +574,11 @@ export default function NotizbuchApp() {
               for (const r of removed) delete next[r.id];
               return next;
             });
+            setQuickNotesAll((prev) => {
+              const next = { ...prev };
+              for (const r of removed) delete next[r.id];
+              return next;
+            });
             if (removed.some((r) => r.id === activeNbRef.current)) {
               const first = nbs[0];
               setActiveNb(first.id);
@@ -619,11 +643,19 @@ export default function NotizbuchApp() {
                   notebooksRef.current = sorted;
                 }
               }
+              // Schnellnotizen vom anderen Gerät übernehmen: Merge, Remote
+              // gewinnt pro Notizbuch. Fehlt das Feld im Remote-Stand (altes
+              // Gerät), lokale behalten – sie migrieren beim nächsten Write.
+              const nQuick =
+                data.quicknotes && typeof data.quicknotes === "object" && !Array.isArray(data.quicknotes)
+                  ? Object.fromEntries(Object.entries(data.quicknotes).filter(([, v]) => Array.isArray(v)))
+                  : null;
               lastSavedState.current = serializeState(nChat, nModel, nCollapsedAll, activeNbRef.current,
-                notebooksRef.current.map((n) => n.id));
+                notebooksRef.current.map((n) => n.id), nQuick || stateRef.current.quickNotesAll);
               setChat(nChat);
               setModel(nModel);
               setCollapsedAll(nCollapsedAll);
+              if (nQuick) setQuickNotesAll((loc) => ({ ...loc, ...nQuick }));
             } catch (e) { /* defekter State – ignorieren */ }
           }
         }
@@ -1228,6 +1260,12 @@ export default function NotizbuchApp() {
         delete next[id];
         return next;
       });
+      setQuickNotesAll((prev) => {
+        if (!prev[id]) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
       if (id === activeNbRef.current) {
         const first = nbs[0];
         setActiveNb(first.id);
@@ -1712,9 +1750,11 @@ export default function NotizbuchApp() {
           cur ? cur.sha : undefined);
       }
 
-      // 4. Chat, Modell, Klappzustände nach state.json
+      // 4. Chat, Modell, Klappzustände nach state.json (Reihenfolge und
+      // Schnellnotizen des Geräts dabei nicht verwerfen)
       setImporting("Chat & Einstellungen werden übertragen …");
-      const payload = serializeState(nc, nm, ncolAll, activeNbRef.current);
+      const payload = serializeState(nc, nm, ncolAll, activeNbRef.current,
+        notebooksRef.current.map((n) => n.id), stateRef.current.quickNotesAll);
       const curSt = await ghGetFile(cfg, STATE_PATH);
       const putSt = await ghPutFile(cfg, STATE_PATH, utf8ToB64(payload),
         "Import: Chat & Einstellungen", curSt ? curSt.sha : undefined);
@@ -1803,7 +1843,7 @@ export default function NotizbuchApp() {
         ) : (
           <span className="font-semibold tracking-tight">Notizbuch</span>
         )}
-        <span className="font-mono text-xs text-slate-400">v6.2</span>
+        <span className="font-mono text-xs text-slate-400">v6.3</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"

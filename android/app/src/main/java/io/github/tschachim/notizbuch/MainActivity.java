@@ -41,6 +41,12 @@ public class MainActivity extends Activity {
         // (Defense-in-Depth; bis API 29 wäre file access sonst default an).
         s.setAllowFileAccess(false);
         s.setAllowContentAccess(false);
+        // App-Gefühl: kein Pinch-/Doppeltipp-Zoom – gezoomter Inhalt ließ
+        // sich sonst seitlich verschieben, die App soll nur vertikal
+        // scrollen und auf Gerätebreite bleiben.
+        s.setSupportZoom(false);
+        s.setBuiltInZoomControls(false);
+        s.setDisplayZoomControls(false);
 
         web.setWebViewClient(new WebViewClient() {
             @Override

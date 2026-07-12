@@ -348,7 +348,9 @@ export function DocView({ text, collapsed, onToggle, imgMap, onImgClick, onToggl
   return (
     // Gleiche Schriftart/-größe wie der Chat (Nutzerwunsch); Hierarchie nur
     // noch über Größe/Gewicht der Überschriften.
-    <div className="font-sans text-sm">
+    // break-words: lange Code-Tokens/URLs dürfen die Seite auf dem Handy
+    // nicht über die Gerätebreite hinausschieben.
+    <div className="font-sans text-sm break-words">
       {renderBlocks(pre, imgMap, onImgClick, "pre", onToggleTask)}
       {sections.map((sec, si) => {
         const key = "s:" + sec.title;
