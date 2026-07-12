@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Rahmenlos: keine ActionBar, Statusleiste im App-Farbton -->
+    <style name="Theme.Notizbuch" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">#4338ca</item>
+        <item name="android:windowBackground">#f1f5f9</item>
+    </style>
+</resources>

@@ -1,0 +1,29 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "io.github.tschachim.notizbuch"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "io.github.tschachim.notizbuch"
+        minSdk 26
+        targetSdk 34
+        // Die App ist nur ein Rahmen um die Website – Updates der App sind
+        // nicht nötig, die Website aktualisiert sich selbst.
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

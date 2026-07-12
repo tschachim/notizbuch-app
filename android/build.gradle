@@ -1,0 +1,4 @@
+// Minimale Android-Hülle: rendert nur die Live-Website (siehe DECISIONS.md).
+plugins {
+    id "com.android.application" version "8.5.2" apply false
+}
