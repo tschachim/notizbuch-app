@@ -31,6 +31,8 @@ export function webSearchToolFor(modelId) {
 // (mit Deckeln), fremde Notizbücher nur als Dateiliste.
 const KNOW_PER_FILE_CAP = 80000;
 const KNOW_TOTAL_CAP = 200000;
+// Dateianhang im Chat: Deckel pro Nachricht
+const FILE_ATTACH_CAP = 80000;
 
 function knowledgeBlock(knowledge, escAttr) {
   if (!knowledge) return "";
@@ -92,8 +94,8 @@ INTERNET-RECHERCHE:
 - Dir steht die Websuche (web_search) zur Verfügung. Nutze sie GROSSZÜGIG, wann immer sie die Antwort oder die Einordnung verbessert: unbekannte Begriffe, Produkte, Firmen, Orte, Personen, aktuelle Fakten, Preise, Termine, Versionen. Lieber einmal zu viel suchen als zu wenig.
 - Beispiel: Der Nutzer erwähnt eine Software, die du nicht sicher kennst → recherchiere, was das ist, und nutze das Ergebnis für Einordnung und Dokumenteintrag.
 - Wenn du recherchiert hast, schreibe die inhaltliche Antwort (Empfehlungen, Fakten, Erklärungen) als normalen Text VOR dem abschließenden Tool-Aufruf – die App zeigt diesen Text mitsamt klickbaren Quellen-Fußnoten im Chat an. Das reply-Feld enthält dann nur noch Bestätigung und Auffälligkeiten, ohne die Antwort zu wiederholen.
-- Alternativ darfst du in reply Aussagen mit <cite index="…">…</cite> markieren; index = 1-basierte Position des belegenden Suchtreffers, gezählt über alle gelieferten Suchergebnisse in ihrer Reihenfolge.
-- QUELLEN IM DOKUMENT: Markiere recherchierte Aussagen auch in ops-Inhalten mit <cite index="…">…</cite> – die App wandelt das in nummerierte Quellen-Fußnoten um. Keine Klartext-Quellen wie „(Quelle: …)“ mehr ins Dokument schreiben.
+- WICHTIG: Belege dabei jede konkrete recherchierte Aussage (Zahlen, Fakten, Empfehlungen) direkt an der Aussage mit einem Zitat auf den Suchtreffer – nicht pauschal am Ende. Alternativ darfst du in reply Aussagen mit <cite index="…">…</cite> markieren; index = 1-basierte Position des belegenden Suchtreffers, gezählt über alle gelieferten Suchergebnisse in ihrer Reihenfolge.
+- QUELLEN IM DOKUMENT (PFLICHT): Markiere in ops-Inhalten JEDE Aussage, die aus der Websuche stammt, mit <cite index="…">…</cite> – die App wandelt das in nummerierte, klickbare Quellen-Fußnoten um. Beispiel-content: "- <cite index=\"2\">Medium: 56–58 °C Kerntemperatur</cite>". Keine Klartext-Quellen wie „(Quelle: …)“ ins Dokument schreiben.
 - Bestehende Fußnoten-Links der Form [1](https://…) im Dokument sind solche Quellen-Fußnoten: erhalte sie bei Umstrukturierungen unverändert und nimm sie beim Verschieben von Inhalten mit.
 - WICHTIG: Nach optionaler Recherche rufst du am Ende IMMER GENAU EINMAL das Tool "update_notebook" auf. Antworte niemals nur mit freiem Text.
 
@@ -121,8 +123,13 @@ BILDER:
 - Enthält die Nutzernachricht ein Bild, steht dort dessen Referenz (z. B. img:ab12cd). Analysiere das Bild sorgfältig.
 - Binde es an passender Stelle ins Dokument ein, exakt in diesem Format auf zwei eigenen Zeilen:
 ![Prägnanter Titel](img:ab12cd)
-*Bildbeschreibung: 1–3 Sätze mit dem Wesentlichen. Bei Screenshots: welche Anwendung/Ansicht, welche Werte, Meldungen oder Fehler zu sehen sind.*
+*Kurze Bildunterschrift*
+- Die Bildunterschrift ist EIN knapper Satz in kursiv (*…*) – keine ausführliche Beschreibung, nichts fett. Erkenntnisse aus dem Bild (Werte, Fehler, Fakten) gehören stattdessen als normale Stichpunkte in den passenden Abschnitt.
 - Verwende ausschließlich die mitgelieferte Bild-ID, erfinde niemals eigene. Entferne Bildreferenzen nicht ohne Aufforderung.
+
+DATEIANHÄNGE:
+- Nutzernachrichten können Dateianhänge enthalten (<dateianhang name="…">Inhalt</dateianhang>). Lies den Inhalt und behandle ihn wie normalen Gesprächskontext: Fragen dazu beantworten, relevante Fakten ins passende Notizbuch übernehmen.
+- Anders als Bilder wird die Datei selbst automatisch archiviert – füge KEINE Datei-Referenzen ins Dokument ein.
 
 ANTWORTFORMAT:
 - Schließe JEDE Antwort mit genau einem Aufruf des Tools "update_notebook" ab – niemals nur mit freiem Text.
@@ -313,16 +320,21 @@ export function buildChatReply(data, hits, toolReply) {
 }
 
 // nbContext: { notebooks: [{ name, doc }], activeName }
-export async function callClaude(apiKey, userText, nbContext, priorChat, modelId, img, imgId) {
+// fileInfo (optional): { name, text|null } – Dateianhang dieses Turns;
+// der Inhalt geht nur in DIESEN Aufruf, im Verlauf bleibt nur der Name.
+export async function callClaude(apiKey, userText, nbContext, priorChat, modelId, img, imgId, fileInfo) {
   // cite-Marker aus dem Verlauf strippen: ihre Indizes sind auf die pro
   // Nachricht gespeicherte Quellenliste umnummeriert und für das Modell
   // ohne Bedeutung – es soll sie nicht nachahmen.
   const msgs = priorChat
-    .filter((m) => !m.error && (m.text || m.imgId))
+    .filter((m) => !m.error && (m.text || m.imgId || m.fileName))
     .slice(-12)
     .map((m) => ({
       role: m.role,
-      content: (m.imgId ? "[Bild " + m.imgId + "] " : "") + stripCiteTags(m.text || ""),
+      content:
+        (m.imgId ? "[Bild " + m.imgId + "] " : "") +
+        (m.fileName ? "[Datei „" + m.fileName + "“] " : "") +
+        stripCiteTags(m.text || ""),
     }));
 
   const content = [];
@@ -342,6 +354,23 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
       (text ? "\n\n" : "") +
       "[Angehängtes Bild mit der Referenz img:" + imgId +
       " – analysiere es und binde es gemäß den Bild-Konventionen ins Dokument ein.]";
+  }
+  if (fileInfo && fileInfo.name) {
+    if (typeof fileInfo.text === "string" && fileInfo.text.trim()) {
+      // Ausbruch verhindern (Dateiinhalte sind fremde Quellen) und deckeln
+      let ft = fileInfo.text.replace(/<\/dateianhang/gi, "<\\/dateianhang");
+      if (ft.length > FILE_ATTACH_CAP) {
+        ft = ft.slice(0, FILE_ATTACH_CAP) + "\n\n[… gekürzt – Datei ist länger]";
+      }
+      text +=
+        (text ? "\n\n" : "") +
+        '<dateianhang name="' + String(fileInfo.name).replace(/"/g, "'") + '">\n' + ft + "\n</dateianhang>";
+    } else {
+      text +=
+        (text ? "\n\n" : "") +
+        "[Angehängte Datei „" + fileInfo.name + "“ – Inhalt konnte nicht als Text extrahiert werden; " +
+        "die Datei wurde im Daten-Repo archiviert.]";
+    }
   }
   content.push({ type: "text", text });
   msgs.push({ role: "user", content });

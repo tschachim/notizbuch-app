@@ -3,6 +3,7 @@ import {
   BookOpen, Send, Pencil, X, Check, History, Download, Copy,
   RotateCcw, GitCommit, ChevronDown, Loader2, Upload, ImagePlus,
   Settings, AlertTriangle, StickyNote, Paperclip, Trash2, FileUp,
+  ArrowUp, ArrowDown, Plus,
 } from "lucide-react";
 
 import { applyOps, dispHead } from "./lib/ops.js";
@@ -103,9 +104,10 @@ const fmtStamp = (ts) =>
   });
 
 // collapsedAll: { notizbuchId: { sectionKey: true } }
-const serializeState = (chat, model, collapsedAll, active) =>
+// order: Notizbuch-IDs in Dropdown-Reihenfolge (Admin-Seite)
+const serializeState = (chat, model, collapsedAll, active, order) =>
   JSON.stringify(
-    { v: 2, active: active || ROOT_NB_ID, chat, model, collapsed: collapsedAll || {} },
+    { v: 2, active: active || ROOT_NB_ID, chat, model, collapsed: collapsedAll || {}, order: order || [] },
     null, 2
   );
 
@@ -132,6 +134,12 @@ export default function NotizbuchApp() {
   const [newNbName, setNewNbName] = useState("");
   const [creatingNb, setCreatingNb] = useState(false);
   const [nbError, setNbError] = useState(null);
+  const [showNbAdmin, setShowNbAdmin] = useState(false);
+  const [nbAdminBusy, setNbAdminBusy] = useState(null); // nbId der laufenden Aktion
+  const [nbRenameId, setNbRenameId] = useState(null);
+  const [nbRenameValue, setNbRenameValue] = useState("");
+  const [nbDeleteId, setNbDeleteId] = useState(null); // Lösch-Bestätigung offen
+  const [nbAdminError, setNbAdminError] = useState(null);
   const [showKnowledge, setShowKnowledge] = useState(false);
   const [knowledgeBusy, setKnowledgeBusy] = useState(null); // Fortschrittstext
   const [, setKnowledgeVersion] = useState(0); // Render-Trigger für Ref-Änderungen
@@ -160,6 +168,7 @@ export default function NotizbuchApp() {
   const [expandedData, setExpandedData] = useState(null); // { sha, text, parentText, error }
 
   const [pendingImg, setPendingImg] = useState(null); // { dataUrl, mime }
+  const [pendingFile, setPendingFile] = useState(null); // { file, name } – Nicht-Bild-Anhang
   const [imgError, setImgError] = useState(null);
   const [imgMap, setImgMap] = useState({}); // id -> dataURL
   const [lightbox, setLightbox] = useState(null);
@@ -243,6 +252,7 @@ export default function NotizbuchApp() {
       let nModel = MODELS[0].id;
       let nCollapsedAll = {};
       let wantActive = null;
+      let wantOrder = [];
       const st = await ghGetFile(cfg, STATE_PATH);
       stateSha.current = st ? st.sha : null;
       if (st) {
@@ -258,6 +268,7 @@ export default function NotizbuchApp() {
               : data.collapsed;
           }
           if (typeof data.active === "string") wantActive = data.active;
+          if (Array.isArray(data.order)) wantOrder = data.order.filter((x) => typeof x === "string");
         } catch (e) { /* defekter State → Defaults */ }
       }
 
@@ -285,6 +296,10 @@ export default function NotizbuchApp() {
         cache[f.id] = f.file.text;
         shas[f.id] = f.file.sha;
       }
+      // Dropdown-Reihenfolge aus state.json anwenden; Unbekanntes hinten
+      // in Discovery-Reihenfolge (sort ist stabil).
+      const pos = new Map(wantOrder.map((id, i) => [id, i]));
+      nbs.sort((a, b) => (pos.has(a.id) ? pos.get(a.id) : 1e9) - (pos.has(b.id) ? pos.get(b.id) : 1e9));
       docCache.current = cache;
       docShas.current = shas;
       const active = nbs.some((n) => n.id === wantActive) ? wantActive : nbs[0].id;
@@ -312,7 +327,7 @@ export default function NotizbuchApp() {
       knowledgeIndex.current = kIdx;
       knowledgeTexts.current = {};
 
-      lastSavedState.current = serializeState(nChat, nModel, nCollapsedAll, active);
+      lastSavedState.current = serializeState(nChat, nModel, nCollapsedAll, active, nbs.map((n) => n.id));
       setNotebooks(nbs);
       notebooksRef.current = nbs;
       setActiveNb(active);
@@ -392,7 +407,7 @@ export default function NotizbuchApp() {
 
   useEffect(() => {
     if (!connected || !settingsRef.current) return;
-    const payload = serializeState(chat, model, collapsedAll, activeNb);
+    const payload = serializeState(chat, model, collapsedAll, activeNb, notebooks.map((n) => n.id));
     if (payload === lastSavedState.current) {
       // Zurück auf dem letzten gespeicherten Stand: geplanten Write verwerfen,
       // sonst schriebe der laufende Timer einen inzwischen veralteten Zustand.
@@ -407,7 +422,7 @@ export default function NotizbuchApp() {
       stateTimer.current = null;
       flushState(cfg, payload);
     }, 2500);
-  }, [chat, model, collapsedAll, activeNb, connected, flushState]);
+  }, [chat, model, collapsedAll, activeNb, notebooks, connected, flushState]);
 
   /* ---------- Notizbuch committen (genau 1 Commit pro Änderung) ---------- */
   // Liefert true bei Erfolg. Bei SHA-Konflikt: Remote-Stand laden, Nutzer
@@ -495,8 +510,40 @@ export default function NotizbuchApp() {
             entries.push({ id: m[1].toLowerCase(), path: f.path, sha: f.sha });
           }
         }
+        // Seit dem ghListDir-await kann ein send()/edit gestartet sein –
+        // dann docCache/aktives Notizbuch nicht mehr anfassen.
+        if (busyRef.current || editingRef.current) return;
         let nbsChanged = false;
-        const nbs = [...notebooksRef.current];
+        let nbs = [...notebooksRef.current];
+        // Auf einem anderen Gerät gelöschte Notizbücher auch hier entfernen
+        // (Root nur, wenn andere existieren – sonst legt connect sie neu an).
+        const known = new Set(entries.map((e) => e.id));
+        if (nbs.some((n) => !known.has(n.id))) {
+          const removed = nbs.filter((n) => !known.has(n.id));
+          nbs = nbs.filter((n) => known.has(n.id));
+          if (nbs.length) {
+            nbsChanged = true;
+            for (const r of removed) {
+              delete docCache.current[r.id];
+              delete docShas.current[r.id];
+            }
+            setCollapsedAll((prev) => {
+              const next = { ...prev };
+              for (const r of removed) delete next[r.id];
+              return next;
+            });
+            if (removed.some((r) => r.id === activeNbRef.current)) {
+              const first = nbs[0];
+              setActiveNb(first.id);
+              activeNbRef.current = first.id;
+              setDoc(docCache.current[first.id] ?? INITIAL_DOC);
+              setActiveSec(0);
+              refreshMeta(cfg, first.path);
+            }
+          } else {
+            nbs = [...notebooksRef.current]; // nichts übrig – lieber nichts tun
+          }
+        }
         for (const en of entries) {
           // Läuft gerade ein Senden/Bearbeiten los, mitten im Refresh abbrechen,
           // damit docCache/docShas nicht unter einem laufenden Commit mutieren.
@@ -537,7 +584,20 @@ export default function NotizbuchApp() {
                   ? { [ROOT_NB_ID]: data.collapsed }
                   : data.collapsed;
               }
-              lastSavedState.current = serializeState(nChat, nModel, nCollapsedAll, activeNbRef.current);
+              // Auch die Dropdown-Reihenfolge vom anderen Gerät übernehmen,
+              // sonst überschreibt der nächste lokale Write sie wieder.
+              if (Array.isArray(data.order)) {
+                const ord = data.order.filter((x) => typeof x === "string");
+                const pos2 = new Map(ord.map((oid, oi) => [oid, oi]));
+                const sorted = [...notebooksRef.current].sort((a, b) =>
+                  (pos2.has(a.id) ? pos2.get(a.id) : 1e9) - (pos2.has(b.id) ? pos2.get(b.id) : 1e9));
+                if (sorted.some((n, si) => n.id !== notebooksRef.current[si].id)) {
+                  setNotebooks(sorted);
+                  notebooksRef.current = sorted;
+                }
+              }
+              lastSavedState.current = serializeState(nChat, nModel, nCollapsedAll, activeNbRef.current,
+                notebooksRef.current.map((n) => n.id));
               setChat(nChat);
               setModel(nModel);
               setCollapsedAll(nCollapsedAll);
@@ -581,6 +641,20 @@ export default function NotizbuchApp() {
     }
   };
 
+  // Anhang beliebigen Typs: Bilder gehen den Bild-Weg (Analyse + Ablage im
+  // Dokument), alles andere wird als Datei-Anhang mitgeschickt und im
+  // Daten-Repo archiviert (nicht im Dokument verlinkt).
+  const attachAny = (file) => {
+    if (!file) return;
+    if (file.type && file.type.startsWith("image/")) { attachImage(file); return; }
+    setImgError(null);
+    if (file.size > 25 * 1024 * 1024) {
+      setImgError("Datei ist größer als 25 MB");
+      return;
+    }
+    setPendingFile({ file, name: safeFileName(file.name) });
+  };
+
   const handlePaste = (e) => {
     const items = e.clipboardData && e.clipboardData.items;
     if (!items) return;
@@ -596,11 +670,12 @@ export default function NotizbuchApp() {
   /* ---------- Senden ---------- */
   const send = async () => {
     const text = input.trim();
-    if ((!text && !pendingImg) || busy) return;
+    if ((!text && !pendingImg && !pendingFile) || busy) return;
     if (!connected || !settingsRef.current) { setShowSettings(true); return; }
     const cfg = settingsRef.current;
 
     const img = pendingImg;
+    const pf = pendingFile;
     let imgId = null;
 
     const userMsg = { role: "user", text, ts: Date.now(), imgId: null };
@@ -609,10 +684,12 @@ export default function NotizbuchApp() {
       userMsg.imgId = imgId;
       setImgMap((prev) => ({ ...prev, [imgId]: img.dataUrl }));
     }
+    if (pf) userMsg.fileName = pf.name;
     const chatWithUser = [...chat, userMsg].slice(-80);
     setChat(chatWithUser);
     setInput("");
     setPendingImg(null);
+    setPendingFile(null);
     setImgError(null);
     setBusy(true);
 
@@ -621,8 +698,19 @@ export default function NotizbuchApp() {
       const imgParts = img ? dataUrlParts(img.dataUrl) : null;
       if (img && !imgParts) throw new Error("Bilddaten unlesbar");
 
+      // Dateianhang: Text best effort extrahieren (nicht extrahierbare
+      // Formate werden trotzdem archiviert, das Modell erfährt nur den Namen).
+      let fileInfo = null;
+      let fileB64 = null;
+      if (pf) {
+        let ftext = null;
+        try { ftext = await extractText(pf.file); } catch (e) { /* Format ohne Textextrakt */ }
+        fileInfo = { name: pf.name, text: ftext };
+        fileB64 = await fileToBase64(pf.file);
+      }
+
       const nbCtx = await buildNbCtx();
-      const res = await callClaude(cfg.apiKey, text, nbCtx, chat, model, img, imgId);
+      const res = await callClaude(cfg.apiKey, text, nbCtx, chat, model, img, imgId, fileInfo);
 
       // Bild erst nach erfolgreicher Antwort als Datei ins Daten-Repo legen
       // (keine verwaisten Dateien bei API-Fehlern), aber vor dem Dokument-
@@ -631,6 +719,23 @@ export default function NotizbuchApp() {
         const path = "bilder/" + imgId + "." + extForMime(imgParts.mime);
         await ghPutFile(cfg, path, imgParts.base64, "Bild " + imgId + " hinzugefügt");
         imgIndex.current[imgId] = path;
+      }
+
+      // Dateianhang archivieren: eigener Ordner dateien/, Namenskonflikte
+      // bekommen einen Zähler-Suffix. Fehler hier brechen den Turn nicht ab.
+      if (pf && fileB64 !== null) {
+        try {
+          let name = pf.name;
+          for (let i = 2; await ghGetFile(cfg, "dateien/" + name); i++) {
+            const dot = pf.name.lastIndexOf(".");
+            name = dot > 0
+              ? pf.name.slice(0, dot) + "-" + i + pf.name.slice(dot)
+              : pf.name + "-" + i;
+          }
+          await ghPutFile(cfg, "dateien/" + name, fileB64, "Datei „" + name + "“ aus dem Chat abgelegt");
+        } catch (e) {
+          setBanner({ kind: "warn", text: "Datei konnte nicht im Daten-Repo abgelegt werden: " + (e && e.message ? e.message : e) });
+        }
       }
 
       let commit = null;
@@ -740,10 +845,21 @@ export default function NotizbuchApp() {
       // Eingabe wie im Konfliktpfad zurückgeben, ohne Neueres zu überschreiben.
       setInput((prev) => (prev.trim() ? prev : text));
       if (img) setPendingImg((prev) => prev || img);
+      // Datei-Anhang analog restaurieren – er wurde weder verarbeitet noch
+      // archiviert und soll mit dem nächsten Senden wieder mitkommen.
+      if (pf) setPendingFile((prev) => prev || pf);
       // Wurde das Bild nicht hochgeladen, die img-Referenz aus der Nachricht
-      // nehmen, damit nach Reload/Sync kein unauflösbares img:… zurückbleibt.
-      const cleaned = img && imgId && !imgIndex.current[imgId]
-        ? chatWithUser.map((m) => (m === userMsg ? { ...m, imgId: null } : m))
+      // nehmen (kein unauflösbares img:… nach Reload/Sync); den Datei-Chip
+      // ebenso, sonst verweist er auf eine nie archivierte Datei.
+      const cleaned = (img && imgId && !imgIndex.current[imgId]) || pf
+        ? chatWithUser.map((m) =>
+            m === userMsg
+              ? {
+                  ...m,
+                  imgId: img && imgId && !imgIndex.current[imgId] ? null : m.imgId,
+                  fileName: pf ? undefined : m.fileName,
+                }
+              : m)
         : chatWithUser;
       const aMsg = {
         role: "assistant",
@@ -935,6 +1051,103 @@ export default function NotizbuchApp() {
       setNbError(e && e.message ? e.message : String(e));
     } finally {
       setCreatingNb(false);
+    }
+  };
+
+  /* ---------- Notizbuch-Verwaltung (Admin-Seite) ---------- */
+  // Reihenfolge im Dropdown: wandert über state.json (order) mit.
+  const moveNotebook = (id, delta) => {
+    const nbs = [...notebooksRef.current];
+    const i = nbs.findIndex((n) => n.id === id);
+    const j = i + delta;
+    if (i < 0 || j < 0 || j >= nbs.length) return;
+    [nbs[i], nbs[j]] = [nbs[j], nbs[i]];
+    setNotebooks(nbs);
+    notebooksRef.current = nbs;
+  };
+
+  // Umbenennen = H1-Titelzeile der Datei ändern (die Datei ist die einzige
+  // Wahrheit für den Namen); Pfad/Slug bleiben stabil.
+  const renameNotebook = async (id, rawName) => {
+    if (busyRef.current) { setNbAdminError("Bitte warten – es läuft gerade eine Anfrage."); return; }
+    const name = String(rawName || "").trim();
+    const nb = notebooksRef.current.find((n) => n.id === id);
+    if (!nb || !name || name === nb.name) { setNbRenameId(null); return; }
+    if (notebooksRef.current.some((n) => n.id !== id && n.name.trim().toLowerCase() === name.toLowerCase())) {
+      setNbAdminError("Es gibt bereits ein Notizbuch mit diesem Namen.");
+      return;
+    }
+    if (!connectedRef.current || !settingsRef.current) {
+      setNbAdminError("Bitte zuerst in den Einstellungen verbinden.");
+      return;
+    }
+    setNbAdminBusy(id);
+    setNbAdminError(null);
+    try {
+      const lines = (docCache.current[id] ?? "").split("\n");
+      if (/^#\s+/.test(lines[0] || "")) lines[0] = "# " + name;
+      else lines.unshift("# " + name);
+      const newText = lines.join("\n");
+      const ok = await commitDocNb(settingsRef.current, id, newText,
+        "Notizbuch umbenannt: „" + nb.name + "“ → „" + name + "“");
+      if (!ok) return; // Konflikt: commitDocNb hat Banner gesetzt
+      const nbs = notebooksRef.current.map((n) => (n.id === id ? { ...n, name } : n));
+      setNotebooks(nbs);
+      notebooksRef.current = nbs;
+      if (id === activeNbRef.current) setDoc(newText);
+      setNbRenameId(null);
+    } catch (e) {
+      setNbAdminError(e && e.message ? e.message : String(e));
+    } finally {
+      setNbAdminBusy(null);
+    }
+  };
+
+  // Löschen entfernt die Notizbuch-Datei und ihr Hintergrundwissen aus dem
+  // Daten-Repo (Bilder bleiben – sie sind repo-weit abgelegt). Das letzte
+  // Notizbuch ist nicht löschbar.
+  const deleteNotebook = async (id) => {
+    if (busyRef.current) { setNbAdminError("Bitte warten – es läuft gerade eine Anfrage."); return; }
+    const nb = notebooksRef.current.find((n) => n.id === id);
+    if (!nb || notebooksRef.current.length <= 1) return;
+    if (!connectedRef.current || !settingsRef.current) {
+      setNbAdminError("Bitte zuerst in den Einstellungen verbinden.");
+      return;
+    }
+    const cfg = settingsRef.current;
+    setNbAdminBusy(id);
+    setNbAdminError(null);
+    try {
+      // Hintergrundwissen zuerst (frische SHAs übers Listing)
+      const kFiles = await ghListDir(cfg, knowledgeDir(id));
+      for (const f of kFiles) {
+        await ghDeleteFile(cfg, f.path, "Notizbuch „" + nb.name + "“ gelöscht: Wissensdatei entfernt", f.sha);
+      }
+      await ghDeleteFile(cfg, nb.path, "Notizbuch „" + nb.name + "“ gelöscht", docShas.current[id]);
+      const nbs = notebooksRef.current.filter((n) => n.id !== id);
+      setNotebooks(nbs);
+      notebooksRef.current = nbs;
+      delete docCache.current[id];
+      delete docShas.current[id];
+      delete knowledgeIndex.current[id];
+      setCollapsedAll((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      if (id === activeNbRef.current) {
+        const first = nbs[0];
+        setActiveNb(first.id);
+        activeNbRef.current = first.id;
+        setDoc(docCache.current[first.id] ?? INITIAL_DOC);
+        setActiveSec(0);
+        refreshMeta(cfg, first.path);
+      }
+      setNbDeleteId(null);
+    } catch (e) {
+      setNbAdminError(e && e.message ? e.message : String(e));
+    } finally {
+      setNbAdminBusy(null);
     }
   };
 
@@ -1465,7 +1678,7 @@ export default function NotizbuchApp() {
 
       {/* Kopfzeile */}
       <header className="flex items-center gap-2 px-3 h-14 bg-white border-b border-slate-200">
-        <BookOpen size={20} className="text-indigo-700" />
+        <img src="icons/logo.png" alt="Notizbuch" className="w-7 h-7" />
         {notebooks.length ? (
           <div className="relative">
             <select
@@ -1474,6 +1687,9 @@ export default function NotizbuchApp() {
               onChange={(e) => {
                 const v = e.target.value;
                 if (v === "__new__") { setNbError(null); setNewNbName(""); setShowNewNb(true); }
+                else if (v === "__admin__") {
+                  setNbAdminError(null); setNbRenameId(null); setNbDeleteId(null); setShowNbAdmin(true);
+                }
                 else switchNotebook(v);
               }}
               className="appearance-none font-semibold tracking-tight bg-transparent hover:bg-slate-50 rounded-lg pl-1 pr-6 py-1 max-w-44 truncate"
@@ -1483,13 +1699,14 @@ export default function NotizbuchApp() {
                 <option key={n.id} value={n.id}>{n.name}</option>
               ))}
               <option value="__new__">＋ Neues Notizbuch …</option>
+              <option value="__admin__">⚙ Notizbücher verwalten …</option>
             </select>
             <ChevronDown size={14} className="absolute right-1 top-2.5 text-slate-500 pointer-events-none" />
           </div>
         ) : (
           <span className="font-semibold tracking-tight">Notizbuch</span>
         )}
-        <span className="font-mono text-xs text-slate-400">v5.3</span>
+        <span className="font-mono text-xs text-slate-400">v6.0</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -1621,6 +1838,14 @@ export default function NotizbuchApp() {
                       <span className="block text-xs opacity-70 mb-1">[Bild]</span>
                     )
                   )}
+                  {m.fileName && (
+                    <span className={"inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs border " +
+                      (m.text ? "mb-2 " : "") +
+                      (m.role === "user" ? "bg-white/15 border-white/30" : "bg-slate-100 border-slate-200 text-slate-700")}>
+                      <Paperclip size={12} />
+                      {m.fileName}
+                    </span>
+                  )}
                   {(() => {
                     if (m.role !== "assistant" || m.error) return m.text;
                     // cite-Tags der Websuche → klickbare Fußnoten. Wurde
@@ -1691,19 +1916,33 @@ export default function NotizbuchApp() {
                 </button>
               </div>
             )}
+            {pendingFile && (
+              <div className="mb-2 flex items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-100 border border-slate-300 text-xs text-slate-700">
+                  <Paperclip size={13} />
+                  {pendingFile.name}
+                </span>
+                <span className="text-xs text-slate-500">
+                  Wird mitgeschickt und im Daten-Repo abgelegt.
+                </span>
+                <button onClick={() => setPendingFile(null)}
+                  className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100" title="Datei entfernen">
+                  <X size={14} />
+                </button>
+              </div>
+            )}
             <div className="flex items-end gap-2">
               <button
                 onClick={() => imgInputRef.current && imgInputRef.current.click()}
                 className="p-3 rounded-xl border border-slate-300 bg-white text-slate-600 hover:bg-slate-50"
-                title="Bild anhängen"
+                title="Bild oder Datei anhängen"
               >
                 <ImagePlus size={18} />
               </button>
               <input
                 ref={imgInputRef}
                 type="file"
-                accept="image/*"
-                onChange={(e) => { attachImage(e.target.files && e.target.files[0]); e.target.value = ""; }}
+                onChange={(e) => { attachAny(e.target.files && e.target.files[0]); e.target.value = ""; }}
                 className="hidden"
               />
               <textarea
@@ -1720,7 +1959,7 @@ export default function NotizbuchApp() {
               <button
                 onClick={send}
                 className={"p-3 rounded-xl bg-indigo-700 text-white " +
-                  (busy || (!input.trim() && !pendingImg) ? "opacity-40" : "hover:bg-indigo-800")}
+                  (busy || (!input.trim() && !pendingImg && !pendingFile) ? "opacity-40" : "hover:bg-indigo-800")}
                 title="Senden"
               >
                 <Send size={18} />
@@ -2142,6 +2381,129 @@ export default function NotizbuchApp() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {showNbAdmin && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0"
+            style={{ backgroundColor: "rgba(15,23,42,0.45)" }}
+            onClick={() => setShowNbAdmin(false)}
+          />
+          <div className="relative bg-white w-full max-w-md rounded-2xl shadow-xl p-4 max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center gap-2 mb-3">
+              <BookOpen size={16} className="text-indigo-700" />
+              <span className="font-semibold">Notizbücher verwalten</span>
+              <div className="flex-1" />
+              <button onClick={() => setShowNbAdmin(false)}
+                className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100">
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              {notebooks.map((n, i) => (
+                <div key={n.id}
+                  className={"rounded-xl border px-2.5 py-2 " +
+                    (n.id === activeNb ? "border-indigo-300 bg-indigo-50/50" : "border-slate-200 bg-white")}>
+                  <div className="flex items-center gap-1.5">
+                    {nbRenameId === n.id ? (
+                      <form className="flex-1 flex items-center gap-1.5"
+                        onSubmit={(e) => { e.preventDefault(); renameNotebook(n.id, nbRenameValue); }}>
+                        <input
+                          autoFocus
+                          value={nbRenameValue}
+                          onChange={(e) => setNbRenameValue(e.target.value)}
+                          className="flex-1 min-w-0 rounded-lg border border-indigo-300 px-2 py-1 text-sm"
+                        />
+                        <button type="submit" disabled={nbAdminBusy === n.id}
+                          className="p-1.5 rounded-lg bg-indigo-700 text-white hover:bg-indigo-800"
+                          title="Umbenennen">
+                          {nbAdminBusy === n.id ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+                        </button>
+                        <button type="button" onClick={() => { setNbRenameId(null); setNbAdminError(null); }}
+                          className="p-1.5 rounded-lg border border-slate-300 text-slate-500 hover:bg-slate-50">
+                          <X size={13} />
+                        </button>
+                      </form>
+                    ) : (
+                      <>
+                        <span className="flex-1 min-w-0 truncate text-sm font-medium text-slate-800">
+                          {n.name}
+                          {n.id === activeNb && <span className="ml-1.5 text-xs font-normal text-indigo-600">(aktiv)</span>}
+                        </span>
+                        <button onClick={() => moveNotebook(n.id, -1)} disabled={i === 0}
+                          className={"p-1.5 rounded-lg border border-slate-300 text-slate-500 " + (i === 0 ? "opacity-30" : "hover:bg-slate-50")}
+                          title="Nach oben">
+                          <ArrowUp size={13} />
+                        </button>
+                        <button onClick={() => moveNotebook(n.id, 1)} disabled={i === notebooks.length - 1}
+                          className={"p-1.5 rounded-lg border border-slate-300 text-slate-500 " + (i === notebooks.length - 1 ? "opacity-30" : "hover:bg-slate-50")}
+                          title="Nach unten">
+                          <ArrowDown size={13} />
+                        </button>
+                        <button
+                          onClick={() => { setNbRenameId(n.id); setNbRenameValue(n.name); setNbDeleteId(null); setNbAdminError(null); }}
+                          className="p-1.5 rounded-lg border border-slate-300 text-slate-500 hover:bg-slate-50"
+                          title="Umbenennen">
+                          <Pencil size={13} />
+                        </button>
+                        <button
+                          onClick={() => { setNbDeleteId(nbDeleteId === n.id ? null : n.id); setNbRenameId(null); setNbAdminError(null); }}
+                          disabled={notebooks.length <= 1}
+                          className={"p-1.5 rounded-lg border " + (notebooks.length <= 1
+                            ? "border-slate-200 text-slate-300"
+                            : "border-rose-200 text-rose-600 hover:bg-rose-50")}
+                          title={notebooks.length <= 1 ? "Das letzte Notizbuch kann nicht gelöscht werden" : "Löschen"}>
+                          <Trash2 size={13} />
+                        </button>
+                      </>
+                    )}
+                  </div>
+                  {nbDeleteId === n.id && (
+                    <div className="mt-2 flex items-center gap-2 px-2 py-1.5 rounded-lg bg-rose-50 border border-rose-200">
+                      <AlertTriangle size={13} className="text-rose-600 shrink-0" />
+                      <span className="flex-1 text-xs text-rose-800">
+                        „{n.name}“ samt Hintergrundwissen endgültig löschen? Alte Stände bleiben in der Git-Historie.
+                      </span>
+                      <button onClick={() => deleteNotebook(n.id)} disabled={nbAdminBusy === n.id}
+                        className="px-2 py-1 rounded-lg bg-rose-600 text-white text-xs font-medium hover:bg-rose-700">
+                        {nbAdminBusy === n.id ? "Lösche …" : "Löschen"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {nbAdminError && (
+              <div className="mt-2 px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800">
+                {nbAdminError}
+              </div>
+            )}
+
+            <form className="mt-3 pt-3 border-t border-slate-200 flex items-center gap-2"
+              onSubmit={(e) => { e.preventDefault(); createNotebook(newNbName); }}>
+              <input
+                value={newNbName}
+                onChange={(e) => setNewNbName(e.target.value)}
+                placeholder="Neues Notizbuch – Name"
+                className="flex-1 min-w-0 rounded-lg border border-slate-300 px-3 py-1.5 text-sm"
+              />
+              <button type="submit" disabled={creatingNb || !newNbName.trim()}
+                className={"inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-indigo-700 text-white text-sm font-medium " +
+                  (creatingNb || !newNbName.trim() ? "opacity-40" : "hover:bg-indigo-800")}>
+                {creatingNb ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+                Anlegen
+              </button>
+            </form>
+            {nbError && showNbAdmin && (
+              <div className="mt-2 px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800">
+                {nbError}
+              </div>
+            )}
           </div>
         </div>
       )}

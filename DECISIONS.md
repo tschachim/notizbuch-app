@@ -224,3 +224,48 @@ aus `referenz-app.jsx` übernommen.
     Im Chat werden konsultierte Quellen zudem auch ohne Inline-Zitat
     unter der Nachricht gelistet (dedupliziert, max. 6), damit sichtbar
     ist, dass recherchiert wurde.
+
+27. **Logo** (v6.0, Nutzerwunsch): Das vom Nutzer gelieferte Logo (blaue
+    Spirale) ersetzt Favicon, PWA-Icons und das Icon im App-Header. Weißer
+    Hintergrund wurde in Transparenz umgerechnet; für „maskable“ und die
+    Android-Launcher-Icons liegt das Logo auf weißem Grund (Safe-Zone).
+    Quelle der Icons ist public/icons/icon-512.png.
+
+28. **Notizbuch-Verwaltung** (v6.0, Nutzerwunsch): Admin-Dialog über die
+    Notizbuchauswahl links oben („⚙ Notizbücher verwalten …“): umbenennen,
+    Reihenfolge, löschen, neu anlegen. Umbenennen ändert nur die
+    H1-Titelzeile der Datei (Pfad/Slug bleiben stabil – die Datei bleibt
+    die einzige Wahrheit für den Namen). Die Dropdown-Reihenfolge wandert
+    als order-Array in state.json mit (unbekannte IDs hinten, stabile
+    Sortierung – ältere Geräte ohne order bleiben kompatibel). Löschen
+    entfernt Notizbuch-Datei und Hintergrundwissen (Bilder bleiben, sie
+    sind repo-weit; alte Stände bleiben in der Git-Historie), das letzte
+    Notizbuch ist nicht löschbar. Der Fokus-Refresh entfernt remote
+    gelöschte Notizbücher auch lokal.
+
+29. **Dateianhänge im Chat** (v6.0, Nutzerwunsch): Der Anhang-Knopf nimmt
+    jede Datei. Bilder gehen unverändert den Bild-Weg – die Bildunterschrift
+    ist jetzt aber nur noch EIN knapper kursiver Satz (keine lange
+    Beschreibung). Andere Dateien: Text wird best effort client-seitig
+    extrahiert (gleiche Extraktoren wie Hintergrundwissen) und nur für
+    DIESEN API-Aufruf als <dateianhang>-Block mitgegeben (80k-Deckel,
+    Escape gegen Block-Ausbruch); im Chatverlauf bleibt nur der Dateiname.
+    Die Datei selbst wird nach erfolgreicher Antwort unter dateien/
+    archiviert (Namenskonflikte bekommen -2/-3-Suffixe) – bewusst getrennt
+    von bilder/ und OHNE Referenz im Dokument. Nicht extrahierbare Formate
+    werden trotzdem archiviert, das Modell erfährt nur den Namen.
+    Bewusstes Restrisiko: Der INHALT einer (evtl. fremd bezogenen) Datei
+    ist ungefilterter Modell-Kontext und könnte Anweisungen enthalten
+    (Prompt-Injection). Block-Ausbruch ist escaped, der System-Prompt
+    grenzt die Verwendung ein; für eine Ein-Nutzer-App akzeptiert.
+
+30. **Android-App** (v6.0, Nutzerwunsch): Minimale WebView-Hülle
+    (android/), die nur die Live-Website rahmenlos lädt – Web-Updates
+    kommen ohne App-Update an. localStorage bleibt App-privat (PAT/Key),
+    Datei-Chooser für Anhänge, externe Links (z. B. Quellen-Fußnoten)
+    öffnen im System-Browser, Zurück-Taste navigiert in der App. Gebaut
+    per GitHub-Actions-Workflow als debug-signiertes APK mit festem
+    Release-Link (Tag android-apk). Bewusst KEIN privater Signierschlüssel
+    im öffentlichen Repo: jeder Build hat eine neue Debug-Signatur, vor
+    Neuinstallation muss die alte App runter – akzeptiert, weil die App
+    praktisch nie neu gebaut werden muss.
