@@ -1848,7 +1848,7 @@ export default function NotizbuchApp() {
     <div className="h-screen w-full flex flex-col bg-slate-100 text-slate-900 font-sans">
 
       {/* Kopfzeile */}
-      <header className="flex items-center gap-2 px-3 h-14 bg-white border-b border-slate-200">
+      <header className="flex items-center gap-2 px-2 sm:px-3 h-14 bg-white border-b border-slate-200">
         <img
           src={nbIcons[activeNb] || "icons/logo.png"}
           alt="Notizbuch"
@@ -1867,7 +1867,7 @@ export default function NotizbuchApp() {
                 }
                 else switchNotebook(v);
               }}
-              className="appearance-none font-semibold tracking-tight bg-transparent hover:bg-slate-50 rounded-lg pl-1 pr-6 py-1 max-w-44 truncate"
+              className="appearance-none font-semibold tracking-tight bg-transparent hover:bg-slate-50 rounded-lg pl-1 pr-6 py-1 max-w-24 sm:max-w-44 truncate"
               title="Notizbuch wählen"
             >
               {notebooks.map((n) => (
@@ -1881,7 +1881,9 @@ export default function NotizbuchApp() {
         ) : (
           <span className="font-semibold tracking-tight">Notizbuch</span>
         )}
-        <span className="font-mono text-xs text-slate-400">v6.5</span>
+        {/* Version auf sehr schmalen Screens ausblenden – der Header muss
+            samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v6.6</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -1895,7 +1897,7 @@ export default function NotizbuchApp() {
           <select
             value={model}
             onChange={(e) => changeModel(e.target.value)}
-            className="appearance-none text-xs font-mono bg-slate-50 border border-slate-300 rounded-lg pl-2 pr-6 py-1 text-slate-700"
+            className="appearance-none text-xs font-mono bg-slate-50 border border-slate-300 rounded-lg pl-2 pr-6 py-1 text-slate-700 max-w-24 sm:max-w-none"
             title="Modell für die Strukturierung"
           >
             {MODELS.map((m) => (

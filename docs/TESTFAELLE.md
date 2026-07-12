@@ -115,8 +115,8 @@ Abbrechen. Erwartet: Ansicht unverändert, kein Commit.
 **E1 [OFFEN] Post-it-Lebenszyklus.** „Schnellnotiz“-Knopf (Desktop:
 Leiste rechts; mobil: im Drawer). Erwartet: gelbes Post-it erscheint,
 Text eintippbar, verschieb-/größenveränderbar; X verwirft; OK übernimmt
-den Text als „Neue Schnellnotiz: …“ ins Eingabefeld und löscht das
-Post-it (nicht automatisch gesendet).
+den Text als „Neue Schnellnotiz:“ + Zeilenumbruch + Text ins Eingabefeld
+(so spezifiziert) und löscht das Post-it (nicht automatisch gesendet).
 
 **E2 [VERBUNDEN] Sync.** Schnellnotiz „QA-Sync-Test“ anlegen, Seite neu
 laden. Erwartet: Post-it ist nach dem Reload wieder da (kommt aus dem
