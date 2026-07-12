@@ -20,6 +20,7 @@ import {
   KNOWLEDGE_EXTS, knowledgeDir, safeFileName, extractPathFor, isExtractPath,
   extractText, fileToBase64,
 } from "./lib/knowledge.js";
+import { renderWithCites } from "./lib/citations.jsx";
 import { loadSettings, saveSettings, clearSettings } from "./lib/settings.js";
 import SettingsDialog from "./components/SettingsDialog.jsx";
 import DocEditor from "./components/DocEditor.jsx";
@@ -723,7 +724,13 @@ export default function NotizbuchApp() {
         }
       }
 
-      const aMsg = { role: "assistant", text: res.reply, ts: Date.now(), commit };
+      const aMsg = {
+        role: "assistant",
+        text: res.reply,
+        ts: Date.now(),
+        commit,
+        sources: res.sources && res.sources.length ? res.sources : undefined,
+      };
       const finalChat = [...chatWithUser, aMsg].slice(-80);
       setChat(finalChat);
       if (commit && view === "chat") setNotesDirty(true);
@@ -1138,7 +1145,12 @@ export default function NotizbuchApp() {
         // ops werden hier bewusst NIE angewendet – reine Rückmeldung.
         setChat((prev) => [...prev,
           { role: "user", info: true, ts: Date.now(), text: "Notizbuch „" + nb.name + "“ manuell bearbeitet" },
-          { role: "assistant", ts: Date.now(), text: reply },
+          {
+            role: "assistant",
+            ts: Date.now(),
+            text: reply,
+            sources: res.sources && res.sources.length ? res.sources : undefined,
+          },
         ].slice(-80));
         if (viewRef.current !== "chat") setChatDirty(true);
       }
@@ -1473,7 +1485,7 @@ export default function NotizbuchApp() {
         ) : (
           <span className="font-semibold tracking-tight">Notizbuch</span>
         )}
-        <span className="font-mono text-xs text-slate-400">v5.1</span>
+        <span className="font-mono text-xs text-slate-400">v5.2</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -1605,7 +1617,33 @@ export default function NotizbuchApp() {
                       <span className="block text-xs opacity-70 mb-1">[Bild]</span>
                     )
                   )}
-                  {m.text}
+                  {(() => {
+                    if (m.role !== "assistant" || m.error) return m.text;
+                    // cite-Tags der Websuche → klickbare Fußnoten
+                    const { nodes, footnotes } = renderWithCites(m.text, m.sources || []);
+                    return (
+                      <>
+                        {nodes}
+                        {footnotes.length > 0 && (
+                          <span className="block mt-2 pt-1.5 border-t border-slate-200 whitespace-normal">
+                            {footnotes.map((f) => (
+                              <span key={f.num} className="block text-xs text-slate-400 truncate">
+                                [{f.num}]{" "}
+                                <a
+                                  href={f.url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-indigo-600 hover:underline"
+                                >
+                                  {f.title}
+                                </a>
+                              </span>
+                            ))}
+                          </span>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
                 {m.commit && (
                   <div className="mt-1 inline-flex items-center gap-1 font-mono text-xs text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-2 py-1">

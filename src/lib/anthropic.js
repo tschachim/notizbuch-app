@@ -6,6 +6,8 @@
 /* max_tokens 4000 statt 1000.                                         */
 /* ------------------------------------------------------------------ */
 
+import { stripCiteTags } from "./citations.jsx";
+
 export const MODELS = [
   { id: "claude-sonnet-4-6", label: "Sonnet 4.6 · Standard" },
   { id: "claude-fable-5", label: "Fable 5 · maximale Tiefe" },
@@ -89,7 +91,7 @@ ${docsBlock}${knowledgeBlock(knowledge, escAttr)}
 INTERNET-RECHERCHE:
 - Dir steht die Websuche (web_search) zur Verfügung. Nutze sie GROSSZÜGIG, wann immer sie die Antwort oder die Einordnung verbessert: unbekannte Begriffe, Produkte, Firmen, Orte, Personen, aktuelle Fakten, Preise, Termine, Versionen. Lieber einmal zu viel suchen als zu wenig.
 - Beispiel: Der Nutzer erwähnt eine Software, die du nicht sicher kennst → recherchiere, was das ist, und nutze das Ergebnis für Einordnung und Dokumenteintrag.
-- Fasse recherchierte Kernfakten knapp in reply bzw. im Dokumenteintrag zusammen (mit Quellenangabe als Klartext, keine Links nötig).
+- In reply darfst du recherchierte Aussagen mit <cite index="…">…</cite> markieren – die App macht daraus klickbare Fußnoten. Als index gib die 1-basierte Position des belegenden Suchtreffers an, gezählt über alle gelieferten Suchergebnisse in ihrer Reihenfolge (z. B. index="3" für den dritten Treffer insgesamt). In ops-Inhalten (Dokument) KEINE cite-Tags: dort Quellen als Klartext nennen (z. B. „(Quelle: hersteller.de)“).
 - WICHTIG: Nach optionaler Recherche rufst du am Ende IMMER GENAU EINMAL das Tool "update_notebook" auf. Antworte niemals nur mit freiem Text.
 
 DEINE AUFGABEN:
@@ -108,6 +110,7 @@ KONVENTIONEN IN JEDEM NOTIZBUCH:
 - Erste Zeile bleibt die Titelzeile des Notizbuchs: "# " + Name des Notizbuchs.
 - Hierarchie: "## Hauptthema" mit "### Unterthema" darunter. Ordne Einträge, wo sinnvoll, einem passenden ###-Unterthema zu; lege Unterthemen an, sobald ein Hauptthema mehr als eine Facette hat.
 - Einträge als Stichpunkte ("- ..."), Datumsangaben im Format JJJJ-MM-TT wenn zeitlich relevant. Nummerierte Listen ("1. ...") sind erlaubt. Aufgaben als Checklisten-Einträge: "- [ ] offen" bzw. "- [x] erledigt".
+- Tabellen im GFM-Pipe-Format sind erlaubt und für strukturierte Daten erwünscht: Kopfzeile, dann Trennzeile ("|---|---|"), dann Datenzeilen – jede Zeile auf einer eigenen Zeile, Zellen ohne Zeilenumbrüche.
 - Vom Nutzer gesetzte Auszeichnungen unverändert erhalten: ~~durchgestrichen~~, <span style="color:…">…</span> (Schriftfarbe) und <mark data-color="…" style="background-color:…">…</mark> (Textmarker). Setze solche Farb-Auszeichnungen nicht selbst ein, außer der Nutzer bittet ausdrücklich darum.
 - Kompakt und sachlich, keine Floskeln im Dokument.
 
@@ -317,8 +320,25 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     return data;
   };
 
+  // Quellen (URL + Titel) aus den Websuche-Ergebnisblöcken einsammeln –
+  // in Trefferreihenfolge und OHNE Dedup, damit die <cite index="D-…">-
+  // Nummern des Modells positionsstabil auf die Treffer abgebildet werden
+  // (dedupliziert wird erst bei der Fußnotenvergabe in citations.jsx).
+  const sources = [];
+  const collectSources = (d) => {
+    for (const b of (d && d.content) || []) {
+      if (b.type !== "web_search_tool_result" || !Array.isArray(b.content)) continue;
+      for (const r of b.content) {
+        if (r && r.type === "web_search_result" && r.url) {
+          sources.push({ url: r.url, title: r.title || r.url });
+        }
+      }
+    }
+  };
+
   const doPost = async (mode) => {
     let data = await postOnce(msgs, mode);
+    collectSources(data);
     // Server-Tools (Websuche) können mit pause_turn unterbrechen: Assistant-
     // Inhalt anhängen und fortsetzen lassen (max. 3 Fortsetzungen).
     let convo = msgs;
@@ -331,6 +351,7 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
         ? [...convo.slice(0, -1), { role: "assistant", content: [...prev.content, ...(data.content || [])] }]
         : [...convo, { role: "assistant", content: data.content }];
       data = await postOnce(convo, mode);
+      collectSources(data);
       cont++;
     }
     return data;
@@ -397,9 +418,15 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     };
   }
 
+  // cite-Tags gehören nicht ins Dokument – dort Quellen als Klartext.
+  const ops = (Array.isArray(parsed.ops) ? parsed.ops : []).map((op) =>
+    op && typeof op === "object" ? { ...op, content: stripCiteTags(op.content) } : op
+  );
+
   return {
     reply: typeof parsed.reply === "string" && parsed.reply ? parsed.reply : "Notiert.",
-    ops: Array.isArray(parsed.ops) ? parsed.ops : [],
+    ops,
     commit: typeof parsed.commit === "string" && parsed.commit.trim() ? parsed.commit.trim() : null,
+    sources,
   };
 }
