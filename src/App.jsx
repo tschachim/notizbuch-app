@@ -11,6 +11,7 @@ import { diffLines, contextize } from "./lib/diff.js";
 import { DocView, IMG_REF_RE, TASK_RE, parseTree, renumberCitations } from "./lib/markdown.jsx";
 import {
   prepareImage, newImgId, extForMime, mimeForName, dataUrlParts, blobToDataURL,
+  makeNotebookIcon,
 } from "./lib/images.js";
 import { MODELS, callClaude } from "./lib/anthropic.js";
 import {
@@ -140,6 +141,10 @@ export default function NotizbuchApp() {
   const [nbRenameValue, setNbRenameValue] = useState("");
   const [nbDeleteId, setNbDeleteId] = useState(null); // Lösch-Bestätigung offen
   const [nbAdminError, setNbAdminError] = useState(null);
+  const [nbIcons, setNbIcons] = useState({}); // nbId -> dataURL („Smart Icons“)
+  const iconShas = useRef({}); // nbId -> SHA von icons/<id>.png
+  const iconInputRef = useRef(null);
+  const iconTargetNb = useRef(null); // Ziel-Notizbuch des Icon-Uploads
   const [showKnowledge, setShowKnowledge] = useState(false);
   const [knowledgeBusy, setKnowledgeBusy] = useState(null); // Fortschrittstext
   const [, setKnowledgeVersion] = useState(0); // Render-Trigger für Ref-Änderungen
@@ -314,6 +319,24 @@ export default function NotizbuchApp() {
       imgIndex.current = idx;
       failedImgs.current = new Set();
       versionCache.current = new Map();
+
+      // Notizbuch-Icons laden (icons/<nbId>.png, parallel). Icons sind Deko:
+      // Fehler hier dürfen das Verbinden nicht verhindern.
+      const icons = {};
+      iconShas.current = {};
+      try {
+        const iconFiles = await ghListDir(cfg, "icons");
+        await Promise.all(iconFiles.map(async (f) => {
+          const m = /^([a-z0-9-]+)\.png$/i.exec(f.name);
+          if (!m) return;
+          iconShas.current[m[1].toLowerCase()] = f.sha;
+          try {
+            const blob = await ghGetBlob(cfg, f.path);
+            if (blob) icons[m[1].toLowerCase()] = await blobToDataURL(blob.slice(0, blob.size, "image/png"));
+          } catch (e) { /* Icon fehlt dann eben – Standard-Logo greift */ }
+        }));
+      } catch (e) { /* icons/ nicht lesbar – Standard-Logos reichen */ }
+      setNbIcons(icons);
 
       // Hintergrundwissen entdecken: wissen/<nbId>/ pro Notizbuch (parallel)
       const kIdx = {};
@@ -1103,6 +1126,65 @@ export default function NotizbuchApp() {
     }
   };
 
+  // „Smart Icon“ setzen: Bild wird quadratisch aufbereitet (mittig
+  // beschnitten bzw. stark Längliches eingepasst) und als icons/<id>.png
+  // im Daten-Repo abgelegt; die SHA erlaubt spätere Ersetzung.
+  const setNotebookIcon = async (id, file) => {
+    if (!file) return;
+    if (!connectedRef.current || !settingsRef.current) {
+      setNbAdminError("Bitte zuerst in den Einstellungen verbinden.");
+      return;
+    }
+    const nb = notebooksRef.current.find((n) => n.id === id);
+    if (!nb) return;
+    setNbAdminBusy(id);
+    setNbAdminError(null);
+    try {
+      const { dataUrl, base64 } = await makeNotebookIcon(file);
+      const msg = "Icon für Notizbuch „" + nb.name + "“";
+      const doPut = (sha) =>
+        ghPutFile(settingsRef.current, "icons/" + id + ".png", base64, msg, sha || undefined);
+      let put;
+      try {
+        put = await doPut(iconShas.current[id]);
+      } catch (e) {
+        if (!(e instanceof ShaConflictError)) throw e;
+        // Anderes Gerät hat das Icon geändert: aktuelle SHA holen, einmal
+        // erneut versuchen (Icon-Ersetzen ist gewollt Last-Writer-Wins).
+        const files = await ghListDir(settingsRef.current, "icons");
+        const cur = files.find((f) => f.name.toLowerCase() === id + ".png");
+        put = await doPut(cur ? cur.sha : undefined);
+      }
+      iconShas.current[id] = put.sha;
+      setNbIcons((prev) => ({ ...prev, [id]: dataUrl }));
+    } catch (e) {
+      setNbAdminError(e && e.message ? e.message : String(e));
+    } finally {
+      setNbAdminBusy(null);
+    }
+  };
+
+  const removeNotebookIcon = async (id) => {
+    if (!connectedRef.current || !settingsRef.current || !iconShas.current[id]) return;
+    setNbAdminBusy(id);
+    setNbAdminError(null);
+    try {
+      const nb = notebooksRef.current.find((n) => n.id === id);
+      await ghDeleteFile(settingsRef.current, "icons/" + id + ".png",
+        "Icon für Notizbuch „" + (nb ? nb.name : id) + "“ entfernt", iconShas.current[id]);
+      delete iconShas.current[id];
+      setNbIcons((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    } catch (e) {
+      setNbAdminError(e && e.message ? e.message : String(e));
+    } finally {
+      setNbAdminBusy(null);
+    }
+  };
+
   // Löschen entfernt die Notizbuch-Datei und ihr Hintergrundwissen aus dem
   // Daten-Repo (Bilder bleiben – sie sind repo-weit abgelegt). Das letzte
   // Notizbuch ist nicht löschbar.
@@ -1124,6 +1206,17 @@ export default function NotizbuchApp() {
         await ghDeleteFile(cfg, f.path, "Notizbuch „" + nb.name + "“ gelöscht: Wissensdatei entfernt", f.sha);
       }
       await ghDeleteFile(cfg, nb.path, "Notizbuch „" + nb.name + "“ gelöscht", docShas.current[id]);
+      if (iconShas.current[id]) {
+        try {
+          await ghDeleteFile(cfg, "icons/" + id + ".png", "Notizbuch „" + nb.name + "“ gelöscht: Icon entfernt", iconShas.current[id]);
+        } catch (e2) { /* best effort – verwaistes Icon stört nicht */ }
+        delete iconShas.current[id];
+        setNbIcons((prev) => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+      }
       const nbs = notebooksRef.current.filter((n) => n.id !== id);
       setNotebooks(nbs);
       notebooksRef.current = nbs;
@@ -1678,7 +1771,11 @@ export default function NotizbuchApp() {
 
       {/* Kopfzeile */}
       <header className="flex items-center gap-2 px-3 h-14 bg-white border-b border-slate-200">
-        <img src="icons/logo.png" alt="Notizbuch" className="w-7 h-7" />
+        <img
+          src={nbIcons[activeNb] || "icons/logo.png"}
+          alt="Notizbuch"
+          className={"w-7 h-7 " + (nbIcons[activeNb] ? "rounded-md border border-slate-200" : "")}
+        />
         {notebooks.length ? (
           <div className="relative">
             <select
@@ -1706,7 +1803,7 @@ export default function NotizbuchApp() {
         ) : (
           <span className="font-semibold tracking-tight">Notizbuch</span>
         )}
-        <span className="font-mono text-xs text-slate-400">v6.1</span>
+        <span className="font-mono text-xs text-slate-400">v6.2</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -2409,6 +2506,11 @@ export default function NotizbuchApp() {
                   className={"rounded-xl border px-2.5 py-2 " +
                     (n.id === activeNb ? "border-indigo-300 bg-indigo-50/50" : "border-slate-200 bg-white")}>
                   <div className="flex items-center gap-1.5">
+                    <img
+                      src={nbIcons[n.id] || "icons/logo.png"}
+                      alt=""
+                      className={"w-6 h-6 shrink-0 " + (nbIcons[n.id] ? "rounded-md border border-slate-200" : "opacity-70")}
+                    />
                     {nbRenameId === n.id ? (
                       <form className="flex-1 flex items-center gap-1.5"
                         onSubmit={(e) => { e.preventDefault(); renameNotebook(n.id, nbRenameValue); }}>
@@ -2451,6 +2553,26 @@ export default function NotizbuchApp() {
                           <Pencil size={13} />
                         </button>
                         <button
+                          onClick={() => {
+                            iconTargetNb.current = n.id;
+                            setNbAdminError(null);
+                            if (iconInputRef.current) iconInputRef.current.click();
+                          }}
+                          disabled={nbAdminBusy === n.id}
+                          className="p-1.5 rounded-lg border border-slate-300 text-slate-500 hover:bg-slate-50"
+                          title="Eigenes Icon hochladen (wird quadratisch zugeschnitten)">
+                          {nbAdminBusy === n.id ? <Loader2 size={13} className="animate-spin" /> : <ImagePlus size={13} />}
+                        </button>
+                        {nbIcons[n.id] && (
+                          <button
+                            onClick={() => removeNotebookIcon(n.id)}
+                            disabled={nbAdminBusy === n.id}
+                            className="p-1.5 rounded-lg border border-slate-300 text-slate-500 hover:bg-slate-50"
+                            title="Icon entfernen (zurück zum Standard)">
+                            <RotateCcw size={13} />
+                          </button>
+                        )}
+                        <button
                           onClick={() => { setNbDeleteId(nbDeleteId === n.id ? null : n.id); setNbRenameId(null); setNbAdminError(null); }}
                           disabled={notebooks.length <= 1}
                           className={"p-1.5 rounded-lg border " + (notebooks.length <= 1
@@ -2484,6 +2606,17 @@ export default function NotizbuchApp() {
               </div>
             )}
 
+            <input
+              ref={iconInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files && e.target.files[0];
+                e.target.value = "";
+                if (f && iconTargetNb.current) setNotebookIcon(iconTargetNb.current, f);
+              }}
+            />
             <form className="mt-3 pt-3 border-t border-slate-200 flex items-center gap-2"
               onSubmit={(e) => { e.preventDefault(); createNotebook(newNbName); }}>
               <input

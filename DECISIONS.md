@@ -269,3 +269,25 @@ aus `referenz-app.jsx` übernommen.
     im öffentlichen Repo: jeder Build hat eine neue Debug-Signatur, vor
     Neuinstallation muss die alte App runter – akzeptiert, weil die App
     praktisch nie neu gebaut werden muss.
+
+31. **Bildgröße im Editor** (v6.2, Nutzerwunsch): Bilder lassen sich im
+    WYSIWYG-Editor per Anfasser unten rechts skalieren (eigene NodeView).
+    Die Breite wird als "|w<px>"-Suffix im Alt-Text persistiert
+    (`![Titel|w320](img:…)`) – Markdown kennt kein width-Attribut, und nur
+    der Alt-Text übersteht sowohl den tiptap-Roundtrip als auch den
+    zeilenbasierten Renderer (IMG_LINE_RE bleibt unverändert gültig).
+    Skalierte Bilder verlieren die 16-rem-Höhenkappung (sonst Verzerrung).
+    Der System-Prompt weist das Modell an, den Suffix zu erhalten und nie
+    selbst zu setzen. Akzeptiertes Restrisiko: Endet eine echte
+    Bildunterschrift zufällig auf "|w<Zahlen>", wird sie als Breite
+    gedeutet (bei Prosa-Captions praktisch ausgeschlossen).
+
+32. **Notizbuch-Icons „Smart Icons“** (v6.2, Nutzerwunsch): Pro Notizbuch
+    kann im Admin-Dialog ein eigenes Icon hochgeladen werden. Aufbereitung
+    client-seitig: fast-quadratische Bilder werden mittig quadratisch
+    beschnitten (möglichst unverändert), stark längliche (Seitenverhältnis
+    > 2) transparent eingepasst; Ergebnis 128-px-PNG unter icons/<nbId>.png
+    im Daten-Repo (SHA-geführt für Ersetzen/Löschen). Links oben erscheint
+    das Icon des aktiven Notizbuchs, ohne eigenes Icon das Standard-Logo.
+    Beim Löschen eines Notizbuchs wird sein Icon mit entfernt. Icons
+    anderer Geräte erscheinen nach dem nächsten Verbinden/Reload.
