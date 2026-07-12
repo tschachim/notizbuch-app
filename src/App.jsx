@@ -1881,7 +1881,7 @@ export default function NotizbuchApp() {
         ) : (
           <span className="font-semibold tracking-tight">Notizbuch</span>
         )}
-        <span className="font-mono text-xs text-slate-400">v6.4</span>
+        <span className="font-mono text-xs text-slate-400">v6.5</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"

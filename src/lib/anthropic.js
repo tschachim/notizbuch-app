@@ -243,7 +243,8 @@ function repairJsonString(s) {
   return out;
 }
 
-function parseLooseJson(raw) {
+// Exportiert für Unit-Tests (riskanteste Heuristik der Datei).
+export function parseLooseJson(raw) {
   if (!raw) return null;
   const clean = raw.replace(/```json|```/g, "").trim();
   const candidates = [clean];

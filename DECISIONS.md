@@ -321,3 +321,21 @@ aus `referenz-app.jsx` übernommen.
     springt hin und schließt, ebenso Tipp auf den Hintergrund oder
     Zurückwischen. Der Schnellnotiz-Knopf wandert mit in den Drawer.
     Desktop (≥ md) bleibt unverändert mit fester Leiste und Splitter.
+
+36. **Qualitätssicherung** (v6.5, Nutzerwunsch): (a) Unit-Tests mit Vitest
+    für die Logik-Schicht src/lib (Ops, Diff, Renderer, Zitate,
+    API-Aufbereitung mit gemocktem fetch, GitHub-Schicht inkl.
+    Warteschlangen-/Konflikt-Verhalten, Helfer). Coverage-Gate 60 %
+    (vitest.config.js), als Pflicht-Schritt im Deploy-Workflow – ohne
+    grüne Tests wird nicht deployt. Die UI-Schicht (App.jsx) wird bewusst
+    nicht per Unit-Test, sondern über die End-to-End-Testfälle geprüft.
+    Der code-reviewer Subagent prüft bei jedem Review Coverage UND
+    Testqualität (relevante Datenlagen statt Pro-forma-Assertions).
+    (b) End-to-End: docs/TESTFAELLE.md definiert User-Story-Testfälle für
+    alle Anwendungsfälle; ein eigener tester-Subagent (Sonnet) bedient
+    nach jedem Deploy die live App im Browser, meldet Findings
+    (Blocker/Fehler/Kosmetik) und räumt QA-Artefakte auf. Sicherheits-
+    regeln: niemals Zugangsdaten eingeben, nur „QA-Test“-Notizbücher
+    anfassen, bezahlte [API]-Fälle höchstens einmal pro Lauf.
+    Beim Testschreiben gefundener echter Bug: safeFileName konnte für
+    Dateinamen aus lauter Punkten das Pfadsegment „..“ erzeugen – behoben.

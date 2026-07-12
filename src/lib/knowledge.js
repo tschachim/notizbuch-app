@@ -15,12 +15,14 @@ export const knowledgeDir = (nbId) => "wissen/" + nbId;
 // Dateinamen für die Ablage im Repo entschärfen (Umlaute, Sonderzeichen).
 export function safeFileName(name) {
   const dot = name.lastIndexOf(".");
-  const base = (dot > 0 ? name.slice(0, dot) : name)
+  let base = (dot > 0 ? name.slice(0, dot) : name)
     .toLowerCase()
     .replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss")
     .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80) || "datei";
+    .replace(/^[-.]+|-+$/g, "")
+    .slice(0, 80);
+  // Nie "." / ".." / versteckte Dateien als Namensbestandteil erzeugen
+  if (!base || /^\.+$/.test(base)) base = "datei";
   const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
   return ext ? base + "." + ext : base;
 }

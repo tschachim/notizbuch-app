@@ -24,6 +24,9 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # Qualitäts-Gate: Unit-Tests inkl. Coverage-Schwelle (60 %, siehe
+      # vitest.config.js) – schlägt fehl, wird nicht deployt.
+      - run: npm run test:coverage
       - run: npm run build
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
