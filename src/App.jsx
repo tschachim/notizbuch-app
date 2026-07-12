@@ -32,6 +32,32 @@ const loadLocal = (key, fallback) => {
   } catch (e) { return fallback; }
 };
 
+/* ---------- Multi-Notizbuch-Helfer ---------- */
+// Das Root-Notizbuch bleibt aus Kompatibilität die Datei wissensbasis.md;
+// alle weiteren liegen unter notizbuecher/<slug>.md. Der Name eines
+// Notizbuchs ist seine H1-Titelzeile – die Datei ist die einzige Wahrheit,
+// state.json cached nur das aktive Notizbuch.
+const ROOT_NB_ID = "wissensbasis";
+
+const slugify = (name) =>
+  String(name).toLowerCase()
+    .replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss")
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
+  || "notizbuch";
+
+const nameFromDoc = (text, fallbackSlug) => {
+  const m = /^#\s+(.+)/.exec(String(text || "").split("\n")[0]);
+  if (m) return m[1].trim();
+  // Fehlende H1: Slug lesbar aufbereiten („koch-rezepte“ → „Koch Rezepte“)
+  return String(fallbackSlug)
+    .split("-")
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+    .join(" ");
+};
+
+const initialDocFor = (name) =>
+  "# " + name + "\n\n## Inbox\n\n_Noch nichts erfasst. Die erste Notiz im Chat legt hier los._\n";
+
 /* ------------------------------------------------------------------ */
 /* Konstanten (aus der Referenz-App übernommen)                        */
 /* ------------------------------------------------------------------ */
@@ -71,8 +97,12 @@ const fmtStamp = (ts) =>
     hour: "2-digit", minute: "2-digit",
   });
 
-const serializeState = (chat, model, collapsed) =>
-  JSON.stringify({ v: 1, chat, model, collapsed: collapsed || {} }, null, 2);
+// collapsedAll: { notizbuchId: { sectionKey: true } }
+const serializeState = (chat, model, collapsedAll, active) =>
+  JSON.stringify(
+    { v: 2, active: active || ROOT_NB_ID, chat, model, collapsed: collapsedAll || {} },
+    null, 2
+  );
 
 /* ------------------------------------------------------------------ */
 /* Haupt-Komponente                                                    */
@@ -86,11 +116,19 @@ export default function NotizbuchApp() {
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState(null);
 
-  const [doc, setDoc] = useState(INITIAL_DOC);
+  const [doc, setDoc] = useState(INITIAL_DOC); // Text des AKTIVEN Notizbuchs
+  const [notebooks, setNotebooks] = useState([]); // [{ id, path, name }]
+  const [activeNb, setActiveNb] = useState(ROOT_NB_ID);
   const [chat, setChat] = useState([]);
   const [model, setModel] = useState(MODELS[0].id);
-  const [collapsed, setCollapsed] = useState({});
+  const [collapsedAll, setCollapsedAll] = useState({}); // nbId -> Klappzustände
   const [meta, setMeta] = useState({ count: 0, lastTs: null });
+  const [showNewNb, setShowNewNb] = useState(false);
+  const [newNbName, setNewNbName] = useState("");
+  const [creatingNb, setCreatingNb] = useState(false);
+  const [nbError, setNbError] = useState(null);
+
+  const collapsed = collapsedAll[activeNb] || {};
 
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -136,21 +174,26 @@ export default function NotizbuchApp() {
       navW: typeof l.navW === "number" ? Math.min(360, Math.max(96, l.navW)) : 148,
     };
   });
-  const [quickNotes, setQuickNotes] = useState(() => {
-    const v = loadLocal(QUICKNOTES_KEY, []);
-    return Array.isArray(v) ? v : [];
+  const [quickNotesAll, setQuickNotesAll] = useState(() => {
+    const v = loadLocal(QUICKNOTES_KEY, {});
+    if (Array.isArray(v)) return { [ROOT_NB_ID]: v }; // Migration: altes Array-Format
+    return v && typeof v === "object" ? v : {};
   });
+  const quickNotes = quickNotesAll[activeNb] || [];
 
   const settingsRef = useRef(null);
   const docRef = useRef(INITIAL_DOC);
+  const notebooksRef = useRef([]);
+  const activeNbRef = useRef(ROOT_NB_ID);
+  const docCache = useRef({}); // nbId -> Text
+  const docShas = useRef({});  // nbId -> Content-SHA
   const taskChain = useRef(Promise.resolve());
   const taskEpoch = useRef(0);
   const connectedRef = useRef(false);
   const busyRef = useRef(false);
   const editingRef = useRef(false);
   const viewRef = useRef("chat");
-  const stateRef = useRef({ chat: [], model: MODELS[0].id, collapsed: {} });
-  const docSha = useRef(null);
+  const stateRef = useRef({ chat: [], model: MODELS[0].id, collapsedAll: {} });
   const stateSha = useRef(null);
   const stateTimer = useRef(null);
   const stateFlushing = useRef(0); // Zähler: auch überlappende Flushes abdecken
@@ -164,12 +207,18 @@ export default function NotizbuchApp() {
   useEffect(() => { busyRef.current = busy; }, [busy]);
   useEffect(() => { editingRef.current = editing; }, [editing]);
   useEffect(() => { viewRef.current = view; }, [view]);
-  useEffect(() => { stateRef.current = { chat, model, collapsed }; }, [chat, model, collapsed]);
+  useEffect(() => { notebooksRef.current = notebooks; }, [notebooks]);
+  useEffect(() => { activeNbRef.current = activeNb; }, [activeNb]);
+  useEffect(() => { stateRef.current = { chat, model, collapsedAll }; }, [chat, model, collapsedAll]);
 
-  /* ---------- Metadaten (Stand & Versionszahl) ---------- */
-  const refreshMeta = useCallback(async (cfg) => {
-    try { setMeta(await ghCommitMeta(cfg, DOC_PATH)); } catch (e) { /* unkritisch */ }
+  /* ---------- Metadaten (Stand & Versionszahl des aktiven Notizbuchs) ---------- */
+  const refreshMeta = useCallback(async (cfg, path) => {
+    try { setMeta(await ghCommitMeta(cfg, path || DOC_PATH)); } catch (e) { /* unkritisch */ }
   }, []);
+
+  const activeNotebook = () =>
+    notebooksRef.current.find((n) => n.id === activeNbRef.current) ||
+    { id: ROOT_NB_ID, path: DOC_PATH, name: "Wissensbasis" };
 
   /* ---------- Verbinden & Laden ---------- */
   const connect = useCallback(async (cfg) => {
@@ -178,15 +227,11 @@ export default function NotizbuchApp() {
     try {
       await ghCheckRepo(cfg);
 
-      let file = await ghGetFile(cfg, DOC_PATH);
-      if (!file) {
-        const put = await ghPutFile(cfg, DOC_PATH, utf8ToB64(INITIAL_DOC), "Initiale Wissensbasis");
-        file = { text: INITIAL_DOC, sha: put.sha };
-      }
-
+      // State laden (Chat, Modell, Klappzustände, aktives Notizbuch)
       let nChat = [WELCOME];
       let nModel = MODELS[0].id;
-      let nCollapsed = {};
+      let nCollapsedAll = {};
+      let wantActive = null;
       const st = await ghGetFile(cfg, STATE_PATH);
       stateSha.current = st ? st.sha : null;
       if (st) {
@@ -194,9 +239,45 @@ export default function NotizbuchApp() {
           const data = JSON.parse(st.text);
           if (Array.isArray(data.chat) && data.chat.length) nChat = data.chat;
           if (typeof data.model === "string" && MODELS.some((m) => m.id === data.model)) nModel = data.model;
-          if (data.collapsed && typeof data.collapsed === "object") nCollapsed = data.collapsed;
+          if (data.collapsed && typeof data.collapsed === "object") {
+            // v1: flache Map mit "s:"-Keys → dem Root-Notizbuch zuordnen
+            const keys = Object.keys(data.collapsed);
+            nCollapsedAll = keys.length && keys.every((k) => k.startsWith("s:"))
+              ? { [ROOT_NB_ID]: data.collapsed }
+              : data.collapsed;
+          }
+          if (typeof data.active === "string") wantActive = data.active;
         } catch (e) { /* defekter State → Defaults */ }
       }
+
+      // Notizbücher entdecken: Root-Datei + notizbuecher/-Ordner.
+      // Der Name kommt aus der H1-Titelzeile der Datei (selbstheilend).
+      const foundNbs = [];
+      const rootFile = await ghGetFile(cfg, "wissensbasis.md");
+      if (rootFile) foundNbs.push({ id: ROOT_NB_ID, path: "wissensbasis.md", file: rootFile });
+      const nbFiles = await ghListDir(cfg, "notizbuecher");
+      for (const f of nbFiles) {
+        const m = /^([a-z0-9-]+)\.md$/i.exec(f.name);
+        if (!m || m[1].toLowerCase() === ROOT_NB_ID) continue; // Kollision mit Root vermeiden
+        const file = await ghGetFile(cfg, f.path);
+        if (file) foundNbs.push({ id: m[1].toLowerCase(), path: f.path, file });
+      }
+      if (!foundNbs.length) {
+        const put = await ghPutFile(cfg, "wissensbasis.md", utf8ToB64(INITIAL_DOC), "Initiale Wissensbasis");
+        foundNbs.push({ id: ROOT_NB_ID, path: "wissensbasis.md", file: { text: INITIAL_DOC, sha: put.sha } });
+      }
+      const nbs = [];
+      const cache = {};
+      const shas = {};
+      for (const f of foundNbs) {
+        nbs.push({ id: f.id, path: f.path, name: nameFromDoc(f.file.text, f.id) });
+        cache[f.id] = f.file.text;
+        shas[f.id] = f.file.sha;
+      }
+      docCache.current = cache;
+      docShas.current = shas;
+      const active = nbs.some((n) => n.id === wantActive) ? wantActive : nbs[0].id;
+      const activePath = nbs.find((n) => n.id === active).path;
 
       const files = await ghListDir(cfg, "bilder");
       const idx = {};
@@ -208,12 +289,15 @@ export default function NotizbuchApp() {
       failedImgs.current = new Set();
       versionCache.current = new Map();
 
-      docSha.current = file.sha;
-      lastSavedState.current = serializeState(nChat, nModel, nCollapsed);
-      setDoc(file.text);
+      lastSavedState.current = serializeState(nChat, nModel, nCollapsedAll, active);
+      setNotebooks(nbs);
+      notebooksRef.current = nbs;
+      setActiveNb(active);
+      activeNbRef.current = active;
+      setDoc(cache[active]);
       setChat(nChat);
       setModel(nModel);
-      setCollapsed(nCollapsed);
+      setCollapsedAll(nCollapsedAll);
       setSettings(cfg);
       settingsRef.current = cfg;
       setConnected(true);
@@ -221,7 +305,7 @@ export default function NotizbuchApp() {
       setSaveState("saved");
       setStorageError(null);
       setBanner(null);
-      refreshMeta(cfg);
+      refreshMeta(cfg, activePath);
       return true;
     } catch (e) {
       setConnectError(e && e.message ? e.message : String(e));
@@ -285,8 +369,14 @@ export default function NotizbuchApp() {
 
   useEffect(() => {
     if (!connected || !settingsRef.current) return;
-    const payload = serializeState(chat, model, collapsed);
-    if (payload === lastSavedState.current) return;
+    const payload = serializeState(chat, model, collapsedAll, activeNb);
+    if (payload === lastSavedState.current) {
+      // Zurück auf dem letzten gespeicherten Stand: geplanten Write verwerfen,
+      // sonst schriebe der laufende Timer einen inzwischen veralteten Zustand.
+      if (stateTimer.current) { clearTimeout(stateTimer.current); stateTimer.current = null; }
+      setSaveState("saved");
+      return;
+    }
     setSaveState("saving");
     if (stateTimer.current) clearTimeout(stateTimer.current);
     const cfg = settingsRef.current;
@@ -294,31 +384,40 @@ export default function NotizbuchApp() {
       stateTimer.current = null;
       flushState(cfg, payload);
     }, 2500);
-  }, [chat, model, collapsed, connected, flushState]);
+  }, [chat, model, collapsedAll, activeNb, connected, flushState]);
 
-  /* ---------- Dokument committen (genau 1 Commit pro Änderung) ---------- */
+  /* ---------- Notizbuch committen (genau 1 Commit pro Änderung) ---------- */
   // Liefert true bei Erfolg. Bei SHA-Konflikt: Remote-Stand laden, Nutzer
   // informieren, nichts überschreiben (Eingabe bleibt beim Aufrufer erhalten).
-  const commitDoc = useCallback(async (cfg, newText, message) => {
+  const commitDocNb = useCallback(async (cfg, nbId, newText, message) => {
+    const nb = notebooksRef.current.find((n) => n.id === nbId);
+    if (!nb) return false;
     setSaveState("saving");
     try {
-      const put = await ghPutFile(cfg, DOC_PATH, utf8ToB64(newText), message, docSha.current || undefined);
-      docSha.current = put.sha;
-      setMeta((m) => ({ count: (m.count || 0) + 1, lastTs: Date.now() }));
+      const put = await ghPutFile(cfg, nb.path, utf8ToB64(newText), message, docShas.current[nbId] || undefined);
+      docShas.current[nbId] = put.sha;
+      docCache.current[nbId] = newText;
+      if (nbId === activeNbRef.current) {
+        setMeta((m) => ({ count: (m.count || 0) + 1, lastTs: Date.now() }));
+      }
       setSaveState("saved");
       setStorageError(null);
       return true;
     } catch (e) {
       if (e instanceof ShaConflictError) {
         try {
-          const f = await ghGetFile(cfg, DOC_PATH);
-          if (f) { docSha.current = f.sha; setDoc(f.text); }
-          refreshMeta(cfg);
+          const f = await ghGetFile(cfg, nb.path);
+          if (f) {
+            docShas.current[nbId] = f.sha;
+            docCache.current[nbId] = f.text;
+            if (nbId === activeNbRef.current) setDoc(f.text);
+          }
+          refreshMeta(cfg, nb.path);
         } catch (e2) { /* Reload fehlgeschlagen – Banner reicht */ }
         setSaveState("saved");
         setBanner({
           kind: "warn",
-          text: "Die Wissensbasis wurde zwischenzeitlich auf einem anderen Gerät geändert. " +
+          text: "Das Notizbuch „" + nb.name + "“ wurde zwischenzeitlich auf einem anderen Gerät geändert. " +
             "Der neue Stand wurde geladen, deine Änderung wurde NICHT gespeichert – bitte noch einmal auslösen.",
         });
         return false;
@@ -364,14 +463,41 @@ export default function NotizbuchApp() {
       if (Date.now() - lastRefresh.current < 15000) return;
       lastRefresh.current = Date.now();
       try {
-        const f = await ghGetFile(cfg, DOC_PATH);
-        if (f && f.sha !== docSha.current) {
-          docSha.current = f.sha;
-          setDoc(f.text);
-          refreshMeta(cfg);
+        // Alle Notizbuch-Dateien nachziehen: neue entdecken, geänderte laden.
+        const entries = [{ id: ROOT_NB_ID, path: "wissensbasis.md", sha: null }];
+        const nbFiles = await ghListDir(cfg, "notizbuecher");
+        for (const f of nbFiles) {
+          const m = /^([a-z0-9-]+)\.md$/i.exec(f.name);
+          if (m && m[1].toLowerCase() !== ROOT_NB_ID) {
+            entries.push({ id: m[1].toLowerCase(), path: f.path, sha: f.sha });
+          }
         }
+        let nbsChanged = false;
+        const nbs = [...notebooksRef.current];
+        for (const en of entries) {
+          // Läuft gerade ein Senden/Bearbeiten los, mitten im Refresh abbrechen,
+          // damit docCache/docShas nicht unter einem laufenden Commit mutieren.
+          if (busyRef.current || editingRef.current) return;
+          const cur = docShas.current[en.id];
+          if (en.sha && en.sha === cur) continue; // Blob-SHA unverändert
+          const f = await ghGetFile(cfg, en.path);
+          if (!f || f.sha === cur) continue;
+          docShas.current[en.id] = f.sha;
+          docCache.current[en.id] = f.text;
+          const name = nameFromDoc(f.text, en.id);
+          const i = nbs.findIndex((n) => n.id === en.id);
+          if (i === -1) { nbs.push({ id: en.id, path: en.path, name }); nbsChanged = true; }
+          else if (nbs[i].name !== name) { nbs[i] = { ...nbs[i], name }; nbsChanged = true; }
+          if (en.id === activeNbRef.current) {
+            setDoc(f.text);
+            refreshMeta(cfg, en.path);
+          }
+        }
+        if (nbsChanged) { setNotebooks(nbs); notebooksRef.current = nbs; }
+
         // Chat/Modell/Klappzustände nur übernehmen, wenn lokal weder eine
-        // Speicherung geplant ist noch gerade eine läuft
+        // Speicherung geplant ist noch gerade eine läuft. Das aktive
+        // Notizbuch bleibt lokal (kein Überraschungs-Wechsel beim Fokus).
         if (!stateTimer.current && !stateFlushing.current) {
           const st = await ghGetFile(cfg, STATE_PATH);
           if (st && st.sha !== stateSha.current) {
@@ -381,11 +507,17 @@ export default function NotizbuchApp() {
               const nChat = Array.isArray(data.chat) && data.chat.length ? data.chat : [WELCOME];
               const nModel = typeof data.model === "string" && MODELS.some((x) => x.id === data.model)
                 ? data.model : stateRef.current.model;
-              const nCollapsed = data.collapsed && typeof data.collapsed === "object" ? data.collapsed : {};
-              lastSavedState.current = serializeState(nChat, nModel, nCollapsed);
+              let nCollapsedAll = {};
+              if (data.collapsed && typeof data.collapsed === "object") {
+                const keys = Object.keys(data.collapsed);
+                nCollapsedAll = keys.length && keys.every((k) => k.startsWith("s:"))
+                  ? { [ROOT_NB_ID]: data.collapsed }
+                  : data.collapsed;
+              }
+              lastSavedState.current = serializeState(nChat, nModel, nCollapsedAll, activeNbRef.current);
               setChat(nChat);
               setModel(nModel);
-              setCollapsed(nCollapsed);
+              setCollapsedAll(nCollapsedAll);
             } catch (e) { /* defekter State – ignorieren */ }
           }
         }
@@ -466,7 +598,11 @@ export default function NotizbuchApp() {
       const imgParts = img ? dataUrlParts(img.dataUrl) : null;
       if (img && !imgParts) throw new Error("Bilddaten unlesbar");
 
-      const res = await callClaude(cfg.apiKey, text, doc, chat, model, img, imgId);
+      const nbCtx = {
+        notebooks: notebooksRef.current.map((n) => ({ name: n.name, doc: docCache.current[n.id] || "" })),
+        activeName: activeNotebook().name,
+      };
+      const res = await callClaude(cfg.apiKey, text, nbCtx, chat, model, img, imgId);
 
       // Bild erst nach erfolgreicher Antwort als Datei ins Daten-Repo legen
       // (keine verwaisten Dateien bei API-Fehlern), aber vor dem Dokument-
@@ -477,54 +613,99 @@ export default function NotizbuchApp() {
         imgIndex.current[imgId] = path;
       }
 
-      let newDoc = doc;
       let commit = null;
 
       if (res.ops.length) {
-        const applied = applyOps(doc, res.ops);
-        if (applied !== doc) {
-          commit = res.commit || "Aktualisierung";
-          const ok = await commitDoc(cfg, applied, commit);
-          if (!ok) {
-            // SHA-Konflikt: Remote-Stand ist bereits geladen, Eingabe zurückgeben
-            // (ohne eine inzwischen neu getippte Eingabe zu überschreiben).
+        // Ops nach Ziel-Notizbuch gruppieren (Default und unbekannte Namen → aktives)
+        const byName = new Map(notebooksRef.current.map((n) => [n.name.trim().toLowerCase(), n]));
+        const groups = new Map();
+        for (const op of res.ops) {
+          const target =
+            (op && typeof op.notebook === "string" && byName.get(op.notebook.trim().toLowerCase())) ||
+            activeNotebook();
+          if (!groups.has(target.id)) groups.set(target.id, []);
+          groups.get(target.id).push(op);
+        }
+
+        const changed = []; // { id, name, ops }
+        let conflict = false;
+        for (const [nbId, ops] of groups) {
+          const before = docCache.current[nbId] || "";
+          const applied = applyOps(before, ops);
+          if (applied === before) continue;
+          const nb = notebooksRef.current.find((n) => n.id === nbId);
+          const ok = await commitDocNb(cfg, nbId, applied, res.commit || "Aktualisierung");
+          if (!ok) { conflict = true; break; }
+          changed.push({ id: nbId, name: nb ? nb.name : nbId, ops });
+        }
+        if (conflict) {
+          // SHA-Konflikt. Achtung: vorherige Notizbücher der Schleife können
+          // bereits committet sein – Teilerfolg ehrlich abbilden, damit ein
+          // erneutes Senden keine Dubletten erzeugt.
+          if (changed.some((c) => c.id === activeNbRef.current)) {
+            setDoc(docCache.current[activeNbRef.current]);
+          }
+          if (!changed.length) {
             setInput((prev) => (prev.trim() ? prev : text));
             if (img) setPendingImg((prev) => prev || img);
-            const aMsg = {
-              role: "assistant",
-              error: true,
-              ts: Date.now(),
-              text:
-                "Die Wissensbasis wurde zwischenzeitlich auf einem anderen Gerät geändert – " +
+          }
+          const saved = changed.map((c) => c.name);
+          const aMsg = {
+            role: "assistant",
+            error: true,
+            ts: Date.now(),
+            text: saved.length
+              ? "Teilweise gespeichert (" + saved.join(", ") + "). Ein weiteres Notizbuch wurde " +
+                "parallel geändert und NICHT gespeichert – bitte nur den fehlenden Teil neu erfassen " +
+                "(nicht die ganze Nachricht erneut senden, sonst entstehen Dubletten)."
+              : "Ein Notizbuch wurde zwischenzeitlich auf einem anderen Gerät geändert – " +
                 "ich habe den neuen Stand geladen und nichts überschrieben. " +
                 "Deine Nachricht steht wieder im Eingabefeld, bitte einfach noch einmal senden.",
-            };
-            setChat([...chatWithUser, aMsg].slice(-80));
-            return;
-          }
-          newDoc = applied;
+          };
+          setChat([...chatWithUser, aMsg].slice(-80));
+          return;
+        }
 
-          // Betroffene Abschnitte automatisch aufklappen
-          const touched = res.ops.map((o) => dispHead(o.heading)).filter(Boolean);
-          if (touched.length && Object.keys(collapsed).length) {
-            const nc = { ...collapsed };
-            let hit = false;
-            Object.keys(nc).forEach((k) => {
-              const path = k.slice(2); // "s:" abschneiden
-              if (touched.some((t) => path === t || path.startsWith(t + "/"))) {
-                delete nc[k];
-                hit = true;
-              }
+        if (changed.length) {
+          const msg = res.commit || "Aktualisierung";
+          commit = changed.length === 1 && changed[0].id === activeNbRef.current
+            ? msg
+            : changed.map((c) => c.name).join(", ") + " · " + msg;
+
+          // Betroffene Abschnitte je Notizbuch automatisch aufklappen
+          for (const ch of changed) {
+            const touched = ch.ops.map((o) => dispHead(o.heading)).filter(Boolean);
+            if (!touched.length) continue;
+            setCollapsedAll((prev) => {
+              const cur = prev[ch.id];
+              if (!cur || !Object.keys(cur).length) return prev;
+              const nc = { ...cur };
+              let hit = false;
+              Object.keys(nc).forEach((k) => {
+                const path = k.slice(2); // "s:" abschneiden
+                if (touched.some((t) => path === t || path.startsWith(t + "/"))) {
+                  delete nc[k];
+                  hit = true;
+                }
+              });
+              return hit ? { ...prev, [ch.id]: nc } : prev;
             });
-            if (hit) setCollapsed(nc);
+          }
+
+          // Auto-Wechsel (Nutzerwunsch): Landet der Inhalt in einem anderen
+          // Notizbuch und nicht auch im aktiven, dorthin springen.
+          const activeChanged = changed.some((c) => c.id === activeNbRef.current);
+          const others = changed.filter((c) => c.id !== activeNbRef.current);
+          if (others.length && !activeChanged) {
+            switchNotebook(others[0].id);
+          } else if (activeChanged) {
+            setDoc(docCache.current[activeNbRef.current]);
           }
         }
       }
 
       const aMsg = { role: "assistant", text: res.reply, ts: Date.now(), commit };
       const finalChat = [...chatWithUser, aMsg].slice(-80);
-
-      setDoc(newDoc);
       setChat(finalChat);
       if (commit && view === "chat") setNotesDirty(true);
     } catch (e) {
@@ -550,14 +731,67 @@ export default function NotizbuchApp() {
     }
   };
 
-  /* ---------- Zuklappen ---------- */
+  /* ---------- Zuklappen (pro Notizbuch) ---------- */
   const toggleCollapse = (key) => {
-    setCollapsed((prev) => {
-      const n = { ...prev };
-      if (n[key]) delete n[key];
-      else n[key] = true;
-      return n;
+    setCollapsedAll((prev) => {
+      const id = activeNbRef.current;
+      const cur = { ...(prev[id] || {}) };
+      if (cur[key]) delete cur[key];
+      else cur[key] = true;
+      return { ...prev, [id]: cur };
     });
+  };
+
+  /* ---------- Notizbuch wechseln / anlegen ---------- */
+  const switchNotebook = (id) => {
+    if (editingRef.current || id === activeNbRef.current) return;
+    const nb = notebooksRef.current.find((n) => n.id === id);
+    if (!nb) return;
+    setActiveNb(id);
+    activeNbRef.current = id;
+    setDoc(docCache.current[id] ?? INITIAL_DOC);
+    setActiveSec(0);
+    setExpanded(null);
+    setExpandedData(null);
+    if (settingsRef.current && connectedRef.current) refreshMeta(settingsRef.current, nb.path);
+  };
+
+  const createNotebook = async (rawName) => {
+    const name = String(rawName || "").trim();
+    if (!name) { setNbError("Bitte einen Namen eingeben."); return; }
+    if (!connectedRef.current || !settingsRef.current) {
+      setNbError("Bitte zuerst in den Einstellungen verbinden.");
+      return;
+    }
+    if (notebooksRef.current.some((n) => n.name.trim().toLowerCase() === name.toLowerCase())) {
+      setNbError("Es gibt bereits ein Notizbuch mit diesem Namen.");
+      return;
+    }
+    let id = slugify(name);
+    while (id === ROOT_NB_ID || notebooksRef.current.some((n) => n.id === id)) id += "-2";
+    const path = "notizbuecher/" + id + ".md";
+    setCreatingNb(true);
+    setNbError(null);
+    try {
+      const init = initialDocFor(name);
+      const put = await ghPutFile(settingsRef.current, path, utf8ToB64(init), "Notizbuch „" + name + "“ angelegt");
+      docCache.current[id] = init;
+      docShas.current[id] = put.sha;
+      const nbs = [...notebooksRef.current, { id, path, name }];
+      setNotebooks(nbs);
+      notebooksRef.current = nbs;
+      setActiveNb(id);
+      activeNbRef.current = id;
+      setDoc(init);
+      setActiveSec(0);
+      setMeta({ count: 1, lastTs: Date.now() });
+      setShowNewNb(false);
+      setNewNbName("");
+    } catch (e) {
+      setNbError(e && e.message ? e.message : String(e));
+    } finally {
+      setCreatingNb(false);
+    }
   };
 
   /* ---------- Checklisten: Abhaken direkt in der Ansicht ---------- */
@@ -565,13 +799,15 @@ export default function NotizbuchApp() {
   // Schnelle Folge-Klicks werden über eine Kette serialisiert, damit
   // jeder Commit mit der dann aktuellen SHA läuft.
   const toggleTask = (lineIdx, checked) => {
-    const lines = docRef.current.split("\n");
+    const nbId = activeNbRef.current;
+    const lines = (docCache.current[nbId] ?? docRef.current).split("\n");
     const m = TASK_RE.exec(lines[lineIdx] || "");
     if (!m) return;
     lines[lineIdx] = m[1] + (checked ? "x" : " ") + m[3] + m[4];
     const newText = lines.join("\n");
+    docCache.current[nbId] = newText;
     docRef.current = newText;
-    setDoc(newText);
+    if (nbId === activeNbRef.current) setDoc(newText);
     if (connected && settingsRef.current) {
       const label = m[4].replace(/<[^>]+>/g, "").replace(/[*_~`]/g, "").trim().slice(0, 40);
       const msg = (checked ? "Erledigt: " : "Wieder offen: ") + (label || "Aufgabe");
@@ -582,7 +818,7 @@ export default function NotizbuchApp() {
           // Nach einem SHA-Konflikt basieren bereits eingereihte Commits auf
           // einem verworfenen Stand – nicht mehr schreiben (Schutz bleibt intakt).
           if (taskEpoch.current !== epoch) return;
-          const ok = await commitDoc(cfg, newText, msg);
+          const ok = await commitDocNb(cfg, nbId, newText, msg);
           if (!ok) taskEpoch.current++;
         })
         .catch(() => {});
@@ -599,10 +835,10 @@ export default function NotizbuchApp() {
   }, [layout]);
   useEffect(() => {
     const t = setTimeout(() => {
-      try { localStorage.setItem(QUICKNOTES_KEY, JSON.stringify(quickNotes)); } catch (e) { /* egal */ }
+      try { localStorage.setItem(QUICKNOTES_KEY, JSON.stringify(quickNotesAll)); } catch (e) { /* egal */ }
     }, 300);
     return () => clearTimeout(t);
-  }, [quickNotes]);
+  }, [quickNotesAll]);
 
   // Splitter: kind "chat" = Grenze Chat/Dokument (Prozent),
   // kind "nav" = Grenze Dokument/Abschnittsleiste (Pixel von rechts).
@@ -632,24 +868,41 @@ export default function NotizbuchApp() {
     handle.addEventListener("pointercancel", up);
   };
 
-  /* ---------- Schnellnotizen (Post-its) ---------- */
+  /* ---------- Schnellnotizen (Post-its, pro Notizbuch) ---------- */
   const addQuickNote = () => {
-    const n = quickNotes.length;
-    setQuickNotes((prev) => [...prev, {
-      id: newImgId(),
-      text: "",
-      x: 90 + (n % 5) * 32,
-      y: 90 + (n % 5) * 32,
-      w: 260,
-      h: 200,
-    }]);
+    const nbId = activeNbRef.current;
+    setQuickNotesAll((prev) => {
+      const cur = prev[nbId] || [];
+      const n = cur.length;
+      return {
+        ...prev,
+        [nbId]: [...cur, {
+          id: newImgId(),
+          text: "",
+          x: 90 + (n % 5) * 32,
+          y: 90 + (n % 5) * 32,
+          w: 260,
+          h: 200,
+        }],
+      };
+    });
   };
 
-  const updateQuickNote = (id, patch) =>
-    setQuickNotes((prev) => prev.map((q) => (q.id === id ? { ...q, ...patch } : q)));
+  const updateQuickNote = (id, patch) => {
+    const nbId = activeNbRef.current;
+    setQuickNotesAll((prev) => ({
+      ...prev,
+      [nbId]: (prev[nbId] || []).map((q) => (q.id === id ? { ...q, ...patch } : q)),
+    }));
+  };
 
-  const removeQuickNote = (id) =>
-    setQuickNotes((prev) => prev.filter((q) => q.id !== id));
+  const removeQuickNote = (id) => {
+    const nbId = activeNbRef.current;
+    setQuickNotesAll((prev) => ({
+      ...prev,
+      [nbId]: (prev[nbId] || []).filter((q) => q.id !== id),
+    }));
+  };
 
   // OK: Inhalt in den Prompt übernehmen, Notiz löschen.
   const submitQuickNote = (id) => {
@@ -667,11 +920,13 @@ export default function NotizbuchApp() {
   const sections = useMemo(() => parseTree(doc).sections, [doc]);
 
   const gotoSection = (si, title) => {
-    setCollapsed((prev) => {
-      if (!prev["s:" + title]) return prev;
-      const n = { ...prev };
+    setCollapsedAll((prev) => {
+      const id = activeNbRef.current;
+      const cur = prev[id];
+      if (!cur || !cur["s:" + title]) return prev;
+      const n = { ...cur };
       delete n["s:" + title];
-      return n;
+      return { ...prev, [id]: n };
     });
     setActiveSec(si);
     // Synchron scrollen: Das Aufklappen des Ziel-Abschnitts verschiebt dessen
@@ -722,21 +977,26 @@ export default function NotizbuchApp() {
       }
     } catch (e) { /* Diff ist optional */ }
     if (diffText.length > 8000) diffText = ""; // Token-Deckel bei Großumbauten
+    const nb = activeNotebook();
     const trigger =
-      "[Systemhinweis: Der Nutzer hat die Wissensbasis soeben MANUELL bearbeitet, " +
+      "[Systemhinweis: Der Nutzer hat das Notizbuch „" + nb.name + "“ soeben MANUELL bearbeitet, " +
       "nicht über den Chat. Der neue Stand steht bereits oben im Dokument und ist so gewollt.\n" +
       (diffText
         ? "Diff der Änderung:\n" + diffText + "\n\n"
         : "Die Änderung ist umfangreich (kein kompakter Diff verfügbar) – prüfe das Gesamtdokument.\n\n") +
-      "Prüfe die Änderung im Kontext des Gesamtdokuments gemäß deiner Aufgabe 3 " +
+      "Prüfe die Änderung im Kontext ALLER Notizbücher gemäß deiner Aufgabe 3 " +
       "(Verbindungen, Widersprüche, Dubletten, Lücken, nächste Schritte, verletzte Konventionen). " +
       "Fällt dir etwas Nennenswertes auf, melde es kurz in reply. " +
       "Fällt dir NICHTS Nennenswertes auf, antworte in reply exakt mit \"##OK##\" und sonst nichts. " +
-      "Lass ops in jedem Fall leer und commit null – das Dokument darf durch diese Prüfung nicht verändert werden.]";
+      "Lass ops in jedem Fall leer und commit null – kein Notizbuch darf durch diese Prüfung verändert werden.]";
     setBusy(true);
     setBusyLabel("prüft die Änderung …");
     try {
-      const res = await callClaude(cfg.apiKey, trigger, newDoc, stateRef.current.chat, model, null, null);
+      const nbCtx = {
+        notebooks: notebooksRef.current.map((n) => ({ name: n.name, doc: docCache.current[n.id] || "" })),
+        activeName: nb.name,
+      };
+      const res = await callClaude(cfg.apiKey, trigger, nbCtx, stateRef.current.chat, model, null, null);
       const reply = (res.reply || "").trim();
       // Sentinel bevorzugt; zusätzlich häufige „nichts zu melden“-Floskeln abfangen.
       const norm = reply.toLowerCase().replace(/[#.!,\s]/g, "");
@@ -745,7 +1005,7 @@ export default function NotizbuchApp() {
       if (!nothing) {
         // ops werden hier bewusst NIE angewendet – reine Rückmeldung.
         setChat((prev) => [...prev,
-          { role: "user", info: true, ts: Date.now(), text: "Wissensbasis manuell bearbeitet" },
+          { role: "user", info: true, ts: Date.now(), text: "Notizbuch „" + nb.name + "“ manuell bearbeitet" },
           { role: "assistant", ts: Date.now(), text: reply },
         ].slice(-80));
         if (viewRef.current !== "chat") setChatDirty(true);
@@ -767,12 +1027,14 @@ export default function NotizbuchApp() {
     const cleaned = md.trim() ? md.replace(/\n{3,}/g, "\n\n").trim() + "\n" : INITIAL_DOC;
     if (cleaned !== doc) {
       const oldDoc = doc;
+      const nbId = activeNbRef.current;
       setSavingEdit(true);
       try {
         if (connected && settingsRef.current) {
-          const ok = await commitDoc(settingsRef.current, cleaned, "Manuelle Bearbeitung");
+          const ok = await commitDocNb(settingsRef.current, nbId, cleaned, "Manuelle Bearbeitung");
           if (!ok) return; // Konflikt: Editor offen lassen, Inhalt bleibt erhalten
         }
+        docCache.current[nbId] = cleaned;
         setDoc(cleaned);
       } finally {
         setSavingEdit(false);
@@ -792,17 +1054,19 @@ export default function NotizbuchApp() {
     setHistoryError(null);
     if (!connected || !settingsRef.current) { setHistory([]); return; }
     setHistoryLoading(true);
-    ghListCommits(settingsRef.current, DOC_PATH, 30)
+    ghListCommits(settingsRef.current, activeNotebook().path, 30)
       .then((list) => setHistory(list))
       .catch((e) => setHistoryError(e && e.message ? e.message : String(e)))
       .finally(() => setHistoryLoading(false));
   };
 
   const loadVersion = async (sha) => {
-    if (versionCache.current.has(sha)) return versionCache.current.get(sha);
-    const f = await ghGetFile(settingsRef.current, DOC_PATH, sha);
+    const path = activeNotebook().path;
+    const key = path + "@" + sha;
+    if (versionCache.current.has(key)) return versionCache.current.get(key);
+    const f = await ghGetFile(settingsRef.current, path, sha);
     const text = f ? f.text : null; // null: Datei existierte in diesem Stand noch nicht
-    versionCache.current.set(sha, text);
+    versionCache.current.set(key, text);
     return text;
   };
 
@@ -821,9 +1085,10 @@ export default function NotizbuchApp() {
 
   // Wiederherstellen = alten Stand als NEUEN Commit schreiben (kein Force-Push)
   const restore = async (entry) => {
-    const text = versionCache.current.get(entry.sha);
+    const nb = activeNotebook();
+    const text = versionCache.current.get(nb.path + "@" + entry.sha);
     if (typeof text !== "string" || text === doc) return;
-    const ok = await commitDoc(settingsRef.current, text, "Wiederhergestellt: Stand " + fmtStamp(entry.ts));
+    const ok = await commitDocNb(settingsRef.current, nb.id, text, "Wiederhergestellt: Stand " + fmtStamp(entry.ts));
     if (ok) {
       setDoc(text);
       setShowHistory(false);
@@ -864,7 +1129,17 @@ export default function NotizbuchApp() {
       }
     }
     downloadBlob(
-      JSON.stringify({ v: 1, doc, history: [], chat, model, collapsed, images }, null, 2),
+      JSON.stringify({
+        v: 2,
+        notebooks: notebooksRef.current.map((n) => ({ name: n.name, doc: docCache.current[n.id] || "" })),
+        active: activeNbRef.current,
+        doc, // Kompatibilität zum v1-Format: das aktive Notizbuch
+        history: [],
+        chat,
+        model,
+        collapsed: collapsedAll,
+        images,
+      }, null, 2),
       "application/json",
       "notizbuch-backup-" + new Date().toISOString().slice(0, 10) + ".json"
     );
@@ -896,7 +1171,8 @@ export default function NotizbuchApp() {
   };
 
   const runImport = async (data) => {
-    if (!data || typeof data.doc !== "string" || !data.doc.trim()) {
+    const isV2 = data && Array.isArray(data.notebooks) && data.notebooks.length;
+    if (!isV2 && (!data || typeof data.doc !== "string" || !data.doc.trim())) {
       setBanner({ kind: "warn", text: "Import fehlgeschlagen: Datei enthält kein gültiges Notizbuch-Backup." });
       return;
     }
@@ -906,12 +1182,19 @@ export default function NotizbuchApp() {
     }
     const cfg = settingsRef.current;
 
-    const nd = data.doc;
     const nh = Array.isArray(data.history) ? data.history : [];
     const nc = Array.isArray(data.chat) && data.chat.length ? data.chat.slice(-80) : [WELCOME];
     const nm = typeof data.model === "string" && MODELS.some((x) => x.id === data.model)
       ? data.model : model;
-    const ncol = data.collapsed && typeof data.collapsed === "object" ? data.collapsed : {};
+    // Klappzustände: v2 = Map pro Notizbuch, v1 = flach → Root-Notizbuch
+    // (dorthin geht auch das v1-Dokument)
+    let ncolAll = stateRef.current.collapsedAll || {};
+    if (data.collapsed && typeof data.collapsed === "object") {
+      const keys = Object.keys(data.collapsed);
+      ncolAll = keys.length && keys.every((k) => k.startsWith("s:"))
+        ? { ...ncolAll, [ROOT_NB_ID]: data.collapsed }
+        : data.collapsed;
+    }
     const imgs = data.images && typeof data.images === "object"
       ? Object.entries(data.images).filter(([id, url]) =>
           typeof url === "string" && /^[a-zA-Z0-9]+$/.test(id) && url.startsWith("data:image/"))
@@ -931,16 +1214,38 @@ export default function NotizbuchApp() {
         imgIndex.current[id] = path;
       }
 
-      // 2. Wissensbasis übernehmen
-      setImporting("Wissensbasis wird übertragen …");
-      const ok = await commitDoc(cfg, nd, "Import aus Artifact-Backup");
-      if (!ok) {
-        setImporting(null);
-        setBanner({
-          kind: "warn",
-          text: "Import abgebrochen: Die Wissensbasis wurde parallel geändert. Bitte den Import einfach noch einmal starten (bereits übertragene Bilder werden übersprungen).",
-        });
-        return;
+      // 2. Notizbücher übernehmen
+      if (isV2) {
+        for (const item of data.notebooks) {
+          if (!item || typeof item.doc !== "string" || !item.doc.trim()) continue;
+          const nm2 = typeof item.name === "string" && item.name.trim() ? item.name.trim() : "Wissensbasis";
+          setImporting("Notizbuch „" + nm2 + "“ wird übertragen …");
+          let nb = notebooksRef.current.find((n) => n.name.trim().toLowerCase() === nm2.toLowerCase());
+          if (!nb) {
+            let id = slugify(nm2);
+            while (id === ROOT_NB_ID || notebooksRef.current.some((n) => n.id === id)) id += "-2";
+            nb = { id, path: "notizbuecher/" + id + ".md", name: nm2 };
+            const nbs = [...notebooksRef.current, nb];
+            setNotebooks(nbs);
+            notebooksRef.current = nbs;
+          }
+          const ok = await commitDocNb(cfg, nb.id, item.doc, "Import: Notizbuch „" + nm2 + "“");
+          if (!ok) throw new Error("Notizbuch „" + nm2 + "“ wurde parallel geändert – Import bitte erneut starten.");
+        }
+      } else {
+        // v1 (Artifact-Backup): immer ins Root-Notizbuch – das ist die
+        // Fortsetzung der alten Ein-Notizbuch-App, nicht das zufällig aktive.
+        const nb = notebooksRef.current.find((n) => n.id === ROOT_NB_ID) || activeNotebook();
+        setImporting("Notizbuch „" + nb.name + "“ wird übertragen …");
+        const ok = await commitDocNb(cfg, nb.id, data.doc, "Import aus Artifact-Backup");
+        if (!ok) {
+          setImporting(null);
+          setBanner({
+            kind: "warn",
+            text: "Import abgebrochen: Das Notizbuch wurde parallel geändert. Bitte den Import einfach noch einmal starten (bereits übertragene Bilder werden übersprungen).",
+          });
+          return;
+        }
       }
 
       // 3. Alte Artifact-Historie einmalig archivieren
@@ -955,7 +1260,7 @@ export default function NotizbuchApp() {
 
       // 4. Chat, Modell, Klappzustände nach state.json
       setImporting("Chat & Einstellungen werden übertragen …");
-      const payload = serializeState(nc, nm, ncol);
+      const payload = serializeState(nc, nm, ncolAll, activeNbRef.current);
       const curSt = await ghGetFile(cfg, STATE_PATH);
       const putSt = await ghPutFile(cfg, STATE_PATH, utf8ToB64(payload),
         "Import: Chat & Einstellungen", curSt ? curSt.sha : undefined);
@@ -964,17 +1269,17 @@ export default function NotizbuchApp() {
 
       // Lokalen Zustand nachziehen
       failedImgs.current = new Set();
-      setDoc(nd);
+      setDoc(docCache.current[activeNbRef.current] ?? INITIAL_DOC);
       setChat(nc);
       setModel(nm);
-      setCollapsed(ncol);
+      setCollapsedAll(ncolAll);
       setImgMap((prev) => ({ ...prev, ...Object.fromEntries(imgs) }));
       setImporting(null);
       setShowHistory(false);
       setExpanded(null);
       setBanner({
         kind: "info",
-        text: `Import abgeschlossen: Wissensbasis, ${imgs.length} Bild(er), Chat und Einstellungen übertragen` +
+        text: `Import abgeschlossen: ${isV2 ? data.notebooks.length + " Notizbuch/-bücher" : "Wissensbasis"}, ${imgs.length} Bild(er), Chat und Einstellungen übertragen` +
           (nh.length ? ", alte Historie archiviert." : "."),
       });
     } catch (e) {
@@ -998,6 +1303,7 @@ export default function NotizbuchApp() {
   }
 
   const lastStand = meta.lastTs ? fmtStamp(meta.lastTs) : "neu";
+  const activeName = (notebooks.find((n) => n.id === activeNb) || { name: "Wissensbasis" }).name;
   const dotClass =
     saveState === "saving" ? "bg-amber-500 animate-pulse"
     : saveState === "saved" ? "bg-emerald-500"
@@ -1012,8 +1318,30 @@ export default function NotizbuchApp() {
       {/* Kopfzeile */}
       <header className="flex items-center gap-2 px-3 h-14 bg-white border-b border-slate-200">
         <BookOpen size={20} className="text-indigo-700" />
-        <span className="font-semibold tracking-tight">Notizbuch</span>
-        <span className="font-mono text-xs text-slate-400">v4.4</span>
+        {notebooks.length ? (
+          <div className="relative">
+            <select
+              value={activeNb}
+              disabled={editing}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === "__new__") { setNbError(null); setNewNbName(""); setShowNewNb(true); }
+                else switchNotebook(v);
+              }}
+              className="appearance-none font-semibold tracking-tight bg-transparent hover:bg-slate-50 rounded-lg pl-1 pr-6 py-1 max-w-44 truncate"
+              title="Notizbuch wählen"
+            >
+              {notebooks.map((n) => (
+                <option key={n.id} value={n.id}>{n.name}</option>
+              ))}
+              <option value="__new__">＋ Neues Notizbuch …</option>
+            </select>
+            <ChevronDown size={14} className="absolute right-1 top-2.5 text-slate-500 pointer-events-none" />
+          </div>
+        ) : (
+          <span className="font-semibold tracking-tight">Notizbuch</span>
+        )}
+        <span className="font-mono text-xs text-slate-400">v5.0</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -1097,7 +1425,7 @@ export default function NotizbuchApp() {
           className={"relative flex-1 py-1.5 rounded-lg text-sm font-medium " +
             (view === "notes" ? "bg-slate-900 text-white" : "text-slate-600")}
         >
-          Wissensbasis
+          {activeName}
           {notesDirty && view !== "notes" && (
             <span className="absolute top-1 right-3 w-2 h-2 bg-indigo-600 rounded-full" />
           )}
@@ -1236,7 +1564,7 @@ export default function NotizbuchApp() {
           {/* Aktenkopf */}
           <div className="flex items-center gap-2 px-4 pt-4 pb-2">
             <div className="flex flex-col">
-              <span className="text-xs tracking-widest uppercase text-slate-500">Wissensbasis</span>
+              <span className="text-xs tracking-widest uppercase text-slate-500 truncate max-w-56">{activeName}</span>
               <span className="font-mono text-xs text-slate-400">Stand {lastStand} · {meta.count} Versionen</span>
             </div>
             <div className="flex-1" />
@@ -1488,6 +1816,60 @@ export default function NotizbuchApp() {
           <div className="bg-white rounded-2xl shadow-xl px-6 py-5 flex items-center gap-3">
             <Loader2 size={18} className="animate-spin text-indigo-700" />
             <span className="text-sm text-slate-700">{importing}</span>
+          </div>
+        </div>
+      )}
+
+      {/* ---------------- Neues Notizbuch ---------------- */}
+      {showNewNb && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0"
+            style={{ backgroundColor: "rgba(15,23,42,0.45)" }}
+            onClick={() => setShowNewNb(false)}
+          />
+          <div className="relative bg-white w-full max-w-sm rounded-2xl shadow-xl p-4">
+            <div className="flex items-center gap-2 mb-3">
+              <BookOpen size={16} className="text-indigo-700" />
+              <span className="font-semibold">Neues Notizbuch</span>
+              <div className="flex-1" />
+              <button onClick={() => setShowNewNb(false)}
+                className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100">
+                <X size={16} />
+              </button>
+            </div>
+            <form onSubmit={(e) => { e.preventDefault(); createNotebook(newNbName); }}>
+              <label className="block text-xs font-medium text-slate-600 mb-1">
+                Eindeutiger Name
+              </label>
+              <input
+                autoFocus
+                value={newNbName}
+                onChange={(e) => setNewNbName(e.target.value)}
+                placeholder="z. B. Kochrezepte"
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-800"
+              />
+              {nbError && (
+                <div className="mt-2 px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800">
+                  {nbError}
+                </div>
+              )}
+              <div className="mt-3 flex items-center gap-2">
+                <button
+                  type="submit"
+                  disabled={creatingNb || !newNbName.trim()}
+                  className={"inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-700 text-white text-sm font-medium " +
+                    (creatingNb || !newNbName.trim() ? "opacity-40" : "hover:bg-indigo-800")}
+                >
+                  {creatingNb ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+                  {creatingNb ? "Lege an …" : "Anlegen"}
+                </button>
+                <button type="button" onClick={() => setShowNewNb(false)}
+                  className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-sm hover:bg-slate-50">
+                  Abbrechen
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

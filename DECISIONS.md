@@ -124,3 +124,26 @@ aus `referenz-app.jsx` übernommen.
     Zusätzlich wurde Aufgabe 3 des System-Prompts geschärft („sobald etwas
     auffällt, sofort melden – aber nichts erzwingen“) und das Antwortlimit
     für Hinweise von ~100 auf ~200 Wörter angehoben.
+
+21. **Multi-Notizbuch** (v5.0, Nutzerwunsch): Mehrere Notizbücher als je eine
+    Markdown-Datei. Kompatibilität: das bestehende `wissensbasis.md` bleibt
+    das Root-Notizbuch, weitere liegen unter `notizbuecher/<slug>.md`.
+    Der **Name ist die H1-Titelzeile der Datei** – die Registry wird beim
+    Verbinden aus den Dateien abgeleitet (selbstheilend, auch wenn ein altes
+    Gerät state.json im v1-Format überschreibt). `state.json` (v2) speichert
+    nur noch aktives Notizbuch, Chat (global, ein Verlauf über alle
+    Notizbücher), Modell und Klappzustände pro Notizbuch. Jeder KI-Aufruf
+    bekommt ALLE Notizbücher als Kontext; ops tragen ein optionales
+    `notebook`-Feld (Default: aktiv, unbekannte Namen fallen aufs aktive
+    zurück). Landet Inhalt ausschließlich in einem anderen Notizbuch,
+    wechselt die App automatisch dorthin; ändert sich (auch) das aktive,
+    bleibt sie stehen. Pro geändertem Notizbuch entsteht ein eigener Commit;
+    der Commit-Stempel im Chat nennt fremde Notizbücher beim Namen.
+    Schnellnotizen und Klappzustände sind notizbuch-spezifisch; Bilder werden
+    weiter geteilt in `bilder/` abgelegt. Umbenennen/Löschen von Notizbüchern
+    ist bewusst noch nicht in der UI (Umweg: Datei im Daten-Repo umbenennen
+    bzw. löschen – die App entdeckt es beim nächsten Verbinden).
+    Backup-Export ist jetzt v2 (alle Notizbücher); der Import versteht v1
+    (Artifact, ins aktive Notizbuch) und v2 (Abgleich über Namen).
+    Der Fokus-Refresh lässt das aktive Notizbuch bewusst lokal (kein
+    Überraschungs-Wechsel durch andere Geräte).
