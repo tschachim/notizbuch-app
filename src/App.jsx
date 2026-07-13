@@ -358,9 +358,17 @@ export default function NotizbuchApp() {
       const kIdx = {};
       await Promise.all(nbs.map(async (nb) => {
         const kFiles = await ghListDir(cfg, knowledgeDir(nb.id));
+        const names = new Set(kFiles.map((f) => f.name));
         const items = kFiles
           .filter((f) => !isExtractPath(f.name))
           .map((f) => ({ name: f.name, path: f.path, extractPath: extractPathFor(f.path) }));
+        // Extrakt-only-Dateien (Original war über 25 MB und wurde nicht
+        // gespeichert): am Extrakt erkennen, dem kein Original gegenübersteht.
+        for (const f of kFiles) {
+          if (!isExtractPath(f.name)) continue;
+          const orig = f.name.replace(/\.extrakt\.md$/i, "");
+          if (!names.has(orig)) items.push({ name: orig, path: null, extractPath: f.path });
+        }
         if (items.length) kIdx[nb.id] = items;
       }));
       knowledgeIndex.current = kIdx;
@@ -1000,11 +1008,16 @@ export default function NotizbuchApp() {
     const cfg = settingsRef.current;
     const nbId = activeNbRef.current;
     const errors = [];
+    const notes = []; // Erfolgs-Hinweise (z. B. „nur Extrakt gespeichert“)
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       const step = `(${i + 1}/${files.length})`;
       try {
-        if (file.size > 25 * 1024 * 1024) throw new Error("größer als 25 MB");
+        if (file.size > 80 * 1024 * 1024) throw new Error("größer als 80 MB");
+        // Über 25 MB wird nur der Text-Extrakt gespeichert: ein so großes
+        // Original per Base64-PUT ist browserseitig fragil, und in Prompts
+        // geht ohnehin nie das Original, nur der Extrakt.
+        const extractOnly = file.size > 25 * 1024 * 1024;
         const name = safeFileName(file.name);
         if ((knowledgeIndex.current[nbId] || []).some((it) => it.name === name)) {
           throw new Error("Datei mit diesem Namen existiert bereits – erst löschen");
@@ -1013,20 +1026,27 @@ export default function NotizbuchApp() {
         const text = await extractText(file);
         const path = knowledgeDir(nbId) + "/" + name;
         const extractPath = extractPathFor(path);
-        setKnowledgeBusy(`${file.name}: Original wird hochgeladen … ${step}`);
-        const putOrig = await ghPutFile(cfg, path, await fileToBase64(file), "Wissen: " + name + " hinzugefügt");
-        setKnowledgeBusy(`${file.name}: Extrakt wird hochgeladen … ${step}`);
-        try {
-          await ghPutFile(cfg, extractPath, utf8ToB64(text), "Wissen: Extrakt zu " + name);
-        } catch (e) {
-          // Kein Original ohne Extrakt zurücklassen (wäre eine stumme Waise)
-          try { await ghDeleteFile(cfg, path, "Wissen: Upload zurückgerollt (" + name + ")", putOrig.sha); } catch (e2) { /* best effort */ }
-          throw e;
+        if (extractOnly) {
+          setKnowledgeBusy(`${file.name}: Extrakt wird hochgeladen … ${step}`);
+          await ghPutFile(cfg, extractPath, utf8ToB64(text),
+            "Wissen: Extrakt zu " + name + " (Original über 25 MB, nicht gespeichert)");
+          notes.push(file.name + ": nur der Text-Extrakt wurde gespeichert (Original über 25 MB)");
+        } else {
+          setKnowledgeBusy(`${file.name}: Original wird hochgeladen … ${step}`);
+          const putOrig = await ghPutFile(cfg, path, await fileToBase64(file), "Wissen: " + name + " hinzugefügt");
+          setKnowledgeBusy(`${file.name}: Extrakt wird hochgeladen … ${step}`);
+          try {
+            await ghPutFile(cfg, extractPath, utf8ToB64(text), "Wissen: Extrakt zu " + name);
+          } catch (e) {
+            // Kein Original ohne Extrakt zurücklassen (wäre eine stumme Waise)
+            try { await ghDeleteFile(cfg, path, "Wissen: Upload zurückgerollt (" + name + ")", putOrig.sha); } catch (e2) { /* best effort */ }
+            throw e;
+          }
         }
         knowledgeTexts.current[extractPath] = text;
         knowledgeIndex.current = {
           ...knowledgeIndex.current,
-          [nbId]: [...(knowledgeIndex.current[nbId] || []), { name, path, extractPath }],
+          [nbId]: [...(knowledgeIndex.current[nbId] || []), { name, path: extractOnly ? null : path, extractPath }],
         };
       } catch (e) {
         errors.push(file.name + ": " + (e && e.message ? e.message : e));
@@ -1036,6 +1056,8 @@ export default function NotizbuchApp() {
     setKnowledgeVersion((v) => v + 1);
     if (errors.length) {
       setBanner({ kind: "warn", text: "Wissen-Upload teilweise fehlgeschlagen – " + errors.join("; ") });
+    } else if (notes.length) {
+      setBanner({ kind: "ok", text: notes.join("; ") });
     }
   };
 
@@ -1055,11 +1077,11 @@ export default function NotizbuchApp() {
         await ghDeleteFile(cfg, item.extractPath, "Wissen: Extrakt zu " + item.name + " gelöscht", exSha);
         delete knowledgeTexts.current[item.extractPath];
       }
-      const sha = shaFor(item.path);
+      const sha = item.path ? shaFor(item.path) : null; // Extrakt-only: kein Original
       if (sha) await ghDeleteFile(cfg, item.path, "Wissen: " + item.name + " gelöscht", sha);
       knowledgeIndex.current = {
         ...knowledgeIndex.current,
-        [nbId]: (knowledgeIndex.current[nbId] || []).filter((it) => it.path !== item.path),
+        [nbId]: (knowledgeIndex.current[nbId] || []).filter((it) => it.extractPath !== item.extractPath),
       };
       delete knowledgeTexts.current[item.extractPath];
     } catch (e) {
@@ -1894,7 +1916,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v6.7</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v6.8</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -2006,7 +2028,10 @@ export default function NotizbuchApp() {
               <div key={i} className={"flex flex-col " + (m.role === "user" ? "items-end" : "items-start")}>
                 <div
                   className={
-                    "max-w-md px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap break-words " +
+                    // Prozentbreite auf Mobil: die festen 28rem waren breiter
+                    // als der Bildschirm – seit overflow-x-hidden wurde Text
+                    // dann abgeschnitten statt gescrollt (QA-Finding).
+                    "max-w-[88%] sm:max-w-md min-w-0 px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap break-words " +
                     (m.role === "user"
                       ? "bg-slate-800 text-slate-50 rounded-2xl rounded-br-sm"
                       : m.error
@@ -2511,7 +2536,7 @@ export default function NotizbuchApp() {
                 </div>
               )}
               {(knowledgeIndex.current[activeNb] || []).map((item) => (
-                <div key={item.path} className="flex items-center gap-2 px-4 py-2.5">
+                <div key={item.extractPath} className="flex items-center gap-2 px-4 py-2.5">
                   <Paperclip size={14} className="text-slate-400 shrink-0" />
                   <span className="text-sm text-slate-800 flex-1 truncate">{item.name}</span>
                   <button

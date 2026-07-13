@@ -101,6 +101,67 @@ export async function extractText(file) {
   );
 }
 
+/* --- Abruf auf Anfrage für große Extrakte (lookup_wissen) --- */
+
+// PDF-Extrakte bestehen aus "## Seite N"-Blöcken; andere Formate werden als
+// nummerierte Kunst-Blöcke von ~4k Zeichen behandelt, damit Suche und
+// Seitenangaben einheitlich funktionieren.
+export function splitPages(extract) {
+  const text = String(extract || "");
+  const parts = text.split(/\n\n(?=## Seite \d+\n)/);
+  const withNums = parts
+    .map((t) => {
+      const m = /^## Seite (\d+)\n/.exec(t);
+      return m ? { page: parseInt(m[1], 10), text: t } : null;
+    })
+    .filter(Boolean);
+  if (withNums.length > 1) return withNums;
+  const blocks = [];
+  for (let i = 0; i * 4000 < text.length; i++) {
+    blocks.push({ page: i + 1, text: "## Abschnitt " + (i + 1) + "\n\n" + text.slice(i * 4000, (i + 1) * 4000) });
+  }
+  return blocks.length ? blocks : [{ page: 1, text }];
+}
+
+// Gezielter Abruf: Seitenbereich ("120-128" bzw. "42") oder Stichwortsuche.
+// Treffer-Seiten kommen mit ±1 Seite Kontext, in Dokumentreihenfolge,
+// gedeckelt auf maxChars. null, wenn nichts gefunden wurde.
+export function lookupInExtract(extract, { suchbegriffe, seiten } = {}, maxChars = 30000) {
+  const pages = splitPages(extract);
+  let selected = null;
+
+  const range = /^\s*(\d+)\s*(?:[-–]\s*(\d+))?\s*$/.exec(String(seiten || ""));
+  if (range) {
+    const from = parseInt(range[1], 10);
+    const to = range[2] ? parseInt(range[2], 10) : from;
+    selected = pages.filter((p) => p.page >= from && p.page <= to);
+  } else if (typeof suchbegriffe === "string" && suchbegriffe.trim()) {
+    const terms = suchbegriffe.toLowerCase().split(/[\s,;]+/).filter((t) => t.length >= 3);
+    if (!terms.length) return null;
+    const hitIdx = new Set();
+    pages.forEach((p, i) => {
+      const lower = p.text.toLowerCase();
+      if (terms.some((t) => lower.includes(t))) {
+        hitIdx.add(i - 1); hitIdx.add(i); hitIdx.add(i + 1); // ±1 Seite Kontext
+      }
+    });
+    selected = [...hitIdx].filter((i) => i >= 0 && i < pages.length).sort((a, b) => a - b).map((i) => pages[i]);
+  }
+
+  if (!selected || !selected.length) return null;
+  const out = [];
+  let used = 0;
+  for (const p of selected) {
+    if (used + p.text.length > maxChars) {
+      out.push("[… weitere Treffer abgeschnitten – grenze die Suche ein oder fordere einen Seitenbereich an]");
+      break;
+    }
+    out.push(p.text);
+    used += p.text.length + 2;
+  }
+  return out.join("\n\n");
+}
+
 // Datei als Base64 lesen (für den Upload des Originals).
 export const fileToBase64 = (file) =>
   new Promise((res, rej) => {

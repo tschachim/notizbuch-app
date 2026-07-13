@@ -142,6 +142,14 @@ Die .txt enthält einen erfundenen Fakt („Der QA-Kennwert Epsilon beträgt
 7,3“). Frage im Chat: „Wie hoch ist der QA-Kennwert Epsilon?“ Erwartet:
 Antwort nennt 7,3 (kommt nur aus der Wissensdatei).
 
+**F5 [VERBUNDEN][API] Große Wissensdatei per Abruf.** Eine .txt mit
+> 80.000 Zeichen hochladen (per JS generierbar: viele „## Seite N“-Blöcke,
+ein erfundener Fakt auf „Seite 42“: „Der QA-Tiefenwert Zeta beträgt 9,81“).
+Frage: „Wie hoch ist der QA-Tiefenwert Zeta laut der großen Datei?“
+Erwartet: Antwort nennt 9,81 – das Modell muss ihn per lookup_wissen
+geholt haben (die Datei steht nur als Index-Eintrag im Prompt). Datei
+danach löschen.
+
 ## G. Historie & Export
 
 **G1 [VERBUNDEN] Historie ansehen.** Historie-Knopf. Erwartet: Liste

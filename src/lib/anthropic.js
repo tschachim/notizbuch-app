@@ -7,6 +7,7 @@
 /* ------------------------------------------------------------------ */
 
 import { stripCiteTags, citeTagsToDocLinks } from "./citations.jsx";
+import { lookupInExtract } from "./knowledge.js";
 
 export const MODELS = [
   { id: "claude-sonnet-4-6", label: "Sonnet 4.6 · Standard" },
@@ -31,6 +32,12 @@ export function webSearchToolFor(modelId) {
 // (mit Deckeln), fremde Notizbücher nur als Dateiliste.
 const KNOW_PER_FILE_CAP = 80000;
 const KNOW_TOTAL_CAP = 200000;
+// Große Wissensdateien: nur dieser Kopf geht in den Prompt, der Rest wird
+// über lookup_wissen gezielt geholt.
+const KNOW_HEAD_CAP = 2000;
+// Deckel pro lookup_wissen-Ergebnis und Obergrenze für Abruf-Runden
+const LOOKUP_RESULT_CAP = 30000;
+const LOOKUP_MAX_ROUNDS = 4;
 // Dateianhang im Chat: Deckel pro Nachricht
 const FILE_ATTACH_CAP = 80000;
 
@@ -40,13 +47,27 @@ function knowledgeBlock(knowledge, escAttr) {
   let used = 0;
   for (const f of knowledge.activeFiles || []) {
     if (!f || typeof f.text !== "string" || !f.text.trim()) continue;
-    // Ausbruch aus dem Block verhindern (Dateiinhalte sind fremde Quellen)
-    let text = f.text.replace(/<\/wissensdatei/gi, "<\\/wissensdatei");
-    if (text.length > KNOW_PER_FILE_CAP) {
-      text = text.slice(0, KNOW_PER_FILE_CAP) + "\n\n[… gekürzt – Datei ist länger]";
+    if (f.text.length > KNOW_PER_FILE_CAP) {
+      // Große Dateien werden nicht mehr abgeschnitten, sondern als Index-
+      // Eintrag geführt: Umfang + Anfang zur Orientierung; Inhalte holt das
+      // Modell gezielt über das Tool lookup_wissen. Erst slicen, dann
+      // escapen – der Volltext-Escape über ~1 MB wäre pro Aufruf unnötig.
+      const kopf = f.text.slice(0, KNOW_HEAD_CAP).replace(/<\/wissensdatei/gi, "<\\/wissensdatei");
+      const seitenM = f.text.match(/^## Seite \d+$/gm);
+      parts.push(
+        `<wissensdatei name="${escAttr(f.name)}" volltext="nein" zeichen="${f.text.length}"` +
+        (seitenM ? ` seiten="${seitenM.length}"` : "") +
+        `>\n[Zu groß für den Prompt – hole benötigte Inhalte GEZIELT mit dem Tool lookup_wissen ` +
+        `(datei="${escAttr(f.name)}" plus suchbegriffe oder seiten). Zur Orientierung der Anfang:]\n` +
+        kopf + "\n</wissensdatei>"
+      );
+      used += kopf.length;
+      continue;
     }
+    // Ausbruch aus dem Block verhindern (Dateiinhalte sind fremde Quellen)
+    const text = f.text.replace(/<\/wissensdatei/gi, "<\\/wissensdatei");
     if (used + text.length > KNOW_TOTAL_CAP) {
-      parts.push(`<wissensdatei name="${escAttr(f.name)}">\n[nicht geladen – Gesamtumfang des Hintergrundwissens überschritten]\n</wissensdatei>`);
+      parts.push(`<wissensdatei name="${escAttr(f.name)}" volltext="nein">\n[nicht geladen – Gesamtumfang überschritten; Inhalte per lookup_wissen holen]\n</wissensdatei>`);
       continue;
     }
     used += text.length;
@@ -56,8 +77,12 @@ function knowledgeBlock(knowledge, escAttr) {
     .filter((o) => o && Array.isArray(o.files) && o.files.length)
     .map((o) => `- Notizbuch „${o.notebook}“: ${o.files.join(", ")}`);
   if (!parts.length && !others.length) return "";
+  const hasIndexed = parts.some((p) => p.includes('volltext="nein"'));
   return (
     "\n\nHINTERGRUNDWISSEN (hinterlegte Dateien des AKTIVEN Notizbuchs, nutze sie zur Beantwortung und Einordnung):\n" +
+    (hasIndexed
+      ? 'WICHTIG: Dateien mit volltext="nein" sind zu groß für den Prompt. Hole benötigte Inhalte GEZIELT über das Tool lookup_wissen (mehrfach erlaubt), BEVOR du inhaltlich antwortest – rate nicht.\n'
+      : "") +
     (parts.length ? parts.join("\n\n") : "(keine Dateien im aktiven Notizbuch)") +
     (others.length
       ? "\n\nWeitere Wissensdateien existieren in anderen Notizbüchern (hier NICHT geladen – bei Bedarf den Nutzer bitten, dorthin zu wechseln):\n" + others.join("\n")
@@ -203,6 +228,28 @@ export const NOTEBOOK_TOOL = {
       },
     },
     required: ["reply", "ops"],
+  },
+};
+
+// Client-seitiges Abruf-Tool für große Wissensdateien: Das Modell fordert
+// gezielt Inhalte an, die App sucht im lokal gecachten Extrakt und setzt
+// die Konversation mit dem Ergebnis fort (keine Serverkomponente nötig).
+export const LOOKUP_TOOL = {
+  name: "lookup_wissen",
+  description:
+    'Holt gezielt Inhalte aus einer großen Wissensdatei des AKTIVEN Notizbuchs (Dateien mit volltext="nein"). ' +
+    "Nutze das Tool – auch mehrfach –, BEVOR du inhaltlich antwortest, wenn die Frage solche Inhalte braucht.",
+  input_schema: {
+    type: "object",
+    properties: {
+      datei: { type: "string", description: "Exakter Dateiname aus dem HINTERGRUNDWISSEN-Block" },
+      suchbegriffe: {
+        type: "string",
+        description: "2–5 aussagekräftige Stichwörter (Leerzeichen-getrennt); Treffer-Seiten kommen mit Kontext zurück",
+      },
+      seiten: { type: "string", description: 'Alternativ ein Seitenbereich, z. B. "120-128" oder "42"' },
+    },
+    required: ["datei"],
   },
 };
 
@@ -382,7 +429,34 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
   content.push({ type: "text", text });
   msgs.push({ role: "user", content });
 
-  // Modi: "search"  = Websuche + update_notebook, tool_choice auto
+  // lookup_wissen anbieten, sobald der Prompt Index-Einträge enthält:
+  // Einzeldatei über dem Datei-Deckel ODER Summe über dem Gesamt-Deckel
+  // (dann verweist auch der Gesamt-Deckel-Eintrag auf das Tool).
+  const activeKnowFiles = (nbContext.knowledge && nbContext.knowledge.activeFiles) || [];
+  const totalKnowLen = activeKnowFiles.reduce(
+    (s, f) => s + (f && typeof f.text === "string" ? f.text.length : 0), 0
+  );
+  const lookupEnabled =
+    activeKnowFiles.some((f) => f && typeof f.text === "string" && f.text.length > KNOW_PER_FILE_CAP) ||
+    totalKnowLen > KNOW_TOTAL_CAP;
+  const runLookup = (input) => {
+    const name = input && typeof input.datei === "string" ? input.datei.trim() : "";
+    const f =
+      activeKnowFiles.find((x) => x.name === name) ||
+      activeKnowFiles.find((x) => x.name.toLowerCase() === name.toLowerCase());
+    if (!f) {
+      return "Keine Wissensdatei namens „" + name + "“ im aktiven Notizbuch. Verfügbar: " +
+        (activeKnowFiles.map((x) => x.name).join(", ") || "keine");
+    }
+    const res = lookupInExtract(
+      f.text,
+      { suchbegriffe: input && input.suchbegriffe, seiten: input && input.seiten },
+      LOOKUP_RESULT_CAP
+    );
+    return res || "Keine Treffer – versuche andere Suchbegriffe oder fordere einen Seitenbereich an.";
+  };
+
+  // Modi: "search"  = Websuche + lookup_wissen + update_notebook, tool_choice auto
   //       "forced"  = nur update_notebook, erzwungen (ohne Recherche)
   //       "none"    = ganz ohne Tools (JSON aus Text, letzte Rettung)
   // Erzwungenes tool_choice verhindert Server-Tool-Aufrufe – deshalb "auto"
@@ -395,7 +469,11 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
       messages,
     };
     if (mode === "search") {
-      body.tools = [webSearchToolFor(modelId), NOTEBOOK_TOOL];
+      body.tools = [
+        webSearchToolFor(modelId),
+        ...(lookupEnabled ? [LOOKUP_TOOL] : []),
+        NOTEBOOK_TOOL,
+      ];
       body.tool_choice = { type: "auto" };
     } else if (mode === "forced") {
       body.tools = [NOTEBOOK_TOOL];
@@ -462,32 +540,63 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     let data = await postOnce(msgs, mode);
     collectSources(data);
     if (mode === "search") collectText(data);
-    // Server-Tools (Websuche) können mit pause_turn unterbrechen: Assistant-
-    // Inhalt anhängen und fortsetzen lassen (max. 3 Fortsetzungen).
+    // Fortsetzungs-Schleife für zwei Fälle:
+    // 1. pause_turn: Server-Tools (Websuche) unterbrechen – Inhalt anhängen
+    //    und weiterlaufen lassen (max. 3 Fortsetzungen).
+    // 2. lookup_wissen: Das Modell fordert Inhalte aus großen Wissensdateien
+    //    an – die App beantwortet den Tool-Aufruf lokal und setzt fort
+    //    (max. LOOKUP_MAX_ROUNDS Runden; ein vorhandener update_notebook-
+    //    Aufruf beendet den Turn, dann kein Lookup mehr).
     let convo = msgs;
     let cont = 0;
-    while (data && !data.error && data.stop_reason === "pause_turn" && cont < 3) {
+    let lookups = 0;
+    for (;;) {
+      if (!data || data.error) break;
+      const isPause = data.stop_reason === "pause_turn" && cont < 3;
+      const lookupCalls = !isPause
+        ? (data.content || []).filter((b) => b.type === "tool_use" && b.name === "lookup_wissen")
+        : [];
+      const hasFinal = (data.content || []).some(
+        (b) => b.type === "tool_use" && b.name === "update_notebook"
+      );
+      const doLookup = mode === "search" && !hasFinal && lookupCalls.length > 0 && lookups < LOOKUP_MAX_ROUNDS;
+      if (!isPause && !doLookup) break;
       // Aufeinanderfolgende assistant-Turns zusammenführen (Rollen müssen
       // alternieren; bei mehrfacher Pause entstünden sonst zwei in Folge).
       const prev = convo[convo.length - 1];
       convo = prev && prev.role === "assistant" && Array.isArray(prev.content)
         ? [...convo.slice(0, -1), { role: "assistant", content: [...prev.content, ...(data.content || [])] }]
         : [...convo, { role: "assistant", content: data.content }];
+      if (doLookup) {
+        convo = [...convo, {
+          role: "user",
+          content: lookupCalls.map((c) => ({
+            type: "tool_result",
+            tool_use_id: c.id,
+            content: runLookup(c.input),
+          })),
+        }];
+        lookups++;
+      } else {
+        cont++;
+      }
       data = await postOnce(convo, mode);
       collectSources(data);
       if (mode === "search") collectText(data);
-      cont++;
     }
-    return data;
+    // convo mitliefern: endet der Turn ohne update_notebook (z. B. Lookup-
+    // Budget erschöpft), kann die Forced-Nachfrage darauf aufsetzen, statt
+    // die bereits geholten Inhalte zu verwerfen.
+    return { data, convo };
   };
 
-  let data = await doPost("search");
+  let { data, convo: lastConvo } = await doPost("search");
   if (data && data.error && /web_search|tool/i.test(String(data.error.message || data.error.type || ""))) {
     // Websuche nicht verfügbar (Modell/Org): ohne Recherche, Tool erzwungen
-    data = await doPost("forced");
+    ({ data, convo: lastConvo } = await doPost("forced"));
   }
   if (data && data.error && /tool/i.test(String(data.error.message || data.error.type || ""))) {
-    data = await doPost("none");
+    ({ data, convo: lastConvo } = await doPost("none"));
   }
   if (!data || data.error) {
     const type = data && data.error && data.error.type;
@@ -515,9 +624,22 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
   let parsed = extractParsed(data);
 
   // tool_choice "auto" kann trotz Anweisung ohne update_notebook enden:
-  // einmal ohne Recherche mit erzwungenem Tool nachfassen.
+  // einmal mit erzwungenem Tool nachfassen. Bevorzugt auf der bisherigen
+  // Konversation (bewahrt geholte lookup-Ergebnisse; deren letzter Eintrag
+  // ist dann ein user-tool_result). Schlägt das fehl – etwa weil Server-
+  // Tool-Blöcke in der History das deklarierte Tool verlangen –, klassisch
+  // von vorn ohne Recherche.
   if ((!parsed || typeof parsed !== "object") && data.stop_reason !== "max_tokens") {
-    data = await doPost("forced");
+    let next = null;
+    const tail = lastConvo[lastConvo.length - 1];
+    if (lastConvo !== msgs && tail && tail.role === "user") {
+      try {
+        next = await postOnce(lastConvo, "forced");
+        if (next && next.error) next = null;
+      } catch (e) { next = null; }
+    }
+    if (next) data = next;
+    else ({ data } = await doPost("forced"));
     if (!data || data.error) {
       throw new Error((data && data.error && data.error.message) || "API-Fehler");
     }

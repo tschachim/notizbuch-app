@@ -352,3 +352,24 @@ aus `referenz-app.jsx` übernommen.
     Poll nur bei echten Änderungen Inhalte lädt (~4 leichte Requests/
     Minute – weit unter dem GitHub-Limit von 5000/h). Außerdem Chat
     gegen Querscrollen gehärtet (overflow-x-hidden, Bilder max-w-full).
+
+38. **Wissens-Abruf auf Anfrage** (v6.8, Nutzerwunsch; Anlass: bison.box-
+    Handbuch mit 819 Seiten ≙ ~970k Zeichen Extrakt): Wissensdateien über
+    80k Zeichen werden nicht mehr abgeschnitten in den Prompt gelegt,
+    sondern als Index-Eintrag geführt (volltext="nein", Umfang, die ersten
+    2k Zeichen zur Orientierung). Das Modell holt benötigte Inhalte über
+    das neue client-seitige Tool lookup_wissen (Datei + Suchbegriffe oder
+    Seitenbereich): Die App sucht im lokal gecachten Extrakt (Seitenblöcke
+    des PDF-Extrakts, Treffer mit ±1 Seite Kontext, 30k-Deckel pro
+    Antwort) und setzt die Konversation mit dem tool_result fort – max.
+    4 Runden, ein update_notebook-Aufruf beendet den Turn. Keine Server-
+    komponente, kein Embedding-Index: Volltextsuche im Extrakt reicht für
+    Handbuch-Fragen und bleibt wartungsfrei. Kosten: normale Nachrichten
+    tragen nur den 2k-Kopf; Handbuch-Fragen einen zweiten, gezielten Call.
+    Upload: Dateien bis 80 MB erlaubt; über 25 MB wird NUR der Extrakt
+    gespeichert (ein Base64-PUT des Originals wäre browserseitig fragil,
+    und Prompts nutzen ohnehin nur Extrakte) – die Discovery erkennt
+    solche Einträge am Extrakt ohne Original. Bewusstes Restrisiko wie
+    beim Wissensblock: tool_result-Inhalte aus Extrakten gehen ungefiltert
+    an das Modell (nutzereigene Dateien; Prompt-Injection-Risiko wie in
+    Punkt 29 akzeptiert).

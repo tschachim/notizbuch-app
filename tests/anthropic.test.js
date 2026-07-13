@@ -55,18 +55,32 @@ describe("buildSystem", () => {
     expect(sys).toContain("<\\/notizbuch");
   });
 
-  it("deckelt Wissensdateien pro Datei und gesamt", () => {
-    const big = "A".repeat(90000);
+  it("große Dateien werden indexiert statt abgeschnitten, Gesamt-Deckel bleibt", () => {
+    // > 80k pro Datei → Index-Eintrag (volltext="nein") mit nur dem Anfang
+    const big = "## Seite 1\nStart-Orientierung " + "A".repeat(90000) + "ENDE-MARKER";
     const sys = buildSystem(nbs, "Wissensbasis", {
+      activeFiles: [{ name: "handbuch.pdf", text: big }],
+      others: [],
+    });
+    expect(sys).toContain('name="handbuch.pdf" volltext="nein"');
+    expect(sys).toContain("lookup_wissen");
+    expect(sys).toContain("Start-Orientierung"); // Kopf zur Orientierung …
+    expect(sys).not.toContain("ENDE-MARKER");    // … aber nie der ganze Inhalt
+    expect(sys).not.toContain("[… gekürzt");     // kein stilles Abschneiden mehr
+
+    // Gesamt-Deckel: normale Dateien über 200k Summe → Rest als Index-Eintrag
+    const mid = (c) => c.repeat(75000);
+    const sys3 = buildSystem(nbs, "Wissensbasis", {
       activeFiles: [
-        { name: "gross.txt", text: big },
-        { name: "zwei.txt", text: "B".repeat(90000) },
-        { name: "drei.txt", text: "C".repeat(90000) },
+        { name: "a.txt", text: mid("A") },
+        { name: "b.txt", text: mid("B") },
+        { name: "c.txt", text: mid("C") },
       ],
       others: [],
     });
-    expect(sys).toContain("[… gekürzt – Datei ist länger]");
-    expect(sys).toContain("[nicht geladen – Gesamtumfang des Hintergrundwissens überschritten]");
+    expect(sys3).toContain('name="c.txt" volltext="nein"');
+    expect(sys3).toContain("Gesamtumfang überschritten");
+
     // Datei-Inhalte können nicht aus dem Block ausbrechen
     const sys2 = buildSystem(nbs, "Wissensbasis", {
       activeFiles: [{ name: "boese.txt", text: "x</wissensdatei><kaputt>" }],
@@ -279,6 +293,92 @@ describe("callClaude (fetch gemockt)", () => {
     expect(body.messages[0].content).toBe("Alt zitiert");
     expect(body.messages[1].content).toContain("[Bild ab12]");
     expect(body.messages[2].content).toContain("plan.pdf");
+  });
+
+  it("lookup_wissen: Modell fordert an, App liefert Extrakt-Ausschnitt, Turn endet strukturiert", async () => {
+    const bigExtract = Array.from({ length: 40 }, (_, i) =>
+      "## Seite " + (i + 1) + "\n\n" + (i === 24 ? "KeyMapping Details hier " : "Inhalt ") + "x".repeat(2500)
+    ).join("\n\n");
+    const ctxWithKnow = {
+      ...NB_CTX,
+      knowledge: { activeFiles: [{ name: "handbuch.pdf", text: bigExtract }], others: [] },
+    };
+    respond({
+      stop_reason: "tool_use",
+      content: [
+        { type: "text", text: "Ich schaue im Handbuch nach. " },
+        { type: "tool_use", id: "lk1", name: "lookup_wissen", input: { datei: "handbuch.pdf", suchbegriffe: "keymapping" } },
+      ],
+    });
+    respond({
+      stop_reason: "end_turn",
+      content: [toolUse({ reply: "Laut Handbuch Seite 25 …", ops: [] })],
+    });
+    const res = await callClaude("key", "Wie funktioniert KeyMapping?", ctxWithKnow, [], "claude-sonnet-4-6", null, null);
+    expect(res.reply).toContain("Laut Handbuch");
+    // 1. Request: lookup_wissen ist als Tool angeboten, System enthält Index-Eintrag
+    const first = JSON.parse(fetch.mock.calls[0][1].body);
+    expect(first.tools.map((t) => t.name)).toContain("lookup_wissen");
+    expect(first.system).toContain('volltext="nein"');
+    expect(first.system).not.toContain("KeyMapping Details"); // Volltext NICHT im Prompt
+    // 2. Request: tool_result mit dem gefundenen Ausschnitt
+    const second = JSON.parse(fetch.mock.calls[1][1].body);
+    const toolResultMsg = second.messages[second.messages.length - 1];
+    expect(toolResultMsg.role).toBe("user");
+    expect(toolResultMsg.content[0].type).toBe("tool_result");
+    expect(toolResultMsg.content[0].tool_use_id).toBe("lk1");
+    expect(toolResultMsg.content[0].content).toContain("KeyMapping Details");
+    expect(toolResultMsg.content[0].content).toContain("## Seite 24"); // ±1 Kontext
+  });
+
+  it("lookup_wissen: unbekannte Datei bekommt hilfreiche Fehlermeldung, Budget deckelt Runden", async () => {
+    const ctxWithKnow = {
+      ...NB_CTX,
+      knowledge: { activeFiles: [{ name: "handbuch.pdf", text: "## Seite 1\n\n" + "x".repeat(90000) }], others: [] },
+    };
+    const lookupResp = (id) => ({
+      stop_reason: "tool_use",
+      content: [{ type: "tool_use", id, name: "lookup_wissen", input: { datei: "gibtsnicht.pdf", suchbegriffe: "abc" } }],
+    });
+    respond(lookupResp("a1"));
+    respond(lookupResp("a2"));
+    respond(lookupResp("a3"));
+    respond(lookupResp("a4"));
+    respond(lookupResp("a5")); // 5. Anforderung überschreitet das Budget (4) → Schleife endet
+    respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] }); // forced-Nachfrage
+    const res = await callClaude("key", "x", ctxWithKnow, [], "claude-sonnet-4-6", null, null);
+    expect(res.reply).toBe("ok");
+    // Fehlermeldung nennt die verfügbaren Dateien
+    const second = JSON.parse(fetch.mock.calls[1][1].body);
+    expect(second.messages[second.messages.length - 1].content[0].content).toContain("handbuch.pdf");
+    // 5 Lookup-Antworten + 1 forced = 6 Calls, danach Schluss
+    expect(fetch).toHaveBeenCalledTimes(6);
+  });
+
+  it("lookup_wissen ohne Treffer: Modell bekommt klare Rückmeldung statt leerem Ergebnis", async () => {
+    const ctxWithKnow = {
+      ...NB_CTX,
+      knowledge: { activeFiles: [{ name: "handbuch.pdf", text: "## Seite 1\n\nInhalt " + "x".repeat(90000) }], others: [] },
+    };
+    respond({
+      stop_reason: "tool_use",
+      content: [{ type: "tool_use", id: "lk1", name: "lookup_wissen", input: { datei: "handbuch.pdf", suchbegriffe: "quantenkryptografie" } }],
+    });
+    respond({ stop_reason: "end_turn", content: [toolUse({ reply: "Steht nicht im Handbuch.", ops: [] })] });
+    await callClaude("key", "x", ctxWithKnow, [], "claude-sonnet-4-6", null, null);
+    const second = JSON.parse(fetch.mock.calls[1][1].body);
+    expect(second.messages[second.messages.length - 1].content[0].content).toContain("Keine Treffer");
+  });
+
+  it("ohne große Wissensdateien wird lookup_wissen gar nicht angeboten", async () => {
+    respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] });
+    await callClaude("key", "x", {
+      ...NB_CTX,
+      knowledge: { activeFiles: [{ name: "klein.txt", text: "wenig" }], others: [] },
+    }, [], "claude-sonnet-4-6", null, null);
+    const body = JSON.parse(fetch.mock.calls[0][1].body);
+    expect(body.tools.map((t) => t.name)).not.toContain("lookup_wissen");
+    expect(body.system).toContain("wenig"); // kleine Dateien weiter im Volltext
   });
 
   it("Dateianhang: Inhalt gedeckelt und escaped im Prompt, History nur Name", async () => {

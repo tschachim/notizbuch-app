@@ -3,6 +3,7 @@ import { diffLines, contextize } from "../src/lib/diff.js";
 import { extForMime, mimeForName, dataUrlParts, newImgId } from "../src/lib/images.js";
 import {
   safeFileName, extractPathFor, isExtractPath, knowledgeDir, extractText,
+  splitPages, lookupInExtract,
 } from "../src/lib/knowledge.js";
 import { loadSettings, saveSettings, clearSettings } from "../src/lib/settings.js";
 
@@ -73,6 +74,68 @@ describe("knowledge-Helfer", () => {
     await expect(extractText(leer)).rejects.toThrow(/leer/);
     const exe = new File(["MZ"], "tool.exe");
     await expect(extractText(exe)).rejects.toThrow(/nicht unterstützt/);
+  });
+});
+
+describe("lookupInExtract (Abruf aus großen Wissensdateien)", () => {
+  const EXTRACT = [
+    "## Seite 1\n\nEinleitung und Inhaltsverzeichnis",
+    "## Seite 2\n\nGrundlagen der Konfiguration",
+    "## Seite 3\n\nKeyMapping: IsAllowedForReceiver steuert den Empfang",
+    "## Seite 4\n\nWeitere Details zum KeyMapping-Schritt",
+    "## Seite 5\n\nAnhang und Glossar",
+  ].join("\n\n");
+
+  it("splitPages erkennt Seiten-Blöcke des PDF-Extrakts mit Nummern", () => {
+    const pages = splitPages(EXTRACT);
+    expect(pages.map((p) => p.page)).toEqual([1, 2, 3, 4, 5]);
+    expect(pages[2].text).toContain("IsAllowedForReceiver");
+  });
+
+  it("splitPages zerlegt Extrakte ohne Seitenmarker in Kunst-Abschnitte", () => {
+    const pages = splitPages("x".repeat(9000));
+    expect(pages.length).toBe(3);
+    expect(pages[0].text).toContain("## Abschnitt 1");
+  });
+
+  it("Stichwortsuche liefert Treffer-Seiten mit ±1 Seite Kontext in Dokumentreihenfolge", () => {
+    const res = lookupInExtract(EXTRACT, { suchbegriffe: "keymapping" });
+    expect(res).toContain("## Seite 2"); // Kontext davor
+    expect(res).toContain("## Seite 3"); // Treffer
+    expect(res).toContain("## Seite 4"); // Treffer
+    expect(res).toContain("## Seite 5"); // Kontext danach
+    expect(res).not.toContain("## Seite 1");
+    expect(res.indexOf("Seite 2")).toBeLessThan(res.indexOf("Seite 5"));
+  });
+
+  it("Seitenbereich und Einzelseite werden direkt geliefert (auch mit Gedankenstrich)", () => {
+    expect(lookupInExtract(EXTRACT, { seiten: "2-3" })).toContain("Grundlagen");
+    expect(lookupInExtract(EXTRACT, { seiten: "2-3" })).not.toContain("Anhang");
+    expect(lookupInExtract(EXTRACT, { seiten: "5" })).toContain("Glossar");
+    // Modelle schreiben gern den typografischen Gedankenstrich
+    expect(lookupInExtract(EXTRACT, { seiten: "2–3" })).toContain("Grundlagen");
+  });
+
+  it("splitPages: genau EIN Seitenmarker fällt bewusst auf Kunst-Abschnitte zurück", () => {
+    // Ein einzelner Block bietet keine sinnvolle Seiten-Navigation – der
+    // 4k-Fallback hält Suche und Deckel trotzdem funktionsfähig.
+    const pages = splitPages("## Seite 1\n\n" + "x".repeat(5000));
+    expect(pages.length).toBeGreaterThan(1);
+    expect(pages[0].text).toContain("## Abschnitt 1");
+  });
+
+  it("ohne Treffer oder mit nur Mini-Begriffen kommt null (Modell soll umformulieren)", () => {
+    expect(lookupInExtract(EXTRACT, { suchbegriffe: "quantenkryptografie" })).toBeNull();
+    expect(lookupInExtract(EXTRACT, { suchbegriffe: "im an zu" })).toBeNull();
+    expect(lookupInExtract(EXTRACT, {})).toBeNull();
+  });
+
+  it("deckelt das Ergebnis und weist auf den Schnitt hin", () => {
+    const big = Array.from({ length: 30 }, (_, i) =>
+      "## Seite " + (i + 1) + "\n\nZielbegriff " + "Füllung ".repeat(400)).join("\n\n");
+    const res = lookupInExtract(big, { suchbegriffe: "zielbegriff" }, 10000);
+    expect(res.length).toBeLessThan(12000);
+    expect(res).toContain("abgeschnitten");
   });
 });
 
