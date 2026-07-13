@@ -10,14 +10,14 @@ import { stripCiteTags, citeTagsToDocLinks } from "./citations.jsx";
 import { lookupInExtract } from "./knowledge.js";
 
 export const MODELS = [
-  { id: "claude-sonnet-4-6", label: "Sonnet 4.6 · Standard" },
+  { id: "claude-sonnet-5", label: "Sonnet 5 · Standard" },
   { id: "claude-fable-5", label: "Fable 5 · maximale Tiefe" },
   { id: "claude-opus-4-8", label: "Opus 4.8" },
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5 · schnell" },
 ];
 
 // Server-seitige Websuche: Tool-Variante ist modellabhängig.
-// Sonnet 4.6 / Opus 4.8 / Fable 5 unterstützen die 20260209-Variante
+// Sonnet 5 / Opus 4.8 / Fable 5 unterstützen die 20260209-Variante
 // (mit dynamischem Filtern); Haiku 4.5 nur die Basis-Variante.
 export function webSearchToolFor(modelId) {
   const basic = String(modelId).startsWith("claude-haiku");

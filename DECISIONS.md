@@ -373,3 +373,11 @@ aus `referenz-app.jsx` übernommen.
     beim Wissensblock: tool_result-Inhalte aus Extrakten gehen ungefiltert
     an das Modell (nutzereigene Dateien; Prompt-Injection-Risiko wie in
     Punkt 29 akzeptiert).
+
+39. **Standard-Modell Sonnet 5** (v6.9, Nutzerhinweis): Die Modellliste
+    stammte aus der v5.0-Zeit; claude-sonnet-4-6 ist durch
+    claude-sonnet-5 als Standard ersetzt (gleiche Websuche-Variante
+    20260209, aktuell Einführungspreis). Geräte mit gespeichertem
+    Sonnet 4.6 in state.json fallen beim Laden automatisch auf den
+    neuen Standard zurück (die Modell-Validierung kennt nur noch die
+    aktuelle Liste). Fable 5, Opus 4.8 und Haiku 4.5 bleiben wählbar.

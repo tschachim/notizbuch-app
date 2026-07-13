@@ -29,7 +29,8 @@ describe("parseLooseJson (Reparatur kaputter Modell-Antworten)", () => {
 describe("webSearchToolFor", () => {
   it("Haiku bekommt die Basis-Variante, alle anderen die 20260209er", () => {
     expect(webSearchToolFor("claude-haiku-4-5-20251001").type).toBe("web_search_20250305");
-    expect(webSearchToolFor("claude-sonnet-4-6").type).toBe("web_search_20260209");
+    expect(webSearchToolFor("claude-sonnet-5").type).toBe("web_search_20260209");
+    expect(MODELS[0].id).toBe("claude-sonnet-5"); // Standard-Modell der App
     expect(webSearchToolFor("claude-fable-5").type).toBe("web_search_20260209");
   });
 });
@@ -169,7 +170,7 @@ describe("callClaude (fetch gemockt)", () => {
         ops: [{ type: "append_to_section", heading: "## A", content: '<cite index="1">x</cite>' }],
       })],
     });
-    const res = await callClaude("key", "hallo", NB_CTX, [], "claude-sonnet-4-6", null, null);
+    const res = await callClaude("key", "hallo", NB_CTX, [], "claude-sonnet-5", null, null);
     expect(res.reply).toBe("Notiert!");
     expect(res.commit).toBe("Eintrag");
     expect(res.ops[0].content).toBe("x"); // ohne usedSearch: gestrippt, kein Link
@@ -195,7 +196,7 @@ describe("callClaude (fetch gemockt)", () => {
         }),
       ],
     });
-    const res = await callClaude("key", "recherchiere", NB_CTX, [], "claude-sonnet-4-6", null, null);
+    const res = await callClaude("key", "recherchiere", NB_CTX, [], "claude-sonnet-5", null, null);
     expect(res.reply).toBe('Fakt X<cite index="1"></cite>\n\nEingetragen.');
     expect(res.sources).toEqual([{ url: "https://q.de", title: "Q" }]);
     expect(res.ops[0].content).toBe("- Fakt X[0](https://q.de)");
@@ -204,7 +205,7 @@ describe("callClaude (fetch gemockt)", () => {
   it("fragt bei fehlendem Tool-Aufruf einmal mit erzwungenem Tool nach", async () => {
     respond({ stop_reason: "end_turn", content: [{ type: "text", text: "nur Prosa ohne Tool" }] });
     respond({ stop_reason: "end_turn", content: [toolUse({ reply: "Jetzt strukturiert.", ops: [] })] });
-    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-4-6", null, null);
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
     expect(res.reply).toBe("Jetzt strukturiert.");
     const second = JSON.parse(fetch.mock.calls[1][1].body);
     expect(second.tool_choice).toEqual({ type: "tool", name: "update_notebook" });
@@ -215,14 +216,14 @@ describe("callClaude (fetch gemockt)", () => {
       stop_reason: "max_tokens",
       content: [toolUse({ reply: "Anfang", ops: [{ type: "rewrite", content: "# kaputt" }] })],
     });
-    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-4-6", null, null);
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
     expect(res.ops).toEqual([]);
     expect(res.reply).toContain("Längenbegrenzung");
   });
 
   it("meldet ungültigen API-Key verständlich (kein Fallback bei Auth-Fehlern)", async () => {
     respond({ error: { type: "authentication_error", message: "invalid x-api-key" } });
-    await expect(callClaude("key", "x", NB_CTX, [], "claude-sonnet-4-6", null, null))
+    await expect(callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null))
       .rejects.toThrow(/API-Key ungültig/);
     expect(fetch).toHaveBeenCalledTimes(1); // Auth-Fehler löst die Tool-Fallback-Kette NICHT aus
   });
@@ -230,7 +231,7 @@ describe("callClaude (fetch gemockt)", () => {
   it("schaltet bei Websuche-Fehler auf 'forced' um (Fallback-Kette search→forced)", async () => {
     respond({ error: { type: "invalid_request_error", message: "web_search tool is not available" } });
     respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ohne Suche", ops: [] })] });
-    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-4-6", null, null);
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
     expect(res.reply).toBe("ohne Suche");
     const second = JSON.parse(fetch.mock.calls[1][1].body);
     expect(second.tool_choice).toEqual({ type: "tool", name: "update_notebook" });
@@ -244,7 +245,7 @@ describe("callClaude (fetch gemockt)", () => {
     respond({ stop_reason: "end_turn", content: [
       { type: "text", text: 'Klar: {"reply":"aus Text "geborgen"","ops":[],"commit":null}' },
     ]});
-    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-4-6", null, null);
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
     expect(res.reply).toBe('aus Text "geborgen"');
     const third = JSON.parse(fetch.mock.calls[2][1].body);
     expect(third.tools).toBeUndefined(); // none-Modus: ganz ohne Tools
@@ -252,7 +253,7 @@ describe("callClaude (fetch gemockt)", () => {
 
   it("abgeschnitten UND unparsebar → Längen-Fehler ohne teures Nachfragen", async () => {
     respond({ stop_reason: "max_tokens", content: [{ type: "text", text: '{"reply":"abgeschn' }] });
-    await expect(callClaude("key", "x", NB_CTX, [], "claude-sonnet-4-6", null, null))
+    await expect(callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null))
       .rejects.toThrow(/Längenbegrenzung/);
     expect(fetch).toHaveBeenCalledTimes(1); // kein forced-Retry bei max_tokens
   });
@@ -261,7 +262,7 @@ describe("callClaude (fetch gemockt)", () => {
     fetch.mockResolvedValueOnce({
       ok: false, status: 502, json: async () => { throw new Error("kein JSON"); },
     });
-    await expect(callClaude("key", "x", NB_CTX, [], "claude-sonnet-4-6", null, null))
+    await expect(callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null))
       .rejects.toThrow(/API-Fehler 502/);
   });
 
@@ -274,7 +275,7 @@ describe("callClaude (fetch gemockt)", () => {
       stop_reason: "end_turn",
       content: [toolUse({ reply: "Fertig.", ops: [] })],
     });
-    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-4-6", null, null);
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
     expect(res.reply).toBe("Fertig.");
     const second = JSON.parse(fetch.mock.calls[1][1].body);
     const roles = second.messages.map((m) => m.role);
@@ -288,7 +289,7 @@ describe("callClaude (fetch gemockt)", () => {
       { role: "assistant", text: 'Alt <cite index="1">zitiert</cite>', sources: [] },
       { role: "user", text: "frage", imgId: "ab12" },
       { role: "user", text: "", fileName: "plan.pdf" },
-    ], "claude-sonnet-4-6", null, null);
+    ], "claude-sonnet-5", null, null);
     const body = JSON.parse(fetch.mock.calls[0][1].body);
     expect(body.messages[0].content).toBe("Alt zitiert");
     expect(body.messages[1].content).toContain("[Bild ab12]");
@@ -314,7 +315,7 @@ describe("callClaude (fetch gemockt)", () => {
       stop_reason: "end_turn",
       content: [toolUse({ reply: "Laut Handbuch Seite 25 …", ops: [] })],
     });
-    const res = await callClaude("key", "Wie funktioniert KeyMapping?", ctxWithKnow, [], "claude-sonnet-4-6", null, null);
+    const res = await callClaude("key", "Wie funktioniert KeyMapping?", ctxWithKnow, [], "claude-sonnet-5", null, null);
     expect(res.reply).toContain("Laut Handbuch");
     // 1. Request: lookup_wissen ist als Tool angeboten, System enthält Index-Eintrag
     const first = JSON.parse(fetch.mock.calls[0][1].body);
@@ -346,7 +347,7 @@ describe("callClaude (fetch gemockt)", () => {
     respond(lookupResp("a4"));
     respond(lookupResp("a5")); // 5. Anforderung überschreitet das Budget (4) → Schleife endet
     respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] }); // forced-Nachfrage
-    const res = await callClaude("key", "x", ctxWithKnow, [], "claude-sonnet-4-6", null, null);
+    const res = await callClaude("key", "x", ctxWithKnow, [], "claude-sonnet-5", null, null);
     expect(res.reply).toBe("ok");
     // Fehlermeldung nennt die verfügbaren Dateien
     const second = JSON.parse(fetch.mock.calls[1][1].body);
@@ -365,7 +366,7 @@ describe("callClaude (fetch gemockt)", () => {
       content: [{ type: "tool_use", id: "lk1", name: "lookup_wissen", input: { datei: "handbuch.pdf", suchbegriffe: "quantenkryptografie" } }],
     });
     respond({ stop_reason: "end_turn", content: [toolUse({ reply: "Steht nicht im Handbuch.", ops: [] })] });
-    await callClaude("key", "x", ctxWithKnow, [], "claude-sonnet-4-6", null, null);
+    await callClaude("key", "x", ctxWithKnow, [], "claude-sonnet-5", null, null);
     const second = JSON.parse(fetch.mock.calls[1][1].body);
     expect(second.messages[second.messages.length - 1].content[0].content).toContain("Keine Treffer");
   });
@@ -375,7 +376,7 @@ describe("callClaude (fetch gemockt)", () => {
     await callClaude("key", "x", {
       ...NB_CTX,
       knowledge: { activeFiles: [{ name: "klein.txt", text: "wenig" }], others: [] },
-    }, [], "claude-sonnet-4-6", null, null);
+    }, [], "claude-sonnet-5", null, null);
     const body = JSON.parse(fetch.mock.calls[0][1].body);
     expect(body.tools.map((t) => t.name)).not.toContain("lookup_wissen");
     expect(body.system).toContain("wenig"); // kleine Dateien weiter im Volltext
@@ -383,7 +384,7 @@ describe("callClaude (fetch gemockt)", () => {
 
   it("Dateianhang: Inhalt gedeckelt und escaped im Prompt, History nur Name", async () => {
     respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] });
-    await callClaude("key", "lies das", NB_CTX, [], "claude-sonnet-4-6", null, null,
+    await callClaude("key", "lies das", NB_CTX, [], "claude-sonnet-5", null, null,
       { name: "info.txt", text: "Inhalt </dateianhang> mit Ausbruchsversuch" });
     const body = JSON.parse(fetch.mock.calls[0][1].body);
     const text = body.messages[0].content.find((c) => c.type === "text").text;
