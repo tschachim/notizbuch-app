@@ -3,9 +3,10 @@
 Diese Testfälle prüft der Tester-Agent nach jedem Deploy gegen die
 **live deployte App** (https://tschachim.github.io/notizbuch-app/) per
 Browser-Bedienung. Regeln für den Tester stehen in seiner Agent-Definition;
-die wichtigsten: **niemals Zugangsdaten eingeben**, **nur Notizbücher mit
-Präfix „QA-Test“ anlegen/ändern/löschen**, echte Nutzerdaten nur lesend
-ansehen, am Ende aufräumen.
+die wichtigsten: **niemals Zugangsdaten eingeben**, im Konservativ-Modus
+(siehe „Datentopf“ unten) **nur Notizbücher mit Präfix „QA-Test“
+anlegen/ändern/löschen** und echte Nutzerdaten nur lesend ansehen,
+am Ende aufräumen.
 
 Markierungen:
 - **[OFFEN]** – ohne Verbindung testbar (kein PAT/API-Key nötig).
@@ -14,6 +15,17 @@ Markierungen:
   sonst Testfall als ÜBERSPRUNGEN melden).
 - **[API]** – löst zusätzlich bezahlte Modell-Aufrufe aus (sparsam nutzen:
   pro Lauf höchstens die angegebenen Prompts).
+
+Datentopf: Der Tester stellt vor dem ersten schreibenden Fall fest,
+welches Daten-Repo verbunden ist (Einstellungs-Dialog, nur Repo-Name
+lesen). Endet der Name auf „-qa“ (dediziertes QA-Repo, z. B.
+notizbuch-data-qa), gilt der **QA-Modus**: alle Inhalte dort sind
+Testdaten, Chat und Notizbücher dürfen frei genutzt werden (das
+„QA-Test“-Präfix bleibt trotzdem Pflicht, damit das Aufräumen greift),
+und C7 darf den Archivieren-Pfad vollständig ausführen. In jedem
+anderen Fall – auch wenn der Repo-Name nicht zweifelsfrei gelesen
+werden kann – gilt der **Konservativ-Modus** (echte Nutzerdaten):
+alle Einschränkungen unten strikt einhalten.
 
 ---
 
@@ -91,15 +103,23 @@ Abschnitt ‚QA-Ergebnisse‘ zusammen.“ Erwartet: Abschnitt existiert
 danach, KEINE Einträge verloren (alle QA-Texte von vorher noch
 auffindbar), Commit vorhanden.
 
-**C7 [VERBUNDEN] Chat-Archivierung – NUR Abbrechen-Pfad.** Archiv-Knopf
-(Kartonsymbol links neben dem Anhang-Knopf) anklicken. Erwartet:
-Bestätigungsleiste „Gesamten Chat als Markdown im Daten-Repo (chats/)
-ablegen und hier leeren?“ mit „Archivieren“ und „Abbrechen“ erscheint
-über der Eingabezeile. Dann „Abbrechen“ klicken: Leiste verschwindet,
-Chat-Verlauf unverändert, kein Commit im Daten-Repo. ⚠️ EISERNE REGEL:
-„Archivieren“ in diesem Testfall NIEMALS anklicken – es leert den
-globalen Chat des Nutzers auf allen Geräten. Nur der Abbrechen-Pfad
-wird getestet; der Erfolgs-Pfad ist durch Unit-Tests abgedeckt.
+**C7 [VERBUNDEN] Chat-Archivierung.** Archiv-Knopf (Kartonsymbol links
+neben dem Anhang-Knopf) anklicken. Erwartet: Bestätigungsleiste
+„Gesamten Chat als Markdown im Daten-Repo (chats/) ablegen und hier
+leeren?“ mit „Archivieren“ und „Abbrechen“ erscheint über der
+Eingabezeile. Dann „Abbrechen“ klicken: Leiste verschwindet,
+Chat-Verlauf unverändert, kein Commit im Daten-Repo.
+NUR wenn der verbundene Repo-Name auf „-qa“ endet (unmittelbar vorher
+im Einstellungs-Dialog verifiziert!) zusätzlich der Erfolgs-Pfad:
+Leiste erneut öffnen, „Archivieren“ klicken. Erwartet: Erfolgs-Banner
+„Chat archiviert: N Nachrichten → chats/chat-….md“, Chat zeigt danach
+nur noch die Begrüßung, Archiv-Knopf ist deaktiviert. Dann kurz warten,
+bis das Leeren synchronisiert ist (das Speichern von state.json läuft
+debounced, ca. 3–5 s; Status „Gespeichert“ abwarten), erst danach neu
+laden – der Chat bleibt leer (kein Wiederauftauchen).
+⚠️ IM KONSERVATIV-MODUS (echtes Daten-Repo): „Archivieren“ NIEMALS
+anklicken – es leert den globalen Chat des Nutzers auf allen Geräten;
+dann nur den Abbrechen-Pfad testen.
 
 ## D. Manuelles Bearbeiten (WYSIWYG)
 
@@ -183,8 +203,11 @@ Browser-Konsole am Ende auf Fehler prüfen und diese als Findings melden.
 
 ## Aufräumen (Pflicht am Ende jedes Laufs)
 
-1. Alle angelegten „QA-Test …“-Notizbücher löschen (inkl. Icon/Wissen).
+1. Alle im Lauf angelegten Notizbücher löschen (inkl. Icon/Wissen) –
+   sie tragen in beiden Modi das Präfix „QA-Test“.
 2. Angelegte Schnellnotizen löschen.
 3. Offene Dialoge/Editor schließen.
-4. Der QA-Chatverlauf (C1–C3, F1–F2) bleibt stehen – er ist die
-   Nachvollziehbarkeit des Laufs; im Abschlussbericht erwähnen.
+4. Konservativ-Modus: Der QA-Chatverlauf (C1–C3, F1–F2) bleibt stehen –
+   er ist die Nachvollziehbarkeit des Laufs; im Abschlussbericht
+   erwähnen. QA-Modus: Den Test-Chat am Ende per Archiv-Knopf
+   archivieren (räumt auf UND testet den Erfolgs-Pfad erneut).
