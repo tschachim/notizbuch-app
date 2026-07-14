@@ -381,3 +381,24 @@ aus `referenz-app.jsx` übernommen.
     Sonnet 4.6 in state.json fallen beim Laden automatisch auf den
     neuen Standard zurück (die Modell-Validierung kennt nur noch die
     aktuelle Liste). Fable 5, Opus 4.8 und Haiku 4.5 bleiben wählbar.
+
+40. **Chat-Archivierung** (v7.0, Nutzerwunsch): Der Chat wird seit jeher
+    auf die letzten 80 Nachrichten gekappt (state.json); Älteres ging
+    stillschweigend verloren. Neuer Archiv-Knopf in der Eingabezeile
+    (mit Bestätigungsleiste): legt den Verlauf als lesbares Markdown
+    unter chats/chat-JJJJ-MM-TT-HHMM.md im Daten-Repo ab (Kollisionen
+    bekommen Zähler-Suffix) und leert den Chat erst NACH erfolgreichem
+    Schreiben (zurück auf die Begrüßung; der Save-Effect synct das auf
+    alle Geräte). Format: Rollen-Label + Zeitstempel pro Nachricht,
+    cite-Marker werden über citeTagsToDocLinks/renumberCitations zu
+    archivweit durchnummerierten Fußnoten-Links, Bilder als relative
+    Links auf bilder/ (../, GitHub-Ansicht), Dateianhänge und
+    Dokument-Commits als Hinweiszeilen. Kein Auto-Archiv: Der Zeitpunkt
+    bleibt bewusst beim Nutzer, die 80er-Kappung bleibt als Deckel.
+    Vor dem Archivieren wird state.json frisch gelesen und per
+    mergeChats mit dem lokalen Stand vereint (Dedupe über ts/Rolle/
+    Text), damit Nachrichten anderer Geräte nicht verloren gehen.
+    Bewusstes Restrisiko (Last-Writer-Wins von state.json): Ein Gerät,
+    das den geleerten Chat noch nicht gepollt hat und danach selbst
+    schreibt, kann den alten Verlauf wiederbeleben – dann existiert
+    er doppelt (Archiv + Chat), es geht aber nichts verloren.

@@ -91,6 +91,16 @@ Abschnitt ‚QA-Ergebnisse‘ zusammen.“ Erwartet: Abschnitt existiert
 danach, KEINE Einträge verloren (alle QA-Texte von vorher noch
 auffindbar), Commit vorhanden.
 
+**C7 [VERBUNDEN] Chat-Archivierung – NUR Abbrechen-Pfad.** Archiv-Knopf
+(Kartonsymbol links neben dem Anhang-Knopf) anklicken. Erwartet:
+Bestätigungsleiste „Gesamten Chat als Markdown im Daten-Repo (chats/)
+ablegen und hier leeren?“ mit „Archivieren“ und „Abbrechen“ erscheint
+über der Eingabezeile. Dann „Abbrechen“ klicken: Leiste verschwindet,
+Chat-Verlauf unverändert, kein Commit im Daten-Repo. ⚠️ EISERNE REGEL:
+„Archivieren“ in diesem Testfall NIEMALS anklicken – es leert den
+globalen Chat des Nutzers auf allen Geräten. Nur der Abbrechen-Pfad
+wird getestet; der Erfolgs-Pfad ist durch Unit-Tests abgedeckt.
+
 ## D. Manuelles Bearbeiten (WYSIWYG)
 
 **D1 [VERBUNDEN] Editor-Roundtrip.** Stift-Knopf → im QA-Notizbuch einen

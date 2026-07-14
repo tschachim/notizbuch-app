@@ -3,7 +3,7 @@ import {
   BookOpen, Send, Pencil, X, Check, History, Download, Copy,
   RotateCcw, GitCommit, ChevronDown, Loader2, Upload, ImagePlus,
   Settings, AlertTriangle, StickyNote, Paperclip, Trash2, FileUp,
-  ArrowUp, ArrowDown, Plus, ListTree,
+  ArrowUp, ArrowDown, Plus, ListTree, Archive,
 } from "lucide-react";
 
 import { applyOps, dispHead } from "./lib/ops.js";
@@ -23,6 +23,7 @@ import {
   extractText, fileToBase64,
 } from "./lib/knowledge.js";
 import { renderWithCites } from "./lib/citations.jsx";
+import { chatToMarkdown, archiveBaseName, mergeChats } from "./lib/archive.js";
 import { loadSettings, saveSettings, clearSettings } from "./lib/settings.js";
 import SettingsDialog from "./components/SettingsDialog.jsx";
 import DocEditor from "./components/DocEditor.jsx";
@@ -163,6 +164,8 @@ export default function NotizbuchApp() {
   const [view, setView] = useState("chat");
   const [notesDirty, setNotesDirty] = useState(false);
   const [chatDirty, setChatDirty] = useState(false);
+  const [confirmArchive, setConfirmArchive] = useState(false);
+  const [archiving, setArchiving] = useState(false);
   const [editing, setEditing] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
   const [saveState, setSaveState] = useState("off");
@@ -746,7 +749,9 @@ export default function NotizbuchApp() {
   /* ---------- Senden ---------- */
   const send = async () => {
     const text = input.trim();
-    if ((!text && !pendingImg && !pendingFile) || busy) return;
+    // archiving-Guard: sonst könnte eine während des Archivierens gesendete
+    // Nachricht vom anschließenden setChat([WELCOME]) verschluckt werden.
+    if ((!text && !pendingImg && !pendingFile) || busy || archiving) return;
     if (!connected || !settingsRef.current) { setShowSettings(true); return; }
     const cfg = settingsRef.current;
 
@@ -948,6 +953,50 @@ export default function NotizbuchApp() {
       setChat([...cleaned, aMsg].slice(-80));
     } finally {
       setBusy(false);
+    }
+  };
+
+  /* ---------- Chat archivieren (Markdown ins Daten-Repo, dann leeren) ---------- */
+  const archiveChat = async () => {
+    if (busy || archiving || !connected || !settingsRef.current) return;
+    const cfg = settingsRef.current;
+    setArchiving(true);
+    try {
+      // Frischen Remote-Stand dazuholen: state.json kann Nachrichten anderer
+      // Geräte enthalten, die das 25s-Polling hier noch nicht geholt hat –
+      // sie gehören mit ins Archiv, bevor der Chat geleert wird.
+      let remoteChat = [];
+      try {
+        const st = await ghGetFile(cfg, STATE_PATH);
+        const data = st ? JSON.parse(st.text) : null;
+        if (data && Array.isArray(data.chat)) remoteChat = data.chat;
+      } catch (e) { /* best effort – lokaler Stand genügt dann */ }
+      const msgs = mergeChats(chat, remoteChat); // Begrüßung (ts 0) fällt raus
+      if (!msgs.length) { setConfirmArchive(false); return; }
+      const d = new Date();
+      const md = chatToMarkdown(msgs, {
+        resolveImg: (id) => imgIndex.current[id] || null,
+        now: d,
+      });
+      const base = archiveBaseName(d);
+      let path = "chats/" + base + ".md";
+      for (let i = 2; await ghGetFile(cfg, path); i++) {
+        path = "chats/" + base + "-" + i + ".md";
+      }
+      await ghPutFile(cfg, path, utf8ToB64(md), "Chat archiviert (" + msgs.length + " Nachrichten)");
+      // Erst nach erfolgreichem Schreiben leeren; der Save-Effect bringt
+      // den geleerten Chat debounced nach state.json (alle Geräte).
+      setChat([WELCOME]);
+      setConfirmArchive(false);
+      setBanner({ kind: "ok", text: "Chat archiviert: " + msgs.length + " Nachrichten → " + path });
+    } catch (e) {
+      setBanner({
+        kind: "warn",
+        text: "Archivieren fehlgeschlagen: " + (e && e.message ? e.message : e) +
+          " – der Chat wurde nicht geleert.",
+      });
+    } finally {
+      setArchiving(false);
     }
   };
 
@@ -1916,7 +1965,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v6.9</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.0</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -2144,7 +2193,37 @@ export default function NotizbuchApp() {
                 </button>
               </div>
             )}
+            {confirmArchive && (
+              <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                <span>
+                  Gesamten Chat als Markdown im Daten-Repo (chats/) ablegen und hier leeren?
+                </span>
+                <button
+                  onClick={archiveChat}
+                  disabled={archiving || busy}
+                  className={"px-2.5 py-1 rounded-lg bg-slate-800 text-white font-medium " +
+                    (archiving || busy ? "opacity-50" : "hover:bg-slate-900")}
+                >
+                  {archiving ? "Archiviert …" : "Archivieren"}
+                </button>
+                <button
+                  onClick={() => setConfirmArchive(false)}
+                  className="px-2.5 py-1 rounded-lg border border-slate-300 hover:bg-slate-50"
+                >
+                  Abbrechen
+                </button>
+              </div>
+            )}
             <div className="flex items-end gap-2">
+              <button
+                onClick={() => setConfirmArchive((v) => !v)}
+                disabled={!chat.some((m) => m.ts)}
+                className={"p-3 rounded-xl border border-slate-300 bg-white text-slate-600 " +
+                  (chat.some((m) => m.ts) ? "hover:bg-slate-50" : "opacity-40")}
+                title="Chat archivieren: als Markdown im Daten-Repo ablegen und leeren"
+              >
+                <Archive size={18} />
+              </button>
               <button
                 onClick={() => imgInputRef.current && imgInputRef.current.click()}
                 className="p-3 rounded-xl border border-slate-300 bg-white text-slate-600 hover:bg-slate-50"
@@ -2172,7 +2251,7 @@ export default function NotizbuchApp() {
               <button
                 onClick={send}
                 className={"p-3 rounded-xl bg-indigo-700 text-white " +
-                  (busy || (!input.trim() && !pendingImg && !pendingFile) ? "opacity-40" : "hover:bg-indigo-800")}
+                  (busy || archiving || (!input.trim() && !pendingImg && !pendingFile) ? "opacity-40" : "hover:bg-indigo-800")}
                 title="Senden"
               >
                 <Send size={18} />
