@@ -97,6 +97,18 @@ describe("buildSystem", () => {
     expect(NOTEBOOK_TOOL.input_schema.properties.ops.items.properties.content.description)
       .toContain("<cite index=");
   });
+
+  it("verbietet Nebenbei-Ops bei reinen Fragen (QA-Findings C2/F2)", () => {
+    const sys = buildSystem(nbs, "Wissensbasis", null);
+    // Regressions-Schutz für die Prompt-Verträge aus v7.1: reine Fragen
+    // dürfen weder Aufräum-Ops noch Datei-Übernahmen auslösen.
+    expect(sys).toContain("REINE FRAGEN (WICHTIG)");
+    expect(sys).toContain("NIEMALS, um nebenbei aufzuräumen");
+    expect(sys).toContain("KEIN Speicherauftrag");
+    expect(sys).toContain("NIE als Nebeneffekt einer bloßen Frage");
+    expect(NOTEBOOK_TOOL.input_schema.properties.ops.description)
+      .toContain("Bei einer bloßen Frage IMMER leer");
+  });
 });
 
 describe("buildChatReply", () => {

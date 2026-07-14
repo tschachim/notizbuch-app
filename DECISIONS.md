@@ -402,3 +402,16 @@ aus `referenz-app.jsx` übernommen.
     das den geleerten Chat noch nicht gepollt hat und danach selbst
     schreibt, kann den alten Verlauf wiederbeleben – dann existiert
     er doppelt (Archiv + Chat), es geht aber nichts verloren.
+
+41. **Keine Nebenbei-Ops bei reinen Fragen** (v7.1, QA-Findings C2/F2
+    aus dem ersten voll verbundenen E2E-Lauf): Das Modell nutzte
+    Informationsfragen („Was steht in diesem Notizbuch/dieser Datei?“)
+    als Anlass für ungefragte Dokumentpflege (Platzhalter entfernt,
+    Dateiinhalt eingetragen). Der System-Prompt verbietet das jetzt
+    dreifach: Strukturpflege nur im Zug inhaltlicher Änderungen, Fakten
+    aus Dateianhängen nur auf erkennbaren Speicherwunsch, und ein
+    eigener REINE-FRAGEN-Block (ops:[] Pflicht, kein Nebenbei-Aufräumen);
+    zusätzlich geschärfte ops-Beschreibung im Tool-Schema. Dazu G2:
+    Export-Dateiname folgt jetzt dem aktiven Notizbuch (slugify) statt
+    fix „wissensbasis-…“. Prompt-Verhalten bleibt stochastisch – die
+    Regeln senken die Rate, der E2E-Retest prüft den Effekt.

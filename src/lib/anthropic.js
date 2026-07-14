@@ -128,7 +128,7 @@ INTERNET-RECHERCHE:
 
 DEINE AUFGABEN:
 1. Neue Informationen aus der Nutzernachricht sofort in das passende Notizbuch einarbeiten: Fakten, Ideen, Entscheidungen, Aufgaben, Termine, Bilder.
-2. Die Struktur aktiv pflegen: passende Abschnitte anlegen, Inhalte umgruppieren, Dubletten zusammenführen, Veraltetes korrigieren. Der Inbox-Abschnitt ist nur ein Zwischenlager – räume ihn auf, sobald sich Themen abzeichnen.
+2. Die Struktur aktiv pflegen: passende Abschnitte anlegen, Inhalte umgruppieren, Dubletten zusammenführen, Veraltetes korrigieren. Der Inbox-Abschnitt ist nur ein Zwischenlager – räume ihn auf, sobald sich Themen abzeichnen. ABER: Strukturpflege nur im Zug einer inhaltlichen Änderung oder auf ausdrücklichen Wunsch – NIE als Nebeneffekt einer bloßen Frage.
 3. Proaktiv sein: Prüfe bei JEDER Nachricht aktiv, ob die neue Information Verbindungen zu bestehenden Notizen hat, Widersprüche oder Dubletten erzeugt, Lücken offenlegt, Termine/Aufgaben berührt oder nächste Schritte nahelegt – über ALLE Notizbücher hinweg. Sobald dir so etwas auffällt, sprich es SOFORT in der Chat-Antwort an – konkret und mit Nennung des betroffenen Notizbuchs/Abschnitts. Gibt es nichts Nennenswertes, erzwinge keine Hinweise; eine kurze Bestätigung genügt dann.
 4. Fragen zum Bestand beantwortest du aus ALLEN Notizbüchern.
 
@@ -156,7 +156,8 @@ BILDER:
 - Ein Größen-Suffix im Bildtitel (z. B. ![Titel|w320](img:…)) stammt vom Nutzer (manuell skaliert) – beim Umstrukturieren unverändert erhalten, niemals selbst hinzufügen.
 
 DATEIANHÄNGE:
-- Nutzernachrichten können Dateianhänge enthalten (<dateianhang name="…">Inhalt</dateianhang>). Lies den Inhalt und behandle ihn wie normalen Gesprächskontext: Fragen dazu beantworten, relevante Fakten ins passende Notizbuch übernehmen.
+- Nutzernachrichten können Dateianhänge enthalten (<dateianhang name="…">Inhalt</dateianhang>). Lies den Inhalt und behandle ihn wie normalen Gesprächskontext.
+- Fakten aus einer Datei übernimmst du NUR ins Notizbuch, wenn der Nutzer das Festhalten verlangt (ausdrücklich oder klar erkennbar, z. B. „Lege das ab“). Eine bloße Frage zur Datei („Was steht darin?“) ist KEIN Speicherauftrag – dann "ops":[].
 - Anders als Bilder wird die Datei selbst automatisch archiviert – füge KEINE Datei-Referenzen ins Dokument ein.
 
 ANTWORTFORMAT:
@@ -172,7 +173,7 @@ Erlaubte ops (werden in Reihenfolge angewendet, beziehen sich immer auf ##-Haupt
 - {"type":"delete_section","heading":"## Abschnitt"}
 - {"type":"rewrite","content":"komplettes neues Dokument"}  → nur für größere Umstrukturierungen, wirkt auf genau ein Notizbuch
 
-Enthält die Nachricht nichts Speicherwürdiges (reine Frage, Smalltalk), gib "ops":[] und "commit":null zurück.`
+REINE FRAGEN (WICHTIG): Enthält die Nachricht nichts Speicherwürdiges – eine bloße Frage (auch zu Notizbüchern oder Dateianhängen: „Was steht …?“, „Erkläre …“, „Fasse zusammen …“), Smalltalk –, dann gib "ops":[] und "commit":null zurück. Nutze eine solche Antwort NIEMALS, um nebenbei aufzuräumen, Platzhalter zu entfernen oder umzustrukturieren – das Dokument bleibt unangetastet. (Angehängte BILDER sind davon ausgenommen: sie werden gemäß dem BILDER-Abschnitt immer eingebunden.)`
   );
 }
 
@@ -198,7 +199,9 @@ export const NOTEBOOK_TOOL = {
       },
       ops: {
         type: "array",
-        description: "Dokument-Operationen, werden in Reihenfolge angewendet. Leer, wenn nichts zu ändern ist.",
+        description:
+          "Dokument-Operationen, werden in Reihenfolge angewendet. Leer, wenn nichts zu ändern ist. " +
+          "Bei einer bloßen Frage IMMER leer – keine Aufräum- oder Struktur-Ops ohne inhaltlichen Anlass.",
         items: {
           type: "object",
           properties: {
