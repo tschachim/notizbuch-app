@@ -114,7 +114,11 @@ const BlockImage = Image.extend({
       const img = document.createElement("img");
       const apply = () => {
         if (img.src !== cur.attrs.src) img.src = cur.attrs.src;
-        if (cur.attrs.alt) img.alt = cur.attrs.alt;
+        // Titel bleibt (wie in der Ansicht, v7.2) nur als alt/title-Tooltip –
+        // keine sichtbare Bildunterschrift im Editor, der Editor hat ohnehin
+        // nie eine gerendert.
+        img.alt = cur.attrs.alt || "";
+        img.title = cur.attrs.alt || "";
         img.style.width = cur.attrs.width ? cur.attrs.width + "px" : "";
         // Feste Breite + max-height würde das Seitenverhältnis verzerren
         img.style.maxHeight = cur.attrs.width ? "none" : "";

@@ -191,6 +191,9 @@ describe("callClaude (fetch gemockt)", () => {
     const body = JSON.parse(fetch.mock.calls[0][1].body);
     expect(body.tools.map((t) => t.name)).toEqual(["web_search", "update_notebook"]);
     expect(body.tool_choice).toEqual({ type: "auto" });
+    // v7.2: 16000 statt 4000 – große Dokument-Umbauten liefen zuvor regelmäßig
+    // in die Abschneide-Warnung, bevor die Antwort inhaltlich fertig war.
+    expect(body.max_tokens).toBe(16000);
   });
 
   it("Suche: sammelt Quellen, wandelt ops-cites in Fußnoten-Links, kombiniert Prosa", async () => {

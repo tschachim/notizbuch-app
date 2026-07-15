@@ -142,11 +142,24 @@ describe("DocView: Tabellen (GFM)", () => {
 });
 
 describe("DocView: Bilder & Quellen-Fußnoten", () => {
-  it("Bildzeile mit |w-Suffix: Breite gesetzt, Caption ohne Suffix", () => {
+  it("Bildzeile mit |w-Suffix: Breite gesetzt, Titel nur als alt/title-Attribut ohne Suffix", () => {
     const html = render("# T\n\n## A\n\n![Mein Titel|w320](img:ab12)", { ab12: "data:image/png;base64,x" });
     expect(html).toContain('width:320px');
-    expect(html).toContain("Mein Titel");
+    expect(html).toContain('alt="Mein Titel"');
+    expect(html).toContain('title="Mein Titel"');
     expect(html).not.toContain("|w320");
+  });
+  it("Bild-Titel erscheint NICHT als sichtbare (fette) Bildunterschrift; kursive Folgezeile bleibt sichtbar", () => {
+    // Konvention: Titel im Alt-Text, direkt darunter eine eigene kursive Zeile.
+    const html = render(
+      "# T\n\n## A\n\n![Mein Titel](img:ab12)\n\n*Eine Bildunterschrift*",
+      { ab12: "data:image/png;base64,x" }
+    );
+    expect(html).not.toContain("<figcaption");
+    // Der Titel steckt nur im alt/title-Attribut, nicht als eigener Textknoten
+    expect(html).not.toMatch(/>Mein Titel</);
+    expect(html).toContain('alt="Mein Titel"');
+    expect(html).toMatch(/<em>Eine Bildunterschrift<\/em>/);
   });
   it("fehlendes Bild zeigt Platzhalter statt kaputtem img", () => {
     const html = render("# T\n\n## A\n\n![Titel](img:fehlt)");

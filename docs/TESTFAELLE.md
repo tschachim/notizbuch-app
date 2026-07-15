@@ -71,6 +71,15 @@ Admin-Zeile und links oben im Header, solange das QA-Notizbuch aktiv ist;
 Erwartet: verschwindet aus Liste/Dropdown; aktives Notizbuch wechselt;
 das letzte verbleibende Notizbuch ist nicht löschbar (Knopf gesperrt).
 
+**B6 [VERBUNDEN] Icons im Notizbuch-Dropdown.** Notizbuch-Dropdown links
+oben öffnen (mind. zwei Notizbücher vorhanden). Erwartet: die
+aufklappende Liste zeigt vor jedem Namen ein kleines Icon (eigenes
+Icon, z. B. aus B4, sofern eines gesetzt ist – sonst das Standard-Logo);
+das aktive Notizbuch ist optisch markiert (Haken/Fettschrift); die
+Einträge „＋ Neues Notizbuch …“ und „⚙ Notizbücher verwalten …“ öffnen
+weiterhin den jeweils passenden Dialog; Escape und Klick außerhalb
+schließen die Liste ohne Auswahl.
+
 ## C. Chat & Dokument
 
 **C1 [VERBUNDEN][API] Notiz eintragen.** Im QA-Notizbuch per Chat:
@@ -121,6 +130,15 @@ laden – der Chat bleibt leer (kein Wiederauftauchen).
 anklicken – es leert den globalen Chat des Nutzers auf allen Geräten;
 dann nur den Abbrechen-Pfad testen.
 
+**C8 [OFFEN] Eingabefeld vergrößern.** Kleinen Vergrößern-Knopf (oben
+rechts im Eingabefeld) anklicken. Erwartet: Eingabefeld wird sichtbar
+größer (mehrzeilig, bei sehr langem Text scrollbar statt den Bildschirm
+zu sprengen), der Knopf wechselt auf ein Verkleinern-Symbol; erneuter
+Klick stellt die kompakte Größe wieder her. Umschalt+Enter fügt in
+beiden Größen weiterhin einen Zeilenumbruch ein; Enter (ohne Umschalt)
+löst weiterhin denselben Sende-Versuch aus wie vorher (ohne Verbindung
+öffnet es die Einstellungen statt zu senden).
+
 ## D. Manuelles Bearbeiten (WYSIWYG)
 
 **D1 [VERBUNDEN] Editor-Roundtrip.** Stift-Knopf → im QA-Notizbuch einen
@@ -156,7 +174,10 @@ Daten-Repo). Danach Post-it wieder löschen.
 
 **F1 [VERBUNDEN][API] Bild anhängen.** Kleines Bild anhängen + „Lege das
 im QA-Notizbuch ab“. Erwartet: Bild erscheint im Dokument mit KURZER
-kursiver Bildunterschrift (kein langer Beschreibungstext).
+kursiver Bildunterschrift (kein langer Beschreibungstext); darüber steht
+NUR diese eine kursive Zeile – kein zusätzlicher fett gedruckter Titel
+direkt unter dem Bild (der Bildtitel steckt nur noch im alt-Attribut/
+Tooltip des Bildes).
 
 **F2 [VERBUNDEN][API] Textdatei anhängen.** Eine .txt-Datei mit Inhalt
 „QA-Dateitest Gamma“ anhängen + „Was steht in der Datei?“. Erwartet:

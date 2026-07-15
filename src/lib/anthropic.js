@@ -3,7 +3,7 @@
 /* System-Prompt, Tool-Schema und Parsing 1:1 aus der Referenz-App.    */
 /* Angepasst gemäß Auftrag: eigener API-Key direkt aus dem Browser     */
 /* (x-api-key + anthropic-dangerous-direct-browser-access) und         */
-/* max_tokens 4000 statt 1000.                                         */
+/* MAX_TOKENS statt 1000 (siehe Konstante unten).                      */
 /* ------------------------------------------------------------------ */
 
 import { stripCiteTags, citeTagsToDocLinks } from "./citations.jsx";
@@ -27,6 +27,13 @@ export function webSearchToolFor(modelId) {
     max_uses: 8,
   };
 }
+
+// Max. Antwortlänge pro API-Aufruf. Sonnet 5/Fable 5 vertragen deutlich mehr
+// Output als das frühere Limit von 4000 Tokens – große Dokument-Umbauten
+// (Rewrites ganzer Abschnitte) liefen regelmäßig in die Abschneide-Warnung.
+// 16000 deckt auch große rewrite-Ops ab und hält Kosten/Latenz trotzdem im
+// Rahmen (die Truncation-Behandlung unten bleibt als Sicherheitsnetz).
+const MAX_TOKENS = 16000;
 
 // Hintergrundwissen fürs Prompt aufbereiten: aktives Notizbuch komplett
 // (mit Deckeln), fremde Notizbücher nur als Dateiliste.
@@ -467,7 +474,7 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
   const postOnce = async (messages, mode) => {
     const body = {
       model: modelId,
-      max_tokens: 4000,
+      max_tokens: MAX_TOKENS,
       system: buildSystem(nbContext.notebooks, nbContext.activeName, nbContext.knowledge),
       messages,
     };

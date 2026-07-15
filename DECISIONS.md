@@ -415,3 +415,52 @@ aus `referenz-app.jsx` übernommen.
     Export-Dateiname folgt jetzt dem aktiven Notizbuch (slugify) statt
     fix „wissensbasis-…“. Prompt-Verhalten bleibt stochastisch – die
     Regeln senken die Rate, der E2E-Retest prüft den Effekt.
+
+42. **max_tokens 16000 statt 4000** (v7.2, Nutzerwunsch): Bei inhaltlich
+    langen Antworten (große Dokument-Umbauten) lief die App regelmäßig
+    in die Abschneide-Warnung, obwohl Sonnet 5/Fable 5 deutlich mehr
+    Output vertragen als das alte Limit. Die Grenze steht jetzt als
+    benannte Konstante `MAX_TOKENS`; die bestehende Truncation-Behandlung
+    (Ops verwerfen, ⚠-Hinweis) bleibt als Sicherheitsnetz unverändert –
+    16000 senkt nur die Häufigkeit, schließt Abschneiden bei sehr langen
+    Rewrites aber nicht grundsätzlich aus. Bewusster Kompromiss zwischen
+    Abdeckung und Kosten/Latenz pro Aufruf.
+
+43. **Bildtitel nicht mehr als fette Bildunterschrift** (v7.2,
+    Nutzerwunsch): `![Titel](img:…)` zeigte den Titel bisher zusätzlich
+    zur (per Konvention folgenden) kursiven Bildunterschrift als fette
+    `<figcaption>` – wirkte wie ein Duplikat. Die figcaption entfällt in
+    Ansicht und Editor-NodeView; der Titel bleibt unangetastet im
+    Markdown und liegt jetzt nur noch als `alt`- und `title`-Attribut am
+    `<img>` (Tooltip beim Hover). Roundtrip (Serialisierung
+    `![Titel|wNNN](img:…)`, IMG_LINE_RE) ist davon nicht betroffen – es
+    wird nur nicht mehr zusätzlich sichtbar gerendert.
+
+44. **Chat-Eingabefeld vergrößerbar** (v7.2, Nutzerwunsch): Kleiner
+    Toggle-Knopf oben rechts im Eingabefeld (innerhalb eines relativ
+    positionierten Wrappers, damit die Kopfzeile auf schmalen Screens
+    nicht um ein weiteres Vollbreite-Element wächst) schaltet zwischen
+    rows 2 (kompakt) und rows 10 (groß) um. Rein lokaler UI-Zustand
+    (useState, kein Persistieren – Vorliebe ist sitzungsbezogen). Da das
+    HTML-`rows`-Attribut nicht responsiv ist, deckelt im großen Modus
+    zusätzlich `max-h-40 sm:max-h-64` mit `overflow-y-auto` die Höhe auf
+    Mobilgeräten (~6 Zeilen sichtbar, Rest scrollt) und am Desktop
+    (~10 Zeilen) – das eigentliche Sprengen des Bildschirms wird so über
+    CSS statt über eine zweite Rows-Zahl verhindert. Enter-zum-Senden und
+    Umschalt+Enter-Zeilenumbruch bleiben unverändert.
+
+45. **Notizbuch-Icons im Dropdown** (v7.2, Nutzerwunsch): Das native
+    `<select>` der Notizbuchauswahl kann keine Bilder in den Optionen
+    zeigen. Ersetzt durch eine selbstgebaute `NotebookMenu`-Komponente
+    (Trigger-Button + aufklappende `role="listbox"`-Liste, `z-[45]` wie
+    der mobile Abschnitts-Drawer): jede Zeile zeigt `nbIcons[id]` bzw.
+    das Standard-Logo, das aktive Notizbuch ist markiert, darunter die
+    bisherigen Aktions-Einträge „＋ Neues Notizbuch …“ und „⚙
+    Notizbücher verwalten …“ (rufen weiterhin dieselben Handler wie das
+    alte `<select>`-onChange). Schließen über Escape, Klick außerhalb
+    (mousedown-Listener) und Auswahl; Pfeiltasten + Enter/Leertaste für
+    Tastaturbedienung – bewusst keine volle ARIA-Combobox
+    (aria-activedescendant etc.), „Grund-Tastaturbedienung“ war die
+    Vorgabe. Touch funktioniert über die normalen Klick-Handler ohne
+    Sonderfall. Modell-Select und das Select im Einstellungs-Dialog
+    bleiben native Selects (keine Icon-Anforderung dort).

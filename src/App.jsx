@@ -3,7 +3,7 @@ import {
   BookOpen, Send, Pencil, X, Check, History, Download, Copy,
   RotateCcw, GitCommit, ChevronDown, Loader2, Upload, ImagePlus,
   Settings, AlertTriangle, StickyNote, Paperclip, Trash2, FileUp,
-  ArrowUp, ArrowDown, Plus, ListTree, Archive,
+  ArrowUp, ArrowDown, Plus, ListTree, Archive, Maximize2, Minimize2,
 } from "lucide-react";
 
 import { applyOps, dispHead } from "./lib/ops.js";
@@ -118,6 +118,165 @@ const serializeState = (chat, model, collapsedAll, active, order, quicknotes) =>
   );
 
 /* ------------------------------------------------------------------ */
+/* Notizbuch-Dropdown (v7.2, Nutzerwunsch)                             */
+/* Ersetzt das native <select> im Header: natives select kann keine    */
+/* Icons in den Optionen zeigen. Trigger-Button + aufklappende Liste   */
+/* mit Icon je Zeile (nbIcons[id] oder Standard-Logo), aktives         */
+/* Notizbuch markiert, plus die zwei bisherigen Aktions-Einträge.      */
+/* Escape/Klick außerhalb schließen; Pfeiltasten + Enter/Leertaste     */
+/* reichen als Grund-Tastaturbedienung, Touch funktioniert wie Klick.  */
+/* ------------------------------------------------------------------ */
+function NotebookMenu({ notebooks, activeNb, nbIcons, disabled, onSelect, onNew, onAdmin }) {
+  const [open, setOpen] = useState(false);
+  const [hi, setHi] = useState(-1); // per Tastatur/Hover hervorgehobener Index
+  const rootRef = useRef(null);
+  const listRef = useRef(null);
+  const btnRef = useRef(null);
+  const itemRefs = useRef([]); // DOM-Knoten je items-Index, für scrollIntoView
+  const active = notebooks.find((n) => n.id === activeNb) || { name: "Notizbuch" };
+
+  // Gemeinsame Liste (Notizbücher + die zwei Aktionen) für Pfeiltasten-Navigation.
+  const items = [
+    ...notebooks.map((n) => ({ kind: "nb", id: n.id, name: n.name })),
+    { kind: "new", name: "＋ Neues Notizbuch …" },
+    { kind: "admin", name: "⚙ Notizbücher verwalten …" },
+  ];
+
+  // Schließen, wahlweise mit Fokus zurück auf den Trigger-Button: bei
+  // Escape/Auswahl soll der Fokus nicht auf <body> verloren gehen (die
+  // Liste wird unmounted); bei Klick außerhalb NICHT refokussieren – dort
+  // hat der Nutzer sein Fokusziel bereits selbst gewählt.
+  const close = (refocus) => {
+    setOpen(false);
+    if (refocus && btnRef.current) btnRef.current.focus();
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    if (listRef.current) listRef.current.focus();
+    // Aktive Zeile beim Öffnen sofort in den sichtbaren Bereich holen (kann
+    // bei vielen Notizbüchern unter max-h-80 hängen).
+    if (itemRefs.current[hi]) itemRefs.current[hi].scrollIntoView({ block: "nearest" });
+    const onDocClick = (e) => {
+      if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false);
+    };
+    const onKey = (e) => { if (e.key === "Escape") close(true); };
+    // mousedown statt click: schließt zuverlässig, bevor ein Klick außerhalb
+    // (z. B. auf einen anderen Header-Knopf) dessen eigenen Handler auslöst.
+    document.addEventListener("mousedown", onDocClick);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      window.removeEventListener("keydown", onKey);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const choose = (item) => {
+    close(true);
+    if (item.kind === "new") onNew();
+    else if (item.kind === "admin") onAdmin();
+    else onSelect(item.id);
+  };
+
+  // Hervorhebung per Pfeiltaste bewegen und die Zeile mitscrollen, statt sie
+  // unsichtbar unter dem Rand von max-h-80 wandern zu lassen.
+  const move = (delta) => {
+    setHi((h) => {
+      const next = Math.min(items.length - 1, Math.max(0, h + delta));
+      if (itemRefs.current[next]) itemRefs.current[next].scrollIntoView({ block: "nearest" });
+      return next;
+    });
+  };
+
+  const openAt = () => {
+    // Nur echte Notizbuch-Einträge kommen als Ausgangs-Highlight infrage –
+    // die Aktions-Einträge haben kein id-Feld (id wäre hier immer undefined).
+    setHi(Math.max(0, items.findIndex((i) => i.kind === "nb" && i.id === activeNb)));
+    setOpen(true);
+  };
+
+  return (
+    <div className="relative" ref={rootRef}>
+      <button
+        type="button"
+        ref={btnRef}
+        disabled={disabled}
+        onClick={() => (open ? close(false) : openAt())}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " " || e.key === "ArrowDown") { e.preventDefault(); openAt(); }
+        }}
+        className={"flex items-center gap-1 min-w-0 max-w-24 sm:max-w-44 font-semibold tracking-tight " +
+          "bg-transparent hover:bg-slate-50 rounded-lg pl-1 pr-1.5 py-1 " +
+          (disabled ? "opacity-60 cursor-default" : "")}
+        title="Notizbuch wählen"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        <span className="truncate min-w-0">{active.name}</span>
+        <ChevronDown size={14} className="shrink-0 text-slate-500" />
+      </button>
+      {open && (
+        <div
+          role="listbox"
+          tabIndex={-1}
+          ref={listRef}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown") { e.preventDefault(); move(1); }
+            else if (e.key === "ArrowUp") { e.preventDefault(); move(-1); }
+            else if (e.key === "Enter" || e.key === " ") { e.preventDefault(); if (hi >= 0) choose(items[hi]); }
+            else if (e.key === "Escape") { e.preventDefault(); close(true); }
+          }}
+          className="absolute left-0 top-full mt-1 z-[45] w-56 max-w-[80vw] max-h-80 overflow-y-auto bg-white border border-slate-300 rounded-lg shadow-xl py-1 outline-none"
+        >
+          {notebooks.map((n, i) => (
+            <div
+              key={n.id}
+              ref={(el) => { itemRefs.current[i] = el; }}
+              role="option"
+              aria-selected={n.id === activeNb}
+              title={n.name}
+              onClick={() => choose(items[i])}
+              onMouseEnter={() => setHi(i)}
+              className={"flex items-center gap-2 px-2.5 py-2.5 sm:py-1.5 text-sm cursor-pointer " +
+                (i === hi ? "bg-indigo-50 " : "") +
+                (n.id === activeNb ? "font-semibold text-indigo-700" : "text-slate-700")}
+            >
+              <img
+                src={nbIcons[n.id] || "icons/logo.png"}
+                alt=""
+                className={"w-4 h-4 shrink-0 " + (nbIcons[n.id] ? "rounded border border-slate-200" : "opacity-70")}
+              />
+              <span className="truncate">{n.name}</span>
+              {n.id === activeNb && <Check size={13} className="ml-auto shrink-0" />}
+            </div>
+          ))}
+          <div className="my-1 border-t border-slate-200" />
+          {items.slice(notebooks.length).map((item, k) => {
+            const idx = notebooks.length + k;
+            return (
+              <div
+                key={item.kind}
+                ref={(el) => { itemRefs.current[idx] = el; }}
+                role="option"
+                aria-selected={false}
+                title={item.name}
+                onClick={() => choose(item)}
+                onMouseEnter={() => setHi(idx)}
+                className={"px-2.5 py-2.5 sm:py-1.5 text-sm cursor-pointer text-slate-600 truncate " +
+                  (idx === hi ? "bg-indigo-50" : "")}
+              >
+                {item.name}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Haupt-Komponente                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -159,6 +318,9 @@ export default function NotizbuchApp() {
   const collapsed = collapsedAll[activeNb] || {};
 
   const [input, setInput] = useState("");
+  // v7.2: Eingabefeld per Knopf vergrößerbar (lange Prompts) – rein lokaler
+  // UI-Zustand, kein Persistieren nötig (Bildschirmgröße/Vorliebe pro Sitzung).
+  const [inputExpanded, setInputExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [busyLabel, setBusyLabel] = useState("strukturiert …");
   const [view, setView] = useState("chat");
@@ -1938,35 +2100,21 @@ export default function NotizbuchApp() {
           className={"w-7 h-7 " + (nbIcons[activeNb] ? "rounded-md border border-slate-200" : "")}
         />
         {notebooks.length ? (
-          <div className="relative">
-            <select
-              value={activeNb}
-              disabled={editing}
-              onChange={(e) => {
-                const v = e.target.value;
-                if (v === "__new__") { setNbError(null); setNewNbName(""); setShowNewNb(true); }
-                else if (v === "__admin__") {
-                  setNbAdminError(null); setNbRenameId(null); setNbDeleteId(null); setShowNbAdmin(true);
-                }
-                else switchNotebook(v);
-              }}
-              className="appearance-none font-semibold tracking-tight bg-transparent hover:bg-slate-50 rounded-lg pl-1 pr-6 py-1 max-w-24 sm:max-w-44 truncate"
-              title="Notizbuch wählen"
-            >
-              {notebooks.map((n) => (
-                <option key={n.id} value={n.id}>{n.name}</option>
-              ))}
-              <option value="__new__">＋ Neues Notizbuch …</option>
-              <option value="__admin__">⚙ Notizbücher verwalten …</option>
-            </select>
-            <ChevronDown size={14} className="absolute right-1 top-2.5 text-slate-500 pointer-events-none" />
-          </div>
+          <NotebookMenu
+            notebooks={notebooks}
+            activeNb={activeNb}
+            nbIcons={nbIcons}
+            disabled={editing}
+            onSelect={switchNotebook}
+            onNew={() => { setNbError(null); setNewNbName(""); setShowNewNb(true); }}
+            onAdmin={() => { setNbAdminError(null); setNbRenameId(null); setNbDeleteId(null); setShowNbAdmin(true); }}
+          />
         ) : (
           <span className="font-semibold tracking-tight">Notizbuch</span>
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.1</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.2</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -2238,17 +2386,31 @@ export default function NotizbuchApp() {
                 onChange={(e) => { attachAny(e.target.files && e.target.files[0]); e.target.value = ""; }}
                 className="hidden"
               />
-              <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onPaste={handlePaste}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
-                }}
-                rows={2}
-                placeholder="Notiz eintippen, diktieren oder Screenshot einfügen …"
-                className="flex-1 min-w-0 resize-none rounded-xl border border-slate-300 bg-white px-3 py-2 text-base text-slate-800"
-              />
+              <div className="relative flex-1 min-w-0">
+                <textarea
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onPaste={handlePaste}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+                  }}
+                  rows={inputExpanded ? 10 : 2}
+                  placeholder="Notiz eintippen, diktieren oder Screenshot einfügen …"
+                  className={"w-full resize-none rounded-xl border border-slate-300 bg-white px-3 py-2 pr-9 text-base text-slate-800 " +
+                    // rows=10 wäre auf schmalen Bildschirmen zu hoch (sprengt den
+                    // sichtbaren Bereich) – max-h deckelt dort auf ~6 Zeilen,
+                    // ab sm auf die vollen ~10 Zeilen; überschüssiger Text scrollt.
+                    (inputExpanded ? "max-h-40 sm:max-h-64 overflow-y-auto" : "")}
+                />
+                <button
+                  type="button"
+                  onClick={() => setInputExpanded((v) => !v)}
+                  className="absolute top-1.5 right-1.5 p-1 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+                  title={inputExpanded ? "Eingabefeld verkleinern" : "Eingabefeld vergrößern"}
+                >
+                  {inputExpanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                </button>
+              </div>
               <button
                 onClick={send}
                 className={"p-3 rounded-xl bg-indigo-700 text-white " +

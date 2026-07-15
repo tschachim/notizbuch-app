@@ -277,12 +277,19 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
       const alt = wM ? wM[1] : altRaw;
       const width = wM ? parseInt(wM[2], 10) : null;
       const src = imgMap[id];
+      // Der Titel (alt) bleibt bewusst nur als alt/title am <img> – keine
+      // sichtbare figcaption mehr (v7.2, Nutzerwunsch): direkt darunter
+      // folgt per Konvention die kursive Bildunterschrift als eigene
+      // Markdown-Zeile, die fette figcaption wirkte wie ein Duplikat. Der
+      // Titel steckt weiterhin im Markdown (![Titel](img:…)) – Roundtrip
+      // bleibt unverändert, es wird nur nicht mehr zusätzlich gerendert.
       blocks.push(
         <figure key={kp + key++} className="my-3">
           {src ? (
             <img
               src={src}
               alt={alt}
+              title={alt || undefined}
               onClick={() => onImgClick && onImgClick(src)}
               style={width ? { width: width + "px", maxWidth: "100%" } : undefined}
               className={(width ? "" : "max-h-64 ") + "rounded-lg border border-slate-200 shadow-sm cursor-pointer"}
@@ -292,7 +299,6 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
               Bild wird geladen …
             </div>
           )}
-          {alt ? <figcaption className="mt-1 text-sm font-semibold text-slate-800">{alt}</figcaption> : null}
         </figure>
       );
     } else if (/^#\s+/.test(line)) {
