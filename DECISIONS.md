@@ -899,3 +899,89 @@ aus `referenz-app.jsx` übernommen.
     strukturelle Erzwingung – ein Modell könnte die Differenzierung im
     Einzelfall weiterhin verfehlen; das nächste E2E-Retest von C9a
     deckt das ab.
+
+53. **buildChatReply-Gate entschärft: Vorab-Text auch ohne Websuche
+    kombiniert** (`src/lib/anthropic.js`, v7.6, QA-Finding C9a – Fortsetzung
+    von Punkt 52/v7.5): Der v7.5-Retest zeigte den ECHTEN Grund für den
+    weiterhin roten Testfall. Ursachen-Historie zur Nachvollziehbarkeit:
+    - **v7.4:** Die generelle Reply-Kürze-Regel (Punkt 41/v7.1) ließ das
+      Modell auf reine Fragen nur mit einem Verweis auf Bestehendes
+      antworten statt zu erklären.
+    - **v7.5 (Punkt 52):** Prompt differenziert Speicher-Auftrag vs. reine
+      Frage – reicht laut Retest nicht: Das Modell schrieb die vollständige
+      Erklärung (inkl. Formel) weiterhin als Textblock VOR dem
+      abschließenden Tool-Aufruf und verwies in reply nur mit „Erklärung
+      oben – …“ darauf. `buildChatReply` (die Funktion, die Vorab-Textblöcke
+      mit reply kombiniert) wurde in `callClaude` aber nur bei
+      `usedSearch===true` aufgerufen – ohne Websuche wurde der Textblock
+      STILLSCHWEIGEND VERWORFEN. Ergebnis: reply verwies auf ein „oben“,
+      das im Chat nie sichtbar war – kompletter Inhaltsverlust. Der v7.5-
+      Prompt-Zusatz „Nach einer Websuche gilt weiterhin die
+      INTERNET-RECHERCHE-Regel: vollständige Antwort als Text VOR dem
+      Tool-Aufruf …“ hat das Modell dabei vermutlich zusätzlich ermutigt,
+      auch ohne Suche Vorab-Text zu schreiben.
+    - **v7.6 (dieser Punkt) – beides, defensiv:**
+      1. **Prompt-Klarstellung:** ANTWORTFORMAT und INTERNET-RECHERCHE
+         verbieten jetzt explizit, OHNE Websuche Text vor dem Tool-Aufruf
+         zu schreiben oder in reply auf „oben“/einen vorherigen Abschnitt
+         zu verweisen – die komplette Antwort gehört dann direkt und
+         vollständig ins reply-Feld. Der Websuche-Fall bleibt unverändert.
+      2. **Code-Sicherheitsnetz:** `callClaude` ruft `buildChatReply` jetzt
+         IMMER auf (nicht mehr nur bei `usedSearch`) – Vorab-Textblöcke
+         werden also auch ohne Websuche mit reply kombiniert statt
+         verworfen. Bestehende Schutzmechanismen bleiben unverändert
+         wirksam: die Payload-Heuristik überspringt JSON-/Codeblock-Leaks,
+         der exakte String-Vergleich verhindert doppelte Bestätigungen.
+         Quellen/cite-Marker bleiben strikt an echte Websuchen gebunden
+         (hits-Argument bei `!usedSearch` explizit `[]`, zusätzlich zur
+         ohnehin leeren `sources`-Liste ohne `web_search_tool_result`) –
+         ohne Suche entsteht also nie eine erfundene Quellenliste.
+         Nebenbefund beim Testen: `textBlocks` sammelte bislang auch Prosa
+         aus VERWORFENEN Zwischenversuchen (z. B. eine Antwort ganz ohne
+         Tool-Aufruf, die einen erzwungenen Nachfass-Versuch auslöst) –
+         ohne Gegenmaßnahme wäre dieser Entwurfstext in die finale Antwort
+         durchgesickert. Fix: `textBlocks` wird an den beiden echten
+         Neustart-Stellen (Websuche-nicht-verfügbar-Fallback,
+         letzte-Rettung-„none“-Fallback) sowie beim Nachfass-Versuch OHNE
+         Websuche geleert. MIT Websuche bleibt `textBlocks` beim
+         Nachfass-Versuch dagegen ERHALTEN (siehe Re-Review-Korrektur 🔴 1
+         unten) – nur ein Textblock aus einem tatsächlich verworfenen
+         Entwurf (kein Tool-Aufruf, keine Recherche) wird gelöscht.
+      Begründung für die Code-Änderung: Inhaltsverlust (Antwort komplett
+      weg) ist der schwerwiegendere Fehler als eine gelegentliche
+      Preamble-Doppelung; der Prompt-Fix aus Schritt 1 minimiert
+      Vorab-Text ohne Suche von vornherein, das Sicherheitsnetz fängt nur
+      den Rest ab. Restrisiko: bei einer echten Websuche MIT
+      pause_turn/lookup_wissen-Zwischenschritten UND zusätzlicher, nicht
+      zitierfähiger Prosa in einem Zwischenschritt könnte diese Prosa
+      (bisher schon, unverändert) in die finale Antwort einfließen – kein
+      neues Risiko durch diese Änderung, aber nicht separat getestet.
+    - **Re-Review (v7.6, vor Freigabe) – zwei Findings, beide behoben:**
+      - 🔴 (Muss): Der erste Entwurf leerte `textBlocks` am
+        Forced-Nachfass UNCONDITIONAL – das verwarf auch LEGITIME
+        Recherche-Prosa (Websuche gelaufen, Modell schreibt die
+        vollständige zitierte Antwort als Text, vergisst nur den
+        Tool-Aufruf → Nachfass hätte die Prosa gelöscht, der Nutzer sähe
+        nur noch die Kurz-Bestätigung plus bis zu 6 stale „konsultierte
+        Quellen“ ohne zugehörigen Text). Fix: `if (!usedSearch)
+        textBlocks.length = 0;` – der Reset greift nur noch für den
+        echten Entwurf-ohne-Recherche-Fall, der Suche-Fall behält seine
+        Prosa. Regressionstest: „Suche + fehlender Tool-Aufruf: Forced-
+        Nachfass behält die bereits zitierte Recherche-Prosa“ in
+        `tests/anthropic.test.js`.
+      - 🟡: Durch den Gate-Wegfall wird auch Lookup-Zwischenprosa
+        („Ich schaue in der Datei nach …“) sichtbar und bei mehreren
+        `lookup_wissen`-Runden aneinandergehängt. Fix: Prompt-Satz im
+        HINTERGRUNDWISSEN-/Lookup-Block ergänzt – keine Freitext-Sätze
+        zwischen `lookup_wissen`-Aufrufen, alles Inhaltliche gehört ins
+        reply-Feld. Regressionstest pinnt die neue Phrase.
+      - 🟡 (Testlücke): Zwei ergänzende Tests: (i) Suche + Prosa +
+        fehlender Tool-Aufruf → Forced-Nachfass → Prosa bleibt erhalten
+        (fängt genau das 🔴-Finding); (ii) ohne Suche + Prosa-Entwurf ohne
+        Tool-Aufruf → Nachfass → Entwurf erscheint NICHT in der finalen
+        Antwort (Gegenprobe, damit der Fix nicht zu weit öffnet).
+      Alle Tests aus `tests/anthropic.test.js` (bisherige UND neue, damit
+      (a)–(d) aus der Erstversion sowie (i)/(ii) aus dem Re-Review) grün;
+      der vorbestehende, bewusst nicht angefasste Punkt „stale
+      usedSearch/sources an den Fallback-Stellen“ bleibt als bekannte,
+      kleinere Ungenauigkeit außerhalb dieses Fixes.

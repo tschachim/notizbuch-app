@@ -88,7 +88,7 @@ function knowledgeBlock(knowledge, escAttr) {
   return (
     "\n\nHINTERGRUNDWISSEN (hinterlegte Dateien des AKTIVEN Notizbuchs, nutze sie zur Beantwortung und Einordnung):\n" +
     (hasIndexed
-      ? 'WICHTIG: Dateien mit volltext="nein" sind zu groß für den Prompt. Hole benötigte Inhalte GEZIELT über das Tool lookup_wissen (mehrfach erlaubt), BEVOR du inhaltlich antwortest – rate nicht.\n'
+      ? 'WICHTIG: Dateien mit volltext="nein" sind zu groß für den Prompt. Hole benötigte Inhalte GEZIELT über das Tool lookup_wissen (mehrfach erlaubt), BEVOR du inhaltlich antwortest – rate nicht. Schreibe dabei auch bei mehreren lookup_wissen-Runden KEINEN Freitext zwischen den Tool-Aufrufen ("Ich schaue nach …" o. ä.) – alles Inhaltliche gehört ausschließlich ins reply-Feld des abschließenden update_notebook-Aufrufs.\n'
       : "") +
     (parts.length ? parts.join("\n\n") : "(keine Dateien im aktiven Notizbuch)") +
     (others.length
@@ -126,6 +126,7 @@ INTERNET-RECHERCHE:
 - Dir steht die Websuche (web_search) zur Verfügung. Nutze sie GROSSZÜGIG, wann immer sie die Antwort oder die Einordnung verbessert: unbekannte Begriffe, Produkte, Firmen, Orte, Personen, aktuelle Fakten, Preise, Termine, Versionen. Lieber einmal zu viel suchen als zu wenig.
 - Beispiel: Der Nutzer erwähnt eine Software, die du nicht sicher kennst → recherchiere, was das ist, und nutze das Ergebnis für Einordnung und Dokumenteintrag.
 - Wenn du recherchiert hast, schreibe die inhaltliche Antwort (Empfehlungen, Fakten, Erklärungen) als normalen Text VOR dem abschließenden Tool-Aufruf – die App zeigt diesen Text mitsamt klickbaren Quellen-Fußnoten im Chat an. Das reply-Feld enthält dann nur noch Bestätigung und Auffälligkeiten, ohne die Antwort zu wiederholen.
+- OHNE Websuche gilt das NICHT: Schreibe dann keinen Text vor dem Tool-Aufruf, sondern die komplette Antwort direkt und vollständig ins reply-Feld (siehe ANTWORTFORMAT).
 - ZITIER-PFLICHT: Markiere JEDE konkrete recherchierte Aussage (Zahlen, Fakten, Empfehlungen) direkt an der Aussage mit <cite index="…">…</cite> – überall: im Antworttext vor dem Tool-Aufruf, in reply und in ops-Inhalten. index = 1-basierte Position des belegenden Suchtreffers, gezählt über ALLE gelieferten Suchergebnisse in Reihenfolge; mehrere Belege kommagetrennt (index="2,5").
   Beispiel-Antworttext: "Morgen wird es <cite index="1">sonnig bei rund 31 °C</cite>, nachts <cite index="3">mild bei 17 °C</cite>."
   Eine Recherche-Antwort ganz ohne cite-Marker ist ein Fehler.
@@ -175,7 +176,7 @@ DATEIANHÄNGE:
 
 ANTWORTFORMAT:
 - Schließe JEDE Antwort mit genau einem Aufruf des Tools "update_notebook" ab – niemals nur mit freiem Text.
-- reply: Chat-Antwort auf Deutsch. BEI SPEICHER-AUFTRÄGEN (es wird etwas im Dokument abgelegt/geändert): Ohne Auffälligkeiten nur kurze Bestätigung (1–2 Sätze); mit Auffälligkeiten benenne sie klar und konkret – dann dürfen es bis ca. 200 Wörter sein. BEI REINEN FRAGEN/Erklär-Bitten OHNE Speicherauftrag ist reply dagegen die VOLLSTÄNDIGE inhaltliche Antwort – inklusive Formeln ($…$/$$…$$), wenn passend. Ein Verweis „steht schon in Notizbuch X“ ist dabei nur als ERGÄNZUNG erlaubt, ersetzt aber NIEMALS die Antwort. Nach einer Websuche gilt weiterhin die INTERNET-RECHERCHE-Regel: vollständige Antwort als Text VOR dem Tool-Aufruf, reply dann nur kurze Bestätigung ohne Wiederholung. Bei Misch-Nachrichten (Speichern + Frage) beides: kurze Bestätigung plus vollständige Antwort auf den Frageteil.
+- reply: Chat-Antwort auf Deutsch. BEI SPEICHER-AUFTRÄGEN (es wird etwas im Dokument abgelegt/geändert): Ohne Auffälligkeiten nur kurze Bestätigung (1–2 Sätze); mit Auffälligkeiten benenne sie klar und konkret – dann dürfen es bis ca. 200 Wörter sein. BEI REINEN FRAGEN/Erklär-Bitten OHNE Speicherauftrag ist reply dagegen die VOLLSTÄNDIGE inhaltliche Antwort – inklusive Formeln ($…$/$$…$$), wenn passend. Ein Verweis „steht schon in Notizbuch X“ ist dabei nur als ERGÄNZUNG erlaubt, ersetzt aber NIEMALS die Antwort. OHNE Websuche gehört IMMER die komplette Antwort in dieses reply-Feld – schreibe dann keinen Text vor dem Tool-Aufruf und lass reply NIE auf „oben“ oder einen vorherigen Abschnitt verweisen, den es ohne Websuche im Chat gar nicht gibt. Nach einer Websuche gilt stattdessen weiterhin die INTERNET-RECHERCHE-Regel: vollständige Antwort als Text VOR dem Tool-Aufruf, reply dann nur kurze Bestätigung ohne Wiederholung. Bei Misch-Nachrichten (Speichern + Frage) beides: kurze Bestätigung plus vollständige Antwort auf den Frageteil.
 - commit: sehr kurze Änderungsbeschreibung im Stil einer Git-Commit-Message; leer lassen, wenn keine Änderung.
 - Verwende im Dokumenttext typografische Anführungszeichen („…“) statt gerader Anführungszeichen (").
 
@@ -335,6 +336,10 @@ export function parseLooseJson(raw) {
 // jeweiligen Textblock kodiert, anschließend werden alle cite-Indizes auf
 // eine kompakte Liste NUR der tatsächlich zitierten Quellen umnummeriert
 // (klein zu speichern, und 1-basiert exakt auflösbar).
+// Seit v7.6 ruft callClaude diese Funktion IMMER auf, auch ohne Websuche
+// (Sicherheitsnetz gegen Inhaltsverlust, siehe DECISIONS.md) – hits ist dann
+// ein leeres Array, es entstehen also nie Quellen ohne echte Recherche;
+// JSON-Payload-Filter und Dedup gegen toolReply schützen unverändert.
 // Exportiert für Tests. data.content = akkumulierte Textblöcke aller
 // Antwortsegmente; hits = Roh-Trefferliste, wird nicht verändert.
 export function buildChatReply(data, hits, toolReply) {
@@ -610,10 +615,15 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
 
   let { data, convo: lastConvo } = await doPost("search");
   if (data && data.error && /web_search|tool/i.test(String(data.error.message || data.error.type || ""))) {
-    // Websuche nicht verfügbar (Modell/Org): ohne Recherche, Tool erzwungen
+    // Websuche nicht verfügbar (Modell/Org): ohne Recherche, Tool erzwungen.
+    // textBlocks gehört zum gescheiterten Versuch (bei einem harten API-Fehler
+    // ohnehin leer) – für den frischen Anlauf verwerfen, sonst könnte Prosa
+    // aus einem verworfenen Versuch in die finale Antwort durchsickern.
+    textBlocks.length = 0;
     ({ data, convo: lastConvo } = await doPost("forced"));
   }
   if (data && data.error && /tool/i.test(String(data.error.message || data.error.type || ""))) {
+    textBlocks.length = 0;
     ({ data, convo: lastConvo } = await doPost("none"));
   }
   if (!data || data.error) {
@@ -648,6 +658,19 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
   // Tool-Blöcke in der History das deklarierte Tool verlangen –, klassisch
   // von vorn ohne Recherche.
   if ((!parsed || typeof parsed !== "object") && data.stop_reason !== "max_tokens") {
+    // Der bisherige Versuch endete OHNE update_notebook-Aufruf – ein
+    // Protokollverstoß (der Prompt verlangt IMMER genau einen Tool-Aufruf).
+    // OHNE Websuche sind etwaige Textblöcke daraus ein verworfener Entwurf,
+    // keine legitime "Antwort vor dem Tool-Aufruf" (die gibt es laut Prompt
+    // nur nach einer Recherche) – dann verwerfen, damit sich der Entwurf
+    // nicht an die reply-Antwort des Nachfass-Versuchs anhängt. MIT
+    // Websuche ist der Textblock dagegen die vom Prompt verlangte
+    // vollständige, zitierte Antwort – nur der Tool-Aufruf fehlte; dieser
+    // Fall behält textBlocks (Review-Fund v7.6: sonst verwirft der Reset
+    // auch legitime, bereits zitierte Recherche-Prosa und der Nutzer sieht
+    // nur noch die kurze Bestätigung plus bis zu 6 „konsultierte Quellen“
+    // ohne den dazugehörigen Text).
+    if (!usedSearch) textBlocks.length = 0;
     let next = null;
     const tail = lastConvo[lastConvo.length - 1];
     if (lastConvo !== msgs && tail && tail.role === "user") {
@@ -695,9 +718,22 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
   // Roh-reply übergeben (ohne "Notiert."-Default): der Default soll nicht
   // an eine vollständige Recherche-Antwort angehängt werden.
   const toolReply = typeof parsed.reply === "string" ? parsed.reply : "";
-  const chat = usedSearch
-    ? buildChatReply({ content: textBlocks }, sources, toolReply)
-    : { reply: toolReply, sources: [] };
+  // v7.6 (Sicherheitsnetz zu QA-Finding C9a): Vorab-Textblöcke werden IMMER
+  // mit reply kombiniert, nicht mehr nur bei usedSearch===true. Trotz der
+  // Prompt-Anweisung (ANTWORTFORMAT/INTERNET-RECHERCHE), ohne Websuche
+  // NIEMALS Text vor dem Tool-Aufruf zu schreiben, tat das Modell es im
+  // Live-Finding trotzdem (vollständige Erklärung inkl. Formel) und verwies
+  // in reply nur knapp auf „oben“ – beim alten usedSearch-Gate wurde dieser
+  // Text komplett verworfen, reply verwies auf ein „oben“, das im Chat nie
+  // existierte (kompletter Inhaltsverlust). buildChatReply schützt weiterhin
+  // vor Doppelungen (exakter Vergleich mit toolReply) und vor JSON-/Codeblock-
+  // Leaks (Payload-Heuristik) – das gilt unabhängig von usedSearch. Quellen/
+  // cite-Marker bleiben dagegen strikt an echte Websuchen gebunden: ohne
+  // Suche ist "sources" ohnehin leer (collectSources füllt es nur bei einem
+  // web_search_tool_result-Block), das hits-Argument wird zusätzlich explizit
+  // damit gegated, damit ein versehentlicher <cite>-Tag ohne Suche nie eine
+  // Quellenliste ohne recherchierte Belege erzeugt.
+  const chat = buildChatReply({ content: textBlocks }, usedSearch ? sources : [], toolReply);
   // Recherchiert, aber nichts inline zitiert: die konsultierten Quellen
   // trotzdem anzeigen (dedupliziert, gedeckelt), statt sie zu verschweigen.
   if (usedSearch && !chat.sources.length && sources.length) {

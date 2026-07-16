@@ -68,6 +68,11 @@ describe("buildSystem", () => {
     expect(sys).toContain("Start-Orientierung"); // Kopf zur Orientierung …
     expect(sys).not.toContain("ENDE-MARKER");    // … aber nie der ganze Inhalt
     expect(sys).not.toContain("[… gekürzt");     // kein stilles Abschneiden mehr
+    // Review-Fund v7.6 (🟡 2): Ohne das Gate wird Lookup-Zwischenprosa
+    // ("Ich schaue nach …") jetzt sichtbar kombiniert – der Prompt verbietet
+    // sie daher explizit zwischen mehreren lookup_wissen-Runden.
+    expect(sys).toContain("Schreibe dabei auch bei mehreren lookup_wissen-Runden KEINEN Freitext zwischen den Tool-Aufrufen");
+    expect(sys).toContain("alles Inhaltliche gehört ausschließlich ins reply-Feld");
 
     // Gesamt-Deckel: normale Dateien über 200k Summe → Rest als Index-Eintrag
     const mid = (c) => c.repeat(75000);
@@ -125,6 +130,17 @@ describe("buildSystem", () => {
       .toContain("Bei REINEN FRAGEN/Erklär-Bitten OHNE Speicherauftrag dagegen die VOLLSTÄNDIGE inhaltliche Antwort");
     expect(NOTEBOOK_TOOL.input_schema.properties.reply.description)
       .toContain("ersetzt niemals die Antwort");
+  });
+
+  it("verbietet Vorab-Text ohne Websuche und Verweise auf 'oben' (QA-Finding C9a, v7.6)", () => {
+    const sys = buildSystem(nbs, "Wissensbasis", null);
+    // Ursache des v7.5-Fehlschlags: das Modell schrieb die Erklärung als
+    // Textblock vor dem Tool-Aufruf, obwohl gar nicht recherchiert wurde,
+    // und reply verwies nur auf ein "oben", das im Chat nie sichtbar war.
+    // Der Prompt verbietet das jetzt explizit für den Nicht-Suche-Fall.
+    expect(sys).toContain("OHNE Websuche gilt das NICHT: Schreibe dann keinen Text vor dem Tool-Aufruf");
+    expect(sys).toContain("OHNE Websuche gehört IMMER die komplette Antwort in dieses reply-Feld");
+    expect(sys).toContain("lass reply NIE auf „oben“ oder einen vorherigen Abschnitt verweisen");
   });
 
   it("erlaubt LaTeX-Formeln nach Ermessen, inline und abgesetzt, in Chat UND Dokument (v7.3)", () => {
@@ -189,6 +205,19 @@ describe("buildChatReply", () => {
     );
     expect(sources).toEqual([{ url: "https://neu.de", title: "Neu" }]);
   });
+
+  it("funktioniert unverändert mit leerer Trefferliste (v7.6: callClaude ruft dies jetzt auch ohne Websuche auf)", () => {
+    // Ohne Suche übergibt callClaude ein leeres hits-Array – buildChatReply
+    // selbst kennt "usedSearch" nicht, muss also auch ganz ohne Treffer
+    // sauber kombinieren und darf keine Quellen erfinden.
+    const { reply, sources } = buildChatReply(
+      { content: [{ type: "text", text: "Vollständige Erklärung ohne Recherche." }] },
+      [],
+      "Kurzfassung."
+    );
+    expect(reply).toBe("Vollständige Erklärung ohne Recherche.\n\nKurzfassung.");
+    expect(sources).toEqual([]);
+  });
 });
 
 describe("callClaude (fetch gemockt)", () => {
@@ -224,6 +253,51 @@ describe("callClaude (fetch gemockt)", () => {
     expect(body.max_tokens).toBe(16000);
   });
 
+  it("ohne Websuche: substanzieller Vorab-Textblock wird trotzdem mit reply kombiniert (Sicherheitsnetz C9a, v7.6)", async () => {
+    // Live-Finding: Ohne Suche schrieb das Modell die vollständige Erklärung
+    // (inkl. Formel) als Textblock VOR dem Tool-Aufruf und verwies in reply
+    // nur knapp auf "oben" – beim alten usedSearch-Gate ging der Textblock
+    // komplett verloren. Jetzt wird er unabhängig von usedSearch kombiniert.
+    respond({
+      stop_reason: "end_turn",
+      content: [
+        { type: "text", text: "Der Satz des Pythagoras lautet $a^2+b^2=c^2$ für rechtwinklige Dreiecke." },
+        toolUse({ reply: "Nur zur Erklärung – nichts gespeichert.", ops: [] }),
+      ],
+    });
+    const res = await callClaude("key", "erkläre mir das", NB_CTX, [], "claude-sonnet-5", null, null);
+    expect(res.reply).toBe(
+      "Der Satz des Pythagoras lautet $a^2+b^2=c^2$ für rechtwinklige Dreiecke.\n\n" +
+      "Nur zur Erklärung – nichts gespeichert."
+    );
+    expect(res.sources).toEqual([]); // keine Quellen ohne echte Websuche
+  });
+
+  it("ohne Websuche: JSON-Payload-Textblock bleibt weiterhin verworfen (kein Leak ins reply)", async () => {
+    respond({
+      stop_reason: "end_turn",
+      content: [
+        { type: "text", text: '{"reply":"sollte nicht erscheinen","ops":[]}' },
+        toolUse({ reply: "Kurz.", ops: [] }),
+      ],
+    });
+    const res = await callClaude("key", "frage", NB_CTX, [], "claude-sonnet-5", null, null);
+    expect(res.reply).toBe("Kurz.");
+    expect(res.reply).not.toContain("sollte nicht erscheinen");
+  });
+
+  it("ohne Websuche: Textblock identisch mit reply wird nicht doppelt angehängt", async () => {
+    respond({
+      stop_reason: "end_turn",
+      content: [
+        { type: "text", text: "Alles bereits notiert." },
+        toolUse({ reply: "Alles bereits notiert.", ops: [] }),
+      ],
+    });
+    const res = await callClaude("key", "frage", NB_CTX, [], "claude-sonnet-5", null, null);
+    expect(res.reply).toBe("Alles bereits notiert.");
+  });
+
   it("Suche: sammelt Quellen, wandelt ops-cites in Fußnoten-Links, kombiniert Prosa", async () => {
     respond({
       stop_reason: "end_turn",
@@ -245,6 +319,31 @@ describe("callClaude (fetch gemockt)", () => {
     expect(res.ops[0].content).toBe("- Fakt X[0](https://q.de)");
   });
 
+  it("Suche + fehlender Tool-Aufruf: Forced-Nachfass behält die bereits zitierte Recherche-Prosa (Review-Fund v7.6, 🔴 1)", async () => {
+    // Das Modell recherchiert, schreibt die vollständige zitierte Antwort als
+    // Text VOR dem Tool-Aufruf (wie vom Prompt verlangt), vergisst aber den
+    // abschließenden update_notebook-Aufruf. Der erzwungene Nachfass darf die
+    // bereits erbrachte, zitierte Prosa NICHT verwerfen – sonst sieht der
+    // Nutzer nur noch die Kurz-Bestätigung ohne den eigentlichen Inhalt.
+    respond({
+      stop_reason: "end_turn",
+      content: [
+        { type: "server_tool_use", name: "web_search" },
+        { type: "web_search_tool_result", content: [
+          { type: "web_search_result", url: "https://q.de", title: "Q" },
+        ]},
+        { type: "text", text: "Fakt X", citations: [{ url: "https://q.de", title: "Q" }] },
+        // kein update_notebook-Aufruf in dieser Antwort!
+      ],
+    });
+    respond({ stop_reason: "end_turn", content: [toolUse({ reply: "Eingetragen.", ops: [] })] });
+    const res = await callClaude("key", "recherchiere", NB_CTX, [], "claude-sonnet-5", null, null);
+    expect(res.reply).toBe('Fakt X<cite index="1"></cite>\n\nEingetragen.');
+    expect(res.sources).toEqual([{ url: "https://q.de", title: "Q" }]);
+    const second = JSON.parse(fetch.mock.calls[1][1].body);
+    expect(second.tool_choice).toEqual({ type: "tool", name: "update_notebook" });
+  });
+
   it("fragt bei fehlendem Tool-Aufruf einmal mit erzwungenem Tool nach", async () => {
     respond({ stop_reason: "end_turn", content: [{ type: "text", text: "nur Prosa ohne Tool" }] });
     respond({ stop_reason: "end_turn", content: [toolUse({ reply: "Jetzt strukturiert.", ops: [] })] });
@@ -252,6 +351,18 @@ describe("callClaude (fetch gemockt)", () => {
     expect(res.reply).toBe("Jetzt strukturiert.");
     const second = JSON.parse(fetch.mock.calls[1][1].body);
     expect(second.tool_choice).toEqual({ type: "tool", name: "update_notebook" });
+  });
+
+  it("ohne Websuche + fehlender Tool-Aufruf: Forced-Nachfass verwirft den Prosa-Entwurf (kein Leak)", async () => {
+    // Gegenstück zum Suche-Fall oben: OHNE Websuche ist ein Textblock ohne
+    // Tool-Aufruf ein reiner Protokollverstoß/Entwurf, kein instruierter
+    // Vorab-Text – er darf NICHT in der finalen Antwort auftauchen.
+    respond({ stop_reason: "end_turn", content: [{ type: "text", text: "Verworfener Entwurfstext ohne Tool-Aufruf." }] });
+    respond({ stop_reason: "end_turn", content: [toolUse({ reply: "Strukturierte Antwort.", ops: [] })] });
+    const res = await callClaude("key", "frage ohne suche", NB_CTX, [], "claude-sonnet-5", null, null);
+    expect(res.reply).toBe("Strukturierte Antwort.");
+    expect(res.reply).not.toContain("Verworfener Entwurfstext");
+    expect(res.sources).toEqual([]);
   });
 
   it("wendet abgeschnittene Antworten nie an (max_tokens)", async () => {
