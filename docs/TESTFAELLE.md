@@ -97,8 +97,14 @@ kleinen hochgestellten Fußnoten-Zahlen an den Aussagen (oder mindestens
 Quellenliste unter der Antwort); im Dokument ein Eintrag mit
 klickbarer Fußnoten-Zahl, die auf eine http(s)-Quelle verlinkt.
 
-**C4 [OFFEN] Chat-Verlauf.** Nach C1–C3: Nachrichten haben Zeitstempel;
-Fußnoten-Links öffnen in neuem Tab (target=_blank).
+**C4 [OFFEN] Chat-Verlauf.** Nach C1–C3: JEDE Chat-Nachricht (Nutzer und
+Assistent) zeigt einen dezenten Zeitstempel (klein, grau) unter der
+Bubble – rechtsbündig bei Nutzer-, linksbündig bei Assistenten-Nachrichten.
+Ausnahme: die Begrüßung ganz oben (kein Zeitstempel), zentrierte
+Info-Pillen (z. B. „… manuell bearbeitet“) und Antworten MIT
+Dokument-Commit-Badge (die Zeit steht dort schon in der Badge „HH:MM ·
+…“, keine doppelte Zeile). Fußnoten-Links öffnen in neuem Tab
+(target=_blank).
 
 **C5 [VERBUNDEN][API] Cross-Notizbuch-Routing.** Zweites Notizbuch
 „QA-Test Zweitbuch“ anlegen, dorthin wechseln, dann eintragen:
@@ -139,17 +145,25 @@ beiden Größen weiterhin einen Zeilenumbruch ein; Enter (ohne Umschalt)
 löst weiterhin denselben Sende-Versuch aus wie vorher (ohne Verbindung
 öffnet es die Einstellungen statt zu senden).
 
-**C9 [VERBUNDEN][API] Formel im Chat und Dokument.** Im QA-Notizbuch per
-Chat: „Notiere den Satz des Pythagoras mit gerenderter Formel.“
-Erwartet: Die Chat-Antwort zeigt eine ECHT gerenderte KaTeX-Formel
-(mathematische Symbole/Hochstellung, keine rohen `$`-Zeichen im Text);
-im Dokument erscheint der Eintrag ebenfalls mit gerenderter Formel statt
-Roh-Markdown (`$a^2+b^2=c^2$` o. ä. darf nirgends als Klartext sichtbar
-sein). ⚠️ Währungs-Sicherheit: Enthält ein anderer Eintrag im selben
-Notizbuch Beträge wie „$50“ oder „-38.000 vs. -50.000“, dürfen diese
-NICHT als Formel interpretiert werden (weiterhin normaler Text mit
-sichtbarem Dollarzeichen) – bei Auffälligkeiten hier explizit als
-Finding melden.
+**C9a [VERBUNDEN][API] Formel im Chat (reine Frage, kein Speicherauftrag).** Im
+QA-Notizbuch per Chat: „Erkläre kurz den Satz des Pythagoras mit Formel –
+nur erklären, nichts speichern.“ (genau 1 API-Aufruf). Erwartet: Die
+Chat-Antwort zeigt eine ECHT gerenderte KaTeX-Formel (`.katex`-Elemente,
+mathematische Symbole/Hochstellung, keine rohen `$`-Zeichen im Text);
+KEIN Dokument-Commit (Regel „keine Nebenbei-Ops bei reinen Fragen“,
+siehe DECISIONS.md Punkt 41).
+
+**C9b [VERBUNDEN][API] Formel im Dokument (Speicherauftrag).** Im
+QA-Notizbuch per Chat: „Notiere den Satz des Pythagoras mit gerenderter
+Formel.“ (genau 1 API-Aufruf). Erwartet: Im Dokument erscheint der
+Eintrag mit gerenderter Formel statt Roh-Markdown (`$a^2+b^2=c^2$` o. ä.
+darf nirgends als Klartext sichtbar sein); die Chat-Antwort darf hier
+NUR knapp bestätigen (keine ausformulierte Erklärung/Formel im Chat
+erwarten – das ist die gewollte Bestätigungs-Regel aus v7.1, kein Bug).
+⚠️ Währungs-Sicherheit: Enthält ein anderer Eintrag im selben Notizbuch
+Beträge wie „$50“ oder „-38.000 vs. -50.000“, dürfen diese NICHT als
+Formel interpretiert werden (weiterhin normaler Text mit sichtbarem
+Dollarzeichen) – bei Auffälligkeiten hier explizit als Finding melden.
 
 ## D. Manuelles Bearbeiten (WYSIWYG)
 
@@ -161,7 +175,11 @@ neue Version in der Historie.
 **D2 [VERBUNDEN] Tabelle.** Im Editor per Tabellen-Knopf eine 2×3-Tabelle
 aufziehen, Kopf und eine Zelle füllen, speichern. Erwartet: gerenderte
 Tabelle mit Kopfzeile; erneutes Öffnen des Editors zeigt die Tabelle
-unverändert (Roundtrip).
+unverändert (Roundtrip). ⚠️ Bekannte, bewusst akzeptierte Grenze (KEIN
+Bug, bitte nicht melden): Wird die Tabelle exakt am Zeilenende eines
+Listenpunkts eingefügt, landet sie im Editor-DOM innerhalb des `<li>`
+statt danach – die Ansicht rendert trotzdem korrekt und der Roundtrip
+bleibt byte-stabil, siehe DECISIONS.md.
 
 **D3 [VERBUNDEN] Checkliste.** Im Editor eine Checkliste mit zwei
 Einträgen anlegen, speichern, dann in der ANSICHT ein Kästchen anklicken.
@@ -173,7 +191,7 @@ Abbrechen. Erwartet: Ansicht unverändert, kein Commit.
 **D5 [VERBUNDEN] Formel-Roundtrip im Editor.** Voraussetzung: Ein
 Dokument mit mindestens einer Inline-Formel (z. B. `$a^2+b^2=c^2$`) und
 einer abgesetzten Formel (z. B. `$$E=mc^2$$` auf eigener Zeile) – bei
-Bedarf vorher per Chat anlegen (siehe C9) oder direkt über die
+Bedarf vorher per Chat anlegen (siehe C9b) oder direkt über die
 Toolbar-Knöpfe „Σ“ (Inline) bzw. „Formel abgesetzt“ im Editor selbst
 einfügen. Editor öffnen. Erwartet: Beide Formeln erscheinen gerendert
 (nicht als Roh-`$…$`-Text). OHNE etwas zu ändern speichern: Erwartet

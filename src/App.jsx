@@ -2115,7 +2115,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.3</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.4</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -2301,11 +2301,20 @@ export default function NotizbuchApp() {
                     );
                   })()}
                 </div>
-                {m.commit && (
+                {m.commit ? (
                   <div className="mt-1 inline-flex items-center gap-1 font-mono text-xs text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-2 py-1">
                     <GitCommit size={12} />
                     <span>{fmtTime(m.ts)} · {m.commit}</span>
                   </div>
+                ) : (
+                  // Dezenter Zeitstempel für alle übrigen Nachrichten (C4, v7.4).
+                  // WELCOME hat ts:0 (falsy) und bleibt bewusst ohne Zeit; bei
+                  // Commit-Badge keinen doppelten Stempel (die Badge zeigt die
+                  // Zeit schon). Ausrichtung folgt items-end/items-start des
+                  // umgebenden flex-col-Containers automatisch.
+                  m.ts ? (
+                    <div className="mt-0.5 px-1 text-[10px] text-slate-400">{fmtTime(m.ts)}</div>
+                  ) : null
                 )}
               </div>
             ))}

@@ -843,3 +843,37 @@ aus `referenz-app.jsx` übernommen.
       einzeiliges `$…$`-Paar (einfaches Dollar) nach einem Codespan wird
       dagegen in BEIDEN Pfaden korrekt als Formel erkannt – nur `$$…$$`
       außerhalb des Zeilenanfangs ist von der Divergenz betroffen.
+
+51. **Fix-Paket v7.4** (`src/App.jsx`, `docs/TESTFAELLE.md`, QA-Findings
+    C4/C9/D2 aus dem v7.3-Tester-Lauf):
+    - **C4 – Zeitstempel an allen Chat-Nachrichten:** Bisher zeigte nur
+      eine Antwort MIT Dokument-Commit eine Uhrzeit (in der
+      Commit-Badge). Jetzt bekommt jede Nachricht mit `ts` (`WELCOME`
+      hat bewusst `ts:0`, bleibt also ohne) eine dezente Zeile
+      `text-[10px] text-slate-400` unter der Bubble – rechtsbündig bei
+      Nutzer-, linksbündig bei Assistenten-Nachrichten (folgt einfach
+      dem `items-end`/`items-start` des umgebenden `flex-col`, keine
+      eigene Ausrichtungslogik nötig). Bei Nachrichten MIT Commit-Badge
+      bleibt es bei der Zeit in der Badge – keine doppelte Zeitangabe.
+      Reiner UI-Fix ohne `src/lib`-Berührung, daher kein neuer
+      Unit-Test; abgedeckt durch den E2E-Testfall C4.
+    - **C9 – Testfall-Erwartung korrigiert (kein Code-Fix):** Der
+      Speicher-Prompt „Notiere den Satz des Pythagoras mit gerenderter
+      Formel“ schrieb die Formel korrekt ins Dokument und bestätigte im
+      Chat nur kurz – exakt die REINE-FRAGEN/Bestätigungs-Regel aus
+      Punkt 41 (v7.1), kein Bug. C9 wurde in C9a (reine Frage ohne
+      Speicherauftrag → Formel MUSS im Chat gerendert erscheinen) und
+      C9b (Speicherauftrag → Formel MUSS im Dokument gerendert
+      erscheinen, Chat darf nur bestätigen) aufgeteilt, damit die
+      Erwartung zur gewollten Modell-Regel passt.
+    - **D2 – bekannte Grenze dokumentiert (kein Code-Fix):** Eine
+      Tabelle, die exakt am Zeilenende eines Listenpunkts eingefügt
+      wird, landet im Editor-DOM innerhalb des `<li>` statt danach. Die
+      Ansicht rendert trotzdem korrekt und der Roundtrip bleibt
+      byte-stabil (ProseMirror/ProseMirror-Serializer geben denselben
+      Markdown-Text zurück) – bewusst akzeptierte Grenze, nicht
+      behoben, da eine Sonderbehandlung „Tabelle direkt nach Cursor am
+      Listenende“ deutlich mehr Editor-Komplexität kosten würde, als
+      der seltene Randfall rechtfertigt. In `docs/TESTFAELLE.md` bei D2
+      als bekannte Divergenz vermerkt, damit der Tester sie nicht als
+      Finding meldet.
