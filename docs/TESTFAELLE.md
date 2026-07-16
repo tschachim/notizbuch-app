@@ -165,6 +165,24 @@ Beträge wie „$50“ oder „-38.000 vs. -50.000“, dürfen diese NICHT als
 Formel interpretiert werden (weiterhin normaler Text mit sichtbarem
 Dollarzeichen) – bei Auffälligkeiten hier explizit als Finding melden.
 
+**C10 [VERBUNDEN][API] Codeblock im Chat und Dokument.** Im QA-Notizbuch
+per Chat: „Lege ein Bash-Snippet zum Löschen von .tmp-Dateien im
+Notizbuch ab und zeig mir das Snippet zusätzlich hier im Chat als
+Codeblock.“ (genau 1 API-Aufruf). Erwartet: Im Dokument erscheint ein
+monospaced Codeblock (grauer/dezenter Kasten, eigene Schriftart,
+horizontal scrollbar bei langen Zeilen statt die Seite zu verbreitern)
+OHNE sichtbare ```-Zäune im Text. Unabhängiges Thema von C9a/C9b (dort
+geht es um Formeln, hier um Code) – beide Features dürfen sich nicht
+gegenseitig stören: Enthält das Notizbuch bereits Formeln aus C9a/C9b,
+müssen diese unverändert weiter als KaTeX gerendert bleiben.
+⚠️ Chat-Teil (kein Finding, falls nicht erfüllbar): Zeigt die
+Chat-Antwort das Snippet (üblich bei dieser Formulierung, da explizit
+im Chat angefragt), muss es dort EBENFALLS monospaced in einem eigenen
+Kasten erscheinen, ohne sichtbare ```-Zeichen. Antwortet das Modell
+stattdessen nur mit einer kurzen Bestätigung ohne Snippet (Kürze-Regel
+aus C9b greift gelegentlich auch hier), gilt nur die Dokument-Prüfung
+als maßgeblich – kurz vermerken, dass der Chat-Teil übersprungen wurde.
+
 ## D. Manuelles Bearbeiten (WYSIWYG)
 
 **D1 [VERBUNDEN] Editor-Roundtrip.** Stift-Knopf → im QA-Notizbuch einen
@@ -214,6 +232,22 @@ Editor ebenfalls komplett als Rohtext stehen, während die Ansicht
 Codespan und Formel nebeneinander rendert. Ein einfaches `$…$`-Paar
 nach einem Codespan (z. B. `` `code` und $x$ hier. ``) funktioniert
 dagegen in BEIDEN Ansichten normal.
+
+**D6 [VERBUNDEN] Codeblock-Roundtrip im Editor.** Voraussetzung: Ein
+Dokument mit mindestens einem Fenced-Codeblock (z. B. aus C10) – bei
+Bedarf vorher per Chat anlegen (siehe C10) oder direkt über den
+Toolbar-Knopf „Codeblock“ (`</>`-Symbol, neben dem Inline-Code-Knopf)
+im Editor selbst einfügen; den Inhalt testweise um ein Dollarzeichen
+und ein Pipe-Zeichen ergänzen (z. B. `Preis: $5 | Menge: 3`). Editor
+öffnen. Erwartet: Der Codeblock erscheint monospaced (grauer/dezenter
+Kasten, eigene Schriftart), NICHT als Roh-```-Text. OHNE etwas zu
+ändern speichern: Erwartet KEIN Commit und keine neue Version in der
+Historie (No-op). Dann den Code-Inhalt geringfügig ändern (z. B. einen
+Kommentar ergänzen) und speichern. Erwartet: neue Version in der
+Historie, Ansicht zeigt den geänderten Code korrekt monospaced,
+Dollarzeichen UND Pipe-Zeichen im Code bleiben wörtlich erhalten (keine
+Formel- oder Tabellen-Fehlinterpretation), alle anderen Inhalte
+(inkl. eventueller Formeln aus D5) unverändert.
 
 ## E. Schnellnotizen
 

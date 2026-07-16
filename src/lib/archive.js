@@ -133,6 +133,16 @@ export function chatToMarkdown(chat, opts = {}) {
 
   // Fußnoten archivweit durchnummerieren (gleiche URL = gleiche Nummer),
   // erst danach die Quellen-Listen einsetzen (siehe SRC_TOKEN).
+  // Restrisiko (Review-Vorschlag, v7.7): Ein unterminierter ```-Zaun in
+  // Nachricht A kann sich im ZUSAMMENGEFÜGTEN Archivtext mit einem Zaun
+  // aus einer SPÄTEREN Nachricht B paaren (renumberCitations/
+  // splitFenceSegments sehen nur den fertigen Gesamttext, keine
+  // Nachrichtengrenzen) – Fußnoten dazwischen bleiben dann unnummeriert.
+  // Kein Datenverlust (der Archivtext bleibt vollständig erhalten) und
+  // die Anzeige ist in sich konsistent (derselbe Bereich rendert
+  // durchgängig als Codeblock); bewusst nicht behoben, da Nachrichten-
+  // Grenzen an renumberCitations durchzureichen die Signatur unnötig
+  // verkomplizieren würde für einen sehr seltenen Randfall.
   return renumberCitations(parts.join("\n")).replace(SRC_TOKEN_RE, (t, i) =>
     "Quellen:\n" +
     srcLists[+i].map((s) => "- [" + escTitle(s.title || s.url) + "](" + s.url + ")").join("\n")

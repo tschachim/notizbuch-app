@@ -24,6 +24,7 @@ import {
 } from "./lib/knowledge.js";
 import { renderWithCites } from "./lib/citations.jsx";
 import { renderMathText, expandMathInNodes } from "./lib/math.jsx";
+import { expandFencedCodeInNodes } from "./lib/code.jsx";
 import { chatToMarkdown, archiveBaseName, mergeChats } from "./lib/archive.js";
 import { loadSettings, saveSettings, clearSettings } from "./lib/settings.js";
 import SettingsDialog from "./components/SettingsDialog.jsx";
@@ -2115,7 +2116,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.6</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.7</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -2263,14 +2264,21 @@ export default function NotizbuchApp() {
                     // oder Nutzerinhalt – dort bleiben $-Zeichen unangetastet.
                     if (m.error) return m.text;
                     // Nutzer-Nachrichten haben keine Zitate, aber $/$$ darf
-                    // auch dort gerendert werden (Nutzerwunsch).
-                    if (m.role !== "assistant") return renderMathText(m.text);
+                    // auch dort gerendert werden (Nutzerwunsch), ebenso
+                    // ```-Codeblöcke/`Inline-Code` (v7.7). Fences kommen
+                    // ZUERST dran, Formeln laufen nur auf den verbleibenden
+                    // Nicht-Code-Segmenten (expandFencedCodeInNodes).
+                    if (m.role !== "assistant") {
+                      return expandFencedCodeInNodes([m.text], (t) => renderMathText(t));
+                    }
                     // cite-Tags der Websuche → klickbare Fußnoten. Wurde
                     // recherchiert, aber nichts inline zitiert, die
-                    // konsultierten Quellen trotzdem auflisten. Formeln
-                    // werden NACH den Zitaten aufgelöst (expandMathInNodes),
-                    // damit ein <cite>…$x$…</cite>-Segment beides bekommt,
-                    // ohne dass sich die beiden Ersetzungen ins Gehege kommen.
+                    // konsultierten Quellen trotzdem auflisten. Codeblöcke/
+                    // Formeln werden NACH den Zitaten aufgelöst
+                    // (expandFencedCodeInNodes → expandMathInNodes je
+                    // Nicht-Code-Segment), damit ein <cite>…$x$…</cite>-
+                    // Segment beides bekommt, ohne dass sich die
+                    // Ersetzungen ins Gehege kommen.
                     const { nodes, footnotes } = renderWithCites(m.text, m.sources || []);
                     const list = footnotes.length
                       ? footnotes
@@ -2279,7 +2287,7 @@ export default function NotizbuchApp() {
                           .map((s, i) => ({ num: i + 1, url: s.url, title: s.title || s.url }));
                     return (
                       <>
-                        {expandMathInNodes(nodes)}
+                        {expandFencedCodeInNodes(nodes, (t) => expandMathInNodes([t]))}
                         {list.length > 0 && (
                           <span className="block mt-2 pt-1.5 border-t border-slate-200 whitespace-normal">
                             {list.map((f) => (

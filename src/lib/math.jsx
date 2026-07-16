@@ -12,6 +12,7 @@
 /* ------------------------------------------------------------------ */
 
 import katex from "katex";
+import { FENCE_OPEN_RE, matchFenceBlock } from "./code.jsx";
 
 // Währungs-Sicherheit (Pandoc-Regel): Die Notizbücher sind voller
 // Finanzbeträge ("$50", "-38.000 vs. -50.000") – ein $ darf nur dann eine
@@ -233,7 +234,7 @@ export function renderMathText(text) {
 /* echten Bearbeitung) Codespan-Inhalte oder gepaarte $$ still um.       */
 /* mathToPlaceholders arbeitet dafür zeilenweise auf dem UNGETEILTEN     */
 /* Dokument (matchDisplayBlock braucht die echten Zeilengrenzen, siehe   */
-/* dort) und wendet drei Schutzmaßnahmen an, bevor irgendetwas           */
+/* dort) und wendet VIER Schutzmaßnahmen an, bevor irgendetwas           */
 /* konvertiert wird: (1) $$…$$ wird AUSSCHLIESSLICH über matchDisplay-   */
 /* Block (zeilenverankert, s. o. inkl. Abbruch an Leerzeilen/Über-       */
 /* schriften, Re-Review R1) erkannt – niemals über den gesamten Text     */
@@ -251,7 +252,12 @@ export function renderMathText(text) {
 /* diesen beim Speichern in mehrere Zeilen zerlegen – Struktur-          */
 /* Korruption. (3) Bildzeilen (![Titel](img:id)) werden komplett         */
 /* ausgenommen, damit ein $ im Bildtitel nicht mitten in die Markdown-   */
-/* Bildsyntax hineingeschrieben wird, bevor sie geparst ist.             */
+/* Bildsyntax hineingeschrieben wird, bevor sie geparst ist. (4) Fenced- */
+/* Codeblöcke (```…```, v7.7, code.jsx) werden als GANZER Block roh      */
+/* übernommen (Zaun-Zeilen + Inhalt), bevor die Zeilen einzeln gegen     */
+/* Bild-/Formel-Regeln laufen – ein $ oder $$ INNERHALB eines Snippets   */
+/* (z. B. Shell-Variablen, Preise in Beispielausgaben) darf nie zu einem */
+/* Formel-Node werden.                                                  */
 /* -------------------------------------------------------------------- */
 
 export const MATH_INLINE_TAG = "math-inline";
@@ -380,6 +386,36 @@ export function mathToPlaceholders(md) {
   const out = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    // Fence-Bewusstsein (v7.7): ein $…$/$$…$$ INNERHALB eines mehrzeiligen
+    // Fenced-Codeblocks darf NIE zu einem Formel-Node werden – Zeilen
+    // zwischen ``` und ``` (inkl. der Zaun-Zeilen selbst) werden komplett
+    // roh übernommen, statt sie einzeln gegen DISPLAY_MATH_START_RE/
+    // mathToPlaceholdersLine laufen zu lassen.
+    if (FENCE_OPEN_RE.test(line)) {
+      const fence = matchFenceBlock(lines, i);
+      if (fence) {
+        out.push(lines.slice(i, fence.endIdx + 1).join("\n"));
+        i = fence.endIdx;
+        continue;
+      }
+      // Unterminiert (Re-Review-Finding P10, 2026-07-17): Anders als der
+      // Viewer (der pro Section/Sub-Section arbeitet und eine unterminierte
+      // Zeile einfach literal als Absatz weiterlaufen lässt) sieht der
+      // ECHTE Editor beim Laden das GESAMTE, ungeteilte Dokument – und
+      // markdown-it verschluckt bei einem fehlenden Schluss-Zaun ALLES ab
+      // dieser Zeile bis Dokumentende in EINEN einzigen Codeblock (exakt
+      // wie ein GIGO-Fall, z. B. eine abgeschnittene Modellantwort). Würde
+      // hier normal weiterverarbeitet, entstünde für ein $x$ WEITER UNTEN
+      // ein <math-inline>-Tag, das dann innerhalb dieses von markdown-it
+      // erkannten Riesen-Codeblocks als Literaltext leakt (empirisch
+      // belegt). Fix: den Rest des Dokuments roh übernehmen (keine
+      // Math-/Bild-Platzhalter mehr ab hier) und die Schleife beenden –
+      // bildet markdown-its tatsächliches Verhalten nach, statt es zu
+      // ignorieren. Der Viewer bleibt bewusst anders (siehe DECISIONS #54):
+      // er arbeitet abschnittsweise und verschluckt dabei nichts.
+      out.push(lines.slice(i).join("\n"));
+      break;
+    }
     if (IMG_LINE_RE_FOR_MATH.test(line.trim())) {
       out.push(line);
       continue;

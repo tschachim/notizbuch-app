@@ -97,4 +97,15 @@ describe("citeTagsToDocLinks", () => {
     const md = "## A\n\n- normaler Eintrag mit [1](https://x.de) Fußnote";
     expect(citeTagsToDocLinks(md, [])).toBe(md);
   });
+
+  it("v7.7: ein Fenced-Codeblock im op-Inhalt bleibt byte-identisch erhalten (kein cite-Tag darin)", () => {
+    // cite-Tags markieren laut System-Prompt ausschließlich recherchierte
+    // AUSSAGEN, nie Code – ein Codeblock im selben op-Inhalt darf trotzdem
+    // nicht angefasst werden, wenn er neben einer echten Zitat-Stelle steht.
+    const md = 'Vorher <cite index="1">56 °C Kerntemperatur</cite>.\n\n```bash\necho "$HOME"\n```';
+    const out = citeTagsToDocLinks(md, SOURCES);
+    expect(out).toContain("```bash\necho \"$HOME\"\n```");
+    expect(out).toContain("56 °C Kerntemperatur[0](https://a.de/x)");
+    expect(out).not.toContain("<cite");
+  });
 });

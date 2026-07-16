@@ -3,6 +3,7 @@ import { useEditor, EditorContent } from "@tiptap/react";
 import { getHTMLFromFragment, Node } from "@tiptap/core";
 import { Fragment } from "@tiptap/pm/model";
 import StarterKit from "@tiptap/starter-kit";
+import CodeBlockExtension from "@tiptap/extension-code-block";
 import Image from "@tiptap/extension-image";
 import TextStyle from "@tiptap/extension-text-style";
 import { Color } from "@tiptap/extension-color";
@@ -16,7 +17,7 @@ import TableHeader from "@tiptap/extension-table-header";
 import TableCell from "@tiptap/extension-table-cell";
 import { Markdown } from "tiptap-markdown";
 import {
-  Bold, Italic, Code, List, ListOrdered, ListChecks, Heading2, Heading3,
+  Bold, Italic, Code, Code2, List, ListOrdered, ListChecks, Heading2, Heading3,
   Minus, Undo2, Redo2, Strikethrough, Palette, Highlighter, Table as TableIcon,
   Sigma, SquareFunction,
 } from "lucide-react";
@@ -24,13 +25,18 @@ import {
   mathToPlaceholders, renderKatexHtml, MATH_SERIALIZED_RE, MATH_INLINE_TAG, MATH_BLOCK_TAG,
   ESCAPED_DOLLAR_SENTINEL,
 } from "../lib/math.jsx";
+import { splitFenceSegments } from "../lib/code.jsx";
 
 /* WYSIWYG-Editor für die manuelle Bearbeitung der Wissensbasis.
    TipTap mit Markdown-Round-Trip, beschränkt auf den Dialekt, den der
    Renderer der App versteht: # / ## / ###, "- "-Listen, nummerierte
    Listen, Checklisten (- [ ]), fett/kursiv/Code/durchgestrichen,
    Schriftfarbe und Textmarker (als Inline-HTML), ---, Bilder, LaTeX-
-   Formeln ($…$/$$…$$, v7.3). Codeblöcke und Zitate bleiben deaktiviert. */
+   Formeln ($…$/$$…$$, v7.3), monospaced Codeblöcke (```…```, v7.7 –
+   StarterKits CodeBlock-Node mit einem EIGENEN Serializer, der den Zaun
+   bei Backtick-Serien im Inhalt verlängert, siehe FencedCodeBlock unten
+   und DECISIONS #54/Re-Review-Fix K1). Zitate (Blockquote) bleiben
+   deaktiviert. */
 
 const TEXT_COLORS = [
   { label: "Standard", value: null, swatch: "#334155" },
@@ -74,13 +80,13 @@ function unresolveImgs(md, imgMap) {
 // (z. B. "\{1,2\}" → "{1,2}"). Split auf MATH_SERIALIZED_RE (wie schon
 // renumberCitations mit Codespans in markdown.jsx) hält Formeln unangetastet.
 const MATH_SPLIT_RE = new RegExp("(" + MATH_SERIALIZED_RE.source + ")");
-// Exportiert (Review-Finding 6), damit Tests die ECHTE Funktion prüfen
-// statt eine im Test nachgebaute Kopie, die bei einer Änderung hier
-// unbemerkt aus dem Takt geraten könnte.
-export const unescapeMd = (md) =>
-  md
+// Innerhalb eines Segments (bereits außerhalb jedes Fenced-Codeblocks,
+// siehe unescapeMd unten) genau wie bisher: Formeln aussparen, sonst
+// Serializer-Escapes entfernen und den \$-Sentinel zurückwandeln.
+const unescapeMdSegment = (seg) =>
+  seg
     .split(MATH_SPLIT_RE)
-    .map((seg, i) => (i % 2 ? seg : seg.replace(/\\([\\`*_{}[\]()#+\-.!>~=])/g, "$1")))
+    .map((s, i) => (i % 2 ? s : s.replace(/\\([\\`*_{}[\]()#+\-.!>~=])/g, "$1")))
     .join("")
     // \$-Escapes aus mathToPlaceholders (Review-Finding 2) kommen als
     // Sentinel-Zeichen an (siehe ESCAPED_DOLLAR_SENTINEL in math.jsx) –
@@ -88,6 +94,22 @@ export const unescapeMd = (md) =>
     // kann mit MATH_SPLIT_RE/dem Backslash-Escape-Muster oben nicht
     // kollidieren, weil er weder "$" noch "\" enthält.
     .split(ESCAPED_DOLLAR_SENTINEL).join("\\$");
+// Exportiert (Review-Finding 6), damit Tests die ECHTE Funktion prüfen
+// statt eine im Test nachgebaute Kopie, die bei einer Änderung hier
+// unbemerkt aus dem Takt geraten könnte.
+//
+// v7.7: Fenced-Codeblöcke (```…```) werden VORAB per splitFenceSegments
+// komplett ausgenommen – ihr Inhalt kommt vom CodeBlock-Serializer
+// UNVERÄNDERT (ohne state.esc(), reiner Text-Node-Inhalt, siehe
+// DECISIONS), jede nachträgliche Bereinigung hier würde absichtliche
+// Backslashes/Formel-artige Zeichenfolgen im Code kaputt machen (z. B.
+// eine Regex mit "\." oder "\-" im Snippet). Da Formel-Nodes laut Schema
+// nicht INNERHALB eines codeBlock-Nodes vorkommen können (content:
+// "text*"), ist die Trennung Fence-zuerst/Formel-danach überschneidungsfrei.
+export const unescapeMd = (md) =>
+  splitFenceSegments(md)
+    .map((seg) => (seg.code ? seg.raw : unescapeMdSegment(seg.raw)))
+    .join("\n");
 
 // tiptap-markdown serialisiert Bilder mit dem Inline-Serializer von
 // prosemirror-markdown – ohne closeBlock klebt die Folgezeile direkt an der
@@ -293,6 +315,46 @@ export const MdTable = Table.extend({
             state.esc = esc;
             state.inTable = false;
           }
+          state.closeBlock(node);
+        },
+        parse: {},
+      },
+    };
+  },
+});
+
+// Codeblöcke mit LÄNGEN-VERLÄNGERTEM Zaun (v7.7-Fix nach Code-Review
+// 2026-07-17, Finding K1). tiptap-markdown liefert für StarterKits
+// eingebaute codeBlock-Node zwar bereits einen Fence-Serializer, der
+// schreibt aber IMMER exakt drei Backticks – anders als der
+// Upstream-Serializer von prosemirror-markdown verlängert er den Zaun
+// NICHT, wenn der Code-Inhalt selbst eine Backtick-Serie enthält (z. B.
+// ein Markdown-Beispiel MIT einem ```-Fence als Codetext – ein von der
+// App aktiv beworbenes Szenario, siehe System-Prompt "Konfiguration/
+// Logs/Code"). Ohne Verlängerung würde eine im Code enthaltene
+// ```-Zeile beim Speichern selbst zum (verfrühten) Schluss-Zaun – das
+// Dokument zerfiele bei jedem weiteren Öffnen+Speichern progressiv
+// weiter (empirisch belegt im Review). Eigener Storage/Serializer-Pfad
+// exakt wie bei BlockImage/MdTable oben: Zaunlänge = längste
+// Backtick-Serie im Inhalt + 1 (mindestens 3) – GENAU die CommonMark-
+// Regel, die auch matchFenceBlock (code.jsx) beim Lesen anwendet (dort
+// muss der Schluss-Zaun mindestens so lang sein wie der öffnende), erst
+// BEIDE Seiten zusammen halten den Roundtrip stabil (siehe
+// tests/docEditorCode.test.jsx). state.text(...,false) bleibt roh (kein
+// state.esc()) wie beim StarterKit-Original – nur die Zaunlänge ändert
+// sich, der restliche Inhalt bleibt byte-genau.
+export const FencedCodeBlock = CodeBlockExtension.extend({
+  addStorage() {
+    return {
+      markdown: {
+        serialize(state, node) {
+          const runs = node.textContent.match(/`{3,}/g) || [];
+          const fenceLen = Math.max(3, ...runs.map((r) => r.length + 1));
+          const fence = "`".repeat(fenceLen);
+          state.write(fence + (node.attrs.language || "") + "\n");
+          state.text(node.textContent, false);
+          state.ensureNewLine();
+          state.write(fence);
           state.closeBlock(node);
         },
         parse: {},
@@ -542,9 +604,16 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
     extensions: [
       StarterKit.configure({
         heading: { levels: [1, 2, 3] },
+        // codeBlock (v7.7, Nutzerwunsch "voller Support"): StarterKits
+        // eingebaute Node bleibt hier deaktiviert – FencedCodeBlock oben
+        // ersetzt sie mit demselben Node-Typnamen ("codeBlock", toggle-/
+        // Tastatur-Verhalten bleibt über .extend() erhalten), aber einem
+        // eigenen Serializer mit Zaun-Verlängerung (Re-Review-Fix K1,
+        // siehe dort und DECISIONS #54).
         codeBlock: false,
         blockquote: false,
       }),
+      FencedCodeBlock,
       BlockImage,
       TextStyle,
       Color,
@@ -673,6 +742,10 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
         <button onClick={() => editor.chain().focus().toggleCode().run()}
           className={btn(editor.isActive("code"))} title="Code">
           <Code size={15} />
+        </button>
+        <button onClick={() => editor.chain().focus().toggleCodeBlock().run()}
+          className={btn(editor.isActive("codeBlock"))} title="Codeblock">
+          <Code2 size={15} />
         </button>
 
         <div className="relative">

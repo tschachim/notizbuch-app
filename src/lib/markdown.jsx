@@ -11,6 +11,7 @@ import {
   MATH_TOKEN_RE, renderMathToken, renderKatexHtml,
   DISPLAY_MATH_START_RE, matchDisplayBlock,
 } from "./math.jsx";
+import { FENCE_OPEN_RE, matchFenceBlock, splitFenceSegments, CodeBlockView } from "./code.jsx";
 
 export const IMG_LINE_RE = /^!\[([^\]]*)\]\(img:([a-zA-Z0-9]+)\)$/;
 export const IMG_REF_RE = /!\[[^\]]*\]\(img:([a-zA-Z0-9]+)\)/g;
@@ -85,19 +86,30 @@ const CITE_LINK_RE = /\[(\d+)\]\((https?:\/\/(?:[^\s()]|\([^\s()]*\))+)\)/g;
 // gleiche Nummer (erste Fundstelle bestimmt die Reihenfolge). Wird bei
 // jedem Schreiben angewendet, damit Einfügungen sauber umnummerieren.
 // Codespans bleiben unangetastet (der Renderer zeigt sie literal).
+// Fenced-Codeblöcke (```…```, v7.7) werden VORAB per splitFenceSegments
+// komplett ausgenommen – ein "[1](https://…)" innerhalb eines Codeblocks
+// (z. B. Beispiel-Markdown in einem Snippet) darf nicht umnummeriert
+// werden, der Block bleibt byte-genau erhalten. numByUrl lebt bewusst
+// AUSSERHALB der Segment-Schleife: die Nummerierung muss über Fence-
+// Grenzen hinweg konsistent bleiben (dieselbe URL vor UND nach einem
+// Codeblock bekommt weiterhin dieselbe Nummer).
 export function renumberCitations(md) {
   const numByUrl = new Map();
-  return String(md)
-    .split(/(`[^`\n]+`)/)
-    .map((seg, i) =>
-      i % 2
-        ? seg
-        : seg.replace(CITE_LINK_RE, (m, num, url) => {
-            if (!numByUrl.has(url)) numByUrl.set(url, numByUrl.size + 1);
-            return "[" + numByUrl.get(url) + "](" + url + ")";
-          })
-    )
-    .join("");
+  const renumberOutsideFences = (text) =>
+    text
+      .split(/(`[^`\n]+`)/)
+      .map((seg, i) =>
+        i % 2
+          ? seg
+          : seg.replace(CITE_LINK_RE, (m, num, url) => {
+              if (!numByUrl.has(url)) numByUrl.set(url, numByUrl.size + 1);
+              return "[" + numByUrl.get(url) + "](" + url + ")";
+            })
+      )
+      .join("");
+  return splitFenceSegments(String(md))
+    .map((seg) => (seg.code ? seg.raw : renumberOutsideFences(seg.raw)))
+    .join("\n");
 }
 
 // Passendes schließendes Tag finden (gleichnamige Verschachtelung mitzählen).
@@ -302,12 +314,29 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
     // unten), wo renderInline/Inline "$$x$$ mehr Text" als eingebetteten
     // Display-Span erkennt bzw. eine unterminierte $$-Zeile literal lässt
     // (Review-Finding 4 – vorher wurde hier der Rest des Abschnitts als
-    // TeX verschluckt). Nicht innerhalb von Codeblöcken/Codespans relevant:
-    // Codespans sind reines Inline-Markup (siehe renderInline) und dieser
-    // Renderer kennt ohnehin keine ```-Codeblöcke (laut Editor-Konvention
-    // deaktiviert, DECISIONS #14).
+    // TeX verschluckt). Codespans sind reines Inline-Markup (siehe
+    // renderInline). Fenced-Codeblöcke (```…```, v7.7 – DECISIONS #14
+    // damit aufgehoben) werden separat über fenceM erkannt (siehe unten);
+    // sie stehen ZEILENANFANG-verankert wie mathBlock und werden deshalb
+    // hier genauso vorab geprüft, bevor die Zeile in die übrigen Zweige
+    // fallen kann.
     const mathBlock = DISPLAY_MATH_START_RE.test(line) ? matchDisplayBlock(rawLines, li) : null;
-    if (TABLE_LINE_RE.test(line)) {
+    // Unterminierter Zaun (kein ausreichend langer schließender Zaun bis
+    // Abschnittsende, li läuft hier nie über die aktuelle Section/Sub-
+    // Section hinaus, siehe parseTree) liefert null – die Zeile fällt dann
+    // bewusst durch zu den normalen Zweigen unten und wird literal als
+    // Absatz gerendert (keine INLINE_TOKEN_RE-Alternative matcht eine
+    // ununterbrochene Backtick-Folge ohne weiteren Backtick später in der
+    // Zeile, unabhängig von deren Länge), statt den Rest des Abschnitts zu
+    // verschlucken (gleiche Philosophie wie matchDisplayBlock).
+    const fenceM = FENCE_OPEN_RE.test(line) ? matchFenceBlock(rawLines, li) : null;
+    if (fenceM) {
+      // Inhalt bleibt byte-genau erhalten: KEIN renderInline, keine
+      // Math-/Bild-/Fußnoten-/Checklisten-Logik innerhalb eines Codeblocks.
+      flush();
+      blocks.push(<CodeBlockView key={kp + key++} lang={fenceM.lang} code={fenceM.code} />);
+      li = fenceM.endIdx;
+    } else if (TABLE_LINE_RE.test(line)) {
       flush();
       const tlines = [line];
       while (li + 1 < lines.length && TABLE_LINE_RE.test(lines[li + 1].text)) {

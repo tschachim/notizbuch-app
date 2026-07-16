@@ -985,3 +985,335 @@ aus `referenz-app.jsx` übernommen.
       der vorbestehende, bewusst nicht angefasste Punkt „stale
       usedSearch/sources an den Fallback-Stellen“ bleibt als bekannte,
       kleinere Ungenauigkeit außerhalb dieses Fixes.
+
+54. **Monospaced Codeblöcke (```-Fences) – voller Support in Dokument-
+    Ansicht, WYSIWYG-Editor und Chat** (v7.7, Nutzerwunsch „sowohl für die
+    Darstellung als auch beim Editieren“). Hebt die Codeblock-Deaktivierung
+    aus Punkt 14 (v4.1) auf; Inline-Codespans (`` `x` ``) funktionierten
+    bereits überall, fehlten nur noch mehrzeilige Fenced-Blöcke.
+    - **Gemeinsame Fence-Erkennung (`src/lib/code.jsx`, neu):** eigene Datei
+      statt in `markdown.jsx` oder `math.jsx`, weil BEIDE die Logik
+      brauchen und `markdown.jsx` bereits von `math.jsx` importiert – ein
+      Re-Import wäre ein Zirkelbezug (gleiches Muster wie
+      `IMG_LINE_RE_FOR_MATH` in `math.jsx`). `matchFenceBlock(lines,
+      startIdx)` sucht ab einer öffnenden Zaun-Zeile (DREI ODER MEHR
+      Backticks, bis zu drei Leerzeichen Einrückung, KEIN Tab – siehe
+      Re-Review-Fix unten) die schließende Zaun-Zeile, die MINDESTENS so
+      lang sein muss wie der öffnende Zaun (CommonMark-Regel, identisch
+      von markdown-it umgesetzt); `null` bedeutet „kein Block“
+      (unterminiert), NICHT „Fehler“ – der Aufrufer lässt die Zeile dann
+      unverändert/normal weiterlaufen statt den Rest zu verschlucken
+      (gleiche konservative Philosophie wie `matchDisplayBlock` bei einem
+      unterminierten `$$`). Das Info-String nach dem Zaun darf laut
+      CommonMark Leerzeichen enthalten (nur Backticks sind verboten, sonst
+      wäre der Zaun nicht von Inline-Code unterscheidbar) – nur das ERSTE
+      Wort wird als Sprach-Label übernommen (identisch zu markdown-it, das
+      ebenfalls nur das erste Wort für die `language-xxx`-Klasse nutzt).
+      Anders als bei Formeln ist dabei KEINE Abbruchgrenze an Leerzeilen/
+      Überschriften nötig: Der Zaun selbst ist ein eindeutiges Start/Ende-
+      Paar, Leerzeilen und „#“-Zeilen INNERHALB eines Codeblocks sind
+      legitimer Code-Inhalt (Kommentare, Markdown-Beispiele in einem
+      Snippet). `splitFenceSegments(text)`
+      zerlegt einen (ggf. mehrzeiligen) Text in Segmente außerhalb/
+      innerhalb GESCHLOSSENER Fences, jedes Segment trägt `raw` für eine
+      byte-genaue Rekonstruktion (`segments.map(s => s.raw).join("\n")`);
+      unterminierte Zäune zählen NICHT als Code und bleiben Teil des
+      umgebenden Text-Segments – das gilt konsistent für Dokument-Ansicht,
+      Chat UND den `mathToPlaceholders`-STRING selbst (reines
+      String-Verhalten dieser Datei). WICHTIGE EINSCHRÄNKUNG (siehe
+      „Re-Review P10“ weiter unten): Der ECHTE Editor lädt nicht den
+      String, sondern lässt markdown-it darüber laufen – und markdown-it
+      behandelt einen unterminierten Zaun STRUKTURELL anders als unsere
+      String-Helfer (es verschluckt alles bis Dokumentende in EINEN
+      Codeblock, statt die Zeile wie ein literaler Absatz zu behandeln).
+      Viewer/Chat und der echte Editor zeigen einen solchen GIGO-Fall
+      (z. B. eine abgeschnittene Modellantwort) deshalb bewusst
+      UNTERSCHIEDLICH an (Viewer/Chat: normale Absätze/Listen; Editor: EIN
+      Codeblock bis Dokumentende) – beide bleiben aber inhaltlich
+      verlustfrei (kein Text geht verloren), und der P10-Fix stellt
+      zusätzlich sicher, dass dabei kein Formel-Platzhalter-Tag in den vom
+      Editor gebildeten Codeblock hineinleakt. `CodeBlockView` ist die
+      gemeinsame React-
+      Darstellung (Dokument UND Chat): `pre`/`code`, `font-mono text-sm`,
+      dezenter Hintergrund (`bg-slate-50`) + Rahmen + `rounded-lg`,
+      `whitespace-pre` (Einrückung bleibt exakt), `overflow-x-auto` NUR im
+      eigenen Container (Nutzerauftrag: die Seite/Bubble darf dadurch nie
+      quer scrollen). Bewusst KEIN Syntax-Highlighting (keine neue
+      Abhängigkeit) – das Sprach-Label wird gespeichert und klein
+      angezeigt, aber nicht ausgewertet.
+    - **Dokument-Ansicht (`src/lib/markdown.jsx`):** `renderBlocks` prüft
+      pro Zeile zusätzlich `FENCE_OPEN_RE`/`matchFenceBlock` (zeilenanfang-
+      verankert wie `mathBlock`, gleiche Priorität in der if/else-Kette)
+      und rendert einen Treffer als `CodeBlockView`, wobei `li` auf
+      `endIdx` vorspringt – GENAU EIN Renderer-Durchlauf verschluckt den
+      kompletten Block, die inneren Zeilen werden vom zeilenweisen Loop nie
+      einzeln erneut betrachtet (kein Risiko, dass ein `$$` oder eine
+      Bildzeile INNERHALB des Codes fälschlich eigene Blöcke erzeugt). Im
+      Block-Inhalt läuft NICHTS: kein `renderInline`, keine Math-/Bild-/
+      Fußnoten-/Checklisten-Logik – der Inhalt bleibt byte-genau. Da
+      `parseTree` abschnittsweise mit Original-Zeilenindizes arbeitet
+      (Checklisten-Klicks) und Codeblöcke innerhalb EINER Section/Sub-
+      Section bleiben (die Section-Grenzen stehen schon vor dem Fence-
+      Scan fest), verrutscht kein Zeilenindex für nachfolgende
+      Checklisten-Einträge.
+    - **WYSIWYG-Editor (`src/components/DocEditor.jsx`):** StarterKits
+      eingebaute `codeBlock`-Node bleibt über `StarterKit.configure({
+      codeBlock: false })` deaktiviert; stattdessen `FencedCodeBlock`
+      (`CodeBlockExtension.extend({...})`, gleicher Node-Name „codeBlock“,
+      toggle-/Tastatur-Verhalten bleibt über `.extend()` erhalten) mit
+      EIGENEM Serializer. Grund (Re-Review-Fix K1, siehe unten): der
+      `tiptap-markdown`-Standard-Serializer für `codeBlock` schreibt IMMER
+      exakt drei Backticks und verlängert den Zaun NICHT, wenn der
+      Code-Inhalt selbst eine Backtick-Serie enthält – bei aktiviertem
+      StarterKit-Standard-`codeBlock` hätte ein Codeblock mit einer
+      ```-Zeile ALS INHALT (das von der App aktiv beworbene Szenario
+      „Markdown-Beispiel im Snippet“) beim Speichern progressiv
+      korrumpiert. `FencedCodeBlock` berechnet die Zaunlänge dynamisch
+      (längste Backtick-Serie im Inhalt + 1, mindestens 3 – exakt die
+      CommonMark-Regel, die `matchFenceBlock` beim Lesen umgekehrt
+      anwendet) und schreibt `state.text(node.textContent, false)` weiter
+      OHNE `state.esc()` roh durch. Ein Headless-TipTap-Roundtrip-Test
+      (`tests/docEditorCode.test.jsx`, Vorbild `docEditorMath.test.jsx`)
+      bestätigt das empirisch statt es nur anzunehmen: No-op-Baseline
+      (laden + sofort speichern ändert nichts byte-genau, auch mit
+      Sprach-Label, Leerzeilen im Code, Nachbarschaft zu Formeln), dass
+      `$`, `$$`, `|`, Backticks und Serializer-escape-artige Backslashes
+      (`\.`, `\-`, `\_`, `\*`) im Code-Inhalt weder von `unescapeMd` noch
+      vom Formel-Ladepfad angefasst werden, UND dass ein Codeblock mit
+      einer eigenen ```-Zeile über ZWEI Roundtrips stabil bleibt (kein
+      progressiver Zerfall, K1-Regressionstest). Toolbar-Knopf
+      „Codeblock“ (lucide `Code2`) neben dem bestehenden Inline-Code-Knopf,
+      `editor.chain().focus().toggleCodeBlock().run()`.
+      `unescapeMd` (`DocEditor.jsx`) wird dafür fence-bewusst: Vor der
+      bisherigen Formel-Aussparung (`MATH_SPLIT_RE`) trennt
+      `splitFenceSegments` zuerst Codeblöcke komplett ab (`seg.raw`
+      unverändert durchgereicht) – ohne diese Trennung hätte die
+      Backslash-Bereinigung `\.`/`\-`/`\_`/… mitten in echtem Code
+      (Regexes, CLI-Escapes) kaputt entfernt. Da Formel-Nodes laut Schema
+      nicht INNERHALB eines `codeBlock`-Nodes vorkommen können (`content:
+      "text*"`), ist die Trennung Fence-zuerst/Formel-danach
+      überschneidungsfrei.
+    - **Editor-Ladepfad (`src/lib/math.jsx`, `mathToPlaceholders`):** vierte
+      Schutzmaßnahme (neben Display-Block/Codespan/Bildzeile, siehe Punkt
+      46ff): Eine erkannte, GESCHLOSSENE Fence wird als GANZER Block
+      (Zaun-Zeilen + Inhalt) roh in die Ausgabe übernommen, BEVOR die
+      Zeilen einzeln gegen Bild-/Formel-Regeln laufen – ein `$`/`$$`
+      INNERHALB eines Snippets (Shell-Variablen, Beispiel-Preise in
+      Logs) wird dadurch nie zu einem Formel-Node. Ein unterminierter
+      Zaun fällt bewusst durch zu den bestehenden Zweigen (die Zaun-Zeile
+      selbst enthält ohnehin kein `$`).
+    - **Bekannte Fallstricke aktiv abgesichert (alle mit Tests):**
+      (a) `renumberCitations` (`markdown.jsx`) splittete bisher nur an
+      Inline-Codespans – ein `[1](https://…)` INNERHALB eines Fenced-
+      Blocks (z. B. Beispiel-Markdown in einem Snippet) wäre umnummeriert
+      worden. Fix: `splitFenceSegments` trennt Codeblöcke VOR der
+      bisherigen Codespan-Logik ab, `numByUrl` bleibt eine gemeinsame Map
+      über alle Segmente hinweg (dieselbe URL vor UND nach einem
+      Codeblock bekommt weiterhin dieselbe Nummer). Betrifft auch
+      `chatToMarkdown`/`archive.js` (ruft `renumberCitations` archivweit
+      auf) – Regressionstest mit einem Bash-Snippet im Chat-Text bestätigt
+      den durchgereichten Fix.
+      (b) `mathToPlaceholders` (Editor-Ladepfad) arbeitete zeilenweise mit
+      Codespan-Schutz PRO ZEILE – ein `$…$`/`$$…$$` INNERHALB eines
+      mehrzeiligen Fenced-Blocks wäre fälschlich zu einem Formel-Node
+      geworden. Siehe oben („Editor-Ladepfad“).
+      (c) `chatToMarkdown` (`archive.js`) reicht Nachrichtentexte roh
+      durch – verifiziert statt angenommen: ein Fenced-Block im
+      Nachrichtentext bleibt byte-identisch (inkl. Backslash-Escapes wie
+      `\;` in einem `find …-exec …\;`-Snippet), nur profitiert automatisch
+      vom Fix in (a), weil `chatToMarkdown` `renumberCitations` auf den
+      gesamten Archivtext anwendet.
+      (d) `citeTagsToDocLinks` (`citations.jsx`) und die Dokument-Ansicht
+      wurden EXPLIZIT verifiziert statt angenommen: `citeTagsToDocLinks`
+      arbeitet über `<cite>`-Tags (die laut System-Prompt nie in Code
+      stehen) und ist von Fences strukturell unberührt – ein Regressions-
+      test bestätigt, dass ein Codeblock direkt neben einer echten
+      `<cite>`-Stelle byte-identisch bleibt. Die Dokument-Ansicht
+      (`markdown.jsx`) schützt Formeln/Bilder/Fußnoten in Codeblöcken über
+      dieselbe Prioritäts-Weiche wie `mathBlock` (siehe oben) – mit Tests
+      belegt, nicht nur angenommen.
+    - **Chat (`src/App.jsx`):** neuer Segmentierer
+      `expandFencedCodeInNodes(nodes, expandRest)` (`code.jsx`) für Nutzer-
+      UND Assistenten-Bubbles: erst werden Fenced-Codeblöcke aus jedem
+      String-Segment herausgezogen und als `CodeBlockView` gerendert, DANN
+      läuft `expandRest` (Formel-Erkennung, `renderMathText`/
+      `expandMathInNodes`) nur noch auf den verbleibenden Nicht-Code-
+      Segmenten – exakt die geforderte Reihenfolge. Als Bonus (trivial über
+      denselben Helfer) werden dabei auch Inline-Codespans (`` `x` ``)
+      monospaced gerendert, die im Chat bisher als Rohtext mit sichtbaren
+      Backticks erschienen UND deren Inhalt bisher fälschlich für Formeln
+      durchsucht wurde (z. B. `` `$x$` `` hätte im Chat bislang eine
+      Formel gerendert – ein beim Testschreiben gefundener Nebeneffekt,
+      jetzt mit demselben Fence-zuerst-Mechanismus behoben). `nodes` kann
+      bereits gerenderte Elemente enthalten (Quellen-Fußnoten aus
+      `renderWithCites`) – die bleiben unangetastet durchgereicht.
+      Key-Kollisionen: `expandRest` wird bei mehreren Text-Segmenten
+      (Text vor UND nach einem Codeblock) MEHRFACH mit je eigenem Null-
+      basiertem Key-Zähler aufgerufen; ohne Gegenmaßnahme kollidieren
+      React-Keys zwischen den Segmenten (zwei Formeln, je die erste in
+      ihrem Segment, beide Key "m0"). `expandFencedCodeInNodes` versieht
+      deshalb ALLE von `expandRest` gelieferten Elemente mit einem intern
+      geführten, über die GESAMTE Ausgabe eindeutigen Key (`cloneElement`)
+      – mit Test abgesichert (zwei Formeln, getrennt durch einen
+      Codeblock, eindeutige Keys).
+    - **System-Prompt (`src/lib/anthropic.js`):** KONVENTIONEN-Block um
+      einen Satz ergänzt: ```-Codeblöcke sind fürs Dokument erlaubt und für
+      Code/Konfiguration/Logs erwünscht (mit Sprach-Label). Die bestehende
+      FORMELN-Regel („Verwende für Formeln NIEMALS ```-Codeblöcke …“)
+      bleibt WÖRTLICH unverändert – bewusst keine Umformulierung, um sie
+      nicht zu verwässern; ein Regressionstest prüft beide Sätze
+      gemeinsam (Codeblock-Erlaubnis UND unverändertes Formel-Verbot).
+    - **Restrisiken:** `parseTree` (Section-Splitting bei `##`/`###`)
+      arbeitet auf dem RAW-Text VOR jeder Fence-Erkennung – ein Codeblock,
+      der eine Zeile wie `## Kommentar` enthält (z. B. ein Shell-Skript
+      mit dem Konventions-Kommentarstil `## Abschnitt`), würde fälschlich
+      als neue Dokument-Section interpretiert. Das ist dieselbe Klasse von
+      bereits akzeptierter Einschränkung wie bei Formeln (`matchDisplay-
+      Block` bricht deshalb an Überschriftenzeilen ab – dort GREIFT der
+      Abbruch aber erst NACH dem Section-Split, kann eine echte Formel
+      also nicht retten, wenn eine `##`-Zeile mittendrin steht). Nicht
+      behoben (würde `parseTree` selbst fence-bewusst machen müssen –
+      deutlich invasiver, Checklisten-Zeilenindex-Risiko), aber als
+      bekannte Grenze hier dokumentiert; der beauftragte E2E-Testfall
+      (Bash-Snippet zum Löschen von `.tmp`-Dateien) berührt sie nicht.
+      Kein Syntax-Highlighting (Nutzerauftrag: bewusst schlicht, keine
+      neue Abhängigkeit). Zwei weitere, bewusst akzeptierte Ausnahmen von
+      der Byte-Genauigkeits-Zusage (Review-Vorschlag, 2026-07-17):
+      (i) Die Sentinel-Neutralisierung für `\$`-Escapes
+      (`ESCAPED_DOLLAR_SENTINEL` → `REPLACEMENT_CHAR`, Re-Review-Finding
+      R4, siehe Punkt 46ff) läuft in `mathToPlaceholders` GLOBAL vor dem
+      Fence-Schutz und trifft daher auch Codeblock-Inhalte – ein im Code
+      bereits vorhandenes Sentinel-Zeichen (praktisch nie in echtem Code,
+      privater Unicode-Bereich) würde durch das Ersatzzeichen U+FFFD
+      ersetzt statt byte-genau erhalten zu bleiben; bewusst in Kauf
+      genommen, weil das Sicherheitsnetz gegen eine STILLE
+      Fremdzeichen-Umdeutung beim nächsten Speichern wichtiger ist als
+      dieser Extremfall. (ii) `resolveImgs`/`unresolveImgs`
+      (`DocEditor.jsx`) ersetzen `](img:id)` textuell auch INNERHALB eines
+      Codeblocks (z. B. ein Snippet, das zufällig `](img:abc)` als Text
+      enthält) – roundtrip-neutral (dieselbe Ersetzung läuft beim
+      Speichern rückwärts), aber die Editor-ANZEIGE zeigt in diesem
+      Sonderfall eine aufgelöste data-URL statt des Originaltexts. Beide
+      Fälle sind Rand­fälle mit vernachlässigbarer Praxisrelevanz, nicht
+      code-gefixt.
+    - **Re-Review (2026-07-17, vor Freigabe) – vier Findings, K1 behoben,
+      W1/W2 behoben, W3 nachgezogen:**
+      - 🔴 **K1 (Muss, behoben):** Siehe „WYSIWYG-Editor“ oben –
+        `FencedCodeBlock` ersetzt den `tiptap-markdown`-Standard-
+        Serializer für `codeBlock` durch einen eigenen mit
+        Zaun-Verlängerung; `matchFenceBlock` (`code.jsx`) verlangt
+        spiegelbildlich einen Schluss-Zaun MINDESTENS so lang wie der
+        öffnende (`FENCE_OPEN_RE` erkennt jetzt `` `{3,} `` statt fix drei
+        Backticks). Ohne BEIDE Hälften hätte die eine Seite die andere
+        nicht stabilisiert (ein von `FencedCodeBlock` erzeugter
+        4-Backtick-Zaun wäre vom alten `FENCE_OPEN_RE` gar nicht als
+        gültiger Zaun erkannt worden). Regressionstests: ein Codeblock mit
+        eigener ```-Zeile im Inhalt bleibt über ZWEI Roundtrips stabil
+        (`tests/docEditorCode.test.jsx`), plus Unit-Tests für
+        `matchFenceBlock`/`splitFenceSegments` mit 4-Backtick-Außenzaun um
+        3-Backtick-Inhalt (`tests/code.test.jsx`) und denselben Fall im
+        Viewer (`tests/markdown.test.jsx`) und im Chat
+        (`tests/code.test.jsx`, `expandFencedCodeInNodes`).
+      - 🟡 **W1 (behoben, teilweise dokumentierte Grenze):** `code.jsx`
+        behauptete fälschlich, CommonMark verbiete Leerzeichen im
+        Info-String (`FENCE_OPEN_RE` verlangte `[^`\s]*` statt `[^`\r\n]*`)
+        – tatsächlich sind nur Backticks verboten, ein Label wie
+        „`python title=x`“ ist gültiges, von markdown-it geparstes
+        Markdown. Fix: Info-String bis Zeilenende erlaubt, nur das erste
+        Wort wird als Sprach-Label übernommen (identisch zu markdown-it).
+        Damit korrekt geschützt: Fence-Label MIT Leerzeichen (P2) sowie –
+        gemeinsam mit dem K1-Fix – ein 4-Backtick-Zaun (P5). NICHT
+        behoben, sondern als Restriktion dokumentiert (Viewer rendert sie
+        ohnehin nicht als Block, geringe Praxisrelevanz gegenüber dem
+        Implementierungsaufwand): `~~~`-Zäune und eingerückter Code
+        (4+ Spaces/Tab) werden von `code.jsx` grundsätzlich NICHT als
+        Code erkannt – markdown-it parst sie beim tatsächlichen
+        Editor-Laden aber sehr wohl als Code. Enthält ein solcher Block
+        ein `$…$`, wandelt `mathToPlaceholders` es (mangels Fence-
+        Erkennung) in einen `<math-inline>`-Platzhalter um, der dann
+        INNERHALB des von markdown-it erkannten Code-Konstrukts als
+        Literaltext landet, statt als Formel-Node interpretiert zu werden
+        (kein Datenverlust, aber sichtbarer Tag-Text im Codeblock – ein
+        seltener Rand­fall, der eine erneute Bearbeitung des betroffenen
+        Blocks nahelegt).
+      - 🟡 **W2 (behoben):** Die Einrückungstoleranz in `FENCE_OPEN_RE`/
+        `FENCE_CLOSE_RE` (`[ \t]*`, beliebig viele Leerzeichen/Tabs) wich
+        von markdown-it ab (CommonMark: max. drei Leerzeichen, kein Tab –
+        danach gilt eine Zeile als eingerückter Codeblock). Die
+        Diskrepanz hätte den Ladepfad Zeilen „schützen“ lassen, die
+        markdown-it beim tatsächlichen Öffnen GAR NICHT als Zaun liest,
+        und umgekehrt zu genau der K1-Klasse von Korruption führen können
+        (Tab-eingerückter Zaunblock). Fix: `^ {0,3}` statt `[ \t]*` in
+        beiden Regexen. Regressionstests in `code.jsx`/`math.jsx`/
+        `markdown.jsx` bestätigen das definierte, jetzt konsistente
+        Verhalten: ein 4-Spaces- oder Tab-eingerückter ```-Block wird
+        NICHT mehr als Zaun erkannt (weder im Ladepfad noch im Viewer).
+      - 🟡 **W3 (nachgezogen):** Die neuen Suiten deckten die eigentlichen
+        Korruptions-Datenlagen noch nicht ab. Ergänzt: Roundtrip mit
+        eigener ```-Zeile im Codeblock-Inhalt (byte-identisch + Idempotenz
+        über zwei Roundtrips), Fence-Label mit Leerzeichen (`$` im Inhalt
+        bleibt roh), Tab-/4-Spaces-eingerückter Zaun (kein
+        Platzhalter-Leak, weil er gar nicht erst als Zaun erkannt wird),
+        `matchFenceBlock` mit Schluss-Zaun kürzer als Öffnungs-Zaun (paart
+        NICHT) und länger als Öffnungs-Zaun (paart trotzdem).
+      - 🟢 (übernommen): Kommentar-Begründungen in `code.jsx`/`math.jsx`
+        korrigiert (siehe oben); Sentinel-/`resolveImgs`-Ausnahmen von der
+        Byte-Genauigkeits-Zusage oben dokumentiert.
+    - **Re-Review 2/RE1 (2026-07-17, FREIGABE erteilt) – ein nicht
+      blockierender Folgefund, behoben:**
+      - 🟡 **P10 (behoben):** Enthält ein Dokument einen NICHT
+        geschlossenen ```-Zaun (GIGO-Fall, z. B. eine abgeschnittene
+        Modellantwort), verschluckt markdown-it beim ECHTEN Editor-Laden
+        ALLES ab dieser Zeile bis Dokumentende in EINEN Codeblock – anders
+        als `mathToPlaceholders` selbst (das seine eigene Zeile bis dahin
+        nur „normal weiterlaufen“ ließ). Ein `$x$` irgendwo in diesem
+        verschluckten Bereich wurde vorher trotzdem zu einem
+        `<math-inline>`-Tag umgewandelt, das dann als LITERALTEXT
+        innerhalb des von markdown-it gebildeten Codeblocks landete
+        (Tag-Leak, empirisch belegt). Fix (`mathToPlaceholders`,
+        `math.jsx`, ~5 Zeilen): Bei einer öffnenden Zaun-Zeile OHNE
+        gefundenen Schluss-Zaun wird der GESAMTE REST des Dokuments roh
+        übernommen und die Verarbeitungsschleife sofort beendet (`break`)
+        – bildet markdown-its tatsächliches Verschlucken nach, Text VOR
+        der unterminierten Zeile bleibt weiterhin ganz normal
+        konvertierbar. Regressionstests auf zwei Ebenen: String-Ebene
+        (`tests/math.test.jsx` – Formel vor dem Zaun wird konvertiert,
+        `$x$` danach bleibt roh bis Dokumentende) UND ein echter
+        Headless-TipTap-Test (`tests/docEditorCode.test.jsx` – lädt das
+        GIGO-Dokument über die ECHTEN Extensions, prüft `mathInline`-
+        Knotenzahl und dass der entstandene `codeBlock`-Node kein
+        `<math-inline`-Tag als Textinhalt enthält). Dabei EMPIRISCH
+        bestätigt (nicht nur angenommen) und bewusst nicht weiter
+        „gefixt“: Speichert man ein so geladenes GIGO-Dokument (auch ganz
+        ohne Änderung), hängt ProseMirror beim Serialisieren einen
+        SCHLIESSENDEN Zaun an – ein Codeblock-KNOTEN kann strukturell gar
+        nicht „unterminiert“ bleiben, sobald er einmal geparst wurde. Das
+        Ergebnis ist dadurch NICHT byte-identisch zum rohen
+        Eingabe-Markdown; im echten `DocEditor.jsx` ist das folgenlos, weil
+        die No-op-Erkennung die frisch beim Laden serialisierte Baseline
+        vergleicht (`onCreate`), nicht das ursprüngliche Roh-Markdown –
+        ein erneutes Speichern DANACH ist wieder stabil (Test deckt beide
+        Speichervorgänge ab). Die zugrundeliegende STRUKTURELLE
+        Divergenz zwischen Viewer/Chat (zeigen den GIGO-Rest als normale
+        Absätze/Listen) und dem echten Editor (zeigt ihn als EINEN
+        Codeblock) ist markdown-it-inhärent und bleibt bestehen – siehe
+        Restriktion oben bei „Gemeinsame Fence-Erkennung“; kein
+        Datenverlust in beiden Fällen, daher kein Blocker.
+      - 🟢 (übernommen): Drei Editor-Normalisierungen sind bewusst
+        akzeptierte, empirisch stabil verprobte Nebeneffekte einer ECHTEN
+        Bearbeitung (nicht des reinen No-op-Ladens) – ein gespeichertes
+        Dokument kann dadurch geringfügig vom Original abweichen, ohne
+        dass Inhalt verloren geht: (1) Zaun-Länge wird beim Speichern auf
+        das Minimum normalisiert (mindestens 3, oder länger falls der
+        Inhalt es braucht – enthält ein zuvor 4-Backtick-gezäunter Block
+        nach der Bearbeitung keine 3er-Backtick-Serie mehr, schrumpft der
+        Zaun beim nächsten Speichern korrekt auf 3). (2) Ein Info-String
+        mit mehreren Wörtern wird auf das erste Wort gekürzt (nur das wird
+        als `language`-Attribut geführt, siehe „Gemeinsame
+        Fence-Erkennung“ oben – der Rest ist für die App ohnehin
+        irrelevant, da kein Syntax-Highlighting). (3) Ein eingerückter
+        Zaun (bis drei Leerzeichen) wird beim Speichern dedentet (die
+        Einrückung ist für `codeBlock` kein Attribut, das ProseMirror
+        kennt). Alle drei sind idempotent (ein zweites Speichern ändert
+        nichts mehr) und wurden im Re-Review empirisch mit den echten
+        Modulen verprobt.

@@ -151,6 +151,7 @@ KONVENTIONEN IN JEDEM NOTIZBUCH:
 - Hierarchie: "## Hauptthema" mit "### Unterthema" darunter. Ordne Einträge, wo sinnvoll, einem passenden ###-Unterthema zu; lege Unterthemen an, sobald ein Hauptthema mehr als eine Facette hat.
 - Einträge als Stichpunkte ("- ..."), Datumsangaben im Format JJJJ-MM-TT wenn zeitlich relevant. Nummerierte Listen ("1. ...") sind erlaubt. Aufgaben als Checklisten-Einträge: "- [ ] offen" bzw. "- [x] erledigt".
 - Tabellen im GFM-Pipe-Format sind erlaubt und für strukturierte Daten erwünscht: Kopfzeile, dann Trennzeile ("|---|---|"), dann Datenzeilen – jede Zeile auf einer eigenen Zeile, Zellen ohne Zeilenumbrüche.
+- Codeblöcke im Fence-Format ("\`\`\`sprache" … "\`\`\`") sind erlaubt und für Code, Konfiguration oder Logs erwünscht: öffnender Zaun mit optionalem Sprach-Label (z. B. "\`\`\`bash"), Inhalt unverändert, schließender Zaun "\`\`\`" auf eigener Zeile. Für Formeln gilt das NICHT – siehe die FORMELN-Regel unten.
 - Vom Nutzer gesetzte Auszeichnungen unverändert erhalten: ~~durchgestrichen~~, <span style="color:…">…</span> (Schriftfarbe) und <mark data-color="…" style="background-color:…">…</mark> (Textmarker). Setze solche Farb-Auszeichnungen nicht selbst ein, außer der Nutzer bittet ausdrücklich darum.
 - Kompakt und sachlich, keine Floskeln im Dokument.
 

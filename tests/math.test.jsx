@@ -414,6 +414,99 @@ describe("mathToPlaceholders (Lade-Pfad des WYSIWYG-Editors)", () => {
       expect(extractAttr(out, MATH_INLINE_TAG)).toBe("y^2");
     });
   });
+
+  describe("Fence-Bewusstsein (v7.7): ```-Codeblöcke werden VOR jeder Math-Erkennung übersprungen", () => {
+    it("$…$ INNERHALB eines Fenced-Codeblocks wird NICHT zur Formel", () => {
+      const text = "```bash\necho \"$HOME kostet $5\"\n```";
+      const out = mathToPlaceholders(text);
+      expect(out).toBe(text); // byte-identisch
+      expect(out).not.toContain("<" + MATH_INLINE_TAG);
+    });
+
+    it("eine $$…$$-Zeile INNERHALB eines Fenced-Codeblocks wird NICHT zum Formel-Block", () => {
+      const text = "```text\nPreis:\n$$\nkein LaTeX, nur Text\n$$\n```";
+      const out = mathToPlaceholders(text);
+      expect(out).toBe(text);
+      expect(out).not.toContain("<" + MATH_BLOCK_TAG);
+    });
+
+    it("Formeln VOR und NACH einem Codeblock werden weiterhin ganz normal konvertiert", () => {
+      const out = mathToPlaceholders("Vorher $a$.\n\n```js\ncode\n```\n\nNachher $b$.");
+      expect(out).toContain("```js\ncode\n```"); // Codeblock unangetastet
+      expect((out.match(new RegExp("<" + MATH_INLINE_TAG, "g")) || []).length).toBe(2);
+    });
+
+    it("P10 (Re-Review 2026-07-17): ein unterminierter Zaun übernimmt den GESAMTEN Rest des Dokuments roh (bildet markdown-its Verschlucken nach)", () => {
+      // markdown-it liest beim ECHTEN Editor-Laden ALLES ab einer nicht
+      // geschlossenen Zaun-Zeile bis Dokumentende als EINEN Codeblock (z. B.
+      // eine abgeschnittene Modellantwort) - ein $x$ darunter darf deshalb
+      // NICHT zu einem Formel-Platzhalter werden, sonst leakt der Tag als
+      // Literaltext INNERHALB dieses von markdown-it erkannten
+      // Riesen-Codeblocks (empirisch belegt, Re-Review-Finding P10).
+      const text = "Vorher $a$ noch normal.\n\n```js\nText ohne schließenden Zaun, echte Formel $x$ hier.";
+      const out = mathToPlaceholders(text);
+      // Text VOR der unterminierten Zaun-Zeile wird weiterhin ganz normal konvertiert.
+      expect((out.match(new RegExp("<" + MATH_INLINE_TAG, "g")) || []).length).toBe(1);
+      expect(extractAttr(out, MATH_INLINE_TAG)).toBe("a");
+      // Ab der Zaun-Zeile bleibt ALLES roh (kein Tag für "$x$" weiter unten).
+      expect(out.endsWith("```js\nText ohne schließenden Zaun, echte Formel $x$ hier.")).toBe(true);
+    });
+
+    it("ein unterminierter Zaun ganz ohne weiteren Inhalt bleibt schlicht eine literale Zeile", () => {
+      const text = "```js";
+      expect(mathToPlaceholders(text)).toBe(text);
+    });
+
+    it("ein Codeblock mit einer Bildzeilen-artigen Zeile bleibt roh (kein img-Sonderpfad innerhalb des Blocks)", () => {
+      const text = "```md\n![Titel $5](img:ab12cd)\n```";
+      expect(mathToPlaceholders(text)).toBe(text);
+    });
+
+    it("mehrere Codeblöcke mit Formeln dazwischen werden unabhängig korrekt verarbeitet", () => {
+      const out = mathToPlaceholders("```a\n$x$\n```\n\nEcht: $y$\n\n```b\n$z$\n```");
+      // Nur EINE echte Formel ($y$) wird konvertiert, die beiden $x$/$z$ in
+      // den Codeblöcken bleiben roher Text.
+      expect((out.match(new RegExp("<" + MATH_INLINE_TAG, "g")) || []).length).toBe(1);
+      expect(extractAttr(out, MATH_INLINE_TAG)).toBe("y");
+      expect(out).toContain("```a\n$x$\n```");
+      expect(out).toContain("```b\n$z$\n```");
+    });
+
+    it("ein Fence-Label MIT Leerzeichen schützt den Inhalt trotzdem vollständig (Re-Review-Fix W1/P2)", () => {
+      // Vorher lehnte FENCE_OPEN_RE ein Label mit Leerzeichen fälschlich ab
+      // (CommonMark erlaubt es ausdrücklich) - die Zeile wäre NICHT als
+      // Zaun erkannt worden, wodurch $x$ im Inhalt zur Formel geworden
+      // wäre, obwohl markdown-it die Zeile beim tatsächlichen Laden im
+      // Editor sehr wohl als Zaun parst (Divergenz-Bug).
+      const text = "```python title=x\n$x$ bleibt roh\n```";
+      const out = mathToPlaceholders(text);
+      expect(out).toBe(text);
+      expect(out).not.toContain("<" + MATH_INLINE_TAG);
+    });
+
+    it("ein 4-Backtick-Zaun um Inhalt mit eigenen 3-Backtick-Zeilen wird als GANZER Block geschützt (K1-Szenario)", () => {
+      const text = "````js\nBeispiel:\n```\n$x$ bleibt roh\n```\n````";
+      const out = mathToPlaceholders(text);
+      expect(out).toBe(text);
+      expect(out).not.toContain("<" + MATH_INLINE_TAG);
+    });
+
+    it("ein 4-Leerzeichen-eingerückter ```-Block wird NICHT als Zaun erkannt (Re-Review-Fix W2 – markdown-it liest ihn als eingerückten Codeblock, nicht als Zaun)", () => {
+      // Ohne $-Zeichen im Inhalt gibt es dabei nichts zu konvertieren -
+      // der Text bleibt so oder so byte-identisch, aber NICHT weil er als
+      // Zaun geschützt wurde, sondern weil einfach nichts zu tun war
+      // (definiertes, getestetes Verhalten statt stillschweigender Annahme).
+      const text = "    ```js\n    plain\n    ```";
+      const out = mathToPlaceholders(text);
+      expect(out).toBe(text);
+    });
+
+    it("ein Tab-eingerückter ```-Block wird NICHT als Zaun erkannt (Re-Review-Fix W2/P9)", () => {
+      const text = "\t```js\n\tplain\n\t```";
+      const out = mathToPlaceholders(text);
+      expect(out).toBe(text);
+    });
+  });
 });
 
 describe("matchDisplayBlock (geteilte Grundlage für Dokument-Ansicht UND Editor-Ladepfad)", () => {

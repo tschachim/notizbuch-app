@@ -320,3 +320,129 @@ describe("renumberCitations & CITE_LINK_RE: fassen TeX-Inhalte nicht an", () => 
     expect(out).toBe("Satz $E=mc^2$[1](https://phys.example/e)");
   });
 });
+
+describe("DocView: monospaced Codeblöcke (```-Fences, v7.7)", () => {
+  it("rendert einen Codeblock monospaced, ohne sichtbare Zäune", () => {
+    const html = render("# T\n\n## A\n\n```js\nconst x = 1;\n```");
+    expect(html).toContain("const x = 1;");
+    expect(html).not.toContain("```");
+    expect(html).toMatch(/<pre[^>]*>/);
+    expect(html).toContain("font-mono");
+    expect(html).toContain("overflow-x-auto");
+  });
+
+  it("zeigt das Sprach-Label an (gespeichert, aber nicht gehighlightet)", () => {
+    const html = render("# T\n\n## A\n\n```bash\necho hi\n```");
+    expect(html).toContain("bash");
+  });
+
+  it("im Codeblock läuft KEINE Inline-/Math-/Bild-Verarbeitung – Inhalt bleibt byte-genau", () => {
+    const html = render(
+      "# T\n\n## A\n\n```text\n**nicht fett** $x^2$ [1](https://a.de) ![t](img:ab12)\n```"
+    );
+    expect(html).toContain("**nicht fett**");
+    expect(html).toContain("$x^2$");
+    expect(html).toContain("[1](https://a.de)");
+    expect(html).toContain("![t](img:ab12)");
+    expect(html).not.toContain("application/x-tex");
+    expect(html).not.toMatch(/<strong/);
+    expect(html).not.toContain("<sup");
+  });
+
+  it("Checklisten NACH einem Codeblock bleiben funktionsfähig (Original-Zeilenindex bleibt korrekt)", () => {
+    const html = render(
+      "# T\n\n## A\n\n```js\nx\n```\n\n- [ ] offen\n- [x] fertig"
+    );
+    expect(html.match(/type="checkbox"/g)).toHaveLength(2);
+    expect(html).toContain("offen");
+    expect(html).toContain("fertig");
+  });
+
+  it("ein mehrzeiliger Codeblock mit Leerzeilen im Inhalt bleibt vollständig erhalten", () => {
+    const html = render("# T\n\n## A\n\n```py\ndef f():\n    return 1\n\n\ndef g():\n    return 2\n```");
+    expect(html).toContain("def f():");
+    expect(html).toContain("def g():");
+  });
+
+  it("ein unterminierter Zaun (kein schließendes ```) verschluckt NICHT den Rest des Abschnitts", () => {
+    const html = render(
+      "# T\n\n## A\n\n```js\nkeine schließende Zeile\n\n- Stichpunkt Eins\n- Stichpunkt Zwei"
+    );
+    expect(html).toContain("Stichpunkt Eins");
+    expect(html).toContain("Stichpunkt Zwei");
+    expect(html).toMatch(/<ul[^>]*>/);
+  });
+
+  it("mehrere Codeblöcke im selben Abschnitt werden unabhängig gerendert", () => {
+    const html = render("# T\n\n## A\n\n```js\nfirst();\n```\n\nText dazwischen.\n\n```css\n.a{}\n```");
+    expect(html).toContain("first();");
+    expect(html).toContain(".a{}");
+    expect(html).toContain("Text dazwischen.");
+    expect((html.match(/<pre/g) || []).length).toBe(2);
+  });
+
+  it("ein Codeblock innerhalb eines ###-Unterthemas wird korrekt gerendert", () => {
+    const html = render("# T\n\n## A\n\n### Sub\n\n```js\nx();\n```");
+    expect(html).toContain("Sub");
+    expect(html).toContain("x();");
+  });
+
+  it("ungültiges/leeres TeX-artiges Zeichen im Code lässt die Ansicht nicht abstürzen", () => {
+    expect(() => render("# T\n\n## A\n\n```\n$$$$$$\n```")).not.toThrow();
+  });
+
+  it("ein 4-Backtick-Zaun um Inhalt mit eigenen 3-Backtick-Zeilen wird als EIN Block gerendert (K1-Szenario)", () => {
+    const html = render("# T\n\n## A\n\n````js\nBeispiel:\n```\ninner\n```\n````");
+    expect(html).toContain("Beispiel:");
+    expect(html).toContain("inner");
+    expect((html.match(/<pre/g) || []).length).toBe(1);
+    expect(html).not.toContain("````");
+  });
+
+  it("ein Sprach-Label mit Leerzeichen zeigt nur das erste Wort an (Re-Review-Fix W1/P2)", () => {
+    const html = render("# T\n\n## A\n\n```python title=x\ncode\n```");
+    expect(html).toContain("python");
+    expect(html).not.toContain("title=x");
+  });
+
+  it("ein 4-Leerzeichen- oder Tab-eingerückter ```-Block wird NICHT als Codeblock gerendert (Re-Review-Fix W2)", () => {
+    const html4 = render("# T\n\n## A\n\n    ```js\n    x\n    ```");
+    const htmlTab = render("# T\n\n## A\n\n\t```js\n\tx\n\t```");
+    expect(html4).not.toMatch(/<pre/);
+    expect(htmlTab).not.toMatch(/<pre/);
+  });
+});
+
+describe("renumberCitations: Fenced-Codeblöcke bleiben unangetastet (v7.7)", () => {
+  it("ein Fußnoten-artiger Link INNERHALB eines Codeblocks wird NICHT umnummeriert", () => {
+    const md = "Text[9](https://a.de)\n\n```md\nBeispiel: [1](https://x.de)\n```";
+    const out = renumberCitations(md);
+    expect(out).toContain("Text[1](https://a.de)");
+    expect(out).toContain("[1](https://x.de)"); // unverändert (war schon [1], bleibt [1])
+    expect(out).toContain("```md\nBeispiel: [1](https://x.de)\n```");
+  });
+
+  it("eine URL, die vor UND nach einem Codeblock zitiert wird, bekommt beide Male dieselbe Nummer", () => {
+    const md = "Erst[5](https://a.de)\n\n```js\nx\n```\n\nNochmal[9](https://a.de)";
+    const out = renumberCitations(md);
+    expect(out).toContain("Erst[1](https://a.de)");
+    expect(out).toContain("Nochmal[1](https://a.de)");
+  });
+
+  it("ein Codeblock mit einer Zahl, die wie ein umzunummerierender Link aussieht, bleibt byte-identisch", () => {
+    const md = "```text\n[42](https://sollte-nicht-umnummeriert-werden.example)\n```";
+    expect(renumberCitations(md)).toBe(md);
+  });
+
+  it("ein unterminierter Zaun wird weiterhin normal umnummeriert (kein echter Codeblock)", () => {
+    const md = "```js\nText[7](https://a.de) ohne schließenden Zaun";
+    const out = renumberCitations(md);
+    expect(out).toContain("[1](https://a.de)");
+  });
+
+  it("bleibt idempotent, auch mit Codeblöcken im Dokument", () => {
+    const md = "a[3](https://a.de)\n\n```js\n[1](https://b.de)\n```\n\nb[3](https://a.de)";
+    const once = renumberCitations(md);
+    expect(renumberCitations(once)).toBe(once);
+  });
+});

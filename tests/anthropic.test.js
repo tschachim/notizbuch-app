@@ -153,6 +153,16 @@ describe("buildSystem", () => {
     // Währungs-Sicherheit: das Modell soll $-Beträge nicht meiden/verfremden
     expect(sys).toMatch(/W[aä]hrungsbetr/);
   });
+
+  it("erlaubt ```-Codeblöcke fürs Dokument (Code/Konfiguration/Logs), ohne die FORMELN-Regel zu verwässern (v7.7)", () => {
+    const sys = buildSystem(nbs, "Wissensbasis", null);
+    expect(sys).toContain("Codeblöcke im Fence-Format");
+    expect(sys).toContain("Code, Konfiguration oder Logs erwünscht");
+    expect(sys).toContain("\`\`\`bash");
+    // Die bestehende FORMELN-Regel bleibt unverändert – Codeblöcke sind dort
+    // weiterhin ausdrücklich verboten (keine widersprüchliche Anweisung).
+    expect(sys).toContain("NIEMALS ```-Codeblöcke oder Unicode");
+  });
 });
 
 describe("buildChatReply", () => {

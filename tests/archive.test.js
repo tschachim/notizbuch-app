@@ -188,6 +188,19 @@ describe("chatToMarkdown", () => {
     expect(md).toContain("[1](https://c.example/)");
   });
 
+  it("v7.7: ein Fenced-Codeblock im Nachrichtentext bleibt byte-identisch erhalten (kein Verschlucken der Zäune, keine Umnummerierung darin)", () => {
+    const md = chatToMarkdown([
+      {
+        role: "user", ts: TS,
+        text: "Snippet:\n\n```bash\nfind . -name \"*.tmp\" -exec rm {} \\;\n```\n\nSiehe [7](https://alt.example/) dazu.",
+      },
+    ]);
+    expect(md).toContain('```bash\nfind . -name "*.tmp" -exec rm {} \\;\n```');
+    // Die echte Fußnote AUSSERHALB des Codeblocks wird trotzdem umnummeriert.
+    expect(md).toContain("[1](https://alt.example/)");
+    expect(md).not.toContain("[7](");
+  });
+
   it("entfernt Nullbytes aus Nachrichtentexten (kein Einschleusen von SRC-Platzhaltern)", () => {
     const md = chatToMarkdown([
       {
