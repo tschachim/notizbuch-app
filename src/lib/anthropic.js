@@ -136,7 +136,7 @@ INTERNET-RECHERCHE:
 DEINE AUFGABEN:
 1. Neue Informationen aus der Nutzernachricht sofort in das passende Notizbuch einarbeiten: Fakten, Ideen, Entscheidungen, Aufgaben, Termine, Bilder.
 2. Die Struktur aktiv pflegen: passende Abschnitte anlegen, Inhalte umgruppieren, Dubletten zusammenführen, Veraltetes korrigieren. Der Inbox-Abschnitt ist nur ein Zwischenlager – räume ihn auf, sobald sich Themen abzeichnen. ABER: Strukturpflege nur im Zug einer inhaltlichen Änderung oder auf ausdrücklichen Wunsch – NIE als Nebeneffekt einer bloßen Frage.
-3. Proaktiv sein: Prüfe bei JEDER Nachricht aktiv, ob die neue Information Verbindungen zu bestehenden Notizen hat, Widersprüche oder Dubletten erzeugt, Lücken offenlegt, Termine/Aufgaben berührt oder nächste Schritte nahelegt – über ALLE Notizbücher hinweg. Sobald dir so etwas auffällt, sprich es SOFORT in der Chat-Antwort an – konkret und mit Nennung des betroffenen Notizbuchs/Abschnitts. Gibt es nichts Nennenswertes, erzwinge keine Hinweise; eine kurze Bestätigung genügt dann.
+3. Proaktiv sein: Prüfe bei JEDER Nachricht aktiv, ob die neue Information Verbindungen zu bestehenden Notizen hat, Widersprüche oder Dubletten erzeugt, Lücken offenlegt, Termine/Aufgaben berührt oder nächste Schritte nahelegt – über ALLE Notizbücher hinweg. Sobald dir so etwas auffällt, sprich es SOFORT in der Chat-Antwort an – konkret und mit Nennung des betroffenen Notizbuchs/Abschnitts. Gibt es nichts Nennenswertes, erzwinge keine Hinweise; eine kurze Bestätigung genügt dann (bei Speicher-Aufträgen – reine Fragen trotzdem vollständig beantworten, siehe ANTWORTFORMAT).
 4. Fragen zum Bestand beantwortest du aus ALLEN Notizbüchern.
 
 EINORDNUNG IN NOTIZBÜCHER:
@@ -175,7 +175,7 @@ DATEIANHÄNGE:
 
 ANTWORTFORMAT:
 - Schließe JEDE Antwort mit genau einem Aufruf des Tools "update_notebook" ab – niemals nur mit freiem Text.
-- reply: Chat-Antwort auf Deutsch. Ohne Auffälligkeiten: nur kurze Bestätigung (1–2 Sätze). Mit Auffälligkeiten: benenne sie klar und konkret – dann dürfen es bis ca. 200 Wörter sein.
+- reply: Chat-Antwort auf Deutsch. BEI SPEICHER-AUFTRÄGEN (es wird etwas im Dokument abgelegt/geändert): Ohne Auffälligkeiten nur kurze Bestätigung (1–2 Sätze); mit Auffälligkeiten benenne sie klar und konkret – dann dürfen es bis ca. 200 Wörter sein. BEI REINEN FRAGEN/Erklär-Bitten OHNE Speicherauftrag ist reply dagegen die VOLLSTÄNDIGE inhaltliche Antwort – inklusive Formeln ($…$/$$…$$), wenn passend. Ein Verweis „steht schon in Notizbuch X“ ist dabei nur als ERGÄNZUNG erlaubt, ersetzt aber NIEMALS die Antwort. Nach einer Websuche gilt weiterhin die INTERNET-RECHERCHE-Regel: vollständige Antwort als Text VOR dem Tool-Aufruf, reply dann nur kurze Bestätigung ohne Wiederholung. Bei Misch-Nachrichten (Speichern + Frage) beides: kurze Bestätigung plus vollständige Antwort auf den Frageteil.
 - commit: sehr kurze Änderungsbeschreibung im Stil einer Git-Commit-Message; leer lassen, wenn keine Änderung.
 - Verwende im Dokumenttext typografische Anführungszeichen („…“) statt gerader Anführungszeichen (").
 
@@ -186,7 +186,7 @@ Erlaubte ops (werden in Reihenfolge angewendet, beziehen sich immer auf ##-Haupt
 - {"type":"delete_section","heading":"## Abschnitt"}
 - {"type":"rewrite","content":"komplettes neues Dokument"}  → nur für größere Umstrukturierungen, wirkt auf genau ein Notizbuch
 
-REINE FRAGEN (WICHTIG): Enthält die Nachricht nichts Speicherwürdiges – eine bloße Frage (auch zu Notizbüchern oder Dateianhängen: „Was steht …?“, „Erkläre …“, „Fasse zusammen …“), Smalltalk –, dann gib "ops":[] und "commit":null zurück. Nutze eine solche Antwort NIEMALS, um nebenbei aufzuräumen, Platzhalter zu entfernen oder umzustrukturieren – das Dokument bleibt unangetastet. (Angehängte BILDER sind davon ausgenommen: sie werden gemäß dem BILDER-Abschnitt immer eingebunden.)`
+REINE FRAGEN (WICHTIG): Enthält die Nachricht nichts Speicherwürdiges – eine bloße Frage (auch zu Notizbüchern oder Dateianhängen: „Was steht …?“, „Erkläre …“, „Fasse zusammen …“), Smalltalk –, dann gib "ops":[] und "commit":null zurück. Nutze eine solche Antwort NIEMALS, um nebenbei aufzuräumen, Platzhalter zu entfernen oder umzustrukturieren – das Dokument bleibt unangetastet. Die Frage selbst wird dabei im reply VOLLSTÄNDIG und inhaltlich beantwortet (siehe ANTWORTFORMAT) – ein Verweis auf bereits im Notizbuch stehende Inhalte ist nur eine Ergänzung und ersetzt niemals die eigentliche Antwort. (Angehängte BILDER sind davon ausgenommen: sie werden gemäß dem BILDER-Abschnitt immer eingebunden.)`
   );
 }
 
@@ -201,8 +201,10 @@ export const NOTEBOOK_TOOL = {
       reply: {
         type: "string",
         description:
-          "Chat-Antwort auf Deutsch. Ohne Auffälligkeiten kurze Bestätigung (1–2 Sätze); " +
+          "Chat-Antwort auf Deutsch. Bei SPEICHER-Aufträgen: ohne Auffälligkeiten kurze Bestätigung (1–2 Sätze); " +
           "mit Auffälligkeiten (Verbindungen, Widersprüche, Lücken, nächste Schritte) konkrete Hinweise, bis ca. 200 Wörter. " +
+          "Bei REINEN FRAGEN/Erklär-Bitten OHNE Speicherauftrag dagegen die VOLLSTÄNDIGE inhaltliche Antwort (inkl. Formeln, wenn passend) – " +
+          "ein Verweis auf bereits Gespeichertes ist nur eine Ergänzung und ersetzt niemals die Antwort. " +
           'Recherchierte Aussagen mit <cite index="…">…</cite> direkt an der Aussage belegen.',
       },
       commit: {

@@ -877,3 +877,25 @@ aus `referenz-app.jsx` übernommen.
       der seltene Randfall rechtfertigt. In `docs/TESTFAELLE.md` bei D2
       als bekannte Divergenz vermerkt, damit der Tester sie nicht als
       Finding meldet.
+
+52. **Reply-Kürze-Regel auf Speicher-Aufträge begrenzt** (`src/lib/anthropic.js`,
+    v7.5, QA-Finding C9a aus dem v7.4-Retest): Der Prompt aus Punkt 41
+    (v7.1) drückte reply generell auf „ohne Auffälligkeiten nur kurze
+    Bestätigung (1–2 Sätze)“ – gedacht für Bestätigungen NACH
+    Speicher-Aufträgen, wurde vom Modell aber auch auf reine Fragen/
+    Erklär-Bitten angewendet. Live-Symptom: „Erkläre kurz den Satz des
+    Pythagoras mit Formel – nur erklären, nichts speichern“ bekam nur
+    einen Verweis „steht schon im Notizbuch X“ statt einer Erklärung.
+    Fix: ANTWORTFORMAT-Regel, `reply`-Beschreibung im
+    `NOTEBOOK_TOOL`-Schema und der REINE-FRAGEN-Block differenzieren
+    jetzt explizit: bei Speicher-Aufträgen bleibt reply die kurze
+    Bestätigung (mit Auffälligkeiten bis ca. 200 Wörter), bei reinen
+    Fragen/Erklär-Bitten OHNE Speicherauftrag ist reply die
+    VOLLSTÄNDIGE inhaltliche Antwort inklusive Formeln – ein Verweis
+    auf bereits Gespeichertes ist dabei nur als Ergänzung erlaubt und
+    ersetzt die Antwort nie. Regressionstest in
+    `tests/anthropic.test.js` prüft die Kernphrasen in System-Prompt
+    UND Tool-Schema. Restrisiko: reine Prompt-Schärfung, keine
+    strukturelle Erzwingung – ein Modell könnte die Differenzierung im
+    Einzelfall weiterhin verfehlen; das nächste E2E-Retest von C9a
+    deckt das ab.

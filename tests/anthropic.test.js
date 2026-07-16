@@ -110,6 +110,23 @@ describe("buildSystem", () => {
       .toContain("Bei einer bloßen Frage IMMER leer");
   });
 
+  it("beantwortet reine Fragen im reply VOLLSTÄNDIG statt nur zu bestätigen (QA-Finding C9a, v7.5)", () => {
+    const sys = buildSystem(nbs, "Wissensbasis", null);
+    // Regressions-Schutz: die Kürze-Regel für reply gilt nur bei
+    // Speicher-Aufträgen. Bei reinen Fragen/Erklär-Bitten muss reply die
+    // vollständige inhaltliche Antwort tragen, sonst antwortet das Modell
+    // (wie im Live-Finding beobachtet) nur mit einem Verweis auf bereits
+    // Gespeichertes statt die Frage zu beantworten.
+    expect(sys).toContain("BEI SPEICHER-AUFTRÄGEN");
+    expect(sys).toContain("BEI REINEN FRAGEN/Erklär-Bitten OHNE Speicherauftrag ist reply dagegen die VOLLSTÄNDIGE inhaltliche Antwort");
+    expect(sys).toContain("ersetzt aber NIEMALS die Antwort");
+    expect(sys).toContain("Die Frage selbst wird dabei im reply VOLLSTÄNDIG und inhaltlich beantwortet");
+    expect(NOTEBOOK_TOOL.input_schema.properties.reply.description)
+      .toContain("Bei REINEN FRAGEN/Erklär-Bitten OHNE Speicherauftrag dagegen die VOLLSTÄNDIGE inhaltliche Antwort");
+    expect(NOTEBOOK_TOOL.input_schema.properties.reply.description)
+      .toContain("ersetzt niemals die Antwort");
+  });
+
   it("erlaubt LaTeX-Formeln nach Ermessen, inline und abgesetzt, in Chat UND Dokument (v7.3)", () => {
     const sys = buildSystem(nbs, "Wissensbasis", null);
     expect(sys).toContain("FORMELN");
