@@ -464,3 +464,382 @@ aus `referenz-app.jsx` übernommen.
     Vorgabe. Touch funktioniert über die normalen Klick-Handler ohne
     Sonderfall. Modell-Select und das Select im Einstellungs-Dialog
     bleiben native Selects (keine Icon-Anforderung dort).
+
+46. **LaTeX-Formel-Helfer `src/lib/math.jsx`** (v7.3, Nutzerwunsch „volles
+    Programm“; Version nach Code-Review, siehe Punkt 49 für die dabei
+    gefundenen und behobenen Findings): Neue Dependency `katex`
+    (ausdrücklich genehmigt). Ein Regex `MATH_TOKEN_RE` erkennt drei
+    Alternativen mit fester Priorität: `\$` (literales Dollarzeichen,
+    konsumiert den Backslash), `$$…$$` (Display, mehrzeilig, nicht-gierig)
+    und `$…$` (Inline) – gedacht für Chat/Zitate (`renderMathText`/
+    `expandMathInNodes`), die Fließtext OHNE zeilenbasierte Struktur
+    rendern und bei denen `$$…$$` bewusst über Zeilenumbrüche hinweg
+    matchen darf (kein Zeilenrenderer). Für den Editor-Ladepfad ist das
+    NICHT sicher genug (siehe Punkt 49) – dort gilt eine eigene, strengere
+    Regel. Die Währungs-Sicherheit folgt der Pandoc-Regel: öffnendes `$`
+    muss direkt von Nicht-Leerzeichen gefolgt sein, schließendes `$`
+    direkt auf Nicht-Leerzeichen folgen und darf nicht direkt vor einer
+    Ziffer stehen – damit bleiben „$50“, „50 $ bis 60 $“ und „$5 and $10“
+    immer Literaltext, unpaarige `$` matchen den Regex schlicht nicht.
+    `DISPLAY_MATH_START_RE`/`DISPLAY_MATH_ONELINE_RE`/`DISPLAY_MATH_END_RE`
+    und die Funktion `matchDisplayBlock(lines, startIdx)` sind die EINE
+    gemeinsame Quelle der Wahrheit für zeilenverankerte Display-Blöcke,
+    genutzt sowohl von der Dokument-Ansicht (Punkt 47) als auch vom
+    Editor-Ladepfad (Punkt 49) – `null` bedeutet dabei ausdrücklich „kein
+    Block“, nie „Fehler“: Aufrufer verarbeiten die Zeile dann normal
+    weiter, statt den Rest des Dokuments zu verschlucken.
+    `renderKatexHtml(tex, displayMode)` ruft `katex.renderToString` mit
+    `{throwOnError:false, trust:false, displayMode}`: `throwOnError:false`
+    verhindert, dass kaputtes TeX (Nutzer- oder Modell-Eingabe) die App
+    abstürzen lässt (KaTeX liefert stattdessen ein `.katex-error`-Element
+    mit der Fehlermeldung); `trust:false` unterbindet `\href`,
+    `\includegraphics` & Co. – zusammen mit KaTeX' eigenem HTML-Escaping
+    des kompletten Outputs (auch der `<annotation>` mit dem Original-TeX)
+    gibt es über `dangerouslySetInnerHTML` keinen XSS-Weg für Formelinhalt
+    (getestet u. a. mit `<script>`-artigem TeX-Text). Ein Modul-Cache
+    (`Map`, Key aus `displayMode`+`tex`, geleert bei > 500 Einträgen)
+    spart wiederholtes `katex.renderToString` – dieselbe Formel wird pro
+    Chat-Tastendruck und Render-Durchlauf sonst mehrfach neu gerendert
+    (Review-Finding 5). `renderMathText`/`expandMathInNodes` zerlegen
+    beliebigen Text bzw. bereits gemischte String/React-Knoten-Arrays
+    (Chat-Zitate) in Literaltext + KaTeX-Spans, mit einem GEMEINSAMEN
+    Key-Zähler über das ganze Array (verhindert doppelte React-Keys, wenn
+    mehrere Segmente je eine Formel enthalten). KaTeX-CSS
+    (`katex/dist/katex.min.css`) wird bewusst NICHT hier, sondern in
+    `src/index.css` importiert – ein CSS-Import in `src/lib` würde die
+    Node-Unit-Tests brechen (kein CSS-Loader in Vitest,
+    `environment: "node"`). Bewusste Lücke: Enthält der TeX-Quelltext
+    selbst ein rohes, ungepaartes `$` (z. B. ein escaptes `\$` MITTEN in
+    einer Formel), kann das die Grenzen-Erkennung beim nächsten Parsen
+    verwirren – seltener Sonderfall (LaTeX bietet dafür `\text{...}`),
+    nicht eigens abgefangen. Für den Editor-Ladepfad ist dieser Fall
+    unschädlich abgesichert: Das Eingabefeld verweigert dort ein rohes `$`
+    von vornherein (Punkt 49).
+
+47. **Formeln in der Dokument-Ansicht** (`src/lib/markdown.jsx`, v7.3):
+    Display-Blöcke werden über `matchDisplayBlock` (math.jsx, Punkt 46)
+    zeilenverankert erkannt (Zeile beginnt mit `$$`, bis zur Zeile, die
+    mit `$$` endet – auch einzeilig `$$…$$` auf einer Zeile) und als
+    eigener `<div>`-Block gerendert, NICHT in ein `<p>` verpackt. Liefert
+    `matchDisplayBlock` `null` (kein sauberer Block – z. B. „$$x$$ mehr
+    Text“ mit Inhalt NACH der schließenden `$$`, oder eine öffnende
+    `$$`-Zeile ohne jede schließende Zeile im restlichen Dokument), fällt
+    die Zeile bewusst durch zu den späteren Zweigen der Block-Erkennung
+    und landet i. d. R. im normalen Absatz-Zweig, wo `renderInline` sie
+    inline verarbeitet: „$$x$$ mehr Text“ wird dort korrekt als
+    eingebetteter Display-Span erkannt, eine unterminierte `$$`-Zeile
+    bleibt mangels Gegenstück literal stehen. Vorher wurde in beiden
+    Fällen der komplette Rest des Abschnitts als TeX in einen
+    (Fehler-)Block verschluckt – beim Code-Review gefunden (Finding 4) und
+    mit Regressionstests in `tests/markdown.test.jsx` abgesichert.
+    Inline-Formeln (`$…$`) laufen durch `renderInline`: Statt
+    `MATH_TOKEN_RE` als weitere Alternative in den bestehenden
+    `INLINE_TOKEN_RE`-Regex-String einzuweben (fragile Konkatenation von
+    Regex-Quelltext, hätte die Formel-Regel aus `math.jsx` dupliziert),
+    prüft `renderInline` beide Regexe PARALLEL pro Schleifendurchlauf und
+    lässt bei Gleichstand die Formel gewinnen. Das garantiert, dass fett/
+    kursiv/Links eine Formel nie mitten durchschneiden: Beginnt z. B.
+    `**fett**` vor einer Formel, gewinnt fett zuerst und reicht seinen
+    Inhalt rekursiv an `renderInline` zurück, das die Formel im nächsten
+    Durchlauf normal erkennt; beginnt die Formel zuerst (z. B. `$x_i$`),
+    kann die `_`-Emphase sie nicht anschneiden, weil deren Wortgrenzen-
+    Regel einen Index-Unterstrich direkt hinter einem Buchstaben ohnehin
+    nie erlaubt. Codespans (einfache Backticks) schützen ihren Inhalt
+    automatisch, weil das Codespan-Token an seiner Startposition immer
+    Vorrang hat und den kompletten Span als EIN Treffer konsumiert, bevor
+    ein `$` darin separat geprüft wird – ebenso bleibt eine Zeile, die mit
+    einem Codespan wie `` `$$x$$` `` beginnt, ein Codespan (die Zeile
+    beginnt mit einem Backtick, nicht mit `$$`, der Display-Block-Regex
+    matcht also gar nicht erst). `renumberCitations`/`CITE_LINK_RE`
+    fassen TeX-Inhalte nicht an, weil deren Muster zwingend ein
+    `[Zahl](https://…)` verlangt – eine Formel wie `$\left[1,2\right]$`
+    erfüllt das nie (Regressionstest vorhanden). Ein ```-Codeblock-Fall
+    ist im Renderer irrelevant: Die App unterstützt ohnehin keine
+    ```-Codeblöcke (laut Editor-Konvention deaktiviert, siehe Punkt 14).
+
+48. **Formeln im Chat & System-Prompt** (`src/App.jsx`,
+    `src/lib/anthropic.js`, v7.3): Die String-Segmente aus
+    `renderWithCites` (Quellen-Fußnoten-Rendering) laufen zusätzlich durch
+    `expandMathInNodes`, sodass `$…$`/`$$…$$` in Assistenten-Antworten
+    gerendert werden, OHNE die bestehenden hochgestellten Fußnoten-Links
+    zu verändern (die sind bereits React-Elemente und werden von
+    `expandMathInNodes` unangetastet durchgereicht). Nutzer-Nachrichten
+    bekommen ebenfalls Formel-Rendering (Nutzerwunsch „ruhig auch“),
+    reine Fehlermeldungen der App NICHT (technischer Text, kein
+    Modell-/Nutzerinhalt). Der System-Prompt bekommt einen neuen
+    Abschnitt „FORMELN“: Das Modell darf nach eigenem Ermessen `$…$`/
+    `$$…$$` setzen, sowohl in `reply` als auch in `ops`-Inhalten, mit der
+    ausdrücklichen Weisung, dafür NIE ```-Codeblöcke oder Unicode-„Kunst“
+    zu verwenden und Währungsbeträge normal zu schreiben (kein
+    $-Missbrauch). Regressionstest in `tests/anthropic.test.js` prüft die
+    Kernphrasen wie bei den bestehenden Prompt-Verträgen.
+
+49. **Formeln im WYSIWYG-Editor** (`src/components/DocEditor.jsx`, v7.3,
+    kritischster Teil – Version nach Code-Review, ursprüngliche Fassung
+    hatte drei vor dem Commit behobene Findings, siehe unten): TeX-
+    Backslashes (`\frac`, `\Delta`) würden sowohl den serializer-eigenen
+    Backslash-Escape-Mechanismus als auch die anschließende
+    `unescapeMd`-Bereinigung (Punkt 14) nicht überstehen, liefe eine
+    Formel als gewöhnlicher Fließtext durch den Editor. Deshalb – exakt
+    wie `BlockImage`/`MdTable` – zwei eigene atomare Node-Erweiterungen
+    `MathInline` (`group:"inline"`) und `MathBlock` (`group:"block"`) mit
+    eigenem Storage/Serializer-Pfad: der TeX-Text steckt als Node-
+    Attribut, die Serialisierung schreibt ihn UNVERÄNDERT (ohne
+    `state.esc()`) als `$tex$` bzw. `$$tex$$` zurück. Beide Node-
+    Erweiterungen sind aus `DocEditor.jsx` exportiert, ebenso `unescapeMd`
+    – für einen echten TipTap-Roundtrip-Test (`tests/docEditorMath.test.jsx`,
+    `@vitest-environment jsdom` NUR für diese eine Datei, der Rest der
+    Suite bleibt bei `environment:"node"`), der die riskantesten Pfade
+    gegen einen echten `@tiptap/core`-Lauf statt nur gegen den String-
+    Output von `mathToPlaceholders` prüft (Review-Finding 6).
+    - **Lade-Pfad (kontextbewusst, Review-Finding 1):** `mathToPlaceholders()`
+      (math.jsx) wandelt `$…$`/`$$…$$` VOR dem tiptap-markdown-Parsing in
+      `<math-inline>`/`<math-block>`-Tags mit einem `data-tex`-HTML-
+      Attribut um (gleiches Vorbild wie `resolveImgs` für `img:`-
+      Referenzen). Anders als `MATH_TOKEN_RE` (Chat/Zitate, Punkt 46) darf
+      dieser Pfad NICHT blind übers gesamte Roh-Markdown laufen – die
+      Dokument-Ansicht schützt Codespans und verankert `$$…$$` zeilenweise,
+      der Editor muss exakt dieselbe Regel anwenden, sonst schreibt das
+      bloße ÖFFNEN eines Dokuments (nach der nächsten echten Bearbeitung)
+      Codespan-Inhalte oder über Absätze hinweg gepaarte `$$` still um.
+      Deshalb: (1) Codespan-Split wie `renumberCitations`
+      (markdown.jsx) – nur die geraden Segmente werden verarbeitet,
+      Codespan-Inhalt bleibt Byte-für-Byte unangetastet. (2) `$$…$$` wird
+      AUSSCHLIESSLICH über `matchDisplayBlock` (zeilenverankert, Punkt 46)
+      erkannt, niemals über den gesamten Text hinweg; ein `$$`-Paar MITTEN
+      in einer normalen Zeile bleibt bewusst unangetastet (eine „Bare-$$-
+      Wache“ in der Inline-Regel verhindert, dass die Einzel-Dollar-
+      Alternative opportunistisch hineinbeißt) – ein eingebetteter Block-
+      Node mitten in einem Absatz würde von ProseMirror aus dem Absatz
+      herausgelöst und diesen beim Speichern in mehrere Zeilen zerlegen
+      (Struktur-Korruption). (3) Bildzeilen (`![Titel](img:id)`) werden
+      komplett ausgenommen, damit ein `$` im Bildtitel nicht mitten in die
+      Markdown-Bildsyntax hineingeschrieben wird, bevor sie geparst ist.
+      Der TeX-Text landet dabei NICHT base64- oder sonst wie kodiert,
+      sondern nur HTML-Attribut-escaped (`&`, `<`, `>`, `"`) – der
+      Browser/jsdom decodiert das beim Auslesen über `el.getAttribute()`
+      automatisch zurück, verifiziert mit Tests für Klammern,
+      Anführungszeichen und mehrzeilige `$$…$$`-Blöcke (Zeilenumbrüche
+      bleiben im Attribut erhalten). `html:true` reicht diese unbekannten
+      Tags roh durch markdown-it durch (Punkt 15), die `parseHTML()`-
+      Regeln der beiden Node-Erweiterungen fangen sie beim
+      DOM→ProseMirror-Parsing ab. Dass markdown-it das Tag dabei stur in
+      ein `<p>` einbettet (Inline-HTML landet immer in einem umgebenden
+      Absatz), ist irrelevant – ProseMirror ordnet einen `group:"block"`-
+      Node beim Parsen automatisch außerhalb ein, exakt das Verhalten,
+      das `BlockImage` (ebenfalls block-level, aber aus Inline-Bild-
+      Syntax) schon nutzt. Ausführlich mit einem Headless-Prototyp
+      (`@tiptap/core` + jsdom, ohne React) gegen echte TipTap-Parser-/
+      Serializer-Läufe verifiziert, bevor der Code in die Komponente
+      übernommen wurde – daraus wurde `tests/docEditorMath.test.jsx`.
+    - **`\$`-Escape via Sentinel-Zeichen (Review-Finding 2):** Ein
+      escaptes Dollarzeichen darf beim Laden NICHT einfach zu einem
+      nackten `$` aufgelöst werden – eine spätere echte Bearbeitung würde
+      diese Normalisierung mitspeichern und (bei einem zweiten, weiter
+      hinten stehenden `$`) still zu einer ungewollten Formel werden
+      lassen. Erster Anlauf: `\$` als HTML-Entity (`&#92;$`) durchreichen,
+      damit markdown-it sie beim Parsen zu einem echten Backslash-
+      TEXTzeichen dekodiert, das der Standard-Serializer beim Speichern
+      wieder verdoppelt und `unescapeMd` wieder auf einen Backslash
+      reduziert. Das brach beim Testschreiben mit ZWEI `\$`-Escapes ohne
+      Formel dazwischen (z. B. `"\$a\$"`): Die Formel-Schutz-Erkennung in
+      `unescapeMd` (`MATH_SERIALIZED_RE`, die $…$-Muster im bereits
+      serialisierten Text vor der Backslash-Bereinigung schützt) las
+      `"$a\\$"` dabei fälschlich als EINE zusammenhängende, zu
+      schützende Formel und ließ das zweite Escape unaufgelöst als
+      Doppel-Backslash stehen – kein sauberer Roundtrip, nicht einmal
+      idempotent. Endgültige Lösung: `ESCAPED_DOLLAR_SENTINEL`, ein
+      Zeichen aus dem privaten Unicode-Bereich (U+E000, kommt in echten
+      Notizen praktisch nie vor) ersetzt `\$` komplett. Der Sentinel ist
+      für jede andere Regel in `math.jsx` unsichtbar (kein `$`, kein
+      Backslash, keine Markdown-Bedeutung), fließt unangetastet durch
+      markdown-it und den Standard-Serializer und wird erst ganz am Ende,
+      in `unescapeMd`, UNBEDINGT (ohne jede Fallunterscheidung) zurück in
+      `\$` verwandelt – dort kann er mit nichts kollidieren. Verifiziert
+      inklusive Idempotenz-Test (zweifaches Laden+Speichern ohne Änderung
+      liefert dasselbe Ergebnis) in `tests/docEditorMath.test.jsx`.
+    - **TeX-Validierung im Eingabefeld (Review-Finding 3):** Der
+      Serializer schreibt `$tex$`/`$$tex$$` ungeprüft. Ein rohes `$` im
+      TeX würde die Formelgrenzen beim nächsten Laden verschieben oder
+      die Formel ganz zu Klartext degradieren lassen (z. B. würde die
+      Eingabe `"a $ b"` zu `"$a $ b$"` serialisiert, was `MATH_TOKEN_RE`
+      gar nicht mehr als Formel erkennt). Da `$` als Formelgrenze
+      reserviert ist, verweigert `commit()` bei einem rohen `$` in
+      `MathInline` bzw. `$$` in `MathBlock` (einzelne `$` sind dort
+      unkritisch – nur ein VERDOPPELTES `$$` kann die Blockgrenze
+      verschieben) den Commit, statt den Node kaputt zu speichern, und
+      lässt das Eingabefeld mit Fehlerstil (rote Kontur, Titel-Tooltip)
+      offen stehen; der Stil verschwindet automatisch, sobald weiter-
+      getippt wird. Getestet über echte DOM-Interaktion (Klick öffnet das
+      Feld, `keydown`/`input`-Events) statt nur die Funktion isoliert
+      aufzurufen.
+    - **Bearbeiten:** Klick (nicht Doppelklick – bei einem atomaren Node
+      hätte Doppelklick zusätzliche Selektions-Timing-Fallstricke, Klick
+      ist direkter) auf die gerenderte Formel öffnet ein einfaches
+      `<input>` mit dem TeX-Quelltext (kein `window.prompt`). Enter und
+      Blur bestätigen (Klick auf „Speichern“ während der Bearbeitung
+      committet die Änderung also VOR dem eigentlichen Speichern), Escape
+      bricht ab und stellt den unveränderten Original-Text wieder her.
+      Leerer TeX beim Bestätigen löscht den Node gezielt (`tr.delete`),
+      dieselbe gezielte Löschung greift, wenn eine frisch über den
+      Toolbar-Knopf eingefügte, noch nie bestätigte Formel per Escape
+      verworfen wird (erkennbar daran, dass ihr TeX-Attribut leer ist –
+      ein bereits gespeichertes Dokument kann laut `MATH_TOKEN_RE` nie
+      einen Formel-Node mit leerem TeX enthalten, die Inline-Alternative
+      verlangt mindestens ein Zeichen Inhalt). `getPos()` wird dafür
+      IMMER frisch zum Zeitpunkt der Aktion gelesen und auf `"number"`
+      geprüft, statt nur auf `typeof getPos === "function"` (Review-
+      Vorschlag 8): Nach einer Zerstörung des Nodes kann `getPos()`
+      `undefined` liefern, ein ungeprüfter `tr.delete(undefined, NaN)`
+      würde werfen. Bewusst KEIN `editor.commands.undo()` für den
+      Verwerfen-Fall: Ein `undo()`-Ansatz wäre zwar „perfekter“ (stellt
+      den Dokumentstand exakt vor dem Einfügen wieder her), birgt aber
+      ein echtes Risiko – passierten zwischen Einfügen und Abbrechen
+      ANDERE, unabhängige Bearbeitungen, würde `undo()` den zuletzt
+      gemachten Schritt zurücknehmen, der nicht zwangsläufig die Formel-
+      Einfügung ist, und könnte so unbemerkt fremde Nutzeränderungen
+      verwerfen. Der gezielte `tr.delete` ist dafür in einem sehr
+      seltenen Randfall (Block-Formel MITTEN in einem bestehenden Absatz
+      eingefügt und sofort wieder verworfen) nicht ganz byte-identisch
+      mit dem Vorzustand (der Absatz kann in zwei Absätze gesplittet
+      bleiben) – ein bewusst in Kauf genommener, rein kosmetischer Rest.
+    - **Toolbar:** Zwei Knöpfe (`Sigma`-Icon für Inline, `SquareFunction`-
+      Icon für Display/abgesetzt aus lucide) statt eines Knopfs mit
+      Shift-Modifikator – zwei separate, selbsterklärende Knöpfe sind
+      auf Touch-Geräten (kein Shift-Klick) zuverlässiger bedienbar.
+    - **BUGFIX in `MdTable`** (beim Testen der neuen Formel-Nodes
+      gefunden): Der bestehende Zellen-Serializer prüfte
+      `cell.firstChild.textContent.trim()`, um leere Zellen zu
+      überspringen. Für eine Zelle, deren einziger Inhalt ein Inline-
+      ATOM ohne Text ist (z. B. jetzt eine Formel – `textContent`
+      liefert bei Atomen immer `""`), war diese Prüfung fälschlich
+      falsy: `state.renderInline` wurde nie aufgerufen, der Inhalt fiel
+      beim Speichern lautlos weg. Fix: eine Zelle gilt als „hat
+      renderbaren Inhalt“, wenn ihr erster Absatz mindestens ein Kind hat,
+      das KEIN reiner harter Zeilenumbruch ist (`cellHasRenderableContent`)
+      – erkennt Text UND Atome korrekt, eine wirklich leere Zelle ODER
+      eine Zelle, deren einziger Inhalt ein/mehrere `hardBreak` sind
+      (Umschalt+Enter in einer sonst leeren Zelle – sonst würde ein
+      echter Zeilenumbruch mitten in die Pipe-Zeile geschrieben und die
+      Tabelle beim nächsten Öffnen zerreißen, Review-Vorschlag 7), bleibt
+      weiterhin leer. Der ursprüngliche Bug betraf vor v7.3 praktisch nie
+      etwas Sichtbares, weil es bis dahin keine Inline-Atom-Nodes im
+      Schema gab (Bilder sind block-level und lassen sich – geprüft –
+      ohnehin nicht in eine Tabellenzelle einfügen, weder im Editor noch
+      im zeilenbasierten Renderer, der `![…]` innerhalb von
+      Tabellenzellen gar nicht als Bild erkennt).
+    - **`unescapeMd` ist formel-bewusst UND exportiert (Review-Finding 6):**
+      TeX enthält legitime Backslash-Sequenzen wie `\{ \} \_ \( \)`
+      (Mengen-/Intervall-Notation), die exakt wie Serializer-Escapes
+      aussehen und sonst kaputt entfernt würden (`\{1,2\}` → `{1,2}`).
+      Split über `MATH_SERIALIZED_RE` (math.jsx) – bewusst OHNE die
+      `\$`-Escape-Alternative von `MATH_TOKEN_RE`: An dieser Stelle im
+      Ablauf (nach dem Serializer) gibt es kein `\$` mehr zu schützen
+      (siehe Sentinel-Ansatz oben), die Node-Serializer erzeugen niemals
+      eins; MIT der `\$`-Alternative würde ein wörtlich getippter
+      `\$`-Text (vom Standard-Serializer zu `\\$`, drei Zeichen,
+      escaped) fälschlich als Formel-Segment erkannt und die nötige
+      Entfernung des führenden Backslashs übersprungen. `unescapeMd`
+      selbst ist jetzt aus `DocEditor.jsx` exportiert, damit Tests die
+      ECHTE Funktion prüfen statt eine im Test nachgebaute Kopie.
+    - **No-op-Vergleich bleibt intakt:** `baseline.current` wird NACH
+      `mathToPlaceholders()` erfasst, Speichern-ohne-Änderung vergleicht
+      also verarbeitet-gegen-verarbeitet und bleibt ein No-op – verifiziert
+      mit echtem TipTap-Lauf inklusive Codespan- und Absatz-Randfällen
+      in `tests/docEditorMath.test.jsx`.
+    - **Bundle-Zuwachs:** `katex` vergrößert den Haupt-JS-Bundle um rund
+      +268 KB roh / +79 KB gzip sowie `index.css` um rund +32 KB roh /
+      +9 KB gzip (KaTeX-CSS inkl. Basis-Icon-/Layout-Regeln). Dazu kommen
+      ca. 60 KaTeX-Webfont-Dateien (WOFF/WOFF2/TTF, mehrere Schnitte) im
+      `dist/assets`-Verzeichnis – der Browser lädt davon nur die
+      tatsächlich für gerenderte Glyphen benötigten Dateien nach, nicht
+      alle auf einmal.
+
+50. **Formeln im WYSIWYG-Editor, Re-Review-Nacharbeit** (`src/lib/math.jsx`,
+    `src/components/DocEditor.jsx`, v7.3, Nachtrag zu Punkt 46/49): Ein
+    zweiter Review-Durchgang fand einen weiteren kritischen Restfall in
+    `mathToPlaceholders` sowie zwei Warnungen; alle behoben, mit echten
+    Tests belegt (`tests/math.test.jsx`, `tests/docEditorMath.test.jsx`).
+    - **R1 (kritisch): `matchDisplayBlock` suchte unbegrenzt weiter.**
+      Der Editor-Ladepfad sieht (anders als der Viewer, der über
+      `parseTree` schon vorher in Abschnitte zerlegt) ein ganzes Dokument
+      bzw. -Segment am Stück. Eine öffnende `$$`-Zeile OHNE echte Formel
+      dahinter (z. B. Dollar-Slang wie „$$$ teuer“, in finanzlastigen
+      Notizbüchern realistisch) paarte sich über Leerzeilen UND
+      Überschriften hinweg mit einer beliebigen späteren `$$`-Zeile zu
+      EINEM `<math-block>`-Tag, dessen `data-tex`-Attribut Leerzeilen und
+      ggf. eine echte Überschrift enthielt – markdown-it (html:true)
+      zerreißt so ein Tag nachweislich in Fragmente (empirisch vom
+      Reviewer mit den echten Modulen belegt). Fix: `matchDisplayBlock`
+      bricht die Suche nach der Schlusszeile jetzt an einer harten Grenze
+      ab (`DISPLAY_MATH_BOUNDARY_RE` – Leerzeile ODER Überschriftenzeile
+      `#`/`##`/`###`) und liefert dann `null` statt weiterzusuchen. Eine
+      Leerzeile mitten in echtem Display-TeX ist ohnehin ungültiges
+      LaTeX, der Abbruch kostet also nichts; der Überschriften-Abbruch
+      verhindert zusätzlich das Paaren über Abschnittsgrenzen hinweg,
+      selbst ohne dazwischenliegende Leerzeile. Da `matchDisplayBlock`
+      die EINE gemeinsame Quelle der Wahrheit für Viewer UND Editor ist
+      (Punkt 46), profitiert auch der Viewer automatisch vom selben,
+      strengeren Abbruch. Regressionstest mit exakt dem vom Reviewer
+      beschriebenen Dokument (öffnende `$$`-Zeile, Überschrift, spätere
+      `$$`-Zeile) über einen echten TipTap-Lauf.
+    - **R2 (Warnung): globaler Codespan-Split vor dem Zeilen-Split.**
+      `mathToPlaceholders` teilte ursprünglich das GESAMTE Dokument am
+      Codespan-Muster, BEVOR es zeilenweise verarbeitet wurde. Eine
+      Zeile, die mit einem Codespan beginnt und mit einem einzeiligen
+      `$$…$$`-Paar endet (z. B. „`x` $$y$$“), wurde dadurch zu einem
+      Zeilen-FRAGMENT nach dem Codespan-Ende, das fälschlich wie der
+      Anfang einer eigenen Zeile aussah und daher selbst als
+      Display-Block-Start erkannt wurde – ein Block-Node MITTEN in der
+      ursprünglichen Zeile hätte ProseMirror dazu gebracht, den Absatz
+      beim nächsten Speichern in zwei Blöcke zu zerlegen (stille
+      Struktur-Umschreibung). Fix: Reihenfolge gedreht – `mathToPlace-
+      holders` arbeitet jetzt zeilenweise auf dem UNGETEILTEN Dokument
+      (die Blockprüfung über `matchDisplayBlock` sieht so immer die
+      echte Zeile), der Codespan-Split (`CODESPAN_SPLIT_RE`) wird erst
+      PRO ZEILE für den Inline-Durchlauf angewendet – Codespans können
+      ohnehin keine Zeilenumbrüche enthalten, ein Split pro Zeile ist
+      dafür ausreichend und sicherer als ein globaler Split davor.
+    - **R3 (Testqualität): `MdTable` erneut als Kopie im Roundtrip-Test.**
+      Exakt das Muster aus Finding 6, nur auf die Tabellen-Erweiterung
+      verschoben. `MdTable` ist jetzt ebenfalls aus `DocEditor.jsx`
+      exportiert und wird im Test importiert statt nachgebaut; ein neuer
+      Test deckt den Randfall aus Vorschlag 7 direkt ab (Zelle, deren
+      einziger Inhalt ein harter Zeilenumbruch ist, wird leer
+      serialisiert statt einen Zeilenumbruch mitten in die Pipe-Zeile zu
+      schreiben).
+    - **R4 (Vorschlag): Sentinel-Kollision.** Stünde
+      `ESCAPED_DOLLAR_SENTINEL` bereits VOR der Verarbeitung im Dokument
+      (extrem selten – z. B. aus eingefügtem Text mit privaten
+      Icon-Fonts), hätte `unescapeMd` es beim nächsten Speichern
+      bedingungslos zu einem `\$`-Escape gemacht. Fix:
+      `mathToPlaceholders` neutralisiert ein bereits vorhandenes
+      Sentinel-Zeichen als ALLERERSTEN Schritt (Ersetzung durch das
+      Unicode-Replacement-Character U+FFFD), bevor irgendetwas sonst
+      verarbeitet wird.
+    - **R5 (Vorschlag): `data-tex` escapte das Pipe-Zeichen nicht.** Ein
+      rohes `|` im Attributwert wäre innerhalb einer GFM-Tabellenzeile
+      ununterscheidbar von einem Zellentrenner gewesen – markdown-it
+      zerteilt Pipe-Tabellenzeilen textbasiert VOR jeder
+      HTML-Interpretation und hätte das Tag in Zell-Fragmente zerrissen.
+      Fix: `escapeHtmlAttr` codiert `|` zusätzlich als numerische Entity
+      (`&#124;`), `getAttribute()` decodiert sie beim Parsen zuverlässig
+      zurück. Bekannte Restgrenze: Der Node-Serializer schreibt das Pipe
+      beim SPEICHERN roh in `$tex$` zurück (kein `state.esc()`) – eine
+      Formel mit Pipe in einer Tabellenzelle bleibt nach dem nächsten
+      Speichern verwundbar, exakt wie unescapte Pipes in normalem
+      Zellentext schon vorher (vorbestehende Grenze, kein neues Problem).
+    - **R6: bekannte, verlustfreie Anzeige-Divergenzen Editor/Viewer**
+      (Roundtrip bleibt in beiden Fällen byte-identisch, nur die
+      Live-Anzeige beim Bearbeiten weicht ab – dokumentiert, damit der
+      E2E-Tester sie nicht als Bug meldet, siehe auch
+      `docs/TESTFAELLE.md`): (a) ein einzeiliges `$$…$$`-Paar MITTEN in
+      einer Zeile (nicht am Zeilenanfang) bleibt im Editor bewusst
+      literal (siehe Punkt 46/49 – Struktur-Korruption-Vermeidung), der
+      Viewer rendert es dagegen als eingebetteten Display-Span mitten im
+      Absatz. (b) Eine Zeile mit einem Codespan gefolgt von `$$…$$` auf
+      derselben Zeile bleibt im Editor ebenfalls komplett literal (siehe
+      R2), der Viewer rendert Codespan und Formel nebeneinander. Ein
+      einzeiliges `$…$`-Paar (einfaches Dollar) nach einem Codespan wird
+      dagegen in BEIDEN Pfaden korrekt als Formel erkannt – nur `$$…$$`
+      außerhalb des Zeilenanfangs ist von der Divergenz betroffen.

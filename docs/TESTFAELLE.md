@@ -139,6 +139,18 @@ beiden Größen weiterhin einen Zeilenumbruch ein; Enter (ohne Umschalt)
 löst weiterhin denselben Sende-Versuch aus wie vorher (ohne Verbindung
 öffnet es die Einstellungen statt zu senden).
 
+**C9 [VERBUNDEN][API] Formel im Chat und Dokument.** Im QA-Notizbuch per
+Chat: „Notiere den Satz des Pythagoras mit gerenderter Formel.“
+Erwartet: Die Chat-Antwort zeigt eine ECHT gerenderte KaTeX-Formel
+(mathematische Symbole/Hochstellung, keine rohen `$`-Zeichen im Text);
+im Dokument erscheint der Eintrag ebenfalls mit gerenderter Formel statt
+Roh-Markdown (`$a^2+b^2=c^2$` o. ä. darf nirgends als Klartext sichtbar
+sein). ⚠️ Währungs-Sicherheit: Enthält ein anderer Eintrag im selben
+Notizbuch Beträge wie „$50“ oder „-38.000 vs. -50.000“, dürfen diese
+NICHT als Formel interpretiert werden (weiterhin normaler Text mit
+sichtbarem Dollarzeichen) – bei Auffälligkeiten hier explizit als
+Finding melden.
+
 ## D. Manuelles Bearbeiten (WYSIWYG)
 
 **D1 [VERBUNDEN] Editor-Roundtrip.** Stift-Knopf → im QA-Notizbuch einen
@@ -157,6 +169,33 @@ Erwartet: Haken bleibt nach Reload erhalten (eigener Commit).
 
 **D4 [OFFEN] Abbrechen ist folgenlos.** Editor öffnen, Text ändern,
 Abbrechen. Erwartet: Ansicht unverändert, kein Commit.
+
+**D5 [VERBUNDEN] Formel-Roundtrip im Editor.** Voraussetzung: Ein
+Dokument mit mindestens einer Inline-Formel (z. B. `$a^2+b^2=c^2$`) und
+einer abgesetzten Formel (z. B. `$$E=mc^2$$` auf eigener Zeile) – bei
+Bedarf vorher per Chat anlegen (siehe C9) oder direkt über die
+Toolbar-Knöpfe „Σ“ (Inline) bzw. „Formel abgesetzt“ im Editor selbst
+einfügen. Editor öffnen. Erwartet: Beide Formeln erscheinen gerendert
+(nicht als Roh-`$…$`-Text). OHNE etwas zu ändern speichern: Erwartet
+KEIN Commit und keine neue Version in der Historie (No-op). Dann eine
+der Formeln anklicken: Ein Eingabefeld mit dem TeX-Quelltext öffnet
+sich; Text ändern und mit Enter bestätigen. Erwartet: Formel zeigt
+danach den geänderten Inhalt gerendert. Speichern. Erwartet: neue
+Version in der Historie, Ansicht zeigt die geänderte Formel korrekt
+gerendert, alle anderen Inhalte unverändert.
+
+⚠️ Bekannte, bewusste Anzeige-Divergenzen zwischen Editor und
+Dokument-Ansicht (KEIN Bug, bitte nicht melden – Roundtrip bleibt in
+beiden Fällen byte-identisch, nur die Live-Anzeige weicht ab):
+(a) Ein einzeiliges `$$…$$`-Paar MITTEN in einer Zeile (nicht am
+Zeilenanfang, z. B. „Vorher $$x^2$$ nachher“) bleibt im Editor als
+Rohtext sichtbar, während die Ansicht es als eingebettete Formel
+rendert. (b) Eine Zeile mit einem Codespan gefolgt von einem
+`$$…$$`-Paar auf derselben Zeile (z. B. `` `x` $$y$$ ``) bleibt im
+Editor ebenfalls komplett als Rohtext stehen, während die Ansicht
+Codespan und Formel nebeneinander rendert. Ein einfaches `$…$`-Paar
+nach einem Codespan (z. B. `` `code` und $x$ hier. ``) funktioniert
+dagegen in BEIDEN Ansichten normal.
 
 ## E. Schnellnotizen
 

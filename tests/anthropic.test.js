@@ -109,6 +109,17 @@ describe("buildSystem", () => {
     expect(NOTEBOOK_TOOL.input_schema.properties.ops.description)
       .toContain("Bei einer bloßen Frage IMMER leer");
   });
+
+  it("erlaubt LaTeX-Formeln nach Ermessen, inline und abgesetzt, in Chat UND Dokument (v7.3)", () => {
+    const sys = buildSystem(nbs, "Wissensbasis", null);
+    expect(sys).toContain("FORMELN");
+    expect(sys).toContain("$…$");
+    expect(sys).toContain("$$…$$");
+    expect(sys).toContain("KaTeX");
+    expect(sys).toContain("NIEMALS ```-Codeblöcke oder Unicode");
+    // Währungs-Sicherheit: das Modell soll $-Beträge nicht meiden/verfremden
+    expect(sys).toMatch(/W[aä]hrungsbetr/);
+  });
 });
 
 describe("buildChatReply", () => {

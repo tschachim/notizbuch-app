@@ -7,6 +7,10 @@
 /* ------------------------------------------------------------------ */
 
 import { ChevronDown } from "lucide-react";
+import {
+  MATH_TOKEN_RE, renderMathToken, renderKatexHtml,
+  DISPLAY_MATH_START_RE, matchDisplayBlock,
+} from "./math.jsx";
 
 export const IMG_LINE_RE = /^!\[([^\]]*)\]\(img:([a-zA-Z0-9]+)\)$/;
 export const IMG_REF_RE = /!\[[^\]]*\]\(img:([a-zA-Z0-9]+)\)/g;
@@ -16,6 +20,10 @@ const OL_RE = /^\s*\d+[.)]\s+(.*)$/;
 const UL_RE = /^\s*[-*]\s+(.*)$/;
 const TABLE_LINE_RE = /^\s*\|.*\|\s*$/;
 const TABLE_SEP_RE = /^\s*\|(\s*:?-+:?\s*\|)+\s*$/;
+
+// Display-Math-Block-Erkennung: DISPLAY_MATH_START_RE/matchDisplayBlock
+// leben zentral in math.jsx (EINE Regel für Dokument-Ansicht UND den
+// Editor-Ladepfad, siehe dort und DECISIONS #46-49).
 
 /* Zeilen behalten ihren Original-Index im Dokument, damit z. B. das
    Abhaken einer Checkbox die richtige Zeile im Markdown ändern kann. */
@@ -50,6 +58,19 @@ const COLOR_OK = /^(#[0-9a-fA-F]{3,8}|rgba?\([\d\s.,%]+\))$/;
 // etwa in URLs von Quellen-Fußnoten – sind keine Auszeichnung.
 const INLINE_TOKEN_RE =
   /(\*\*[^*\n]+\*\*|~~[^~\n]+~~|\*[^*\n]+\*|(?<![\w\d])_[^_\n]+_(?![\w\d])|`[^`\n]+`|\[\d+\]\(https?:\/\/(?:[^\s()]|\([^\s()]*\))+\)|<(?:span|mark)\b[^>]*>)/;
+
+// Formeln ($…$, $$…$$, \$) werden NICHT als weitere Alternative in
+// INLINE_TOKEN_RE eingebaut (Regex-Source-Konkatenation wäre fehleranfällig
+// und würde die Formel-Regel aus math.jsx duplizieren). Stattdessen prüft
+// renderInline beide Regexe parallel und lässt die früher beginnende
+// gewinnen – bei Gleichstand die Formel. Das garantiert, dass fett/kursiv/
+// Links eine Formel nie mitten durchschneiden: Läuft z. B. **fett** VOR
+// einer Formel, gewinnt fett und reicht seinen Inhalt rekursiv an
+// renderInline zurück, das die Formel darin beim nächsten Durchlauf erneut
+// erkennt. Beginnt dagegen die Formel zuerst (z. B. "$x_i$" mit Unterstrich
+// für den Index), kann die _-Emphase sie nicht anschneiden: Deren Regel
+// verlangt ohnehin einen Unterstrich an einer Wortgrenze – ein Index-
+// Unterstrich direkt hinter einem Buchstaben erfüllt das nie.
 
 /* ---------------- Quellen-Fußnoten im Dokument ---------------- */
 /* Konvention: [n](https://…) direkt hinter der belegten Aussage – ein
@@ -126,11 +147,21 @@ function renderInline(text) {
   let k = 0;
   let s = text;
   while (s.length) {
-    const m = INLINE_TOKEN_RE.exec(s);
+    const otherM = INLINE_TOKEN_RE.exec(s);
+    const mathM = MATH_TOKEN_RE.exec(s);
+    // Bei Gleichstand gewinnt die Formel (siehe Kommentar bei INLINE_TOKEN_RE).
+    const isMath = mathM && (!otherM || mathM.index <= otherM.index);
+    const m = isMath ? mathM : otherM;
     if (!m) { parts.push(s); break; }
     if (m.index > 0) parts.push(s.slice(0, m.index));
     const tok = m[0];
     const after = m.index + tok.length;
+
+    if (isMath) {
+      parts.push(renderMathToken(tok, k++));
+      s = s.slice(after);
+      continue;
+    }
 
     if (tok.startsWith("<")) {
       const tag = tok.startsWith("<span") ? "span" : "mark";
@@ -257,10 +288,25 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
     if (!list || list.type !== type) { flush(); list = { type, items: [] }; }
   };
 
+  // Für matchDisplayBlock: reine Textzeilen ohne die {text, idx}-Hülle,
+  // einmal vorab gebaut statt pro Zeile neu zu mappen.
+  const rawLines = lines.map((l) => l.text);
+
   for (let li = 0; li < lines.length; li++) {
     const { text: line, idx } = lines[li];
     const imgM = IMG_LINE_RE.exec(line.trim());
     const taskM = TASK_RE.exec(line);
+    // null bedeutet "kein sauberer, zeilenverankerter Block" (siehe
+    // matchDisplayBlock in math.jsx) – die Zeile fällt dann bewusst durch
+    // zu den späteren Zweigen (i. d. R. der normale Absatz-Zweig ganz
+    // unten), wo renderInline/Inline "$$x$$ mehr Text" als eingebetteten
+    // Display-Span erkennt bzw. eine unterminierte $$-Zeile literal lässt
+    // (Review-Finding 4 – vorher wurde hier der Rest des Abschnitts als
+    // TeX verschluckt). Nicht innerhalb von Codeblöcken/Codespans relevant:
+    // Codespans sind reines Inline-Markup (siehe renderInline) und dieser
+    // Renderer kennt ohnehin keine ```-Codeblöcke (laut Editor-Konvention
+    // deaktiviert, DECISIONS #14).
+    const mathBlock = DISPLAY_MATH_START_RE.test(line) ? matchDisplayBlock(rawLines, li) : null;
     if (TABLE_LINE_RE.test(line)) {
       flush();
       const tlines = [line];
@@ -269,6 +315,16 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
         tlines.push(lines[li].text);
       }
       blocks.push(renderTable(tlines, kp + key++));
+    } else if (mathBlock) {
+      flush();
+      blocks.push(
+        <div
+          key={kp + key++}
+          className="my-3 overflow-x-auto"
+          dangerouslySetInnerHTML={{ __html: renderKatexHtml(mathBlock.tex, true) }}
+        />
+      );
+      li = mathBlock.endIdx;
     } else if (imgM) {
       flush();
       const [, altRaw, id] = imgM;

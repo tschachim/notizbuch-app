@@ -1,4 +1,8 @@
 @import "tailwindcss";
+/* KaTeX-Grundstyles (v7.3, LaTeX-Formeln in Chat/Dokument/Editor) – bewusst
+   NICHT in src/lib importiert, das würde die Node-Unit-Tests brechen
+   (kein CSS-Loader in Vitest). Siehe src/lib/math.jsx. */
+@import "katex/dist/katex.min.css";
 
 /* Nie seitlich scrollen (Handy/WebView): breite Inhalte wie Tabellen und
    Codezeilen scrollen in ihren eigenen Containern. */
@@ -155,3 +159,48 @@ html, body { overflow-x: hidden; }
   text-decoration: none;
   font-weight: 600;
 }
+/* LaTeX-Formel-Nodes (v7.3): gerenderte Ansicht bekommt eine gestrichelte
+   Kontur als Klick-Affordanz ("hier steckt eine bearbeitbare Formel"),
+   das Eingabefeld übernimmt Font/Größe des umgebenden Texts. */
+.tiptap-doc .math-node-rendered {
+  display: inline-block;
+  min-width: 0.75rem;
+  min-height: 1em;
+  border-radius: 0.25rem;
+  padding: 0 0.125rem;
+  cursor: text;
+  outline: 1px dashed transparent;
+}
+.tiptap-doc .math-node-rendered:hover {
+  outline-color: var(--color-indigo-300);
+  background: var(--color-indigo-50);
+}
+.tiptap-doc .math-node-input {
+  font: inherit;
+  color: inherit;
+  border: 1px solid var(--color-indigo-400);
+  border-radius: 0.25rem;
+  padding: 0 0.25rem;
+  outline: none;
+  background: white;
+}
+/* Ungültiges TeX (rohes $ als Formelgrenze reserviert, Review-Finding 3):
+   Commit wird verweigert, das Feld bleibt mit Fehlerstil offen stehen. */
+.tiptap-doc .math-node-input-error {
+  border-color: var(--color-rose-500);
+  background: var(--color-rose-50);
+}
+.tiptap-doc .math-node-inline { display: inline-block; vertical-align: middle; }
+.tiptap-doc .math-node-inline .math-node-input { min-width: 6rem; }
+.tiptap-doc .math-node-block {
+  display: block;
+  margin: 0.75rem 0;
+  overflow-x: auto;
+}
+.tiptap-doc .math-node-block .math-node-input { width: 100%; box-sizing: border-box; }
+.tiptap-doc .math-node-block .math-node-rendered { display: block; text-align: center; }
+.tiptap-doc .math-node.ProseMirror-selectednode .math-node-rendered {
+  outline: 2px solid var(--color-indigo-400);
+  outline-style: solid;
+}
+.tiptap-doc .katex-error { cursor: text; }

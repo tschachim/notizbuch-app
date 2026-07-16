@@ -190,3 +190,133 @@ describe("exportierte Regexe", () => {
     expect(IMG_LINE_RE.test("Text ![t](img:abc) Text")).toBe(false);
   });
 });
+
+describe("DocView: LaTeX-Formeln (KaTeX)", () => {
+  it("Inline-Formel $…$ in einem Stichpunkt wird gerendert, kein rohes $ bleibt stehen", () => {
+    const html = render("# T\n\n## A\n\n- Es gilt $a^2+b^2=c^2$ laut Pythagoras.");
+    expect(html).toContain("application/x-tex");
+    expect(html).toContain("katex");
+    expect(html).not.toContain("$a^2");
+  });
+
+  it("Display-Block $$…$$ auf eigener Zeile wird als eigener Block gerendert (nicht in <p>)", () => {
+    const html = render("# T\n\n## A\n\n$$E=mc^2$$");
+    expect(html).toContain("katex-display");
+    expect(html).not.toMatch(/<p[^>]*><span[^>]*katex-display/);
+  });
+
+  it("einzeiliges $$…$$ funktioniert genauso wie mehrzeilig", () => {
+    const single = render("# T\n\n## A\n\n$$a^2 + b^2 = c^2$$");
+    const multi = render("# T\n\n## A\n\n$$\na^2 + b^2 = c^2\n$$");
+    expect(single).toContain("katex-display");
+    expect(multi).toContain("katex-display");
+    expect(single).toContain("a^2 + b^2 = c^2");
+    expect(multi).toContain("a^2 + b^2 = c^2");
+  });
+
+  it("Display-Block über mehrere Zeilen sammelt bis zur schließenden $$-Zeile", () => {
+    const html = render("# T\n\n## A\n\nVorher\n\n$$\n\\frac{1}{2}\n+ \\Delta\n$$\n\nNachher");
+    expect(html).toContain("Vorher");
+    expect(html).toContain("Nachher");
+    expect(html).toContain("katex-display");
+    expect(html).toContain("frac{1}{2}");
+  });
+
+  it('"$$x$$ mehr Text" auf einer Zeile verschluckt NICHT den Rest des Abschnitts (Review-Finding 4)', () => {
+    const html = render("# T\n\n## A\n\n$$x^2$$ mehr Text\n\nDanach ein eigener Absatz.");
+    expect(html).toContain("katex-display"); // $$x^2$$ trotzdem als Formel erkannt (eingebettet)
+    expect(html).toContain("mehr Text");
+    expect(html).toContain("Danach ein eigener Absatz.");
+  });
+
+  it("eine unterminierte $$-Zeile (kein Ende im Dokument) verschluckt NICHT den restlichen Abschnitt (Review-Finding 4)", () => {
+    const html = render("# T\n\n## A\n\n$$\nkeine schließende Zeile\n\n- Stichpunkt Eins\n- Stichpunkt Zwei");
+    // Kein Absturz, kein Formel-Rendering (mangels Ende), aber die
+    // nachfolgenden Stichpunkte müssen als normale Liste erscheinen statt
+    // als TeX in einem KaTeX-Block zu verschwinden.
+    expect(html).toContain("Stichpunkt Eins");
+    expect(html).toContain("Stichpunkt Zwei");
+    expect(html).toMatch(/<ul[^>]*>/);
+  });
+
+  it("Formeln stehen nicht im Weg von fett/kursiv – beides funktioniert im selben Satz", () => {
+    const html = render("# T\n\n## A\n\n- **Wichtig**: $x_i$ ist der *i-te* Wert.");
+    expect(html).toMatch(/<strong[^>]*>Wichtig<\/strong>/);
+    expect(html).toMatch(/<em>i-te<\/em>/);
+    expect(html).toContain("application/x-tex");
+  });
+
+  it("Formeln in einer Tabellenzelle werden gerendert", () => {
+    const html = render("# T\n\n## A\n\n| Formel | Wert |\n|---|---|\n| $x^2$ | 4 |");
+    expect(html).toContain("<table");
+    expect(html).toContain("application/x-tex");
+  });
+
+  it("Formeln in einer Checkliste/Aufgabe werden gerendert, Checkbox bleibt funktionsfähig", () => {
+    const html = render("# T\n\n## A\n\n- [ ] Beweise $E=mc^2$");
+    expect(html).toContain('type="checkbox"');
+    expect(html).toContain("application/x-tex");
+  });
+
+  it("Formeln funktionieren zusammen mit Schriftfarbe/Textmarker (Farb-Spans bleiben unangetastet)", () => {
+    const html = render(
+      '# T\n\n## A\n\n- <span style="color:#dc2626">Wichtig: $x^2$</span>'
+    );
+    expect(html).toContain("color:#dc2626");
+    expect(html).toContain("application/x-tex");
+  });
+
+  it("Codespans schützen ihren Inhalt vor Formel-Erkennung (kein Rendering innerhalb `…`)", () => {
+    const html = render("# T\n\n## A\n\n- Schreibe `$x$` um eine Inline-Formel zu erzeugen.");
+    expect(html).not.toContain("application/x-tex");
+    expect(html).toMatch(/<code[^>]*>\$x\$<\/code>/);
+  });
+
+  it('Codespan-Zeile, die mit "$$" beginnt, bleibt Codespan (kein Display-Block)', () => {
+    const html = render("# T\n\n## A\n\n`$$x$$` ist eine Formel-Notation.");
+    expect(html).not.toContain("katex-display");
+    expect(html).toMatch(/<code[^>]*>\$\$x\$\$<\/code>/);
+  });
+
+  it("Währungsbeträge bleiben unangetastet (keine Formel-Fehlinterpretation)", () => {
+    const html = render("# T\n\n## A\n\n- Das kostet $50, nicht $100.\n- Spanne von 50 $ bis 60 $.");
+    expect(html).not.toContain("application/x-tex");
+    expect(html).toContain("$50");
+    expect(html).toContain("$100");
+  });
+
+  it("\\$-Escape bleibt literales Dollarzeichen im Dokument", () => {
+    const html = render("# T\n\n## A\n\n- Preis exakt \\$5.");
+    expect(html).toContain("$5");
+    expect(html).not.toContain("application/x-tex");
+  });
+
+  it("ungültiges TeX lässt die Ansicht nicht abstürzen", () => {
+    expect(() => render("# T\n\n## A\n\n$$\\notacommand{$$")).not.toThrow();
+  });
+
+  it("Bild-Referenzen (img:) bleiben unbeeinflusst, wenn im selben Dokument Formeln vorkommen", () => {
+    const html = render(
+      "# T\n\n## A\n\n$$x^2$$\n\n![Titel](img:ab12)",
+      { ab12: "data:image/png;base64,x" }
+    );
+    expect(html).toContain("katex-display");
+    expect(html).toContain('alt="Titel"');
+  });
+});
+
+describe("renumberCitations & CITE_LINK_RE: fassen TeX-Inhalte nicht an", () => {
+  it("Formel mit eckigen Klammern/Backslashes bleibt beim Umnummerieren unverändert", () => {
+    const md = "- $\\left[1,2\\right]$ Intervall, Quelle[3](https://a.de) und nochmal Quelle[9](https://a.de)";
+    const out = renumberCitations(md);
+    expect(out).toContain("$\\left[1,2\\right]$");
+    expect(out).toContain("Quelle[1](https://a.de)");
+    expect(out.match(/\(https:\/\/a\.de\)/g)).toHaveLength(2);
+  });
+
+  it("eine Formel direkt vor einer echten Fußnote wird nicht mit ihr verwechselt", () => {
+    const md = "Satz $E=mc^2$[1](https://phys.example/e)";
+    const out = renumberCitations(md);
+    expect(out).toBe("Satz $E=mc^2$[1](https://phys.example/e)");
+  });
+});

@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
-import { getHTMLFromFragment } from "@tiptap/core";
+import { getHTMLFromFragment, Node } from "@tiptap/core";
 import { Fragment } from "@tiptap/pm/model";
 import StarterKit from "@tiptap/starter-kit";
 import Image from "@tiptap/extension-image";
@@ -18,14 +18,19 @@ import { Markdown } from "tiptap-markdown";
 import {
   Bold, Italic, Code, List, ListOrdered, ListChecks, Heading2, Heading3,
   Minus, Undo2, Redo2, Strikethrough, Palette, Highlighter, Table as TableIcon,
+  Sigma, SquareFunction,
 } from "lucide-react";
+import {
+  mathToPlaceholders, renderKatexHtml, MATH_SERIALIZED_RE, MATH_INLINE_TAG, MATH_BLOCK_TAG,
+  ESCAPED_DOLLAR_SENTINEL,
+} from "../lib/math.jsx";
 
 /* WYSIWYG-Editor für die manuelle Bearbeitung der Wissensbasis.
    TipTap mit Markdown-Round-Trip, beschränkt auf den Dialekt, den der
    Renderer der App versteht: # / ## / ###, "- "-Listen, nummerierte
    Listen, Checklisten (- [ ]), fett/kursiv/Code/durchgestrichen,
-   Schriftfarbe und Textmarker (als Inline-HTML), ---, Bilder.
-   Codeblöcke und Zitate bleiben deaktiviert. */
+   Schriftfarbe und Textmarker (als Inline-HTML), ---, Bilder, LaTeX-
+   Formeln ($…$/$$…$$, v7.3). Codeblöcke und Zitate bleiben deaktiviert. */
 
 const TEXT_COLORS = [
   { label: "Standard", value: null, swatch: "#334155" },
@@ -61,8 +66,28 @@ function unresolveImgs(md, imgMap) {
 }
 
 // Der zeilenbasierte Renderer der App interpretiert keine Backslash-Escapes –
-// die vom Markdown-Serializer erzeugten daher entfernen.
-const unescapeMd = (md) => md.replace(/\\([\\`*_{}[\]()#+\-.!>~=])/g, "$1");
+// die vom Markdown-Serializer erzeugten daher entfernen. Formel-Segmente
+// ($…$/$$…$$, von MathInline/MathBlock direkt – ohne state.esc() – ge-
+// schrieben) dürfen dabei NICHT angefasst werden: TeX enthält legitime
+// Backslash-Sequenzen wie \{ \} \_ \( \) (Mengen-/Intervall-Notation), die
+// exakt wie Serializer-Escapes aussehen und sonst kaputt entfernt würden
+// (z. B. "\{1,2\}" → "{1,2}"). Split auf MATH_SERIALIZED_RE (wie schon
+// renumberCitations mit Codespans in markdown.jsx) hält Formeln unangetastet.
+const MATH_SPLIT_RE = new RegExp("(" + MATH_SERIALIZED_RE.source + ")");
+// Exportiert (Review-Finding 6), damit Tests die ECHTE Funktion prüfen
+// statt eine im Test nachgebaute Kopie, die bei einer Änderung hier
+// unbemerkt aus dem Takt geraten könnte.
+export const unescapeMd = (md) =>
+  md
+    .split(MATH_SPLIT_RE)
+    .map((seg, i) => (i % 2 ? seg : seg.replace(/\\([\\`*_{}[\]()#+\-.!>~=])/g, "$1")))
+    .join("")
+    // \$-Escapes aus mathToPlaceholders (Review-Finding 2) kommen als
+    // Sentinel-Zeichen an (siehe ESCAPED_DOLLAR_SENTINEL in math.jsx) –
+    // unbedingt zurückwandeln, ohne jede Fallunterscheidung: Der Sentinel
+    // kann mit MATH_SPLIT_RE/dem Backslash-Escape-Muster oben nicht
+    // kollidieren, weil er weder "$" noch "\" enthält.
+    .split(ESCAPED_DOLLAR_SENTINEL).join("\\$");
 
 // tiptap-markdown serialisiert Bilder mit dem Inline-Serializer von
 // prosemirror-markdown – ohne closeBlock klebt die Folgezeile direkt an der
@@ -195,6 +220,21 @@ const BlockImage = Image.extend({
 // Absätze in einer Zelle – nur per Paste erreichbar) landen wie im Original
 // als HTML, damit beim nächsten Öffnen nichts verloren geht.
 const cellHasSpan = (cell) => cell.attrs.colspan > 1 || cell.attrs.rowspan > 1;
+// Eine Zelle, deren einziger Inhalt ein oder mehrere harte Zeilenumbrüche
+// sind (Umschalt+Enter in einer sonst leeren Zelle), muss für die
+// Pipe-Zeilen-Serialisierung ebenfalls als "leer" gelten: state.renderInline
+// würde sonst einen echten Zeilenumbruch mitten in die Pipe-Zeile schreiben
+// und die Tabelle beim nächsten Öffnen zerreißen (Review-Vorschlag 7,
+// gefunden beim MdTable-Bugfix für Formel-Zellen).
+function cellHasRenderableContent(cell) {
+  const p = cell.firstChild;
+  if (!p || p.childCount === 0) return false;
+  let has = false;
+  p.forEach((child) => {
+    if (child.type.name !== "hardBreak") has = true;
+  });
+  return has;
+}
 function gfmSerializable(table) {
   let ok = true;
   table.forEach((row, _o, i) => {
@@ -207,7 +247,10 @@ function gfmSerializable(table) {
   });
   return ok;
 }
-const MdTable = Table.extend({
+// Exportiert (Re-Review-Finding R3), damit der Roundtrip-Test die ECHTE
+// Erweiterung importiert statt cellHasRenderableContent/gfmSerializable im
+// Test nachzubauen.
+export const MdTable = Table.extend({
   addStorage() {
     return {
       markdown: {
@@ -225,7 +268,17 @@ const MdTable = Table.extend({
               state.write("| ");
               row.forEach((cell, _o2, j) => {
                 if (j) state.write(" | ");
-                if (cell.firstChild && cell.firstChild.textContent.trim()) {
+                // BUGFIX (v7.3, beim Einbau der Formel-Nodes gefunden): Die
+                // ursprüngliche Prüfung "cell.firstChild.textContent.trim()"
+                // ist für eine Zelle, deren einziger Inhalt ein Inline-ATOM
+                // ohne Text ist (z. B. eine Formel – textContent liefert bei
+                // Atomen immer ""), fälschlich falsy: state.renderInline
+                // wurde nie aufgerufen und der Inhalt der Zelle fiel beim
+                // Speichern stillschweigend weg. cellHasRenderableContent
+                // erkennt "hat überhaupt sichtbaren Kind-Inhalt" korrekt für
+                // Text UND Atome, eine wirklich leere ODER nur aus harten
+                // Zeilenumbrüchen bestehende Zelle bleibt weiterhin leer.
+                if (cellHasRenderableContent(cell)) {
                   state.renderInline(cell.firstChild);
                 }
               });
@@ -245,6 +298,234 @@ const MdTable = Table.extend({
         parse: {},
       },
     };
+  },
+});
+
+// LaTeX-Formeln als atomare Nodes (v7.3, Nutzerwunsch "volles Programm").
+// GRÖSSTER FALLSTRICK (siehe DECISIONS #14): tiptap-markdown serialisiert
+// normalen Fließtext mit Backslash-Escapes, und unescapeMd entfernt diese
+// nachträglich wieder – TeX-Backslashes (\frac, \Delta) würden auf BEIDEN
+// Wegen zerstört, liefe eine Formel als gewöhnlicher Text durch den
+// Editor. Deshalb – exakt wie BlockImage/MdTable oben – ein eigener
+// Storage/Serializer-Pfad: der TeX-Quelltext steckt als Node-Attribut,
+// die Serialisierung schreibt ihn UNVERÄNDERT (ohne state.esc()) als
+// $tex$ bzw. $$tex$$ zurück; unescapeMd wird über MATH_SERIALIZED_RE
+// (math.jsx) angewiesen, diese Spans nicht anzufassen.
+//
+// Lade-Pfad: mathToPlaceholders() (math.jsx) wandelt $…$/$$…$$ VOR dem
+// tiptap-markdown-Parsing in <math-inline>/<math-block>-Tags mit einem
+// data-tex-Attribut um (gleiches Vorbild wie img:-Referenzen: Konvertieren
+// vorm Laden, das Gegenstück serialisiert beim Speichern direkt zurück).
+// html:true reicht diese unbekannten Tags roh durch markdown-it durch
+// (gleiches Prinzip wie <span>/<mark> für Farben, DECISIONS #15); die
+// parseHTML()-Regeln unten wandeln sie beim DOM→ProseMirror-Parsing in
+// die atomaren Nodes um. Dass markdown-it das Tag dabei in ein <p>
+// einbettet, ist irrelevant – ProseMirror ordnet einen Block-Node
+// (mathBlock) automatisch außerhalb ein (exakt wie bei BlockImage, das
+// ebenfalls block-level ist, aber aus Inline-Bild-Syntax stammt).
+//
+// Bearbeiten: Klick auf die gerenderte Formel öffnet ein einfaches
+// <input> mit dem TeX-Quelltext (kein window.prompt). Enter bestätigt,
+// Escape bricht ab (verwirft die Eingabe, die ORIGINAL-Formel bleibt
+// erhalten), Blur bestätigt wie Enter (Klick auf "Speichern" während der
+// Bearbeitung committet die Änderung noch vor dem eigentlichen Speichern).
+// Leerer TeX beim Bestätigen löscht den Node (Spezifikation). Klick statt
+// Doppelklick: bei einem atomaren Node hätte Doppelklick zusätzliche
+// Timing-Fallstricke (ProseMirror selektiert bei Klick #1 zunächst den
+// Node), Klick ist die direktere, leichter auffindbare Geste.
+//
+// Validierung (Review-Finding 3): $tex$/$$tex$$ wird UNGEPRÜFT geschrieben
+// (kein state.esc()) – ein rohes $ im TeX würde die Formelgrenzen beim
+// nächsten Laden verschieben oder die Formel ganz zu Klartext degradieren
+// lassen ("a $ b" → "$a $ b$", von MATH_TOKEN_RE gar nicht mehr erkannt).
+// Da $ als Formelgrenze reserviert ist, verweigert commit() bei einem
+// rohen $ in MathInline bzw. $$ in MathBlock (einzelne $ sind dort
+// unkritisch) statt den Node kaputt zu speichern, und lässt das Eingabe-
+// feld mit Fehlerstil offen stehen.
+function mathNodeView(displayMode) {
+  return ({ node, editor, getPos }) => {
+    let cur = node;
+    // Frisch über den Toolbar-Knopf eingefügte Formeln haben leeren TeX –
+    // die Prüfung "$…$"/"$$…$$" erfordert mindestens ein Zeichen Inhalt
+    // (MATH_TOKEN_RE), ein geladenes Dokument kann also nie einen bereits
+    // bestehenden Formel-Node mit leerem TeX enthalten. "leer" bedeutet
+    // hier folglich zuverlässig "gerade erst eingefügt" → sofort Eingabe.
+    let editing = !cur.attrs.tex.trim();
+    const wrap = document.createElement(displayMode ? "div" : "span");
+    wrap.className = "math-node " + (displayMode ? "math-node-block" : "math-node-inline");
+
+    const rendered = document.createElement("span");
+    rendered.className = "math-node-rendered";
+    rendered.title = "Klicken zum Bearbeiten";
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "math-node-input";
+    input.placeholder = displayMode ? "LaTeX, z. B. a^2+b^2=c^2" : "LaTeX, z. B. x^2";
+
+    const ERROR_HINT = "Dollarzeichen ($) ist als Formelgrenze reserviert – bitte entfernen.";
+    const isValidTex = (val) => (displayMode ? !val.includes("$$") : !val.includes("$"));
+    const setInvalid = (v) => {
+      input.classList.toggle("math-node-input-error", v);
+      input.title = v ? ERROR_HINT : "";
+    };
+
+    // Liest die AKTUELLE Position frisch (nicht beim Erzeugen der NodeView
+    // eingefroren). Kann nach einer Zerstörung des Nodes undefined liefern
+    // (Review-Finding 8) – dann nichts tun statt tr.delete(undefined, NaN)
+    // aufzurufen, was werfen würde.
+    const currentPos = () => (typeof getPos === "function" ? getPos() : undefined);
+
+    const removeSelf = () => {
+      const pos = currentPos();
+      if (typeof pos !== "number") return;
+      editor.chain().command(({ tr }) => {
+        tr.delete(pos, pos + cur.nodeSize);
+        return true;
+      }).run();
+    };
+
+    const renderView = () => {
+      wrap.innerHTML = "";
+      if (editing) {
+        input.value = cur.attrs.tex;
+        wrap.appendChild(input);
+      } else {
+        rendered.innerHTML = renderKatexHtml(cur.attrs.tex, displayMode);
+        wrap.appendChild(rendered);
+      }
+    };
+
+    const openEdit = () => {
+      editing = true;
+      setInvalid(false);
+      renderView();
+      // Erst nach dem Einhängen ins DOM fokussieren (Layout muss stehen).
+      setTimeout(() => { input.focus(); input.select(); }, 0);
+    };
+
+    const commit = () => {
+      const next = input.value.trim();
+      if (!next) { removeSelf(); return; } // leer bestätigt -> Node löschen
+      if (!isValidTex(next)) { setInvalid(true); return; } // Commit verweigern, Feld bleibt offen
+      setInvalid(false);
+      const pos = currentPos();
+      if (typeof pos === "number") {
+        editor.chain().command(({ tr }) => {
+          tr.setNodeMarkup(pos, undefined, { ...cur.attrs, tex: next });
+          return true;
+        }).run();
+      }
+      editing = false;
+      // cur wird über update() mit dem neuen Attribut nachgezogen; falls
+      // update() aus irgendeinem Grund nicht feuert, hier zusätzlich neu
+      // rendern, sonst bliebe die alte Formel sichtbar.
+      renderView();
+    };
+
+    const cancel = () => {
+      if (!cur.attrs.tex.trim()) { removeSelf(); return; } // leer + verworfen -> löschen
+      editing = false;
+      setInvalid(false);
+      renderView(); // zeigt wieder die unveränderte cur.attrs.tex
+    };
+
+    input.addEventListener("keydown", (e) => {
+      // Tippen im Feld darf ProseMirror nie als Editor-Tastatureingabe
+      // erreichen (sonst könnte z. B. Backspace den ganzen Node löschen).
+      e.stopPropagation();
+      if (e.key === "Enter") { e.preventDefault(); commit(); }
+      else if (e.key === "Escape") { e.preventDefault(); cancel(); }
+    });
+    input.addEventListener("mousedown", (e) => e.stopPropagation());
+    // Fehlerstil verschwindet, sobald weitergetippt wird (bessere UX als
+    // bis zum nächsten Bestätigungsversuch rot zu bleiben).
+    input.addEventListener("input", () => setInvalid(false));
+    input.addEventListener("blur", commit);
+
+    rendered.addEventListener("click", (e) => {
+      e.preventDefault();
+      openEdit();
+    });
+
+    renderView();
+    if (editing) setTimeout(() => { input.focus(); }, 0);
+
+    return {
+      dom: wrap,
+      // Die innerHTML-Swaps oben sind reine Anzeige, keine Dokument-Änderung.
+      ignoreMutation: () => true,
+      // Während der Bearbeitung soll ProseMirror Tastatur-/Maus-Events auf
+      // dem Node NICHT selbst interpretieren (z. B. NodeSelection/Löschen).
+      stopEvent: () => editing,
+      update: (updated) => {
+        if (updated.type.name !== cur.type.name) return false;
+        cur = updated;
+        if (!editing) renderView();
+        return true;
+      },
+    };
+  };
+}
+
+// Exportiert (Review-Finding 6) für einen echten TipTap-Roundtrip-Test
+// (tests/docEditorMath.test.jsx) statt nur den String-Output von
+// mathToPlaceholders zu prüfen.
+export const MathInline = Node.create({
+  name: "mathInline",
+  group: "inline",
+  inline: true,
+  atom: true,
+  addAttributes() {
+    return { tex: { default: "" } };
+  },
+  parseHTML() {
+    return [{ tag: MATH_INLINE_TAG, getAttrs: (el) => ({ tex: el.getAttribute("data-tex") || "" }) }];
+  },
+  renderHTML({ node }) {
+    return [MATH_INLINE_TAG, { "data-tex": node.attrs.tex }];
+  },
+  addStorage() {
+    return {
+      markdown: {
+        serialize(state, node) {
+          state.write("$" + node.attrs.tex + "$");
+        },
+        parse: {},
+      },
+    };
+  },
+  addNodeView() {
+    return mathNodeView(false);
+  },
+});
+
+export const MathBlock = Node.create({
+  name: "mathBlock",
+  group: "block",
+  atom: true,
+  addAttributes() {
+    return { tex: { default: "" } };
+  },
+  parseHTML() {
+    return [{ tag: MATH_BLOCK_TAG, getAttrs: (el) => ({ tex: el.getAttribute("data-tex") || "" }) }];
+  },
+  renderHTML({ node }) {
+    return [MATH_BLOCK_TAG, { "data-tex": node.attrs.tex }];
+  },
+  addStorage() {
+    return {
+      markdown: {
+        serialize(state, node) {
+          state.write("$$" + node.attrs.tex + "$$");
+          state.closeBlock(node);
+        },
+        parse: {},
+      },
+    };
+  },
+  addNodeView() {
+    return mathNodeView(true);
   },
 });
 
@@ -282,12 +563,15 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
       TableRow,
       TableHeader,
       TableCell,
+      MathInline,
+      MathBlock,
       // html:true ist nötig, damit Schriftfarbe/Textmarker (Marks ohne
-      // Markdown-Entsprechung) als <span>/<mark> serialisiert und beim
-      // Öffnen wieder eingelesen werden.
+      // Markdown-Entsprechung) als <span>/<mark> UND die Formel-Tags
+      // (<math-inline>/<math-block>) serialisiert und beim Öffnen wieder
+      // eingelesen werden.
       Markdown.configure({ html: true, bulletListMarker: "-", tightLists: true }),
     ],
-    content: resolveImgs(initialDoc, imgMap),
+    content: resolveImgs(mathToPlaceholders(initialDoc), imgMap),
     autofocus: "start",
     editorProps: { attributes: { class: "tiptap-doc focus:outline-none" } },
     onCreate: ({ editor: ed }) => { baseline.current = ed.storage.markdown.getMarkdown(); },
@@ -338,6 +622,12 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
     const c = editor.chain().focus();
     (value ? c.setHighlight({ color: value }) : c.unsetHighlight()).run();
     setPicker(null);
+  };
+
+  // Fügt eine leere Formel ein; die NodeView öffnet für einen leeren TeX-
+  // Wert automatisch sofort das Eingabefeld (siehe mathNodeView oben).
+  const insertMath = (displayMode) => {
+    editor.chain().focus().insertContent({ type: displayMode ? "mathBlock" : "mathInline", attrs: { tex: "" } }).run();
   };
 
   const swatchGrid = (colors, current, apply) => (
@@ -415,6 +705,13 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
         <button onClick={() => editor.chain().focus().setHorizontalRule().run()}
           className={btn(false)} title="Trennlinie">
           <Minus size={15} />
+        </button>
+
+        <button onClick={() => insertMath(false)} className={btn(false)} title="Formel einfügen (inline, $…$)">
+          <Sigma size={15} />
+        </button>
+        <button onClick={() => insertMath(true)} className={btn(false)} title="Formel einfügen (abgesetzt, $$…$$)">
+          <SquareFunction size={15} />
         </button>
 
         <div className="relative">
