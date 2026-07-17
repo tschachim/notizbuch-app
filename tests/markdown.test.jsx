@@ -53,6 +53,12 @@ describe("renumberCitations", () => {
     const md = "- s[0](https://de.wikipedia.org/wiki/Steak_(Fleisch))";
     expect(renumberCitations(md)).toBe("- s[1](https://de.wikipedia.org/wiki/Steak_(Fleisch))");
   });
+  it("lässt generische Links (nicht-numerischer Titel) unangetastet (v7.8)", () => {
+    const md = "- Info [Titel](https://a.de) und [2024-Bericht](https://b.de) sowie f[3](https://c.de)";
+    expect(renumberCitations(md)).toBe(
+      "- Info [Titel](https://a.de) und [2024-Bericht](https://b.de) sowie f[1](https://c.de)"
+    );
+  });
 });
 
 describe("DocView: Grundgerüst", () => {
@@ -175,6 +181,109 @@ describe("DocView: Bilder & Quellen-Fußnoten", () => {
     const html = render("# T\n\n## A\n\n- Array[0] und [kein Link](nix)");
     expect(html).toContain("Array[0]");
     expect(html).toContain("[kein Link](nix)");
+  });
+});
+
+describe("DocView: generische Links (v7.8)", () => {
+  it("[Titel](url) wird zu einem klickbaren Link mit href/target/rel/title, kein <sup>", () => {
+    const html = render(
+      "# T\n\n## A\n\n- Siehe [Azure-Ticket](https://dev.azure.com/reasult/Reasult/_workitems/edit/33487) dazu."
+    );
+    expect(html).toMatch(
+      /<a[^>]*href="https:\/\/dev\.azure\.com\/reasult\/Reasult\/_workitems\/edit\/33487"[^>]*target="_blank"[^>]*rel="noopener noreferrer"[^>]*title="https:\/\/dev\.azure\.com\/reasult\/Reasult\/_workitems\/edit\/33487"[^>]*>Azure-Ticket<\/a>/
+    );
+    expect(html).not.toContain("<sup");
+  });
+
+  it("Fußnote [2](url) bleibt <sup>, generischer Link daneben wird normaler Link – beides in EINER Zeile", () => {
+    const html = render("# T\n\n## A\n\n- Fakt[2](https://a.de/x) siehe auch [Quelle](https://b.de/y).");
+    expect(html).toMatch(/<sup[^>]*><a[^>]*href="https:\/\/a\.de\/x"[^>]*>\[2\]<\/a><\/sup>/);
+    expect(html).toMatch(/<a[^>]*href="https:\/\/b\.de\/y"[^>]*>Quelle<\/a>/);
+  });
+
+  it('javascript:- und data:-"Links" bleiben Klartext (kein <a>, nur http(s) erlaubt)', () => {
+    const html = render(
+      "# T\n\n## A\n\n- [Klick mich](javascript:alert(1))\n- [Bild anzeigen](data:text/html,x)"
+    );
+    expect(html).not.toContain("<a ");
+    expect(html).toContain("[Klick mich](javascript:alert(1))");
+    expect(html).toContain("[Bild anzeigen](data:text/html,x)");
+  });
+
+  it("Autolink <https://…> wird zum Link, Anzeigetext = URL", () => {
+    const html = render("# T\n\n## A\n\n- Siehe <https://example.org/x> hier.");
+    expect(html).toMatch(/<a[^>]*href="https:\/\/example\.org\/x"[^>]*>https:\/\/example\.org\/x<\/a>/);
+    expect(html).not.toContain("&lt;https");
+  });
+
+  it("nackte URL mit abschließendem Satzzeichen: Punkt wird nicht mitverlinkt", () => {
+    const html = render("# T\n\n## A\n\n- Siehe https://x.de/a. Danach.");
+    expect(html).toMatch(/<a[^>]*href="https:\/\/x\.de\/a"[^>]*>https:\/\/x\.de\/a<\/a>/);
+    expect(html).not.toContain('href="https://x.de/a."');
+    expect(html).toMatch(/<\/a>\.\s*Danach/);
+  });
+
+  it("nackte URL mit runden Klammern (Wikipedia) bleibt komplett verlinkt", () => {
+    const html = render("# T\n\n## A\n\n- Siehe https://de.wikipedia.org/wiki/Steak_(Fleisch) dazu.");
+    expect(html).toMatch(/<a[^>]*href="https:\/\/de\.wikipedia\.org\/wiki\/Steak_\(Fleisch\)"[^>]*>/);
+  });
+
+  it("nackte URL in Klammern im Fließtext: die Satzklammer wird NICHT mitverlinkt", () => {
+    const html = render("# T\n\n## A\n\n- Quelle (https://x.de/a) im Satz.");
+    expect(html).toMatch(/<a[^>]*href="https:\/\/x\.de\/a"[^>]*>https:\/\/x\.de\/a<\/a>\)/);
+  });
+
+  it("nackte URL am Zeilenende wird komplett verlinkt", () => {
+    const html = render("# T\n\n## A\n\n- Quelle: https://x.de/pfad");
+    expect(html).toMatch(/<a[^>]*href="https:\/\/x\.de\/pfad"[^>]*>https:\/\/x\.de\/pfad<\/a>/);
+  });
+
+  it("Link in Tabellenzelle und Listen-Item funktioniert", () => {
+    const html = render(
+      "# T\n\n## A\n\n| A | B |\n| --- | --- |\n| [Titel](https://x.de/a) | y |\n\n- [Punkt](https://x.de/b)"
+    );
+    expect(html).toMatch(/<td[^>]*><a[^>]*href="https:\/\/x\.de\/a"[^>]*>Titel<\/a><\/td>/);
+    expect(html).toMatch(/<li[^>]*><a[^>]*href="https:\/\/x\.de\/b"[^>]*>Punkt<\/a><\/li>/);
+  });
+
+  it("Link-Titel mit **fett** wird rekursiv gerendert", () => {
+    const html = render("# T\n\n## A\n\n- [Sehr **wichtig**](https://x.de/a)");
+    expect(html).toMatch(/<a[^>]*href="https:\/\/x\.de\/a"[^>]*>Sehr <strong[^>]*>wichtig<\/strong><\/a>/);
+  });
+
+  it("nackte URL innerhalb eines Codespans bleibt Code, kein Link", () => {
+    const html = render("# T\n\n## A\n\n- Beispiel: `https://x.de/a` im Text.");
+    expect(html).not.toContain("<a ");
+    expect(html).toMatch(/<code[^>]*>https:\/\/x\.de\/a<\/code>/);
+  });
+
+  // Nachbesserung Finding 1 (Re-Review 2026-07-17, DocEditor.jsx
+  // normalizeLinkUrl): eine vom Editor prozent-kodierte URL (Leerzeichen,
+  // verschachtelte Klammern, Anführungszeichen, spitze Klammern) muss der
+  // Viewer als VOLLSTÄNDIGEN Link erkennen – schließt den Kreis zum
+  // Editor-Roundtrip-Test in tests/docEditorLinks.test.jsx.
+  it("eine vom Editor prozent-kodierte URL (Leerzeichen/Klammern/Anführungszeichen/spitze Klammern) wird vollständig erkannt", () => {
+    const html = render("# T\n\n## A\n\n[Titel](https://x.de/a%20b%28c%22d%3Ee)");
+    expect(html).toMatch(/<a[^>]*href="https:\/\/x\.de\/a%20b%28c%22d%3Ee"[^>]*>Titel<\/a>/);
+  });
+
+  // Nachbesserung Finding 3 (Re-Review 2026-07-17): Titellänge in
+  // INLINE_TOKEN_RE auf 300 Zeichen gecappt (Backtracking-Schutz, siehe
+  // Kommentar dort). Dokumentierte Grenze: 300 Zeichen funktionieren noch
+  // als vollständiger [Titel](url)-Link, 301 Zeichen matcht die Klammer-Form
+  // nicht mehr und der Titeltext bleibt Klartext stehen (die eingebettete
+  // bare-URL wird trotzdem separat als eigener Link erkannt – dieselbe
+  // Fallback-Grammatik wie bei jedem anderen nicht matchenden "[…](url)",
+  // z. B. bei verschachtelten Klammern).
+  it("Titel mit genau 300 Zeichen wird noch als vollständiger Link erkannt, 301 Zeichen nicht mehr (Backtracking-Cap)", () => {
+    const t300 = "x".repeat(300);
+    const t301 = "x".repeat(301);
+    const html300 = render("# T\n\n## A\n\n[" + t300 + "](https://x.de/a)");
+    const html301 = render("# T\n\n## A\n\n[" + t301 + "](https://x.de/a)");
+    expect(html300).toContain('<a href="https://x.de/a"');
+    expect(html300).toContain(">" + t300 + "</a>");
+    expect(html301).toContain("[" + t301 + "](");
+    expect(html301).not.toContain(">" + t301 + "</a>");
   });
 });
 

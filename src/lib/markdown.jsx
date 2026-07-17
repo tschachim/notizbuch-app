@@ -57,8 +57,59 @@ const COLOR_OK = /^(#[0-9a-fA-F]{3,8}|rgba?\([\d\s.,%]+\))$/;
 
 // _-Emphase nur an Wortgrenzen (wie GFM): Unterstriche mitten im Wort –
 // etwa in URLs von Quellen-Fußnoten – sind keine Auszeichnung.
-const INLINE_TOKEN_RE =
-  /(\*\*[^*\n]+\*\*|~~[^~\n]+~~|\*[^*\n]+\*|(?<![\w\d])_[^_\n]+_(?![\w\d])|`[^`\n]+`|\[\d+\]\(https?:\/\/(?:[^\s()]|\([^\s()]*\))+\)|<(?:span|mark)\b[^>]*>)/;
+//
+// Links (v7.8, Nutzerwunsch "generische Links funktionieren"): VIER Formen
+// werden erkannt, ausnahmslos nur mit http(s)-Schema (Defense-in-Depth wie
+// schon bei renderWithCites, citations.jsx – kein javascript:/data:/…):
+// (1) [Titel](url) – eine ECHTE OBERMENGE der bisherigen Quellen-Fußnote
+//     [n](url): welche der beiden Darstellungen greift (hochgestellte Zahl
+//     vs. normaler Link), entscheidet renderInline anhand des Titels
+//     (reine Ziffern → Fußnote), NICHT diese Regex. renumberCitations
+//     (weiter unten) bleibt UNVERÄNDERT und nummerierts weiterhin
+//     ausschließlich [\d+](url) um – ein generischer Link wie
+//     [2024-Bericht](url) ist für CITE_LINK_RE kein Treffer (Titel ist
+//     nicht rein numerisch) und bleibt beim Umnummerieren unangetastet.
+// (2) <url> – CommonMark-Autolink (auch das, was tiptap-markdown für einen
+//     Link mit Text==URL serialisiert, siehe DocEditor.jsx).
+// (3) eine nackte URL im Fließtext (letzte Alternative unten; renderInline
+//     kürzt sie danach um abschließende Satzzeichen/eine unausgeglichene
+//     schließende Klammer, GFM-ähnlich – siehe trimBareUrl).
+// (4) <span>/<mark> (Farbe/Textmarker) wie bisher.
+// Die Alternativen-REIHENFOLGE in dieser Regex entscheidet nur, welche
+// Alternative an EIN UND DERSELBEN Position gewinnt (praktisch nur <url>
+// vs. <span>/<mark>, beide beginnen mit "<" – inhaltlich überschneidungsfrei,
+// da nur Erstere ein http(s)-Schema verlangt). Welche Alternative überhaupt
+// zum Zug kommt, entscheidet dagegen die POSITION des frühesten Treffers
+// im String (renderInline sucht je Durchlauf den am weitesten links
+// stehenden Treffer): ein Codespan oder [Titel](url), der früher im Text
+// beginnt als eine darin enthaltene nackte URL, konsumiert diese automatisch
+// mit – z. B. bleibt eine URL INNERHALB eines Codespans Code (siehe Tests).
+//
+// Grammatik für die URL in [Titel](url)/[n](url): GENAU eine Ebene
+// balancierter runder Klammern (Wikipedia: `.../Steak_(Fleisch)`), sonst
+// weder Klammern noch Whitespace. Exportiert (Nachbesserung v7.8,
+// Finding 1 des Re-Reviews), damit DocEditor.jsx (normalizeLinkUrl) beim
+// Validieren einer neu eingegebenen URL EXAKT dieselbe Regel prüft statt
+// eine zweite, per Hand synchron zu haltende Kopie zu pflegen (analog
+// MATH_SERIALIZED_RE aus math.jsx, das DocEditor.jsx schon per
+// `new RegExp(MATH_SERIALIZED_RE.source)` wiederverwendet statt zu
+// duplizieren).
+export const LINK_URL_RE = /https?:\/\/(?:[^\s()]|\([^\s()]*\))+/;
+// Titellänge auf 300 Zeichen gecappt (Nachbesserung v7.8, Finding 3 des
+// Re-Reviews): reale Linktitel sind kurz, aber ein UNGECAPPTES `[^\]\n]+`
+// vor einer NICHT schließenden "]" lässt die Regex-Engine bei jedem
+// Startindex ("[") den kompletten Rest der Zeile durchprobieren, bevor sie
+// aufgibt – quadratisches Backtracking (gemessen: eine Zeile aus 20 000 "["
+// ohne "]" brauchte 356 ms, 50 000 "[" 2,3 s pro INLINE_TOKEN_RE.exec).
+// {1,300} begrenzt den Backtracking-Aufwand pro Startposition auf eine
+// Konstante, macht den Gesamtaufwand wieder linear in der Zeilenlänge –
+// ein Titel über 300 Zeichen ist ohnehin kein sinnvoller Linktitel und
+// bleibt (wie bisher bei kaputten/unbekannten Mustern) einfach Klartext.
+const INLINE_TOKEN_RE = new RegExp(
+  "(\\*\\*[^*\\n]+\\*\\*|~~[^~\\n]+~~|\\*[^*\\n]+\\*|(?<![\\w\\d])_[^_\\n]+_(?![\\w\\d])|`[^`\\n]+`" +
+  "|\\[[^\\]\\n]{1,300}\\]\\(" + LINK_URL_RE.source + "\\)" +
+  "|<https?:\\/\\/[^\\s>]+>|<(?:span|mark)\\b[^>]*>|https?:\\/\\/[^\\s<>]+)"
+);
 
 // Formeln ($…$, $$…$$, \$) werden NICHT als weitere Alternative in
 // INLINE_TOKEN_RE eingebaut (Regex-Source-Konkatenation wäre fehleranfällig
@@ -78,9 +129,17 @@ const INLINE_TOKEN_RE =
    Markdown-Link mit reiner Zahl als Text. Er übersteht den WYSIWYG-
    Roundtrip (Link-Extension) und wird hier als hochgestellte Zahl
    gerendert. Die Nummern vergibt renumberCitations dokumentweit.
-   Die URL darf eine Ebene runder Klammern enthalten (Wikipedia!). */
+   Die URL darf eine Ebene runder Klammern enthalten (Wikipedia!).
+   WICHTIG (v7.8): CITE_LINK_RE/renumberCitations bleiben strikt auf DIESE
+   Konvention beschränkt (Titel = \d+) – generische Links mit sprechendem
+   Titel (siehe INLINE_TOKEN_RE oben) laufen zwar durch denselben Link-
+   Mark im Editor, aber NIE durch renumberCitations, damit ein frei
+   gewählter Titel nicht versehentlich dokumentweit durch eine Nummer
+   ersetzt wird. */
 
-const CITE_LINK_RE = /\[(\d+)\]\((https?:\/\/(?:[^\s()]|\([^\s()]*\))+)\)/g;
+// URL-Grammatik wiederverwendet aus LINK_URL_RE (siehe Kommentar bei
+// INLINE_TOKEN_RE oben) – dieselbe Klammer-Regel wie beim generischen Link.
+const CITE_LINK_RE = new RegExp("\\[(\\d+)\\]\\((" + LINK_URL_RE.source + ")\\)", "g");
 
 // Fußnoten von Dokumentanfang bis -ende durchnummerieren: gleiche URL =
 // gleiche Nummer (erste Fundstelle bestimmt die Reihenfolge). Wird bei
@@ -154,6 +213,51 @@ function extractStyles(openTag, tag) {
   return style;
 }
 
+// GFM-ähnliches Trailing-Trimming für eine NACKTE URL im Fließtext (v7.8):
+// abschließende Satzzeichen gehören fast immer zum umgebenden Satz, nicht
+// zur URL ("Siehe https://x.de/a." soll den Punkt NICHT mitverlinken).
+// Eine schließende ")" ist die Ausnahme: Sie bleibt Teil der URL, wenn sie
+// eine im bereits akzeptierten Teil der URL offene "(" schließt (Wikipedia-
+// Artikel mit Klammer im Titel, z. B. .../wiki/Steak_(Fleisch)) – sonst
+// wird auch sie abgetrennt (z. B. eine URL in Klammern im Fließtext:
+// "(https://x.de/a)" soll die Satzklammer nicht mitverlinken).
+function trimBareUrl(url) {
+  let end = url.length;
+  for (;;) {
+    if (end === 0) break;
+    const ch = url[end - 1];
+    if (".,;:!?".includes(ch)) { end--; continue; }
+    if (ch === ")") {
+      const prefix = url.slice(0, end - 1);
+      const opens = (prefix.match(/\(/g) || []).length;
+      const closes = (prefix.match(/\)/g) || []).length;
+      if (opens > closes) break; // gehört zu einer offenen "(" -> URL endet hier
+      end--;
+      continue;
+    }
+    break;
+  }
+  return url.slice(0, end);
+}
+
+// Gemeinsame Optik für generische Links (Autolink, nackte URL UND
+// [Titel](url) mit sprechendem Titel) – bewusst ANDERS als die kompakte
+// Fußnoten-Optik (kleine hochgestellte Zahl), damit ein Link im Fließtext
+// als solcher erkennbar ist. break-all verhindert, dass eine lange URL das
+// mobile Layout sprengt (gleiche Sorge wie beim "break-words" der DocView).
+const DOC_LINK_CLASS =
+  "text-indigo-700 underline decoration-indigo-300 hover:decoration-indigo-600 break-all";
+
+// Zerlegt einen von INLINE_TOKEN_RE bereits erkannten "[Titel](url)"-Treffer
+// in Titel/URL. War bislang eine zweite, im renderInline-Zweig ad-hoc
+// gebaute Kopie derselben Obermengen-Regex (Review-Finding 3 des
+// Re-Reviews: eine ungecappte Kopie hier hätte den Backtracking-Schutz von
+// INLINE_TOKEN_RE oben wirkungslos gemacht, sobald dieser Zweig erreicht
+// wird) – jetzt EIN Modul-Level-Konstrukt mit demselben {1,300}-Titel-Cap
+// und derselben LINK_URL_RE-Klammergrammatik, einmalig kompiliert statt bei
+// jedem Aufruf neu (wie TASK_RE/OL_RE oben).
+const GENERIC_LINK_TOKEN_RE = new RegExp("^\\[([^\\]\\n]{1,300})\\]\\((" + LINK_URL_RE.source + ")\\)$");
+
 function renderInline(text) {
   const parts = [];
   let k = 0;
@@ -176,6 +280,27 @@ function renderInline(text) {
     }
 
     if (tok.startsWith("<")) {
+      // Autolink <https://…> (v7.8): Anzeigetext = URL. Geprüft VOR der
+      // <span>/<mark>-Erkennung, weil beide mit "<" beginnen – inhaltlich
+      // überschneidungsfrei, da hier zusätzlich ein http(s)-Schema direkt
+      // nach "<" verlangt wird (span/mark-Tags erfüllen das nie).
+      const autoM = /^<(https?:\/\/[^\s>]+)>$/.exec(tok);
+      if (autoM) {
+        parts.push(
+          <a
+            key={k++}
+            href={autoM[1]}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={autoM[1]}
+            className={DOC_LINK_CLASS}
+          >
+            {autoM[1]}
+          </a>
+        );
+        s = s.slice(after);
+        continue;
+      }
       const tag = tok.startsWith("<span") ? "span" : "mark";
       const closeAt = findClose(s, after, tag);
       if (closeAt === -1) {
@@ -195,22 +320,52 @@ function renderInline(text) {
       continue;
     }
 
-    if (tok.startsWith("[")) {
-      const cm = /^\[(\d+)\]\((https?:\/\/(?:[^\s()]|\([^\s()]*\))+)\)$/.exec(tok);
-      if (!cm) { parts.push(tok); s = s.slice(after); continue; }
+    if (tok.startsWith("http")) {
+      // Nackte URL im Fließtext (v7.8): abschließende Satzzeichen/eine
+      // unausgeglichene ")" gehören NICHT zur URL (trimBareUrl oben). Nur
+      // der getrimmte Teil wird konsumiert – der Rest (z. B. ein
+      // abgeschnittener Punkt) bleibt als normaler Text stehen und läuft
+      // beim nächsten Schleifendurchlauf einfach mit durch.
+      const url = trimBareUrl(tok);
       parts.push(
-        <sup key={k++} className="ml-0.5">
-          <a
-            href={cm[2]}
-            target="_blank"
-            rel="noopener noreferrer"
-            title={cm[2]}
-            className="text-indigo-600 hover:underline font-medium no-underline"
-          >
-            [{cm[1]}]
-          </a>
-        </sup>
+        <a key={k++} href={url} target="_blank" rel="noopener noreferrer" title={url} className={DOC_LINK_CLASS}>
+          {url}
+        </a>
       );
+      s = s.slice(m.index + url.length);
+      continue;
+    }
+
+    if (tok.startsWith("[")) {
+      const cm = GENERIC_LINK_TOKEN_RE.exec(tok);
+      if (!cm) { parts.push(tok); s = s.slice(after); continue; }
+      const [, title, url] = cm;
+      // Reine Ziffern = Quellen-Fußnote (bisheriges Verhalten, von
+      // renumberCitations dokumentweit durchnummeriert); jeder andere
+      // Titel ist ein generischer Link mit eigener Optik (DOC_LINK_CLASS)
+      // und rekursiv gerendertem Titel (damit z. B. **fett** im Linktext
+      // funktioniert).
+      if (/^\d+$/.test(title)) {
+        parts.push(
+          <sup key={k++} className="ml-0.5">
+            <a
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={url}
+              className="text-indigo-600 hover:underline font-medium no-underline"
+            >
+              [{title}]
+            </a>
+          </sup>
+        );
+      } else {
+        parts.push(
+          <a key={k++} href={url} target="_blank" rel="noopener noreferrer" title={url} className={DOC_LINK_CLASS}>
+            {renderInline(title)}
+          </a>
+        );
+      }
     } else if (tok.startsWith("**")) {
       parts.push(<strong key={k++} className="font-semibold text-slate-900">{renderInline(tok.slice(2, -2))}</strong>);
     } else if (tok.startsWith("~~")) {

@@ -1,7 +1,9 @@
 import { useRef, useState } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
-import { getHTMLFromFragment, Node } from "@tiptap/core";
+import { getHTMLFromFragment, Node, Extension } from "@tiptap/core";
 import { Fragment } from "@tiptap/pm/model";
+import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import StarterKit from "@tiptap/starter-kit";
 import CodeBlockExtension from "@tiptap/extension-code-block";
 import Image from "@tiptap/extension-image";
@@ -19,13 +21,14 @@ import { Markdown } from "tiptap-markdown";
 import {
   Bold, Italic, Code, Code2, List, ListOrdered, ListChecks, Heading2, Heading3,
   Minus, Undo2, Redo2, Strikethrough, Palette, Highlighter, Table as TableIcon,
-  Sigma, SquareFunction,
+  Sigma, SquareFunction, Link2 as LinkIcon,
 } from "lucide-react";
 import {
   mathToPlaceholders, renderKatexHtml, MATH_SERIALIZED_RE, MATH_INLINE_TAG, MATH_BLOCK_TAG,
   ESCAPED_DOLLAR_SENTINEL,
 } from "../lib/math.jsx";
 import { splitFenceSegments } from "../lib/code.jsx";
+import { LINK_URL_RE } from "../lib/markdown.jsx";
 
 /* WYSIWYG-Editor für die manuelle Bearbeitung der Wissensbasis.
    TipTap mit Markdown-Round-Trip, beschränkt auf den Dialekt, den der
@@ -591,11 +594,178 @@ export const MathBlock = Node.create({
   },
 });
 
+/* -------------------------------------------------------------------- */
+/* Generische Links (v7.8, Nutzerwunsch): siehe markdown.jsx (Viewer) für */
+/* die Gegenstelle. Quellen-Fußnoten ([n](url), Mark-Text = reine Zahl)   */
+/* und generische Links (Mark-Text = sprechender Titel) laufen im Editor  */
+/* über DENSELBEN Link-Mark (@tiptap/extension-link) – nur die ANZEIGE     */
+/* soll sich unterscheiden, damit man beim Bearbeiten sieht, was beim     */
+/* Speichern wie im Viewer landet. Ein ProseMirror-Plugin scannt dafür    */
+/* bei jeder Dokumentänderung alle Link-Mark-Bereiche und vergibt eine    */
+/* CSS-Klasse (siehe index.css, "cite-link"/"doc-link").                  */
+/* -------------------------------------------------------------------- */
+
+// Läuft über den kompletten Dokumentbaum und fasst zusammenhängende
+// Text-Runs mit IDENTISCHEM href zu EINER Decoration zusammen – auch wenn
+// ProseMirror den Text intern in mehrere Text-Nodes aufgeteilt hat (z. B.
+// nach einer Bearbeitung mitten im Link). "run.to === from" ist die
+// Zusammenhangs-Prüfung: nur direkt aneinandergrenzende Text-Nodes mit
+// gleichem href gelten als EIN Link (ein neuer Node an anderer Position
+// beendet den laufenden Run garantiert, egal was dazwischen liegt).
+function computeLinkDecorations(doc) {
+  const decos = [];
+  let run = null; // { from, to, href, text }
+  const flush = () => {
+    if (run) {
+      const isCite = /^\d+$/.test(run.text);
+      decos.push(Decoration.inline(run.from, run.to, { class: isCite ? "cite-link" : "doc-link" }));
+    }
+    run = null;
+  };
+  doc.descendants((node, pos) => {
+    const linkMark = node.isText ? node.marks.find((m) => m.type.name === "link") : null;
+    if (!linkMark) { flush(); return; }
+    const from = pos;
+    const to = pos + node.nodeSize;
+    if (run && run.href === linkMark.attrs.href && run.to === from) {
+      run.to = to;
+      run.text += node.text;
+    } else {
+      flush();
+      run = { from, to, href: linkMark.attrs.href, text: node.text };
+    }
+  });
+  flush();
+  return DecorationSet.create(doc, decos);
+}
+
+const linkDecorationsPluginKey = new PluginKey("linkDecorations");
+
+export const LinkDecorations = Extension.create({
+  name: "linkDecorations",
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        key: linkDecorationsPluginKey,
+        state: {
+          init: (_, { doc }) => computeLinkDecorations(doc),
+          // Neu berechnen NUR bei echten Doc-Änderungen (tr.docChanged) –
+          // ein reiner Selektionswechsel (Cursor bewegen) soll bei langen
+          // Dokumenten nicht bei jedem Tastendruck neu scannen. Ohne
+          // Änderung wird die bestehende DecorationSet einfach gemappt
+          // (Standardmuster für docChanged-abhängigen Plugin-State).
+          apply: (tr, old) => (tr.docChanged ? computeLinkDecorations(tr.doc) : old.map(tr.mapping, tr.doc)),
+        },
+        props: {
+          decorations: (state) => linkDecorationsPluginKey.getState(state),
+        },
+      }),
+    ];
+  },
+});
+
+// Titel-Validierung für den Link-Dialog (Toolbar-Knopf, siehe unten):
+// (a) reine Ziffern sind für Quellen-Fußnoten reserviert – renumberCitations
+// (markdown.jsx, CITE_LINK_RE) würde einen solchen Titel beim nächsten
+// Speichern dokumentweit durch eine fortlaufende Nummer ERSETZEN, ein
+// Nutzer, der versehentlich "2024" als Linktitel eintippt, würde also
+// stillschweigend eine Fußnote statt eines Links bekommen – lieber vorher
+// blockieren als das hinterher überraschend umzudeuten.
+// (b) "[" / "]" im Titel werden STILL durch "(" / ")" ersetzt:
+// prosemirror-markdown escaped sie beim Serialisieren zu "\[ \]"
+// (state.esc()), unescapeMd (oben) macht dieses Escape beim Speichern
+// unbedingt wieder rückgängig – ein roher "]" im Linktitel würde dann den
+// Viewer-Link-Regex (INLINE_TOKEN_RE, markdown.jsx, Titel schließt "]"
+// bewusst aus) mitten im Titel beenden und den Link zerschneiden. Beide
+// Funktionen sind exportiert (wie unescapeMd/MdTable oben), damit Tests
+// die ECHTEN Funktionen prüfen statt einer im Test nachgebauten Kopie.
+export function validateLinkTitle(raw) {
+  const title = String(raw ?? "").trim();
+  if (!title) return { error: "Bitte einen Titel angeben." };
+  if (/^\d+$/.test(title)) {
+    return {
+      error: "Reine Zahlen sind für Quellen-Fußnoten reserviert – bitte einen sprechenden Titel wählen.",
+    };
+  }
+  return { title: title.replace(/\[/g, "(").replace(/\]/g, ")") };
+}
+
+// URL-Validierung/-Normalisierung für den Link-Dialog: fehlt ein Schema,
+// wird https:// vorangestellt (Nutzerkomfort – die App-Konvention verlangt
+// ohnehin nur http(s)); jedes ANDERE explizite Schema (javascript:, data:,
+// ftp:, …) wird abgelehnt (dieselbe Beschränkung wie im Viewer, markdown.jsx,
+// und im bestehenden Zitat-Fluss, citations.jsx).
+//
+// Zeichen-Encoding (Nachbesserung v7.8, Finding 1 des Re-Reviews): empirisch
+// nachgestellt (siehe Testfälle unten), dass eine an sich "gültige" URL den
+// Roundtrip Editor → Markdown → Viewer bricht, wenn sie eines der folgenden
+// Zeichen roh enthält:
+// - LEERZEICHEN: prosemirror-markdown escaped Leerzeichen im href NICHT
+//   (anders als "()\""); die Viewer-Grammatik (LINK_URL_RE, markdown.jsx)
+//   verlangt aber whitespace-freie URLs – die URL-Erkennung bricht am
+//   Leerzeichen ab, der Rest der Zeile bleibt als Markdown-Trümmer stehen.
+// - UNBALANCIERTE ODER VERSCHACHTELTE runde Klammern: prosemirror-markdown
+//   escaped "(" / ")" im href zwar zu "\(" / "\)", aber unescapeMd (oben)
+//   entfernt genau dieses Escape wieder BEDINGUNGSLOS (dieselbe Funktion
+//   läuft über das gesamte Dokument, ohne URL-Kontext) – die rohen Klammern
+//   landen also unverändert im gespeicherten Markdown. Die Viewer-Grammatik
+//   (LINK_URL_RE) trägt aber nur GENAU EINE Ebene balancierter Klammern
+//   (Wikipedia: `.../Steak_(Fleisch)`): eine unbalancierte schließende ")"
+//   kürzt die erkannte URL beim nächsten Laden still (der Rest wird
+//   literaler Text), eine verschachtelte Klammer lässt die GESAMTE
+//   [Titel](url)-Form gar nicht mehr matchen (Klartext-Trümmer).
+// - '"' (Anführungszeichen): wird von prosemirror-markdown zwar escaped,
+//   aber von unescapeMd NIE entfernt (state.esc()-Zeichensatz oben enthält
+//   bewusst kein '"' – Klammern/Sternchen/etc. gehören zur normalen
+//   Markdown-Syntax des Renderers, Anführungszeichen nicht). Ein roher '"'
+//   im href hinterlässt dadurch dauerhaft ein zusätzliches "\" im
+//   gespeicherten Dokument (Idempotenz gebrochen – jeder weitere Load/Save-
+//   Zyklus bleibt zwar STABIL bei dieser kaputten Form, aber sie weicht für
+//   immer vom eingegebenen href ab).
+// - '<' / '>': brechen die Viewer-Grammatik selbst zwar NICHT (kein
+//   Sonderzeichen dort), werden von prosemirror-markdown beim Serialisieren
+//   aber auch NICHT escaped – tiptap-markdown/markdown-it normalisiert eine
+//   rohe "<"/">" im href beim NÄCHSTEN Laden jedoch still zu "%3C"/"%3E"
+//   (eigene URL-Normalisierung der markdown-it/mdurl-Bibliothek, empirisch
+//   geprüft). Ohne Vorab-Encoding würde sich die im Link-Dialog angezeigte
+//   URL beim zweiten Öffnen des Dokuments also überraschend ändern.
+// ENTSCHEIDUNG: Alle fünf Fälle werden statt abgelehnt automatisch
+// PROZENT-ENCODIERT (%20/%22/%3C/%3E bzw. %28/%29 für Klammern) –
+// nutzerfreundlicher als eine Fehlermeldung, und eine mit diesen Zeichen aus
+// dem Browser kopierte URL (z. B. ein Dateipfad mit Leerzeichen) bleibt
+// benutzbar. Klammern werden NUR encodiert, wenn die URL nicht bereits der
+// Viewer-Grammatik entspricht (LINK_URL_FULL_RE-Test) – eine einzelne Ebene
+// balancierter Klammern (Wikipedia) bleibt dadurch bewusst unverändert
+// lesbar. Reihenfolge wichtig: Leerzeichen/"/<> zuerst encodieren, danach
+// erst gegen die Grammatik prüfen (ein noch rohes Leerzeichen würde die
+// Klammer-Prüfung sonst verfälschen).
+const LINK_URL_FULL_RE = new RegExp("^" + LINK_URL_RE.source + "$");
+export function normalizeLinkUrl(raw) {
+  const trimmed = String(raw ?? "").trim();
+  if (!trimmed) return { error: "Bitte eine URL angeben." };
+  const withScheme = /^[a-z][a-z0-9+.-]*:/i.test(trimmed) ? trimmed : "https://" + trimmed;
+  if (!/^https?:\/\//i.test(withScheme)) {
+    return { error: "Nur http(s)-Links werden unterstützt." };
+  }
+  let url = withScheme
+    .replace(/\s/g, "%20")
+    .replace(/"/g, "%22")
+    .replace(/</g, "%3C")
+    .replace(/>/g, "%3E");
+  if (!LINK_URL_FULL_RE.test(url)) {
+    url = url.replace(/\(/g, "%28").replace(/\)/g, "%29");
+  }
+  return { url };
+}
+
 export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving }) {
   const baseline = useRef(null);
   const [error, setError] = useState(null);
-  const [picker, setPicker] = useState(null); // null | "color" | "highlight" | "table"
+  const [picker, setPicker] = useState(null); // null | "color" | "highlight" | "table" | "link"
   const [tableHover, setTableHover] = useState({ r: 0, c: 0 });
+  // Formularzustand des Link-Popovers (siehe openLinkPicker/applyLink
+  // unten); null solange das Popover geschlossen ist.
+  const [linkForm, setLinkForm] = useState(null); // { title, url, error, existing }
   // TipTap feuert Transaktionen ohne React-Re-Render; kleiner Zähler,
   // damit die Aktiv-Zustände der Toolbar-Knöpfe mitziehen.
   const [, setTick] = useState(0);
@@ -620,11 +790,40 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
       Highlight.configure({ multicolor: true }),
       TaskList,
       TaskItem.configure({ nested: false }),
-      // Quellen-Fußnoten [n](url) müssen den Roundtrip überstehen; ohne
-      // Link-Extension würde TipTap den Link beim Öffnen zu Klartext
-      // reduzieren. Auto-Verlinken bleibt aus (Links entstehen nur über
-      // die Recherche, nicht beim Tippen).
-      Link.configure({ openOnClick: false, autolink: false, linkOnPaste: false }),
+      // Generische Links (v7.8, Nutzerwunsch): autolink/linkOnPaste an – eine
+      // getippte oder über eine Auswahl eingefügte http(s)-URL wird
+      // automatisch verlinkt. isAllowedUri (Nachbesserung, Finding 2 des
+      // Re-Reviews): die eingebaute Prüfung von @tiptap/extension-link
+      // 2.27.2 lässt PER DEFAULT weit mehr als http/https zu (ftp/ftps/
+      // mailto/tel/callto/sms/cid/xmpp, siehe isAllowedUri() in
+      // node_modules/@tiptap/extension-link/dist/index.js) – eine getippte
+      // oder eingefügte E-Mail-Adresse würde also klammheimlich einen
+      // mailto:-Link erzeugen, den der Viewer (markdown.jsx, LINK_URL_RE –
+      // ausdrücklich nur http(s)) danach als Klartext zeigt (kein XSS, aber
+      // Editor/Viewer laufen auseinander). ctx.defaultValidate(url) ruft die
+      // eingebaute Prüfung (inkl. der über "protocols" registrierten
+      // Zusatz-Schemas, hier keine) unverändert auf und schränkt zusätzlich
+      // auf http(s) ein; das gilt für ALLE Konsumenten von isAllowedUri
+      // gleichermaßen (Autolink-Plugin, linkOnPaste-Regel, setLink/
+      // toggleLink-Commands, parseHTML/renderHTML – siehe dieselbe Datei),
+      // Autolink/linkOnPaste für https-URLs funktionieren dadurch
+      // unverändert weiter (bestehende Tests), mailto/tel/… erzeugen jetzt
+      // KEINEN Link-Mark mehr (neuer Test). openOnClick bleibt AUS: ein
+      // Klick auf einen Link WÄHREND des Bearbeitens soll nicht aus dem
+      // Editor navigieren – dafür gibt es den "Öffnen"-Knopf im
+      // Link-Popover (Toolbar unten). Quellen-Fußnoten ([n](url)) laufen
+      // über denselben Mark-Typ und müssen den Roundtrip weiterhin
+      // unverändert überstehen (renumberCitations, markdown.jsx – NICHT
+      // angefasst).
+      Link.configure({
+        openOnClick: false,
+        autolink: true,
+        linkOnPaste: true,
+        isAllowedUri: (url, ctx) => ctx.defaultValidate(url) && /^https?:/i.test(url),
+      }),
+      // Optische Unterscheidung Fußnote/generischer Link direkt im Editor
+      // (siehe LinkDecorations oben).
+      LinkDecorations,
       // Keine Zellen-Verbünde anbieten: nur einfache Tabellen sind als
       // GFM-Markdown serialisierbar (sonst fiele der Serializer auf HTML
       // zurück, das der Renderer nicht darstellt).
@@ -697,6 +896,56 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
   // Wert automatisch sofort das Eingabefeld (siehe mathNodeView oben).
   const insertMath = (displayMode) => {
     editor.chain().focus().insertContent({ type: displayMode ? "mathBlock" : "mathInline", attrs: { tex: "" } }).run();
+  };
+
+  // Öffnet das Link-Popover und belegt Titel/URL vor: Steht der Cursor in
+  // einem bestehenden Link, wird die Selektion per extendMarkRange auf die
+  // GESAMTE Mark-Spanne ausgedehnt (Titel+URL kommen dann von dort, und
+  // "Übernehmen" ersetzt später den kompletten alten Link statt nur einen
+  // Teil davon); ist nur Text markiert (kein Link), bleibt die Auswahl wie
+  // sie ist und liefert den vorbelegten Titel; ohne Auswahl bleiben beide
+  // Felder leer (neuer Link wird an der Cursor-Position eingefügt).
+  const openLinkPicker = () => {
+    const hadLink = editor.isActive("link");
+    if (hadLink) editor.chain().focus().extendMarkRange("link").run();
+    const { from, to } = editor.state.selection;
+    const title = editor.state.doc.textBetween(from, to, " ");
+    const url = hadLink ? editor.getAttributes("link").href || "" : "";
+    setLinkForm({ title, url, error: null, existing: hadLink });
+    setPicker("link");
+  };
+
+  // Ersetzt die aktuelle Selektion (bzw. fügt an der Cursor-Position ein)
+  // durch einen Textknoten mit Link-Mark. extendMarkRange ist hier NOCHMAL
+  // nötig (nicht nur beim Öffnen): Zwischen Öffnen und Bestätigen hat sich
+  // am Dokument nichts geändert (nur Popover-Zustand), der Aufruf ist bei
+  // einer reinen Text-Selektion oder ohne aktiven Link ein No-op und daher
+  // gefahrlos redundant – schützt aber vor Fokus-/Selektions-Drift durch
+  // Klicks in die Eingabefelder.
+  const applyLink = () => {
+    if (!editor || !linkForm) return;
+    const t = validateLinkTitle(linkForm.title);
+    if (t.error) { setLinkForm((f) => ({ ...f, error: t.error })); return; }
+    const u = normalizeLinkUrl(linkForm.url);
+    if (u.error) { setLinkForm((f) => ({ ...f, error: u.error })); return; }
+    editor.chain().focus().extendMarkRange("link").insertContent({
+      type: "text",
+      text: t.title,
+      marks: [{ type: "link", attrs: { href: u.url } }],
+    }).run();
+    setPicker(null);
+    setLinkForm(null);
+  };
+
+  const removeLink = () => {
+    editor.chain().focus().extendMarkRange("link").unsetLink().run();
+    setPicker(null);
+    setLinkForm(null);
+  };
+
+  const openLinkUrl = () => {
+    const url = (linkForm?.url || "").trim();
+    if (/^https?:\/\//i.test(url)) window.open(url, "_blank", "noopener");
   };
 
   const swatchGrid = (colors, current, apply) => (
@@ -786,6 +1035,55 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
         <button onClick={() => insertMath(true)} className={btn(false)} title="Formel einfügen (abgesetzt, $$…$$)">
           <SquareFunction size={15} />
         </button>
+
+        <div className="relative">
+          <button
+            onClick={() => (picker === "link" ? setPicker(null) : openLinkPicker())}
+            className={btn(editor.isActive("link"))}
+            title="Link einfügen/bearbeiten"
+          >
+            <LinkIcon size={15} />
+          </button>
+          {picker === "link" && linkForm && (
+            <div className="absolute z-10 top-full left-0 mt-1 p-3 w-72 bg-white border border-slate-200 rounded-lg shadow-lg">
+              <label className="block text-xs font-medium text-slate-600 mb-0.5">Titel</label>
+              <input
+                type="text"
+                value={linkForm.title}
+                onChange={(e) => setLinkForm((f) => ({ ...f, title: e.target.value, error: null }))}
+                placeholder="Sprechender Titel"
+                className="w-full mb-2 px-2 py-1 text-sm border border-slate-300 rounded"
+              />
+              <label className="block text-xs font-medium text-slate-600 mb-0.5">URL</label>
+              <input
+                type="text"
+                value={linkForm.url}
+                onChange={(e) => setLinkForm((f) => ({ ...f, url: e.target.value, error: null }))}
+                placeholder="https://…"
+                className="w-full mb-2 px-2 py-1 text-sm border border-slate-300 rounded"
+              />
+              {linkForm.error && <div className="mb-2 text-xs text-rose-700">{linkForm.error}</div>}
+              <div className="flex items-center gap-1.5">
+                <button onClick={applyLink}
+                  className="px-2 py-1 rounded bg-indigo-700 text-white text-xs hover:bg-indigo-800">
+                  {linkForm.existing ? "Übernehmen" : "Einfügen"}
+                </button>
+                {linkForm.existing && (
+                  <>
+                    <button onClick={removeLink}
+                      className="px-2 py-1 rounded border border-rose-200 text-rose-700 text-xs hover:bg-rose-50">
+                      Entfernen
+                    </button>
+                    <button onClick={openLinkUrl}
+                      className="px-2 py-1 rounded border border-slate-300 text-slate-600 text-xs hover:bg-slate-50">
+                      Öffnen
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
 
         <div className="relative">
           <button

@@ -1317,3 +1317,219 @@ aus `referenz-app.jsx` übernommen.
         kennt). Alle drei sind idempotent (ein zweites Speichern ändert
         nichts mehr) und wurden im Re-Review empirisch mit den echten
         Modulen verprobt.
+
+55. **Generische Links – Dokument-Viewer und WYSIWYG-Editor** (v7.8,
+    Nutzerwunsch: „Links funktionieren gar nicht"). Bisher rendert der
+    Viewer AUSSCHLIESSLICH `[n](https://…)` (reine Ziffer als Titel) als
+    hochgestellte Quellen-Fußnote; jeder andere Link (`[Titel](url)`,
+    `<url>`-Autolink, nackte URL im Fließtext) fiel als Klartext durch.
+    Harte Anforderung des Nutzers: Quellen-Fußnoten (Konvention aus Punkt
+    26) und ihre dokumentweite Umnummerierung (`renumberCitations`)
+    mussten UNVERÄNDERT weiterlaufen.
+    - **Viewer (`src/lib/markdown.jsx`):** `INLINE_TOKEN_RE`s bisherige
+      `[`-Alternative (`\[\d+\]\(https?://…\)`) wurde zu einer ECHTEN
+      OBERMENGE (`\[[^\]\n]+\]\(https?://…\)` – Titel = beliebiger Text
+      ohne `]`/Zeilenumbruch); WELCHE der beiden Darstellungen greift,
+      entscheidet jetzt `renderInline` anhand des Titels (reine Ziffern
+      → wie bisher `<sup>`-Fußnote, sonst normaler Link mit rekursiv
+      gerendertem Titel, damit `**fett**` im Linktext funktioniert). Zwei
+      neue Alternativen kamen dazu: `<https://…>`-Autolink (Anzeigetext =
+      URL) und eine nackte URL im Fließtext (letzte Alternative, GREEDY
+      bis Whitespace/`<`/`>`, danach per `trimBareUrl` um abschließende
+      Satzzeichen (`.,;:!?`) UND eine unausgeglichene schließende `)`
+      gekürzt – balancierte Klammern wie in Wikipedia-URLs
+      (`.../Steak_(Fleisch)`) bleiben Teil der URL, siehe
+      `trimBareUrl`-Kommentar). ALLE vier Formen verlangen ausnahmslos
+      ein http(s)-Schema (Defense-in-Depth wie schon bei
+      `renderWithCites`, `citations.jsx` – `javascript:`/`data:`/… bleiben
+      Klartext). Welche Alternative bei mehreren im selben Text
+      passenden Kandidaten gewinnt, entscheidet – wie bei Formeln/Fett/
+      Kursiv seit jeher – die POSITION des frühesten Treffers, nicht die
+      Reihenfolge in der Regex (ein Codespan oder `[Titel](url)`, der vor
+      einer darin enthaltenen nackten URL beginnt, konsumiert sie
+      automatisch mit; eine URL INNERHALB eines Codespans bleibt daher
+      Code). `renumberCitations`/`CITE_LINK_RE` bleiben UNVERÄNDERT (nur
+      `[\d+](url)`) – ein generischer Link wie `[2024-Bericht](url)` ist
+      für sie kein Treffer und bleibt beim Umnummerieren byte-identisch
+      (Regressionstest).
+    - **Editor (`src/components/DocEditor.jsx`):** `Link.configure` von
+      `{ autolink:false, linkOnPaste:false }` auf `{ autolink:true,
+      linkOnPaste:true }` umgestellt (`openOnClick` bleibt `false` – ein
+      Klick auf einen Link WÄHREND des Bearbeitens soll den Editor nicht
+      verlassen, dafür gibt es jetzt den „Öffnen"-Knopf im Link-Popover).
+      `isAllowedUri` schränkt Autolink/Paste/Commands zusätzlich auf
+      http(s) ein (KORREKTUR nach Re-Review, siehe „Nachbesserung" unten –
+      die ursprüngliche Annahme, die eingebaute Prüfung lasse das schon von
+      sich aus zu, war FALSCH). Ein Link mit Text==href serialisiert über
+      `prosemirror-markdown`s `isPlainURL`-Heuristik automatisch als
+      `<url>`-Autolink – das kann der Viewer jetzt darstellen (siehe oben).
+      Neuer Toolbar-Knopf „Link" (lucide `Link2`, als `LinkIcon` importiert
+      – Namenskollision mit dem tiptap-`Link`-Import) öffnet ein Popover
+      (Titel-/URL-Feld, Stil wie die bestehenden Farb-/Tabellen-Picker):
+      Textauswahl vorbelegt den Titel; Cursor in einem bestehenden Link
+      dehnt die Auswahl per `extendMarkRange("link")` auf die GESAMTE
+      Mark-Spanne aus und belegt Titel+URL vor; „Einfügen"/„Übernehmen"
+      ersetzt die Auswahl durch einen Textknoten mit Link-Mark (URL ohne
+      Schema bekommt `https://` vorangestellt, jedes andere Schema wird
+      abgelehnt); bei bestehendem Link zusätzlich „Entfernen" (`unsetLink`)
+      und „Öffnen" (`window.open(url, "_blank", "noopener")`). Zwei
+      EXPORTIERTE reine Funktionen kapseln die Validierung (Review-Muster
+      wie `unescapeMd`/`MdTable`, damit Tests die ECHTEN Funktionen
+      prüfen): `validateLinkTitle` blockiert einen Titel aus REINEN Ziffern
+      („Reine Zahlen sind für Quellen-Fußnoten reserviert – bitte einen
+      sprechenden Titel wählen.", sonst würde `renumberCitations` einen
+      frei gewählten Titel wie „42" beim nächsten Speichern stillschweigend
+      durch eine Fußnoten-Nummer ersetzen) und ersetzt `[`/`]` im Titel
+      STILL durch `(`/`)` (`prosemirror-markdown` escaped sie beim
+      Serialisieren zu `\[ \]`, `unescapeMd` macht das Escape beim
+      Speichern bedingungslos rückgängig – ein rohes `]` im Titel würde
+      dann den Viewer-Link-Regex mitten im Titel beenden und den Link
+      zerschneiden); `normalizeLinkUrl` erzwingt http(s). BEKANNTE LÜCKE:
+      diese Validierung greift NUR im Dialog-Pfad – ein per Autolink
+      (Tippen) oder `linkOnPaste` (URL über eine Auswahl einfügen)
+      entstandener Link durchläuft sie nicht. Für Autolink ist das
+      unkritisch (Text==URL, enthält nie `[`/`]`, ist nie rein numerisch
+      außer die URL selbst wäre nur Ziffern – dann bliebe ohnehin `<url>`-
+      Form, keine `[n](url)`-Verwechslungsgefahr). Für `linkOnPaste` über
+      eine VORHANDENE Auswahl mit `]` im Text bleibt ein Rest-Risiko
+      (seltener Randfall, akzeptiert statt zusätzlicher Komplexität in der
+      Paste-Rule).
+    - **Optische Abgrenzung im Editor:** Fußnote und generischer Link
+      laufen über denselben Link-Mark, sollen aber wie im Viewer
+      unterschiedlich aussehen. Ein neues ProseMirror-Plugin
+      (`LinkDecorations`, `addProseMirrorPlugins`) scannt bei jeder
+      Dokumentänderung (`apply` reagiert NUR auf `tr.docChanged`, ein
+      reiner Selektionswechsel scannt nicht neu) den kompletten Dokument-
+      baum, fasst zusammenhängende Text-Runs mit IDENTISCHEM `href` zu
+      EINER Decoration zusammen (robust gegenüber ProseMirrors interner
+      Aufteilung eines Link-Texts in mehrere Text-Nodes) und vergibt
+      `cite-link` (Text nur Ziffern, Optik wie die Viewer-Fußnote:
+      hochgestellt, klein, indigo, ohne Unterstreichung) oder `doc-link`
+      (alles andere: blau + unterstrichen) – Style-Regeln in `index.css`
+      bei den übrigen `tiptap-doc`-Styles. Der `.tiptap-doc a`-Basisstil
+      wurde dafür von einer festen Fußnoten-Optik (galt bisher für JEDEN
+      Link) auf neutral (`color: inherit`) zurückgebaut; die Klassen-
+      Selektoren sind bewusst OHNE `a`-Präfix (`.doc-link` statt
+      `a.doc-link`), weil ProseMirror eine Inline-Decoration je nach
+      Rendering auf einem inneren `<span>` statt direkt auf dem `<a>`
+      platzieren kann.
+    - **Tests:** `tests/markdown.test.jsx` (neuer Block „DocView:
+      generische Links") deckt alle vier Link-Formen ab (inkl. Fußnote
+      und generischer Link in EINER Zeile, `javascript:`/`data:` bleiben
+      Klartext, Trailing-Punctuation, Wikipedia-Klammern, Klammer im
+      Fließtext, Tabellenzelle/Listen-Item, `**fett**` im Titel, URL
+      innerhalb eines Codespans bleibt Code) plus einen Regressionstest,
+      dass `renumberCitations` generische Links unangetastet lässt. Neue
+      Datei `tests/docEditorLinks.test.jsx` (echter TipTap-Roundtrip wie
+      `docEditorCode.test.jsx`/`docEditorMath.test.jsx`, `jsdom`-Override):
+      No-op-Stabilität für `[Titel](url)` (Fließtext, Tabellenzelle,
+      Listen-Item, neben `$x$`-Formel, neben Codespan, Umlaute/`&`),
+      Fußnote bleibt nach Roundtrip numerisch (keine Titel-Mutation),
+      `<url>`-Autolink lädt korrekt und bleibt über ZWEI Roundtrips
+      stabil, Autolink-beim-Tippen erzeugt tatsächlich einen Link-Mark,
+      die Decoration-Klassen erscheinen im gerenderten `editor.view.dom`
+      und werden nach einer Doc-Änderung neu berechnet, plus direkte
+      Tests von `validateLinkTitle`/`normalizeLinkUrl` (Ziffern-Sperre
+      inkl. „007", Klammer-Ersetzung, Schema-Zwang, Ablehnung von
+      `javascript:`/`data:`/`ftp:`).
+    - Restrisiko (siehe „bekannte Lücke" oben): `linkOnPaste` über eine
+      vorhandene Auswahl mit `[`/`]`/reinem Ziffern-Text umgeht die
+      Dialog-Validierung. Bewusst akzeptiert (seltener Fall, Nutzer sieht
+      das Ergebnis sofort im Editor und kann es über den Link-Dialog
+      nachträglich korrigieren).
+    - **Nachbesserung (Re-Review 2026-07-17, drei 🟡-Findings vor dem
+      Commit behoben, v7.8 bleibt v7.8 – reine Korrektur des noch
+      uncommitteten Stands, kein neues Feature):**
+      1. **`normalizeLinkUrl` trug nicht jede akzeptierte URL durch den
+         Roundtrip.** Empirisch nachgestellt: `https://x.de/a b`
+         (Leerzeichen) landete unverändert im Markdown und brach die
+         Viewer-Grammatik (`LINK_URL_RE`, s. u.) mitten in der URL ab
+         (Klartext-Trümmer); `https://x.de/a)b` (unbalancierte Klammer)
+         wurde von `prosemirror-markdown` beim Serialisieren zwar zu `\)`
+         escaped, aber von `unescapeMd` bedingungslos wieder zu `)`
+         zurückverwandelt – der Viewer kürzte den href beim nächsten Laden
+         still auf `https://x.de/a`; eine verschachtelte Klammer
+         (`a(b(c)d)e`) ließ die GESAMTE `[Titel](url)`-Form nicht mehr
+         matchen. Ergänzend geprüft: ein rohes `"` wird von
+         `prosemirror-markdown` escaped, aber von `unescapeMd` NIE wieder
+         entfernt (nicht im Escape-Zeichensatz) – bleibt dauerhaft als
+         `\"` im Dokument hängen (Idempotenz gebrochen); ein rohes `<`/`>`
+         bricht zwar weder Serialisierung noch Viewer, wird aber von
+         `markdown-it` beim NÄCHSTEN Laden still zu `%3C`/`%3E`
+         normalisiert (überraschende URL-Änderung beim zweiten Öffnen).
+         **Entscheidung: prozent-encodieren statt ablehnen** (`%20` für
+         Whitespace, `%22`/`%3C`/`%3E` für `"`/`</>`, `%28`/`%29` für
+         Klammern NUR wenn die URL nicht schon vollständig der
+         Viewer-Grammatik entspricht – eine einzelne Ebene balancierter
+         Klammern bleibt dadurch bewusst roh, Wikipedia-Fall funktioniert
+         weiter unencodiert). Encodieren ist nutzerfreundlicher als eine
+         Fehlermeldung: eine aus dem Browser kopierte URL mit Leerzeichen
+         (z. B. Dateipfad) bleibt benutzbar. Die Klammer-Grammatik
+         (`(?:[^\s()]|\([^\s()]*\))+`) ist jetzt als `LINK_URL_RE` aus
+         `src/lib/markdown.jsx` EXPORTIERT und wird sowohl von
+         `INLINE_TOKEN_RE`/`CITE_LINK_RE` (Viewer) als auch von
+         `normalizeLinkUrl` (Editor-Dialog, `DocEditor.jsx`) über
+         `new RegExp(LINK_URL_RE.source)` wiederverwendet (analog
+         `MATH_SERIALIZED_RE` aus `math.jsx`) – EINE Quelle der Wahrheit
+         statt zweier Kopien, die unbemerkt hätten auseinanderlaufen
+         können.
+      2. **`isAllowedUri` von `@tiptap/extension-link` 2.27.2 lässt per
+         Default mehr als http(s) zu** (u. a. `ftp`/`ftps`/`mailto`/`tel`/
+         `callto`/`sms`/`cid`/`xmpp`, siehe `isAllowedUri()` in
+         `node_modules/@tiptap/extension-link/dist/index.js`) – die
+         ursprüngliche Behauptung im DECISIONS-Text oben („lässt ohnehin
+         nur http/https zu") war FALSCH (im Code-Review nicht anhand der
+         tatsächlichen Bibliotheksquelle verifiziert). Eine getippte oder
+         eingefügte E-Mail-Adresse hätte klammheimlich einen
+         `mailto:`-Link-Mark erzeugt, den der Viewer als Klartext zeigt
+         (kein XSS, aber Editor/Viewer laufen auseinander). Fix:
+         `Link.configure({ …, isAllowedUri: (url, ctx) =>
+         ctx.defaultValidate(url) && /^https?:/i.test(url) })` – die
+         `ctx.defaultValidate`/`ctx.protocols`-API existiert in 2.27.2
+         exakt wie angenommen (verifiziert in `isAllowedUri`/
+         `parseHTML`/`renderHTML`/`addCommands`/`addPasteRules`/
+         `addProseMirrorPlugins` derselben Datei – ALLE Konsumenten rufen
+         `this.options.isAllowedUri(url, { defaultValidate, protocols,
+         defaultProtocol })` auf, die Einschränkung greift dadurch für
+         Autolink-beim-Tippen, `linkOnPaste` UND `setLink`/`toggleLink`
+         gleichermaßen).
+      3. **Quadratisches Backtracking der `[Titel]`-Alternative in
+         `INLINE_TOKEN_RE`** (`src/lib/markdown.jsx`): Ein ungecapptes
+         `\[[^\]\n]+\]` lässt die Regex-Engine bei jedem `[`-Startindex
+         ohne folgendes `]` den kompletten Rest der Zeile durchprobieren,
+         bevor sie aufgibt. Gemessen: eine Zeile aus 20 000 `[` ohne `]`
+         brauchte 356 ms, 50 000 `[` 2,3 s pro `INLINE_TOKEN_RE.exec`
+         (vorher, mit der alten `\[\d+\]`-Fußnoten-Grammatik, war das
+         irrelevant – `\d+` kann so gut wie nichts matchen und gibt sofort
+         auf). Fix: `\[[^\]\n]{1,300}\]` – begrenzt den Backtracking-
+         Aufwand pro Startposition auf eine Konstante (macht den
+         Gesamtaufwand wieder linear in der Zeilenlänge, verifiziert:
+         20 000 `[` jetzt 20 ms, 50 000 `[` 30 ms). Ein Titel über 300
+         Zeichen ist ohnehin kein sinnvoller Linktitel und bleibt (wie
+         jedes andere kaputte/unbekannte Muster) Klartext – die
+         eingebettete bare-URL wird dabei trotzdem separat als eigener
+         Link erkannt (dieselbe Fallback-Grammatik wie bei jeder anderen
+         nicht matchenden `[…](url)`-Form, z. B. verschachtelten
+         Klammern). Dieselbe Obermengen-Regex war ein zweites Mal im
+         `renderInline`-Zweig für „["-Token dupliziert (dort ebenfalls
+         ungecappt) – jetzt als modul-weites `GENERIC_LINK_TOKEN_RE` mit
+         demselben Cap zusammengeführt, einmalig kompiliert statt bei
+         jedem Aufruf neu gebaut.
+      - **Tests:** `tests/docEditorLinks.test.jsx` – neue Blöcke für
+        `normalizeLinkUrl`-Encoding (Leerzeichen, balancierte vs.
+        unbalancierte/verschachtelte Klammern, `"`, `</>`, Kombination)
+        UND für jeden transformierten Fall ein voller Editor-Roundtrip
+        (Einfügen → Speichern → Markdown enthält die getragene Form →
+        erneutes Laden+Speichern idempotent); Autolink-beim-Tippen einer
+        E-Mail-Adresse erzeugt keinen Link-Mark mehr, `setLink` lehnt
+        `mailto:` ab (derselbe Validierungspfad wie `linkOnPaste`).
+        `tests/markdown.test.jsx` – eine vom Editor prozent-kodierte URL
+        wird im Viewer vollständig erkannt (schließt den Kreis); Titel mit
+        300 Zeichen wird noch als Link erkannt, 301 Zeichen bleibt
+        Klartext (dokumentierte Grenze).
+      - Restrisiko: die 300-Zeichen-Titelgrenze ist eine bewusste, aber
+        willkürliche Konstante – ein legitimer (wenn auch unüblich langer)
+        Linktitel über 300 Zeichen würde als Klartext gerendert statt als
+        Link. Akzeptiert (Backtracking-Schutz wiegt schwerer, 300 Zeichen
+        sind für einen Linktitel bereits weit jenseits jeder sinnvollen
+        Länge).

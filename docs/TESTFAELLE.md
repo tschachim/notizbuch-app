@@ -183,6 +183,18 @@ stattdessen nur mit einer kurzen Bestätigung ohne Snippet (Kürze-Regel
 aus C9b greift gelegentlich auch hier), gilt nur die Dokument-Prüfung
 als maßgeblich – kurz vermerken, dass der Chat-Teil übersprungen wurde.
 
+**C11 [VERBUNDEN] Generischer Link in der Dokument-Ansicht.** Voraussetzung:
+Ein Dokument mit einem generischen Link – bei Bedarf über den Editor
+anlegen (siehe D7) mit Titel „Azure-Ticket“ und URL
+`https://dev.azure.com/reasult/Reasult/_workitems/edit/33487`. Steht im
+selben Notizbuch bereits eine Quellen-Fußnote (z. B. aus C3), diese
+NICHT entfernen. Ansicht öffnen. Erwartet: Der generische Link
+erscheint als normaler, unterstrichener Fließtext-Link (blau, NICHT
+klein/hochgestellt) und öffnet beim Klick die Ziel-URL in einem NEUEN
+Tab (`target=_blank`); eine daneben stehende Quellen-Fußnote bleibt
+unverändert eine kleine hochgestellte Zahl – beide Link-Arten dürfen
+sich optisch nicht vermischen.
+
 ## D. Manuelles Bearbeiten (WYSIWYG)
 
 **D1 [VERBUNDEN] Editor-Roundtrip.** Stift-Knopf → im QA-Notizbuch einen
@@ -248,6 +260,40 @@ Historie, Ansicht zeigt den geänderten Code korrekt monospaced,
 Dollarzeichen UND Pipe-Zeichen im Code bleiben wörtlich erhalten (keine
 Formel- oder Tabellen-Fehlinterpretation), alle anderen Inhalte
 (inkl. eventueller Formeln aus D5) unverändert.
+
+**D7 [VERBUNDEN] Link-Dialog im Editor.** Editor öffnen, etwas Text
+markieren, Link-Knopf (Kettensymbol) in der Toolbar anklicken. Erwartet:
+Popover mit Feldern „Titel“ und „URL“ öffnet sich, Titel ist bereits mit
+der Markierung vorbelegt. Titel auf „33487“ (reine Zahl) ändern und
+„Einfügen“ klicken. Erwartet: Fehlermeldung, dass reine Zahlen für
+Quellen-Fußnoten reserviert sind; es wird NICHTS eingefügt, Popover
+bleibt offen. Titel auf „Azure-Ticket“ ändern, als URL
+`dev.azure.com/reasult/Reasult/_workitems/edit/33487` (bewusst OHNE
+„https://“) eingeben, „Einfügen“ klicken. Erwartet: Der Linktext
+erscheint im Editor optisch abgehoben (blau/unterstrichen), NICHT wie
+eine kleine hochgestellte Fußnote. Cursor erneut in diesen Link setzen
+und den Link-Knopf anklicken. Erwartet: Popover zeigt Titel und URL
+vorbelegt (URL jetzt mit ergänztem „https://“) sowie zusätzlich die
+Knöpfe „Entfernen“ und „Öffnen“; „Öffnen“ öffnet die URL in einem neuen
+Tab. Popover schließen (Link-Knopf erneut klicken oder in den Editor-
+Text klicken). An einer ANDEREN Stelle im Dokument einen Textabschnitt
+markieren und eine vollständige URL (z. B. `https://example.com`) DARÜBER
+einfügen (Einfügen aus der Zwischenablage oder Eintippen samt
+folgendem Leerzeichen). Erwartet: Die Auswahl wird automatisch zu einem
+Link (Autolink/Einfügen-Erkennung). Eine E-Mail-Adresse (z. B.
+`max@example.com`) samt folgendem Leerzeichen eintippen. Erwartet: KEIN
+automatischer Link (nur http/https werden verlinkt, siehe DECISIONS.md
+#55 Nachbesserung Finding 2). Speichern. Erwartet: neue Version in
+der Historie, Ansicht zeigt den Dialog-Link wie in C11, der zweite Link
+öffnet ebenfalls in einem neuen Tab. Editor OHNE JEDE weitere Änderung
+erneut öffnen und direkt speichern. Erwartet: KEIN Commit/keine neue
+Version (No-op-Roundtrip, wie schon bei D5/D6 für Formeln/Codeblöcke).
+⚠️ Bekannte, bewusste Normalisierung (KEIN Bug, bitte nicht melden): Eine
+im Link-Dialog eingegebene URL mit Leerzeichen, unbalancierten/
+verschachtelten runden Klammern, `"` oder `<`/`>` wird beim Einfügen
+automatisch prozent-encodiert (z. B. `%20` für ein Leerzeichen) – eine
+einzelne Ebene balancierter Klammern (z. B. ein Wikipedia-Link) bleibt
+dagegen unverändert lesbar.
 
 ## E. Schnellnotizen
 
