@@ -1789,9 +1789,10 @@ aus `referenz-app.jsx` übernommen.
         Schema+Host, s. o. – ein rein pfad-bezogener Edge-Case ohne
         Sicherheitsrelevanz).
 
-57. **Doppelter Auto-Kommentar nach manueller Bearbeitung – dreischichtiger
-    Fix** (`src/lib/feedback.js` NEU, `src/lib/anthropic.js`, `src/App.jsx`,
-    v7.10, 2× von E2E-Testern beobachtetes Alt-🔵 aus v7.7). Nach einer
+57. **Doppelter Auto-Kommentar nach manueller Bearbeitung – mehrschichtiger
+    Fix, v7.10 + Nachtrag v7.11** (`src/lib/feedback.js` NEU,
+    `src/lib/anthropic.js`, `src/App.jsx`, 2× bzw. (v7.11) 3× von
+    E2E-Testern beobachtetes Alt-🔵 aus v7.7). Nach einer
     manuellen Editor-Bearbeitung schaut das Modell einmal über die Änderung
     (`requestFeedback`); die Rückmeldung erschien manchmal ZWEIMAL
     hintereinander im selben Chat-Eintrag, fast identisch formuliert. Zwei
@@ -1870,3 +1871,85 @@ aus `referenz-app.jsx` übernommen.
       Doppelung theoretisch möglich – dagegen hilft nur der Prompt-Vertrag
       aus Schicht 1, der beim Live-Finding laut Root-Cause-Analyse die
       eigentliche Ursache war.
+
+    **Nachtrag v7.11 – dritte Ausprägung derselben Fehlerfamilie, genau das
+    oben genannte Restrisiko trat ein.** Der E2E-Retest fand ein neues 🔴:
+    Das Modell duplizierte die Einschätzung diesmal INNERHALB des
+    reply-Felds selbst – EINE Chat-Nachricht, zwei aufeinanderfolgende,
+    inhaltlich identische, aber komplett unterschiedlich formulierte
+    Absätze (Beispiel: „Achtung: Meine vorherige Bestätigung … steht im
+    Widerspruch zum Dokument …“ gefolgt von „Achtung: Meine vorherige
+    Notiz … widerspricht dem aktuellen Dokumentstand …“ – gleiche Aussage,
+    fast keine gemeinsame Wortwahl). Der v7.10-Fix (Vorab-Text vs.
+    toolReply, zwei verschiedene FELDER) greift hier konstruktionsbedingt
+    nicht – `buildChatReply` sieht nur ein einziges reply-Feld.
+    - **Fix, zweischichtig:**
+      1. **Prompt-Vertrag (Klausel 4 in `buildFeedbackTrigger`):** „Fasse
+         deine Rückmeldung in EINEM kompakten Absatz zusammen; wiederhole
+         dieselbe Aussage nicht in anderen Worten.“
+      2. **`dedupeFeedbackParagraphs(reply)`** (neu, `src/lib/feedback.js`):
+         Absatz-Dublettenschutz INNERHALB eines reply-Texts. Guard: enthält
+         der Text einen ```-Fence, bleibt er komplett unangetastet (Absatz-
+         Split über Codeblöcke wäre riskant). Sonst Split an `/\n{2,}/`,
+         pro Absatz Normalform (lowercase, Interpunktion raus, Whitespace-
+         Kollaps), dann alle Paare (nicht nur Nachbarn) verglichen: Dublette
+         AUSSCHLIESSLICH bei normalisierter GLEICHHEIT. Bei Dublette bleibt
+         der ERSTE Absatz stehen, die Reihenfolge der übrigen bleibt
+         erhalten. Absätze unter 5 Tokens werden NIE als Dublette gewertet
+         (Schutz vor Grußformeln/kurzen Überschriften, die legitim
+         wortgleich wiederkehren können).
+      - **Korrektur nach Review-Fund (wichtig, ursprünglicher Entwurf hatte
+        zusätzlich einen Jaccard-Zweig – WURDE WIEDER ENTFERNT):** Die
+        erste Implementierung ergänzte den Gleichheits-Check um „ODER
+        Jaccard-Ähnlichkeit der Token-MENGEN ≥ 0,4“ (kalibriert, weil der
+        im Auftrag vorgeschlagene Wert 0,8 den Pflicht-Testfall mit nur
+        ~0,4237 gemessenem Overlap verfehlt hätte). Der Code-Review verwarf
+        diesen Zweig mit einer Gegenmessung: **fünf realistische Paare aus
+        je ZWEI EIGENSTÄNDIGEN Beobachtungen zum selben Abschnitt**
+        (paralleler Mehr-Befund-Stil, gleiches Satzgerüst, z. B. „fehlt der
+        Beleg“ vs. „fehlt das Datum“) lagen bei **Jaccard 0,55–0,87** –
+        HÖHER als der echte Paraphrase-Beleg-Fall (0,4237). Die Metrik ist
+        für dieses Problem strukturell INVERTIERT: „gleiche Aussage, andere
+        Worte“ ergibt NIEDRIGEN Wort-Overlap (jedes Inhaltswort wird
+        umformuliert), „andere Aussage, gleiches Satzgerüst“ (paralleler
+        Aufzählungsstil, den das Modell für mehrere Befunde im selben
+        Abschnitt typischerweise verwendet) ergibt HOHEN Overlap (nur ein,
+        zwei Wörter unterscheiden sich). Es existiert also KEIN
+        Schwellwert, der beide Fälle korrekt trennt – jede Wahl hätte
+        entweder den Paraphrase-Fall verpasst oder echte Mehrfach-Befunde
+        stillschweigend verschluckt. Da stilles Löschen einer echten
+        Beobachtung schwerwiegender ist als eine gelegentliche, weiterhin
+        sichtbare Doppelung, wurde der Jaccard-Zweig komplett entfernt
+        (inkl. der zugehörigen Konstante und Hilfsfunktion). Der Schutz vor
+        paraphrasierten Doppelungen liegt jetzt AUSSCHLIESSLICH bei
+        Schicht 1 (Prompt-Klausel 4); `dedupeFeedbackParagraphs` fängt nur
+        noch exakte (bis auf Formatierung identische) Wiederholungen.
+      - **Bewusst NUR im Feedback-Pfad** (`App.jsx#requestFeedback`, auf
+        `reply` NACH der `isNoFeedback`-Prüfung, VOR `setChat`) angewendet,
+        NICHT in `buildChatReply`/dem globalen Chat-Pfad: Dort tragen
+        Absätze echte, vom Nutzer angestoßene Chat-Inhalte – ein
+        fälschlich entfernter, tatsächlich eigenständiger Absatz wäre dort
+        ein Inhaltsverlust und nicht tolerierbar. Die automatische
+        Feedback-Nachricht ist dagegen reine Zusatz-Information.
+    - **Tests:** `tests/feedback.test.js` ergänzt um `dedupeFeedbackParagraphs`
+      (8 Fälle) – der echte (leicht gekürzte) Beleg-Paraphrase-Fall aus dem
+      E2E-Finding bleibt jetzt bewusst ZWEIABSÄTZIG (umgedreht gegenüber dem
+      ersten Entwurf, mit Kommentar zum akzeptierten Restrisiko); der vom
+      Review benannte Template-Fall (zwei eigenständige Befunde „Beleg“ vs.
+      „Datum“ im selben Satzgerüst) als gepinnter Regressionstest, der
+      NICHT gemerged werden darf; zwei inhaltlich verschiedene, ähnlich
+      lange Beobachtungen (beide bleiben); exakte Wiederholung mit nur
+      Whitespace-/Groß-Klein-/Interpunktions-Unterschied (wird gemergt);
+      Einzelabsatz/Leerstring unverändert; Fence-Guard (auch bei exakter
+      Wiederholung); Kurz-Absatz-Schutz; „erster Absatz bleibt, Reihenfolge
+      der übrigen erhalten“ bei mehreren exakten Dubletten. Alle
+      Jaccard-spezifischen Tests entfernt.
+    - Restrisiko (ehrlich benannt, NICHT mehr Jaccard-abgesichert): Eine
+      paraphrasierte Doppelung wie im v7.11-Live-Finding kann grundsätzlich
+      wieder auftreten, wenn sich das Modell nicht an die Prompt-Klausel
+      hält – der Code fängt sie nicht mehr ab. Der nächste sinnvolle
+      Schritt bei einem erneuten Live-Finding dieser Art ist eine
+      Prompt-Nachschärfung (Klausel 4 weiter präzisieren, ggf. mit
+      Few-Shot-Beispiel), NICHT ein erneuter Versuch mit Fuzzy-Matching auf
+      Wortebene – dessen strukturelle Untauglichkeit für dieses Problem ist
+      jetzt empirisch belegt (siehe Messwerte oben).

@@ -14,7 +14,7 @@ import {
   makeNotebookIcon,
 } from "./lib/images.js";
 import { MODELS, callClaude } from "./lib/anthropic.js";
-import { buildFeedbackTrigger, isNoFeedback } from "./lib/feedback.js";
+import { buildFeedbackTrigger, isNoFeedback, dedupeFeedbackParagraphs } from "./lib/feedback.js";
 import {
   ShaConflictError, utf8ToB64, ghGetFile, ghGetBlob, ghListDir, ghPutFile,
   ghDeleteFile, ghListCommits, ghCommitMeta, ghCheckRepo,
@@ -1780,12 +1780,15 @@ export default function NotizbuchApp() {
       const reply = (res.reply || "").trim();
       if (!isNoFeedback(reply)) {
         // ops werden hier bewusst NIE angewendet – reine Rückmeldung.
+        // v7.11: nur im Feedback-Pfad (best effort, siehe feedback.js)
+        // beinahe-identische Absätze innerhalb der Antwort selbst entfernen.
+        const dedupedReply = dedupeFeedbackParagraphs(reply);
         setChat((prev) => [...prev,
           { role: "user", info: true, ts: Date.now(), text: "Notizbuch „" + nb.name + "“ manuell bearbeitet" },
           {
             role: "assistant",
             ts: Date.now(),
-            text: reply,
+            text: dedupedReply,
             sources: res.sources && res.sources.length ? res.sources : undefined,
           },
         ].slice(-80));
@@ -2123,7 +2126,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.10</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.11</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
