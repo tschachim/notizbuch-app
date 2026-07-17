@@ -255,6 +255,54 @@ Einstellungen (A4) versuchsweise ein Confluence-Link vorhanden ist
 (URL-Muster `https://<team>.atlassian.net/wiki/spaces/…/pages/…`):
 gleiches Verhalten, andere Icon-Farbe/-Form.
 
+**C13 [VERBUNDEN] Kapitel-Anzeige in Dokument und Leiste (#, v7.14).**
+Voraussetzung: Ein Dokument mit mindestens einem `#`-Kapitel, das
+mindestens zwei `##`-Abschnitte enthält – bei Bedarf über den Editor
+anlegen (siehe D10: Kapitel-Knopf verwenden, zwei `##`-Abschnitte
+darunter). Dokument-Ansicht öffnen. Erwartet: Der Kapitel-Titel erscheint
+deutlich größer/fetter als die H2-Abschnittsköpfe, mit eigenem Chevron und
+einer Trennlinie, oberhalb seiner Abschnitte. Auf den Kapitel-Kopf klicken.
+Erwartet: Das Kapitel klappt zu – dabei verschwinden ALLE seine
+Abschnitte samt ihrer eigenen Köpfe (nicht nur deren Inhalt); erneuter
+Klick klappt wieder auf. In der Leiste rechts erscheint derselbe
+Kapitel-Titel als eigener Gruppen-Kopf (kräftigere Optik, sichtbar
+dunklerer Hintergrund als die einzelnen H2-Reiter), die zugehörigen
+H2-Reiter darunter sichtbar eingerückt. Klick auf das CHEVRON links am
+Kapitel-Kopf IN DER LEISTE: blendet NUR die H2-Reiter-Liste dort aus/ein
+– das Dokument selbst bleibt davon unberührt (bleibt aufgeklappt, falls es
+das war). Klick auf den KAPITEL-TITEL selbst in der Leiste (nicht das
+Chevron): scrollt zum Kapitel im Dokument und klappt es dort auf, falls es
+zuvor eingeklappt war. Hat das Dokument mehrere Kapitel und mindestens
+einen Abschnitt VOR dem ersten Kapitel (falls vorhanden/anlegbar):
+Erwartet, dass dieser Vorspann-Bereich flach bleibt – kein zusätzlicher
+Kapitel-Kopf/keine Einrückung davor.
+
+**C14 [VERBUNDEN][API] Struktur-Vorschlag anfordern (zweistufige
+Gliederung, v7.14).** Voraussetzung: Das QA-Notizbuch hat mehrere
+`##`-Abschnitte (bei Bedarf vorher 2–3 kurze QA-Testeinträge in
+unterschiedlichen Abschnitten anlegen). Im Chat: „Schlage mir eine
+zweistufige Gliederung mit Kapiteln für dieses Notizbuch vor.“ (1
+API-Aufruf). Erwartet: Die Chat-Antwort enthält einen KONKRETEN
+Gliederungsvorschlag als Text (Kapitel-Namen mit den ihnen jeweils
+zugeordneten vorhandenen Abschnitten) – KEIN neuer Commit, das Dokument
+bleibt unverändert (reiner Vorschlag, keine Ops). Danach zustimmen: „Ja,
+setze das so um.“ (weiterer 1 API-Aufruf). Erwartet: Jetzt erscheint ein
+Commit; die Dokument-Ansicht zeigt danach `#`-Kapitel-Köpfe über den
+bisherigen `##`-Abschnitten (Optik wie in C13); ALLE vorher vorhandenen
+QA-Testeinträge/Abschnitte sind weiterhin auffindbar (nichts inhaltlich
+verloren) – nur umgruppiert.
+
+**C15 [VERBUNDEN][API] Gezielte Kapitel-Zuordnung bei doppeltem
+Abschnittsnamen (v7.14).** Voraussetzung: Zwei `#`-Kapitel mit je einem
+GLEICHNAMIGEN `##`-Abschnitt (z. B. „Notizen“) – bei Bedarf über den
+Editor anlegen (siehe D10): zwei Kapitel, in jedem ein `## Notizen`
+mit unterschiedlichem Platzhalter-Inhalt. Im Chat, unter Nennung BEIDER
+Namen: „Trage im Abschnitt ‚Notizen‘ im Kapitel ‚<Name des zweiten
+Kapitels>‘ ein: QA-Kapitel-Test Theta.“ (1 API-Aufruf). Erwartet: Der
+neue Eintrag landet AUSSCHLIESSLICH im „Notizen“-Abschnitt des genannten
+zweiten Kapitels; der gleichnamige Abschnitt im ERSTEN Kapitel bleibt
+unverändert (kein Duplikat, keine Vermischung).
+
 ## D. Manuelles Bearbeiten (WYSIWYG)
 
 **D1 [VERBUNDEN] Editor-Roundtrip.** Stift-Knopf → im QA-Notizbuch einen
@@ -418,6 +466,28 @@ Antwort zeigt das Dokument die URL ebenfalls als aufgelösten Link
 zusätzliche Nutzeraktion und ohne sichtbaren Fehlertext im Chat, selbst
 wenn die Auflösung im Hintergrund scheitern sollte (dann bleibt die URL
 schlicht unverändert stehen).
+
+**D10 [VERBUNDEN] Kapitel im Editor (#-Knopf, Gliederungs-Leiste,
+Roundtrip, v7.14).** Editor öffnen (Stift-Knopf). Erwartet: ein neuer
+Toolbar-Knopf „Kapitel (#)“ (H1-Symbol) erscheint VOR dem
+Abschnitts-Knopf (##). Rechts neben dem Editor-Bereich erscheint (NUR auf
+Desktop-Breite; auf einem schmalen/mobilen Fenster fehlt sie bewusst –
+kein Bug) eine schmale Gliederungs-Leiste in ähnlicher Breite wie die
+Dokument-Leiste. Cursor in eine Zeile setzen (z. B. „QA-Kapitel Eins“
+eintippen), „Kapitel (#)“ klicken. Erwartet: Die Zeile wird zu einer
+großen Kapitel-Überschrift; in der Gliederungs-Leiste erscheint SOFORT ein
+neuer, kräftig hervorgehobener Eintrag dafür. Darunter zwei `##`-Abschnitte
+anlegen/vorhandene nutzen. Erwartet: Sie erscheinen in der Leiste
+eingerückt unterhalb des Kapitel-Eintrags. Cursor an den Dokumentanfang
+setzen, dann in der Leiste auf einen weiter unten stehenden Eintrag
+klicken. Erwartet: Der Editor scrollt zur entsprechenden Überschrift, der
+Cursor springt dorthin (direkt danach getippter Text erscheint an dieser
+Stelle, nicht am alten Cursor-Ort). Speichern. Erwartet: neue Version in
+der Historie, Dokument-Ansicht zeigt das neue Kapitel wie in C13
+beschrieben. Editor OHNE JEDE weitere Änderung erneut öffnen und direkt
+speichern. Erwartet: KEIN Commit/keine neue Version (No-op-Roundtrip, wie
+bei D5–D7 für Formeln/Codeblöcke/Links) – die `#`-Kapitelzeile bleibt
+byte-stabil erhalten.
 
 ## E. Schnellnotizen
 

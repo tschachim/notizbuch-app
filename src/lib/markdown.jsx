@@ -28,27 +28,98 @@ const TABLE_SEP_RE = /^\s*\|(\s*:?-+:?\s*\|)+\s*$/;
 // Editor-Ladepfad, siehe dort und DECISIONS #46-49).
 
 /* Zeilen behalten ihren Original-Index im Dokument, damit z. B. das
-   Abhaken einer Checkbox die richtige Zeile im Markdown ändern kann. */
+   Abhaken einer Checkbox die richtige Zeile im Markdown ändern kann.
+
+   Kapitel-Ebene (v7.14, Nutzerwunsch "zweistufige Gliederung"): "# Titel"
+   gruppiert mehrere "##"-Abschnitte zu einem Kapitel. "sections" bleibt
+   dabei bewusst eine FLACHE Liste mit globalem Index (Scroll-Spy, gotoSection
+   & alle bestehenden Konsumenten bleiben minimal-invasiv) – jede Section
+   trägt zusätzlich "chapter" (Index in "chapters"). "chapters" ist
+   [{ title, secFrom, secTo }] mit HALBOFFENEM Bereich [secFrom, secTo).
+
+   Abwärtskompatibilität HART (Kernentscheidung, siehe DECISIONS – v7.14
+   Nachbesserung nach Code-Review, löst die anfängliche "sawSection"-
+   Heuristik ab): Die Notizbuch-Titelzeile wird über ihre POSITION erkannt,
+   NICHT über den Verarbeitungszustand beim Durchlaufen. Ist die erste
+   NICHT-LEERE Zeile des gesamten Dokuments eine "# "-Zeile (per Konvention
+   immer der Fall, siehe System-Prompt: "# " + Notizbuchname), gilt GENAU
+   diese eine Zeile (per Original-Index gemerkt, "titleLineIdx") als Titel
+   und wird NIE zum Kapitel – unabhängig davon, ob vorher/nachher schon ein
+   "##"/"###" aufgetaucht ist. JEDE ANDERE "# "-Zeile ist immer ein Kapitel,
+   auch wenn sie VOR dem ersten "##" steht (Regressionsfall des Reviews:
+   "# Titel\n# Kapitel A\n## A1\n# Kapitel B\n## B1" – Kapitel A stand vor
+   dem ersten "##" und wurde von der alten sawSection-Logik fälschlich als
+   Fließtext neben der Titelzeile behandelt, siehe Tests). Beginnt das
+   Dokument NICHT mit einer "# "-Zeile (kein Alt-Dokument, sondern z. B. ein
+   Test-Fixture ohne Titel), gibt es KEINE Titel-Ausnahme – dann ist JEDE
+   "# "-Zeile ein Kapitel. Ein Dokument ganz ohne "# "-Zeile hat "chapters:
+   []", ein Dokument mit genau einer "# "-Zeile ganz oben (jedes reale
+   Alt-Dokument) ebenfalls – beides exakt das Verhalten vor v7.14.
+   Sammeln sich vor dem ERSTEN echten Kapitel bereits Abschnitte an ("H2 vor
+   dem ersten H1", z. B. Inhalt direkt unter der Titelzeile, bevor das erste
+   "#"-Kapitel beginnt), bekommen sie ein IMPLIZITES titelloses Kapitel
+   (title:null) – aber NUR, wenn es dafür auch wirklich schon Abschnitte
+   gibt (kein leeres Phantom-Kapitel nur wegen der Titelzeile). DocView/
+   App.jsx rendern ein Kapitel mit title:null bewusst flach (kein Kopf/
+   Einrückung), damit ein Dokument OHNE jede echte "#"-Kapitelzeile
+   weiterhin "chapters:[]" liefert (kein Sonderfall in den Renderern nötig).
+
+   Wie schon bei "##"/"###" ist die Erkennung bewusst FENCE-BLIND (siehe
+   DECISIONS #54): eine "# "-Zeile INNERHALB eines ```-Codeblocks wird hier
+   nicht ausgenommen und kann fälschlich als Kapitelgrenze zählen – dieselbe
+   dokumentierte, bewusst in Kauf genommene Grenze wie bei "##" gilt jetzt
+   auch für "#". */
 export function parseTree(text) {
   const lines = text.split("\n");
   const pre = [];
   const sections = [];
+  const chapters = [];
   let cur = null;
   let curSub = null;
+  let chapterIdx = -1; // Index in chapters; -1 = noch kein REALES Kapitel eröffnet
+
+  // Titelzeile per POSITION bestimmen (siehe Kopfkommentar): NUR wenn die
+  // erste nicht-leere Zeile des Dokuments eine "# "-Zeile ist, ist GENAU
+  // ihr Original-Index von der Kapitel-Erkennung ausgenommen.
+  const firstContentIdx = lines.findIndex((l) => l.trim() !== "");
+  const titleLineIdx =
+    firstContentIdx !== -1 && /^#\s+/.test(lines[firstContentIdx]) ? firstContentIdx : -1;
+
   lines.forEach((line, idx) => {
     if (/^###\s+/.test(line)) {
-      if (!cur) { cur = { title: "Allgemein", lines: [], subs: [] }; sections.push(cur); }
+      if (!cur) { cur = { title: "Allgemein", lines: [], subs: [], chapter: chapterIdx }; sections.push(cur); }
       curSub = { title: line.replace(/^###\s+/, "").trim(), lines: [] };
       cur.subs.push(curSub);
     } else if (/^##\s+/.test(line)) {
-      cur = { title: line.replace(/^##\s+/, "").trim(), lines: [], subs: [] };
+      cur = { title: line.replace(/^##\s+/, "").trim(), lines: [], subs: [], chapter: chapterIdx };
       sections.push(cur);
+      curSub = null;
+    } else if (idx !== titleLineIdx && /^#\s+/.test(line)) {
+      // Strukturelle Kapitelzeile (siehe Kopfkommentar) – jede "# "-Zeile
+      // außer der einen Titelzeile, unabhängig davon, ob schon ein "##"
+      // gesehen wurde.
+      if (chapterIdx >= 0) chapters[chapterIdx].secTo = sections.length;
+      else if (sections.length > 0) chapters.push({ title: null, secFrom: 0, secTo: sections.length }); // implizit, nur wenn nicht leer
+      chapters.push({ title: line.replace(/^#\s+/, "").trim(), secFrom: sections.length, secTo: sections.length });
+      chapterIdx = chapters.length - 1;
+      cur = null;
       curSub = null;
     } else {
       (curSub ? curSub.lines : cur ? cur.lines : pre).push({ text: line, idx });
     }
   });
-  return { pre, sections };
+  if (chapterIdx >= 0) chapters[chapterIdx].secTo = sections.length;
+  // Abschnitte, die VOR dem ersten echten Kapitel entstanden sind, tragen
+  // noch chapter:-1 (Wert von chapterIdx beim jeweiligen Push) – sie gehören
+  // zum impliziten Kapitel 0 (das ist laut obiger Logik IMMER chapters[0],
+  // sobald es überhaupt Kapitel gibt: der erste Kapitel-Durchlauf legt,
+  // falls nötig, stets zuerst den impliziten Eintrag an). Gibt es gar keine
+  // Kapitel, bleibt "chapter" ungenutzt – Konsumenten prüfen zuerst
+  // chapters.length.
+  if (chapters.length) {
+    sections.forEach((s) => { if (s.chapter < 0) s.chapter = 0; });
+  }
+  return { pre, sections, chapters };
 }
 
 /* ---------------- Inline-Rendering (rekursiv) ---------------- */
@@ -609,8 +680,83 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
 }
 
 export function DocView({ text, collapsed, onToggle, imgMap, onImgClick, onToggleTask, anchorPrefix }) {
-  const { pre, sections } = parseTree(text);
+  const { pre, sections, chapters } = parseTree(text);
   const ap = anchorPrefix || "sec-";
+
+  // Ein einzelner ##-Abschnitt (Kapitel-Zugehörigkeit spielt für seine
+  // eigene Darstellung keine Rolle, siehe parseTree-Kopfkommentar): dieselbe
+  // Optik wie vor v7.14, jetzt als Helfer, damit sie sowohl flach (kein
+  // Kapitel bzw. implizites titelloses Kapitel) als auch innerhalb eines
+  // Kapitel-Rahmens identisch aussieht.
+  const renderSection = (sec, si) => {
+    const key = "s:" + sec.title;
+    const isC = !!collapsed[key];
+    return (
+      <div key={key + si} id={ap + si} className="mt-5">
+        <button
+          onClick={() => onToggle(key)}
+          className="w-full flex items-center gap-1.5 text-left pb-1 border-b border-slate-200"
+        >
+          <ChevronDown size={16} className={"text-slate-400 " + (isC ? "-rotate-90" : "")} />
+          <span className="text-base font-semibold text-slate-900">{sec.title}</span>
+        </button>
+        {!isC && (
+          <div className="pt-2">
+            {renderBlocks(sec.lines, imgMap, onImgClick, "s" + si, onToggleTask)}
+            {sec.subs.map((sub, bi) => {
+              const sk = "s:" + sec.title + "/" + sub.title;
+              const sc = !!collapsed[sk];
+              return (
+                <div key={sk + bi} className="mt-3 pl-3 border-l-2 border-slate-100">
+                  <button onClick={() => onToggle(sk)} className="flex items-center gap-1.5 text-left">
+                    <ChevronDown size={14} className={"text-slate-400 " + (sc ? "-rotate-90" : "")} />
+                    <span className="text-sm font-semibold text-slate-800">{sub.title}</span>
+                  </button>
+                  {!sc && <div className="pt-1">{renderBlocks(sub.lines, imgMap, onImgClick, "s" + si + "b" + bi, onToggleTask)}</div>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Kapitel-Bereich [secFrom, secTo) rendern; leere Kapitel (noch keine
+  // Abschnitte, z. B. gerade erst per Chat angelegt) bekommen trotzdem
+  // einen Kopf, damit sie im Dokument sichtbar/klappbar sind.
+  const sectionsOf = (chap) =>
+    sections.slice(chap.secFrom, chap.secTo).map((sec, i) => renderSection(sec, chap.secFrom + i));
+
+  const body = !chapters.length
+    ? sections.map((sec, si) => renderSection(sec, si))
+    : chapters.map((chap, ci) => {
+        // Implizites titelloses Kapitel ("H2 vor dem ersten H1"): FLACH
+        // gerendert wie vor v7.14 – kein zusätzlicher Kopf/Einrückung, sonst
+        // bekäme jedes Dokument ohne "#"-Kapitel plötzlich einen leeren
+        // Vorspann-Rahmen (siehe parseTree-Kommentar).
+        if (chap.title === null) return sectionsOf(chap);
+        const ck = "c:" + chap.title;
+        const cIsC = !!collapsed[ck];
+        return (
+          <div key={"chap" + ci}>
+            <div id={"chap-" + ci} className="mt-6">
+              <button
+                onClick={() => onToggle(ck)}
+                className="w-full flex items-center gap-1.5 text-left pb-1.5 border-b-2 border-slate-300"
+              >
+                <ChevronDown size={17} className={"text-slate-500 shrink-0 " + (cIsC ? "-rotate-90" : "")} />
+                <span className="text-lg font-bold text-slate-900">{chap.title}</span>
+              </button>
+            </div>
+            {/* Eingeklapptes Kapitel verbirgt ALLE seine Abschnitte (samt
+                ihrer eigenen Köpfe) – anders als ein eingeklappter ##-
+                Abschnitt, der seinen eigenen Kopf sichtbar behält. */}
+            {!cIsC && sectionsOf(chap)}
+          </div>
+        );
+      });
+
   return (
     // Gleiche Schriftart/-größe wie der Chat (Nutzerwunsch); Hierarchie nur
     // noch über Größe/Gewicht der Überschriften.
@@ -618,39 +764,7 @@ export function DocView({ text, collapsed, onToggle, imgMap, onImgClick, onToggl
     // nicht über die Gerätebreite hinausschieben.
     <div className="font-sans text-sm break-words">
       {renderBlocks(pre, imgMap, onImgClick, "pre", onToggleTask)}
-      {sections.map((sec, si) => {
-        const key = "s:" + sec.title;
-        const isC = !!collapsed[key];
-        return (
-          <div key={key + si} id={ap + si} className="mt-5">
-            <button
-              onClick={() => onToggle(key)}
-              className="w-full flex items-center gap-1.5 text-left pb-1 border-b border-slate-200"
-            >
-              <ChevronDown size={16} className={"text-slate-400 " + (isC ? "-rotate-90" : "")} />
-              <span className="text-base font-semibold text-slate-900">{sec.title}</span>
-            </button>
-            {!isC && (
-              <div className="pt-2">
-                {renderBlocks(sec.lines, imgMap, onImgClick, "s" + si, onToggleTask)}
-                {sec.subs.map((sub, bi) => {
-                  const sk = "s:" + sec.title + "/" + sub.title;
-                  const sc = !!collapsed[sk];
-                  return (
-                    <div key={sk + bi} className="mt-3 pl-3 border-l-2 border-slate-100">
-                      <button onClick={() => onToggle(sk)} className="flex items-center gap-1.5 text-left">
-                        <ChevronDown size={14} className={"text-slate-400 " + (sc ? "-rotate-90" : "")} />
-                        <span className="text-sm font-semibold text-slate-800">{sub.title}</span>
-                      </button>
-                      {!sc && <div className="pt-1">{renderBlocks(sub.lines, imgMap, onImgClick, "s" + si + "b" + bi, onToggleTask)}</div>}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        );
-      })}
+      {body}
     </div>
   );
 }

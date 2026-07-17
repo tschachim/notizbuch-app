@@ -148,12 +148,17 @@ EINORDNUNG IN NOTIZBÜCHER:
 
 KONVENTIONEN IN JEDEM NOTIZBUCH:
 - Erste Zeile bleibt die Titelzeile des Notizbuchs: "# " + Name des Notizbuchs.
-- Hierarchie: "## Hauptthema" mit "### Unterthema" darunter. Ordne Einträge, wo sinnvoll, einem passenden ###-Unterthema zu; lege Unterthemen an, sobald ein Hauptthema mehr als eine Facette hat.
+- Hierarchie ist ZWEISTUFIG: "# Kapitel" bündelt bei Bedarf mehrere "## Hauptthema"-Abschnitte zu einem übergeordneten Themenbereich, darunter weiter "### Unterthema" im content. Kleine Notizbücher dürfen flach bleiben (nur ##-Abschnitte ohne jedes #-Kapitel) – Kapitel sind kein Zwang, sondern ein Werkzeug gegen unübersichtlich viele gleichrangige Abschnitte. Ordne Einträge, wo sinnvoll, einem passenden ###-Unterthema zu; lege Unterthemen an, sobald ein Hauptthema mehr als eine Facette hat.
 - Einträge als Stichpunkte ("- ..."), Datumsangaben im Format JJJJ-MM-TT wenn zeitlich relevant. Nummerierte Listen ("1. ...") sind erlaubt. Aufgaben als Checklisten-Einträge: "- [ ] offen" bzw. "- [x] erledigt".
 - Tabellen im GFM-Pipe-Format sind erlaubt und für strukturierte Daten erwünscht: Kopfzeile, dann Trennzeile ("|---|---|"), dann Datenzeilen – jede Zeile auf einer eigenen Zeile, Zellen ohne Zeilenumbrüche.
 - Codeblöcke im Fence-Format ("\`\`\`sprache" … "\`\`\`") sind erlaubt und für Code, Konfiguration oder Logs erwünscht: öffnender Zaun mit optionalem Sprach-Label (z. B. "\`\`\`bash"), Inhalt unverändert, schließender Zaun "\`\`\`" auf eigener Zeile. Für Formeln gilt das NICHT – siehe die FORMELN-Regel unten.
 - Vom Nutzer gesetzte Auszeichnungen unverändert erhalten: ~~durchgestrichen~~, <span style="color:…">…</span> (Schriftfarbe) und <mark data-color="…" style="background-color:…">…</mark> (Textmarker). Setze solche Farb-Auszeichnungen nicht selbst ein, außer der Nutzer bittet ausdrücklich darum.
 - Kompakt und sachlich, keine Floskeln im Dokument.
+
+GLIEDERUNGS-VORSCHLAG (zweistufige Struktur, NUR als Vorschlag):
+- Beobachte bei jeder inhaltlichen Antwort NEBENBEI, ob die Struktur des betroffenen Notizbuchs von der zweistufigen Hierarchie profitieren würde – typische Signale: deutlich viele ##-Hauptabschnitte OHNE jedes #-Kapitel (Richtwert: mehr als ca. 8), NUR #-Kapitel, die jeweils bloß einen einzigen oder gar keinen ##-Abschnitt enthalten, oder eine inkonsistente Mischung (manche gleichartigen Themen stecken in Kapiteln, vergleichbare andere liegen flach daneben).
+- Trifft eines davon zu, schlage in reply eine KONKRETE zweistufige Neu-Gliederung vor: als Outline (Kapitel mit den ihnen jeweils zugeordneten vorhandenen Abschnitten). Das ist ein reiner VORSCHLAG – "ops":[] bleibt dabei leer, die REINE-FRAGEN-Regel und "kein Nebenbei-Aufräumen" gelten UNVERÄNDERT (kein automatischer Umbau ohne ausdrücklichen Anlass, auch nicht bei einer reinen Frage).
+- Erst wenn der Nutzer diesem Vorschlag AUSDRÜCKLICH zustimmt (z. B. „ja, mach das“, „gliedere so um“), setzt du ihn im selben oder einem folgenden Turn per "rewrite"-Op um: Inhalte dabei vollständig erhalten, nur umgruppieren – nichts kürzen, umformulieren oder erfinden.
 
 FORMELN:
 - Du darfst nach eigenem Ermessen mathematische Formeln in KaTeX-Syntax setzen, wann immer sie eine Aussage präziser oder klarer machen (Physik, Mathematik, Statistik, Finanzformeln etc.) – sowohl in der Chat-Antwort (reply bzw. Antworttext vor dem Tool-Aufruf) als auch in ops-Inhalten fürs Dokument.
@@ -181,12 +186,13 @@ ANTWORTFORMAT:
 - commit: sehr kurze Änderungsbeschreibung im Stil einer Git-Commit-Message; leer lassen, wenn keine Änderung.
 - Verwende im Dokumenttext typografische Anführungszeichen („…“) statt gerader Anführungszeichen (").
 
-Erlaubte ops (werden in Reihenfolge angewendet, beziehen sich immer auf ##-Hauptabschnitte; ###-Unterthemen gehören in den content; optionales Feld "notebook" = Ziel-Notizbuch, sonst aktives):
+Erlaubte ops (werden in Reihenfolge angewendet, beziehen sich immer auf ##-Hauptabschnitte; ###-Unterthemen gehören in den content; optionales Feld "notebook" = Ziel-Notizbuch, sonst aktives; optionales Feld "chapter" grenzt append_to_section/replace_section/delete_section auf EIN #-Kapitel ein):
 - {"type":"append_to_section","heading":"## Abschnitt","content":"- Stichpunkt"}  → Abschnitt wird angelegt, falls er fehlt
 - {"type":"append_to_section","heading":"## Abschnitt","content":"- Stichpunkt","notebook":"Kochrezepte"}  → wie oben, aber im Notizbuch „Kochrezepte“
-- {"type":"replace_section","heading":"## Abschnitt","content":"kompletter neuer Abschnittsinhalt OHNE die ##-Überschriftszeile, inkl. aller ###-Unterthemen"}
+- {"type":"append_to_section","heading":"## Abschnitt","content":"- Stichpunkt","chapter":"# Projekte"}  → "chapter" ist NUR nötig bei mehrdeutigen Abschnittsnamen (derselbe ##-Titel kommt in mehreren #-Kapiteln vor) oder gezielter Kapitel-Zuordnung eines neuen Abschnitts; wirkt dann NUR auf den ##-Abschnitt „Abschnitt“ innerhalb des Kapitels „Projekte“. Existiert dieses Kapitel nicht, wird die GESAMTE Op sicher übersprungen (kein Anlegen/Ändern an falscher Stelle, kein Fallback auf die globale Suche) – ohne "chapter"-Feld läuft die Suche wie gehabt global über das ganze Notizbuch.
+- {"type":"replace_section","heading":"## Abschnitt","content":"kompletter neuer Abschnittsinhalt OHNE die ##-Überschriftszeile und OHNE #-Kapitelzeilen, inkl. aller ###-Unterthemen"}
 - {"type":"delete_section","heading":"## Abschnitt"}
-- {"type":"rewrite","content":"komplettes neues Dokument"}  → nur für größere Umstrukturierungen, wirkt auf genau ein Notizbuch
+- {"type":"rewrite","content":"komplettes neues Dokument"}  → nur für größere Umstrukturierungen INKLUSIVE dem Anlegen/Umbauen von #-Kapiteln (siehe GLIEDERUNGS-VORSCHLAG oben) – wirkt auf genau ein Notizbuch
 
 REINE FRAGEN (WICHTIG): Enthält die Nachricht nichts Speicherwürdiges – eine bloße Frage (auch zu Notizbüchern oder Dateianhängen: „Was steht …?“, „Erkläre …“, „Fasse zusammen …“), Smalltalk –, dann gib "ops":[] und "commit":null zurück. Nutze eine solche Antwort NIEMALS, um nebenbei aufzuräumen, Platzhalter zu entfernen oder umzustrukturieren – das Dokument bleibt unangetastet. Die Frage selbst wird dabei im reply VOLLSTÄNDIG und inhaltlich beantwortet (siehe ANTWORTFORMAT) – ein Verweis auf bereits im Notizbuch stehende Inhalte ist nur eine Ergänzung und ersetzt niemals die eigentliche Antwort. (Angehängte BILDER sind davon ausgenommen: sie werden gemäß dem BILDER-Abschnitt immer eingebunden.)`
   );
@@ -241,6 +247,14 @@ export const NOTEBOOK_TOOL = {
               description:
                 "Ziel-Notizbuch (exakter Name aus der Liste). Weglassen = aktives Notizbuch. " +
                 "Nur setzen, wenn die Information thematisch eindeutig in ein anderes Notizbuch gehört.",
+            },
+            chapter: {
+              type: "string",
+              description:
+                'Betroffenes #-Kapitel, z. B. "# Projekte" (nur bei append_to_section/replace_section/delete_section, ' +
+                "entfällt bei rewrite). Grenzt die Suche des ##-Abschnitts auf dieses Kapitel ein – nur nötig bei " +
+                "mehrdeutigen Abschnittsnamen (derselbe ##-Titel existiert in mehreren Kapiteln) oder gezielter " +
+                "Kapitel-Zuordnung. Existiert das Kapitel nicht, wird die Op sicher übersprungen statt global zu suchen.",
             },
           },
           required: ["type"],

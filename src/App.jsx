@@ -1719,7 +1719,43 @@ export default function NotizbuchApp() {
   };
 
   /* ---------- Abschnitts-Navigation (Tabs rechts / mobiler Drawer) ---------- */
-  const sections = useMemo(() => parseTree(doc).sections, [doc]);
+  // v7.14: parseTree liefert zusätzlich "chapters" (##-Abschnitte, die von
+  // einer "# "-Zeile gruppiert werden); "sections" bleibt unverändert die
+  // flache Liste mit globalem Index (jede Section trägt jetzt "chapter").
+  const { sections, chapters } = useMemo(() => {
+    const t = parseTree(doc);
+    return { sections: t.sections, chapters: t.chapters };
+  }, [doc]);
+
+  // Leisten-Klappzustand der Kapitel-Gruppen (v7.14): rein UI-lokaler
+  // State, NICHT persistiert (kein state.json/localStorage) – klappt in der
+  // Leiste NUR die Liste der H2-Reiter unter einem Kapitel ein/aus. Das ist
+  // ein GETRENNTES Konzept vom Klapp-Zustand des Kapitels IM DOKUMENT
+  // (collapsedAll, Schlüssel "c:"+Titel, synct über state.json): ein
+  // Kapitel kann in der Leiste eingeklappt sein, während es im Dokument
+  // aufgeklappt bleibt, und umgekehrt. Schlüssel enthält die Notizbuch-Id,
+  // damit ein Wechsel des Notizbuchs die Klappzustände nicht vermischt
+  // (aber eben ohne Persistenz – Default nach Neuladen ist immer
+  // aufgeklappt).
+  const [navChapCollapsed, setNavChapCollapsed] = useState({});
+  const navChapKey = (title) => activeNb + "::" + title;
+  const toggleNavChap = (title) => {
+    const key = navChapKey(title);
+    setNavChapCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  // Scroll-Spy (onDocScroll unten) setzt activeSec; liegt der aktive
+  // Abschnitt in einem Kapitel, das in der LEISTE gerade eingeklappt ist,
+  // klappt es automatisch auf (sonst wäre die Hervorhebung unsichtbar).
+  useEffect(() => {
+    if (!chapters.length) return;
+    const sec = sections[activeSec];
+    const chap = sec ? chapters[sec.chapter] : null;
+    if (!chap || chap.title === null) return;
+    const key = navChapKey(chap.title);
+    setNavChapCollapsed((prev) => (prev[key] ? { ...prev, [key]: false } : prev));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSec, chapters, sections, activeNb]);
 
   // Drawer per Escape schließen
   useEffect(() => {
@@ -1728,6 +1764,23 @@ export default function NotizbuchApp() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [navDrawer]);
+
+  // Ein einzelner H2-Reiter – unverändertes Aussehen, jetzt als Helfer, weil
+  // er sowohl flach (kein Kapitel) als auch eingerückt unter einem
+  // Kapitel-Kopf gebraucht wird.
+  const renderSecTab = (sec, si) => (
+    <button
+      key={si + sec.title}
+      onClick={() => { gotoSection(si, sec.title); setNavDrawer(false); }}
+      title={sec.title}
+      className={"w-full text-left text-xs pl-2.5 pr-2 py-1.5 mb-1.5 truncate rounded-r-xl border border-l-0 shadow-sm transition-colors " +
+        (activeSec === si
+          ? "bg-white border-indigo-300 text-indigo-900 font-medium shadow"
+          : "bg-gradient-to-r from-slate-50 to-slate-100 border-slate-200 text-slate-600 hover:from-indigo-50 hover:to-indigo-100 hover:text-slate-900")}
+    >
+      {sec.title}
+    </button>
+  );
 
   // Gemeinsamer Inhalt für die Desktop-Leiste und den mobilen Drawer;
   // das Schließen des Drawers ist am Desktop ein No-op.
@@ -1741,37 +1794,119 @@ export default function NotizbuchApp() {
         <StickyNote size={13} className="shrink-0" />
         Schnellnotiz
       </button>
-      {sections.map((sec, si) => (
-        <button
-          key={si + sec.title}
-          onClick={() => { gotoSection(si, sec.title); setNavDrawer(false); }}
-          title={sec.title}
-          className={"w-full text-left text-xs pl-2.5 pr-2 py-1.5 mb-1.5 truncate rounded-r-xl border border-l-0 shadow-sm transition-colors " +
-            (activeSec === si
-              ? "bg-white border-indigo-300 text-indigo-900 font-medium shadow"
-              : "bg-gradient-to-r from-slate-50 to-slate-100 border-slate-200 text-slate-600 hover:from-indigo-50 hover:to-indigo-100 hover:text-slate-900")}
-        >
-          {sec.title}
-        </button>
-      ))}
+      {!chapters.length
+        ? sections.map((sec, si) => renderSecTab(sec, si))
+        : chapters.map((chap, ci) => {
+            const secsInChap = [];
+            sections.forEach((sec, si) => { if (sec.chapter === ci) secsInChap.push([sec, si]); });
+            // Implizites titelloses Kapitel ("H2 vor dem ersten H1"): flach
+            // wie ohne Kapitel, kein Gruppen-Kopf.
+            if (chap.title === null) return secsInChap.map(([sec, si]) => renderSecTab(sec, si));
+            const navClosed = !!navChapCollapsed[navChapKey(chap.title)];
+            const chapActive = sections[activeSec] && sections[activeSec].chapter === ci;
+            return (
+              <div key={"navchap" + ci} className="mb-1.5">
+                <div
+                  className={"flex items-stretch rounded-r-xl border border-l-0 shadow-sm mb-1 " +
+                    (chapActive
+                      ? "border-indigo-300 bg-gradient-to-r from-indigo-100 to-indigo-200"
+                      : "border-slate-300 bg-gradient-to-r from-slate-100 to-slate-200")}
+                >
+                  {/* Chevron klappt NUR die Liste in der Leiste ein/aus
+                      (lokaler UI-State, s. o.) – Klick auf den TITEL
+                      navigiert stattdessen und klappt das Kapitel im
+                      DOKUMENT auf (siehe gotoChapter). Getrennte Buttons +
+                      stopPropagation, damit sich beide Gesten nicht
+                      gegenseitig auslösen. */}
+                  <button
+                    onClick={(e) => { e.stopPropagation(); toggleNavChap(chap.title); }}
+                    title={navClosed ? "Abschnitte einblenden" : "Abschnitte ausblenden"}
+                    className="px-1.5 py-1.5 shrink-0 text-slate-500 hover:text-slate-800"
+                  >
+                    <ChevronDown size={13} className={navClosed ? "-rotate-90" : ""} />
+                  </button>
+                  <button
+                    onClick={() => { gotoChapter(ci, chap.title); setNavDrawer(false); }}
+                    title={chap.title}
+                    className={"flex-1 min-w-0 text-left text-xs font-semibold py-1.5 pr-2 truncate " +
+                      (chapActive ? "text-indigo-900" : "text-slate-800")}
+                  >
+                    {chap.title}
+                  </button>
+                </div>
+                {!navClosed && (
+                  <div className="pl-3">
+                    {secsInChap.map(([sec, si]) => renderSecTab(sec, si))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
     </>
   );
 
   const gotoSection = (si, title) => {
+    const sec = sections[si];
+    const chap = sec && chapters.length ? chapters[sec.chapter] : null;
+    const chapKey = chap && chap.title !== null ? "c:" + chap.title : null;
+    // Snapshot AUS DEM AKTUELLEN Render lesen (nicht im Updater unten): der
+    // synchrone Scroll direkt danach muss wissen, ob das Kapitel gerade
+    // erst aufklappt (siehe scrollToTarget unten).
+    const wasChapCollapsed = !!(chapKey && collapsed[chapKey]);
     setCollapsedAll((prev) => {
       const id = activeNbRef.current;
       const cur = prev[id];
-      if (!cur || !cur["s:" + title]) return prev;
+      const hasSec = cur && cur["s:" + title];
+      const hasChap = chapKey && cur && cur[chapKey];
+      if (!hasSec && !hasChap) return prev;
       const n = { ...cur };
       delete n["s:" + title];
+      if (chapKey) delete n[chapKey];
       return { ...prev, [id]: n };
     });
     setActiveSec(si);
-    // Synchron scrollen: Das Aufklappen des Ziel-Abschnitts verschiebt dessen
-    // Kopfzeile nicht, und RAF/Smooth-Scroll laufen in eingebetteten
-    // Browsern (Hintergrund-Tabs) nicht zuverlässig.
+    const scrollToTarget = () => {
+      const root = docScrollRef.current;
+      const el = document.getElementById("sec-" + si);
+      if (!root || !el) return;
+      root.scrollTop =
+        el.getBoundingClientRect().top - root.getBoundingClientRect().top + root.scrollTop - 4;
+    };
+    if (wasChapCollapsed) {
+      // War das ENTHALTENDE Kapitel im Dokument eingeklappt, existiert der
+      // Abschnitts-Anker ("sec-"+si) im DOM noch gar nicht (ein
+      // eingeklapptes Kapitel verbirgt seine Abschnitte VOLLSTÄNDIG, siehe
+      // DocView) – anders als ein einzelner eingeklappter ##-Abschnitt, der
+      // seine Kopfzeile immer behält. Der Anker entsteht erst mit dem
+      // nächsten Render; ein Tick später reicht (React hat den State-Update
+      // aus diesem Klick-Handler dann längst gerendert).
+      setTimeout(scrollToTarget, 0);
+    } else {
+      // Synchron scrollen: Das Aufklappen des Ziel-Abschnitts verschiebt
+      // dessen Kopfzeile nicht, und RAF/Smooth-Scroll laufen in
+      // eingebetteten Browsern (Hintergrund-Tabs) nicht zuverlässig.
+      scrollToTarget();
+    }
+  };
+
+  // Klick auf einen Kapitel-TITEL in der Leiste (v7.14): navigiert zum
+  // Kapitel-Anker und klappt es IM DOKUMENT auf, falls zu (der Anker selbst
+  // bleibt bei einem eingeklappten Kapitel immer im DOM, siehe DocView – nur
+  // seine Abschnitte verschwinden -, daher hier IMMER synchron scrollbar).
+  const gotoChapter = (ci, title) => {
+    setCollapsedAll((prev) => {
+      const id = activeNbRef.current;
+      const cur = prev[id];
+      const ck = "c:" + title;
+      if (!cur || !cur[ck]) return prev;
+      const n = { ...cur };
+      delete n[ck];
+      return { ...prev, [id]: n };
+    });
+    const chap = chapters[ci];
+    if (chap && chap.secFrom < chap.secTo) setActiveSec(chap.secFrom);
     const root = docScrollRef.current;
-    const el = document.getElementById("sec-" + si);
+    const el = document.getElementById("chap-" + ci);
     if (!root || !el) return;
     root.scrollTop =
       el.getBoundingClientRect().top - root.getBoundingClientRect().top + root.scrollTop - 4;
@@ -2193,7 +2328,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.13</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.14</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -2584,6 +2719,7 @@ export default function NotizbuchApp() {
               onSave={saveEdit}
               onCancel={cancelEdit}
               saving={savingEdit || busy}
+              navWidth={layout.navW}
             />
           ) : (
             <div className="flex-1 min-h-0 flex">

@@ -163,6 +163,52 @@ describe("buildSystem", () => {
     // weiterhin ausdrücklich verboten (keine widersprüchliche Anweisung).
     expect(sys).toContain("NIEMALS ```-Codeblöcke oder Unicode");
   });
+
+  // v7.14 (Nutzerwunsch "zweistufige Gliederung"): Prompt-Verträge für die
+  // #-Kapitel-Konvention, die Vorschlags-Regel (Struktur-Umbau NUR nach
+  // ausdrücklicher Zustimmung, ops:[] beim reinen Vorschlag) und das
+  // optionale "chapter"-Feld bei den Ops.
+  describe("zweistufige Gliederung (Kapitel, v7.14)", () => {
+    it("dokumentiert die #-Kapitel-Konvention über ##-Hauptabschnitten, flach bleibt erlaubt", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("ZWEISTUFIG");
+      expect(sys).toContain("# Kapitel");
+      expect(sys).toContain("## Hauptthema");
+      expect(sys).toContain("### Unterthema");
+      expect(sys).toMatch(/flach bleiben/);
+    });
+
+    it("verlangt bei einem reinen Struktur-Vorschlag ops:[] und Umsetzung erst nach ausdrücklicher Zustimmung", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("GLIEDERUNGS-VORSCHLAG");
+      expect(sys).toMatch(/mehr als ca\. 8/);
+      expect(sys).toContain('"ops":[] bleibt dabei leer');
+      expect(sys).toContain("AUSDRÜCKLICH zustimmt");
+      expect(sys).toContain("per \"rewrite\"-Op um");
+    });
+
+    it("dokumentiert das optionale chapter-Feld inkl. Skip-Semantik bei fehlendem Kapitel", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain('"chapter"');
+      expect(sys).toContain("# Projekte");
+      expect(sys).toMatch(/mehrdeutigen Abschnittsnamen/);
+      expect(sys).toContain("wird die GESAMTE Op sicher übersprungen");
+      expect(sys).toContain("kein Fallback auf die globale Suche");
+    });
+
+    it("replace_section-content bleibt weiterhin OHNE ##- UND OHNE #-Zeilen dokumentiert", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("OHNE die ##-Überschriftszeile und OHNE #-Kapitelzeilen");
+    });
+
+    it("NOTEBOOK_TOOL-Schema enthält die chapter-Property mit Beschreibung", () => {
+      const props = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties;
+      expect(props.chapter).toBeDefined();
+      expect(props.chapter.type).toBe("string");
+      expect(props.chapter.description).toMatch(/Kapitel/);
+      expect(props.chapter.description).toMatch(/sicher übersprungen/);
+    });
+  });
 });
 
 describe("buildChatReply", () => {

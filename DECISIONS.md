@@ -2283,3 +2283,270 @@ aus `referenz-app.jsx` übernommen.
       stillschweigend. Sollte das in der Praxis weiterhin zu Verwirrung
       führen, wäre der nächste Schritt eine kontrollierte Erweiterung von
       `loadSettings()`/der `connected`-Logik, kein weiterer Text-Hinweis.
+
+60. **Zweistufige Gliederung: H1-Kapitel über H2-Abschnitten** (v7.14,
+    Nutzerwunsch). Die Reiter-Leiste rechts zeigte bisher nur `##`-
+    Abschnitte; große Notizbücher (viele gleichrangige H2-Reiter) waren
+    dadurch unübersichtlich. Neue Ebene `# Titel` gruppiert mehrere `##`-
+    Abschnitte zu einem Kapitel – klappbar in Dokument UND Leiste, Reiter
+    in der Leiste zweistufig (Kapitel kräftiger, H2 darunter eingerückt).
+    - **Datenmodell (`src/lib/markdown.jsx`, `parseTree`):** `sections`
+      bleibt bewusst eine FLACHE Liste mit globalem Index (jede Section
+      trägt zusätzlich `chapter`, den Index in ein neues `chapters`-Array
+      `[{ title, secFrom, secTo }]`, Bereich HALBOFFEN) – Scroll-Spy
+      (`sec-`+i-Anker), `gotoSection` und alle bestehenden Konsumenten
+      bleiben dadurch minimal-invasiv (kein Umbau auf verschachtelte
+      Strukturen). Kern-Entscheidung für Abwärtskompatibilität (Stand nach
+      der Nachbesserung unten – siehe dort für die ursprünglich verworfene
+      `sawSection`-Heuristik): Die Notizbuch-Titelzeile wird über ihre
+      POSITION erkannt, nicht über den Verarbeitungszustand beim
+      Durchlaufen. Ist die erste NICHT-LEERE Zeile des gesamten Dokuments
+      eine `"# "`-Zeile (per Konvention immer der Fall – jedes Alt-Dokument
+      beginnt mit `"# Notizbuchname"`), ist GENAU diese eine Zeile (per
+      Original-Index gemerkt) der Titel und wird NIE zum Kapitel – JEDE
+      ANDERE `"# "`-Zeile ist immer ein Kapitel, unabhängig davon, ob sie
+      vor oder nach dem ersten `##` steht. Ein Dokument ganz ohne
+      `"# "`-Zeile sowie jedes Alt-Dokument (genau eine `"# "`-Zeile ganz
+      oben) liefern weiterhin `chapters: []` – exakt das Verhalten vor
+      v7.14. Sammeln sich vor dem ersten echten Kapitel bereits Abschnitte
+      an ("H2 vor dem ersten H1"), bekommen sie ein IMPLIZITES titelloses
+      Kapitel (`title:null`) – NUR, wenn es dafür auch wirklich schon
+      Abschnitte gibt (kein leeres Phantom-Kapitel allein wegen der
+      Titelzeile, s. u.); dieses Kapitel ist dann IMMER `chapters[0]`. Wie
+      schon `##`/`###` ist auch die `#`-Erkennung FENCE-BLIND (DECISIONS
+      #54 geteilt): eine `"# "`-Zeile innerhalb eines ```-Codeblocks kann
+      fälschlich als Kapitelgrenze zählen – dieselbe dokumentierte, bewusst
+      nicht behobene Grenze wie bei `##`, jetzt für `#` mitdokumentiert
+      statt separat gepflegt.
+    - **Dokument-Ansicht (`DocView`):** Kapitel-Kopf optisch eine Stufe
+      über den H2-Köpfen (`text-lg font-bold`, `border-b-2`, Chevron wie
+      gehabt), Klapp-Schlüssel `"c:"+Titel` in DERSELBEN `collapsed`-Map
+      wie die bestehenden `"s:"`-Schlüssel (synct schon über `state.json`,
+      kein neues Persistenz-Feld nötig) – beide Namensräume überschneiden
+      sich nie (unterschiedliche Präfixe). Ein eingeklapptes Kapitel
+      verbirgt ALLE seine Abschnitte VOLLSTÄNDIG (samt deren eigener
+      Köpfe) – anders als ein einzelner eingeklappter `##`-Abschnitt, der
+      seinen Kopf sichtbar behält (bewusster Unterschied: ein Kapitel ist
+      eine GRUPPE, kein einzelner Inhalt). Das implizite titellose Kapitel
+      (`title:null`) bekommt BEWUSST keinen Kopf/keine Einrückung ("flach
+      gerendert wie heute") – sonst bekäme jedes Dokument mit auch nur
+      EINEM echten `#`-Kapitel zusätzlich einen leeren Vorspann-Rahmen für
+      den Rest. Ein leeres Kapitel (noch keine `##`-Abschnitte, z. B.
+      gerade erst per Chat angelegt) bekommt trotzdem einen sichtbaren,
+      klappbaren Kopf (über eine `chapters`-basierte statt
+      `sections`-basierte Iteration in `DocView` – sonst hätte ein Kapitel
+      ohne jeden Abschnitt nie eine Chance, gerendert zu werden). Die
+      bisher als Fließtext gerenderte `"# "`-Zeile (`renderBlocks`
+      h1-Zweig) entfällt automatisch für STRUKTURELLE Kapitel (deren Zeile
+      landet nicht mehr in `sec.lines`/`pre`) und bleibt unverändert für
+      die Titelzeile (die weiterhin in `pre` steht) – keine Doppel-
+      Darstellung, ohne den h1-Zweig selbst anzufassen.
+    - **Reiter-Leiste rechts (`src/App.jsx`, `sectionNavContent`):**
+      Kapitel-Kopf kräftiger (`font-semibold`, `from-slate-100 to-
+      slate-200`), H2-Reiter darunter über einen `pl-3`-Wrapper eingerückt
+      (bewusst PADDING am Container statt `margin-left` am `w-full`-Knopf
+      selbst – Letzteres hätte den Knopf über den rechten Rand hinaus
+      überstehen lassen). ZWEI GETRENNTE Klapp-Konzepte, im Code
+      kommentiert: (a) der Dokument-Klappzustand (`collapsedAll`,
+      `"c:"`-Schlüssel, persistiert über `state.json`, s. o.) und (b) ein
+      NEUER, rein lokaler `navChapCollapsed`-State (`useState`, NICHT
+      persistiert, Schlüssel `activeNb+"::"+Titel`), der in der Leiste NUR
+      die Liste der H2-Reiter unter einem Kapitel ein-/ausblendet – Klick
+      auf den Kapitel-TITEL navigiert (scrollt, klappt das Dokument-
+      Kapitel auf), Klick auf das CHEVRON (mit `stopPropagation`) schaltet
+      NUR den Leisten-Zustand. Scroll-Spy: Ist das Kapitel des aktiv
+      gescrollten Abschnitts in der Leiste eingeklappt, klappt ein
+      `useEffect` (Abhängigkeit `activeSec`) es automatisch wieder auf,
+      sonst wäre die aktive Markierung unsichtbar. `gotoSection` klappt
+      zusätzlich das ENTHALTENDE Dokument-Kapitel auf; war es eingeklappt,
+      existiert der Ziel-Anker (`"sec-"+si`) erst nach dem NÄCHSTEN Render
+      (ein eingeklapptes Kapitel entfernt seine Abschnitts-Köpfe
+      komplett aus dem DOM, anders als ein einzelner eingeklappter
+      `##`-Abschnitt) – ein `setTimeout(…, 0)` verzögert den Scroll in
+      genau diesem einen Fall, sonst bleibt der bisherige synchrone Scroll
+      (kein RAF/Smooth-Scroll, siehe bestehender Kommentar) unverändert.
+      Ohne Kapitel sieht die Leiste exakt aus wie vor v7.14 (derselbe
+      `sections.map`-Zweig, keine zusätzlichen DOM-Elemente). Mobiler
+      Drawer bleibt eine reine Konsument von `sectionNavContent` (EINE
+      Quelle wie bisher).
+    - **Editor-Gliederung (`src/components/DocEditor.jsx`):** Eigenständig
+      in DocEditor integriert (flex-row: Editor-Bereich + neue `<nav>`
+      rechts) statt eine Outline+Scroll-API nach `App.jsx` zu exponieren –
+      sauberer, weil `editor`/`view` Implementierungsdetail dieser
+      Komponente bleiben (kein neues Interface, das App.jsx roh an
+      ProseMirror koppeln würde); `App.jsx` reicht nur `navWidth={layout.
+      navW}` durch (gleiche Breite wie die Dokument-Leiste, EIN
+      persistierter Wert statt eines zweiten Splitters). Neue reine,
+      exportierte Funktion `extractOutline(doc)` traversiert das ECHTE
+      ProseMirror-Dokument (`doc.descendants`) nach `heading`-Nodes der
+      Level 1/2 mit Text+Position – bewusst NICHT der Markdown-String
+      (der Editor bearbeitet laufend Nodes; ein String-Reparse wäre eine
+      zweite, potenziell abweichende Quelle). Dieselbe Titel-Ausnahme wie
+      `parseTree` (s. o., Nachbesserung unten): Ist der ALLERERSTE Block des
+      Dokuments (Position 0 – das ProseMirror-Äquivalent zu "erste
+      nicht-leere Zeile", da Leerzeilen dort keine eigenen Knoten erzeugen)
+      eine Level-1-Überschrift, ist das die Titelzeile und taucht NICHT in
+      der Liste auf – sonst kämen Editor-Leiste und Dokument-Ansicht auf
+      unterschiedliche Kapitel-Listen. Aktualisierung über
+      `useMemo` mit `editor.state.doc` als Abhängigkeit: das ist zugleich
+      die geforderte "leichte Drosselung" OHNE Timer – ProseMirror
+      erzeugt bei einer reinen Selektions-/Cursor-Änderung KEIN neues
+      `doc`-Objekt (nur `tr.docChanged` löst eine neue Referenz aus),
+      `extractOutline` läuft also nur bei echten Bearbeitungen erneut,
+      nicht bei jedem `onTransaction`-Tick (der auch für die Toolbar-
+      Aktivzustände feuert). Klick ruft `gotoHeading(pos)` auf
+      (`editor.chain().focus().setTextSelection(pos+1).scrollIntoView().
+      run()` – TipTap-Chain-API, die intern denselben `view.dispatch`
+      nutzt wie ein manueller Aufruf). NUR Desktop (`md:`) – mobil bleibt
+      es bewusst bei Toolbar+Editor ohne Leiste (kein Platz neben dem
+      ohnehin schmalen Editor-Bereich auf schmalen Geräten, gleiche
+      Abwägung wie die bestehende mobile Abschnitts-Leiste). Neuer
+      Toolbar-Knopf „Kapitel (#)“ (`Heading1`, lucide-react) vor dem
+      H2-Knopf – `StarterKit`s `heading:{levels:[1,2,3]}` war technisch
+      schon vor v7.14 aktiv (die Notizbuch-Titelzeile lief dadurch
+      unbemerkt bereits als echter `heading`-Node level 1 durch den
+      Editor), v7.14 ergänzt nur den Knopf und die Leiste – der Roundtrip
+      selbst war laut Test bereits stabil (kein Bugfix nötig, siehe
+      Tests).
+    - **`src/lib/ops.js` – KRITISCHE Härtung (Korruptionsgefahr):**
+      `findSection` endete bisher NUR an der nächsten `"## "`-Zeile. Eine
+      `"# "`-Kapitelzeile HINTER dem letzten Abschnitt eines Kapitels
+      wurde dadurch fälschlich zum Vorgänger-Abschnitt gezählt und bei
+      `replace_section`/`delete_section` MITGELÖSCHT bzw. bei
+      `append_to_section` übersprungen (die neue Zeile landete VOR statt
+      NACH der Kapitelzeile). Fix: neue `BOUNDARY_RE = /^#{1,2}\s/`
+      (matcht `"#"` UND `"##"`, NICHT `"###"` – durch das Backtracking auf
+      1 Hash bei fehlgeschlagenem 2-Hash-Versuch ausgeschlossen, mit Test
+      verifiziert) ersetzt die bisherige `HEAD_RE`-only-Prüfung für die
+      END-Grenze; `findSection` bekommt zusätzlich einen optionalen
+      `range`-Parameter `[from, to)` für die Kapitel-Eingrenzung (s. u.).
+      `tidy()` erzwingt jetzt ebenfalls eine Leerzeile vor `"# "`-Zeilen
+      (vorher nur vor `"## "`), über dieselbe `BOUNDARY_RE`. Wie die
+      Renderer-Grenze bleibt auch diese FENCE-BLIND (s. o.) – bewusst
+      geteilte, dokumentierte Grenze, nicht behoben. Regressionstest exakt
+      für das Verschluck-Szenario (`tests/ops.test.js`, „Kapitel-Grenzen“).
+    - **Neues optionales op-Feld `"chapter"`** (z. B. `"# Projekte"` oder
+      `"Projekte"` – `normHead`-tolerant wie `heading`): grenzt
+      `append_to_section`/`replace_section`/`delete_section` auf den
+      Zeilenbereich EINES Kapitels ein (neue Hilfsfunktion `findChapter`,
+      sucht die `"# "`-Zeile mit passendem `normHead` und den Bereich bis
+      zur nächsten `"# "`-Zeile). Kapitel nicht gefunden ⇒ die GESAMTE Op
+      wird sicher übersprungen – bewusst KEIN Fallback auf die globale
+      Suche (Ambiguitäts-Schutz: sonst könnte ein Tippfehler im
+      Kapitelnamen einen Abschnitt unbemerkt am falschen Ort/global
+      treffen); `append_to_section` legt in diesem Fall auch NICHTS an.
+      Ohne `"chapter"`-Feld verhält sich `applyOne` exakt wie vor v7.14
+      (globale Suche, erster Treffer gewinnt) – `applyOne`/`applyOps`
+      bleiben dadurch vollständig abwärtskompatibel (kein Signaturbruch,
+      `chapter` ist rein additiv). Kapitel-Anlage/-Umbau läuft weiterhin
+      über die bestehende `rewrite`-Op (im System-Prompt dokumentiert),
+      NICHT über ein eigenes „create_chapter“-Op – ein zusätzlicher Op-Typ
+      hätte `ops.js`/den Prompt unnötig verkompliziert, obwohl `rewrite`
+      dieselbe Aufgabe (Inhalte erhalten, nur umgruppieren) bereits
+      abdeckt.
+    - **System-Prompt (`src/lib/anthropic.js`):** KONVENTIONEN-Block
+      beschreibt jetzt die zweistufige Hierarchie (`#`-Kapitel optional
+      über `##`-Hauptthemen, kleine Notizbücher dürfen flach bleiben).
+      Neuer Block GLIEDERUNGS-VORSCHLAG: Erkennt das Modell zu viele
+      `##`-Abschnitte ohne jedes Kapitel (Richtwert > 8), nur `#`-Kapitel
+      mit maximal einem Abschnitt darin, oder eine inkonsistente Mischung,
+      schlägt es in `reply` eine konkrete zweistufige Neu-Gliederung als
+      Outline vor – REIN als Vorschlag (`"ops":[]`, die REINE-FRAGEN-/
+      Kein-Nebenbei-Aufräumen-Regeln gelten unverändert). Erst nach
+      AUSDRÜCKLICHER Zustimmung des Nutzers setzt das Modell den Umbau per
+      `rewrite`-Op um (Inhalte vollständig erhalten, nur umgruppieren).
+      `NOTEBOOK_TOOL`-Schema um die `chapter`-Property ergänzt (Spiegel
+      der Prompt-Doku). Vier neue Prompt-Vertragstests (`toContain`) in
+      `tests/anthropic.test.js`.
+    - **Tests:** `tests/markdown.test.jsx` (parseTree: ohne `#`, mit `#`,
+      H2 vor erstem H1, nur H1 ohne H2, H1 mit `###`-Unterthemen, globale
+      `sec`-Indizes, fence-blinde Grenze geteilt; DocView: Kapitel-Kopf
+      klappbar, `"c:"`-Schlüssel, eingeklapptes Kapitel verbirgt alle
+      Abschnitte samt Köpfen, leeres Kapitel bleibt sichtbar, Alt-`"s:"`-
+      Schlüssel bleiben gültig, Alt-Dokument ohne `#` rendert exakt wie
+      bisher inkl. kein h1-Doppel), `tests/ops.test.js` (Verschluck-
+      Regression für replace/delete/append, `###` bleibt Inhalt, `chapter`-
+      Filter inkl. Ambiguitäts-Fall mit doppeltem `##`-Titel, normHead-
+      Toleranz, Kapitel-nicht-gefunden ⇒ No-op, `tidy` mit `#`-Zeilen,
+      `rewrite` unverändert inkl. ignoriertem `chapter`-Feld),
+      `tests/docEditorOutline.test.jsx` (neu – `extractOutline` inkl.
+      Randfälle, `#`-Kapitel-Roundtrip byte-stabil auch neben Formeln/
+      Codeblöcken/Links, leeres Kapitel, `toggleHeading(1)`),
+      `tests/anthropic.test.js` (Prompt-Verträge). Gesamtstand vor der
+      Nachbesserung unten: 605/605 grün (vorher 571).
+    - **Bewusste Restrisiken:** (1) Fence-Blindheit von `#`/`##` (geteilt,
+      dokumentiert, nicht behoben – Konsistenz mit der bestehenden
+      Grenze wichtiger als ein Sonderfall nur für Kapitel). (2) Freitext
+      direkt unter einer `"# "`-Zeile OHNE folgenden `"##"`-Abschnitt
+      landet weiterhin in `pre` (rendert ganz oben statt beim Kapitel) –
+      seltener Rand­fall (die Konvention verlangt Inhalte innerhalb von
+      `##`-Abschnitten), gleiche Behandlung wie Freitext vor dem
+      allerersten `##` seit jeher. (3) Die Editor-Gliederungs-Leiste
+      zeigt nur Level 1/2 (keine `###`-Unterthemen) – bewusst, analog zur
+      Dokument-Leiste, die ebenfalls nur `##` listet.
+    - **Nachbesserung (Code-Review vor dem Commit, v7.14 bleibt v7.14 –
+      reine Korrektur des noch uncommitteten Stands, kein neues Feature):**
+      Ein 🔴-Finding, behoben:
+      1. **`sawSection`-Heuristik brach den Kern-Anwendungsfall** (`src/lib/
+         markdown.jsx`, `parseTree`, 🔴). Die ursprüngliche Regel erkannte
+         eine `"# "`-Zeile nur dann als Kapitelgrenze, wenn VORHER schon
+         mindestens ein `"##"`/`"###"` gesehen wurde. Empirisch belegtes
+         Gegenbeispiel: `"# Titel / # Kapitel A / ## A1 / # Kapitel B /
+         ## B1"` (typischer Zielzustand nach einer Modell-Umgliederung per
+         `rewrite`) – "# Kapitel A" steht VOR dem ersten `"##"` und wurde
+         dadurch fälschlich zu Fließtext neben der Titelzeile (landete in
+         `pre`, rendert als LOSES zweites `<h1>`); `A1` fiel flach ins
+         implizite Kapitel statt zu Kapitel A zu gehören; nur Kapitel B
+         wurde korrekt gruppiert. Die Reiter-Leiste (App.jsx, datengetrieben
+         aus genau diesem `chapters`/`sections`-Modell) ließ Kapitel A
+         dadurch komplett weg, während `extractOutline` im Editor (das
+         Level-1-Überschriften unabhängig von "##" davor traversiert) es
+         korrekt zeigte – Editor und Leseansicht widersprachen sich sichtbar.
+         Alle bisherigen Test-Fixtures hatten zufällig immer ein `"##"` VOR
+         der ersten Kapitelzeile (z. B. `"## Vorspann"` vor
+         `"# Kapitel Eins"`) und fingen den Bug deshalb nicht.
+         **Fix:** Die Titelzeile wird jetzt über ihre POSITION erkannt statt
+         über den Verarbeitungszustand: Ist die erste NICHT-LEERE Zeile des
+         gesamten Dokuments eine `"# "`-Zeile, ist GENAU sie (per
+         Original-Zeilenindex `titleLineIdx`, vorab mit
+         `lines.findIndex(l => l.trim() !== "")` bestimmt) der Titel und nie
+         ein Kapitel – JEDE andere `"# "`-Zeile ist immer ein Kapitel,
+         unabhängig von der Reihenfolge zu `"##"`. Robust, weil rein
+         positionsbasiert (keine Abhängigkeit von der Zeilen-
+         Verarbeitungsreihenfolge mehr). Zusätzlich (Auftrag Punkt 3a,
+         billig mitgenommen): Das implizite titellose Kapitel wird jetzt NUR
+         noch gepusht, wenn zu diesem Zeitpunkt bereits Abschnitte
+         existieren (`sections.length > 0`) – vorher unconditional, aber vor
+         der Nachbesserung technisch nie beobachtbar leer (siehe alter
+         Kommentar); mit der neuen Positionsregel kann ein Kapitel jetzt
+         DIREKT nach der Titelzeile beginnen (`sections.length === 0` an der
+         Stelle), ein leeres Phantom-Kapitel wäre dort ein sichtbarer
+         Fehler in `chapters[0]` gewesen.
+         **`extractOutline`-Parität (Auftrag Punkt 3b, `src/components/
+         DocEditor.jsx`):** dieselbe Titel-Ausnahme, ProseMirror-seitig
+         über `pos === 0 && node.attrs.level === 1` (das Äquivalent zu
+         "erste nicht-leere Zeile", da Leerzeilen im Editor-Dokument keine
+         eigenen Knoten erzeugen) – hält Editor-Leiste und Dokument-Ansicht
+         wieder deckungsgleich.
+      - **Tests:** `tests/markdown.test.jsx` – neuer Block "Titel-Ausnahme
+        per Position" (`parseTree`): exaktes Review-Regressionsszenario
+        (beide Kapitel erkannt, `A1`→Kapitel A, `B1`→Kapitel B, komplettes
+        `chapters`/`sections`-Datenmodell inkl. `chapter`-Index gepinnt,
+        `pre` enthält nur noch die echte Titelzeile), Ein-Kapitel-Variante
+        (`# Titel / # Kapitel A / ## A1`), Randfall ohne separate Titelzeile
+        (erste `#`-Zeile bleibt Titel, auch wenn sie inhaltlich wie ein
+        Kapitel gemeint war – dokumentierte Vereinfachung). Neuer DocView-
+        Test mit derselben Fixture-Form (kein `"##"` vor der ersten
+        Kapitelzeile): genau EIN `<h1>` im gesamten Dokument, beide
+        `chap-`-Anker vorhanden, kein drittes Kapitel erfunden.
+        `tests/docEditorOutline.test.jsx`: alle Fixtures bekommen jetzt eine
+        separate Titelzeile (`"# T\n\n…"`) statt die erste Überschrift
+        direkt als Kapitel zu missbrauchen, neuer Block "Titel-Ausnahme: NUR
+        die allererste Level-1-Überschrift ist der Titel" inkl. derselben
+        Review-Regressions-Fixture wie in `markdown.test.jsx` (Editor-Leiste
+        und Dokument-Ansicht liefern jetzt nachweislich dieselbe
+        Kapitel-Liste). Gesamtstand danach 611/611 grün (vorher 605),
+        Coverage `src/lib` weiterhin deutlich über dem 60-%-Gate.
+      - **Nicht angefasst** (laut Review bereits solide verifiziert):
+        `src/lib/ops.js`, der System-Prompt (`src/lib/anthropic.js`), die
+        Leisten-UX in `src/App.jsx`.

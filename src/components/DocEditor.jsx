@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import { getHTMLFromFragment, Node, Extension } from "@tiptap/core";
 import { Fragment } from "@tiptap/pm/model";
@@ -19,7 +19,7 @@ import TableHeader from "@tiptap/extension-table-header";
 import TableCell from "@tiptap/extension-table-cell";
 import { Markdown } from "tiptap-markdown";
 import {
-  Bold, Italic, Code, Code2, List, ListOrdered, ListChecks, Heading2, Heading3,
+  Bold, Italic, Code, Code2, List, ListOrdered, ListChecks, Heading1, Heading2, Heading3,
   Minus, Undo2, Redo2, Strikethrough, Palette, Highlighter, Table as TableIcon,
   Sigma, SquareFunction, Link2 as LinkIcon, Sparkles, Loader2,
 } from "lucide-react";
@@ -818,7 +818,37 @@ export function applyAutoFetchResult(linkForm, lastAutoTitle, res) {
   return { ...linkForm, error: res ? res.reason : linkForm.error };
 }
 
-export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving }) {
+// Gliederungs-Leiste im Editor (v7.14, Nutzerwunsch "beim Editieren bleibt
+// die Navigation durch lange Dokumente erhalten"): traversiert das ECHTE
+// ProseMirror-Dokument (nicht den Markdown-String – der Editor bearbeitet
+// laufend Nodes, ein String-Reparse wäre eine zweite, potenziell
+// abweichende Quelle) und sammelt alle heading-Nodes der Level 1/2 mit
+// Position, damit ein Klick per setTextSelection direkt dorthin springen
+// kann. Reine, DOM-freie Funktion (kein editor/view nötig) – exportiert,
+// damit Tests sie direkt gegen einen echten TipTap/ProseMirror-Doc-Baum
+// prüfen können (siehe tests/docEditorOutline.test.jsx), statt die
+// Traversierung im Test nachzubauen.
+//
+// Titel-Ausnahme (v7.14-Nachbesserung nach Code-Review, Parität zu
+// markdown.jsx#parseTree): Ist der ALLERERSTE Block des Dokuments (Position
+// 0 – das ProseMirror-Äquivalent zu "erste nicht-leere Zeile" in parseTree,
+// da Leerzeilen im Editor-Dokument keine eigenen Knoten erzeugen) eine
+// Level-1-Überschrift, ist das die Notizbuch-Titelzeile und taucht NICHT in
+// der Gliederung auf – sonst würden Viewer (parseTree) und Editor
+// widersprüchliche Kapitel-Listen zeigen (genau das vom Review gefundene
+// Finding).
+export function extractOutline(doc) {
+  const items = [];
+  if (!doc || typeof doc.descendants !== "function") return items;
+  doc.descendants((node, pos) => {
+    if (node.type.name !== "heading" || (node.attrs.level !== 1 && node.attrs.level !== 2)) return;
+    if (pos === 0 && node.attrs.level === 1) return; // Titelzeile ausgenommen
+    items.push({ level: node.attrs.level, text: node.textContent, pos });
+  });
+  return items;
+}
+
+export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving, navWidth }) {
   const baseline = useRef(null);
   const [error, setError] = useState(null);
   const [picker, setPicker] = useState(null); // null | "color" | "highlight" | "table" | "link"
@@ -918,6 +948,26 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
     onCreate: ({ editor: ed }) => { baseline.current = ed.storage.markdown.getMarkdown(); },
     onTransaction: () => setTick((t) => t + 1),
   });
+
+  // Gliederungs-Leiste (v7.14): "editor.state.doc" als useMemo-Abhängigkeit
+  // ist bereits die geforderte leichte Drosselung, ganz ohne Timer – ein
+  // reiner Selektions-/Cursor-Wechsel erzeugt bei ProseMirror KEIN neues
+  // doc-Objekt (nur bei tr.docChanged ändert sich die Referenz), extractOutline
+  // läuft also nur bei echten Bearbeitungen erneut, nicht bei jedem Tick aus
+  // onTransaction (der u. a. auch für die Toolbar-Aktivzustände feuert).
+  const outline = useMemo(
+    () => extractOutline(editor ? editor.state.doc : null),
+    [editor && editor.state.doc] // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
+  // Klick in der Gliederungs-Leiste: Cursor an den Anfang der Überschrift
+  // setzen, in den sichtbaren Bereich scrollen, Fokus zurück in den Editor
+  // (läuft über die TipTap-Chain-API, die intern denselben view.dispatch
+  // nutzt wie ein manueller Aufruf).
+  const gotoHeading = (pos) => {
+    if (!editor) return;
+    editor.chain().focus().setTextSelection(pos + 1).scrollIntoView().run();
+  };
 
   const save = () => {
     if (!editor || saving) return;
@@ -1134,6 +1184,10 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
   return (
     <div className="flex-1 min-h-0 flex flex-col px-4 pb-4 gap-2">
       <div className="flex flex-wrap items-center gap-1">
+        <button onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
+          className={btn(editor.isActive("heading", { level: 1 }))} title="Kapitel (#)">
+          <Heading1 size={15} />
+        </button>
         <button onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
           className={btn(editor.isActive("heading", { level: 2 }))} title="Abschnitt (##)">
           <Heading2 size={15} />
@@ -1354,9 +1408,46 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
         </button>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto rounded-lg border border-indigo-300 bg-white p-3"
-        onClick={() => picker && setPicker(null)}>
-        <EditorContent editor={editor} />
+      <div className="flex-1 min-h-0 flex gap-2">
+        <div className="flex-1 min-h-0 overflow-y-auto rounded-lg border border-indigo-300 bg-white p-3"
+          onClick={() => picker && setPicker(null)}>
+          <EditorContent editor={editor} />
+        </div>
+
+        {/* Gliederungs-Leiste (v7.14, Nutzerwunsch "beim Editieren bleibt
+            die Navigation durch lange Dokumente erhalten"): NUR Desktop
+            (md:) – mobil ist neben dem ohnehin schmalen Editor-Bereich kein
+            Platz dafür, dort bleibt es wie bisher bei Toolbar+Editor ohne
+            Leiste (bewusste Entscheidung, siehe DECISIONS). Gleiche
+            Zweistufen-Optik wie die Dokument-Leiste (App.jsx
+            sectionNavContent): Kapitel (Level 1) kräftiger, Abschnitte
+            (Level 2) darunter eingerückt. Eigenständig in DocEditor
+            integriert statt eine Outline-API nach App.jsx zu exponieren
+            (siehe DECISIONS – hält editor/view als Implementierungsdetail
+            dieser Komponente, kein neues Interface zum Elternteil nötig
+            außer der reinen Breitenangabe). */}
+        <nav
+          style={{ "--nav-w": (navWidth || 148) + "px" }}
+          className="hidden md:block md:w-[var(--nav-w)] shrink-0 overflow-y-auto py-1 pr-1"
+        >
+          {outline.map((item, i) => (
+            // Einrückung über einen Wrapper mit Innenabstand (pl-3) statt
+            // ml-3 direkt am Knopf: "w-full" bezöge sich sonst weiter auf
+            // die volle Leistenbreite und würde nach rechts überstehen.
+            <div key={i + item.pos} className={item.level === 2 ? "pl-3" : undefined}>
+              <button
+                onClick={() => gotoHeading(item.pos)}
+                title={item.text || (item.level === 1 ? "Kapitel" : "Abschnitt")}
+                className={"block w-full text-left truncate rounded-r-xl border border-l-0 shadow-sm mb-1.5 " +
+                  (item.level === 1
+                    ? "text-xs font-bold py-1.5 pl-2 pr-2 border-slate-300 bg-gradient-to-r from-slate-100 to-slate-200 text-slate-900"
+                    : "text-xs py-1 pl-2 pr-2 border-slate-200 bg-gradient-to-r from-slate-50 to-slate-100 text-slate-600")}
+              >
+                {item.text || "(ohne Titel)"}
+              </button>
+            </div>
+          ))}
+        </nav>
       </div>
 
       {error && (

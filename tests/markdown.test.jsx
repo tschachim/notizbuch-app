@@ -37,6 +37,115 @@ describe("parseTree", () => {
   });
 });
 
+// v7.14 (Nutzerwunsch "zweistufige Gliederung"): "# Titel" gruppiert
+// mehrere ##-Abschnitte zu einem Kapitel. "sections" bleibt eine flache
+// Liste mit globalem Index (jede Section trägt zusätzlich "chapter").
+describe("parseTree: Kapitel (# , v7.14)", () => {
+  it("ohne echtes #-Kapitel bleibt chapters leer – Alt-Verhalten byte-/verhaltensgleich (die Titelzeile wird NIE zum Kapitel)", () => {
+    const { sections, chapters } = parseTree("# T\n\n## A\n\n## B");
+    expect(chapters).toEqual([]);
+    // "chapter" bleibt bei fehlenden Kapiteln ungenutzt (-1, siehe Kommentar
+    // in parseTree) – Konsumenten prüfen immer zuerst chapters.length.
+    expect(sections.every((s) => s.chapter === -1)).toBe(true);
+  });
+
+  it("gruppiert ##-Abschnitte zu Kapiteln, globale sec-Indizes bleiben erhalten, H2 vor dem ersten H1 landet im impliziten titellosen Kapitel", () => {
+    const doc = "# T\n\n## Vorspann\n\n# Kapitel Eins\n\n## Alpha\n\n## Beta\n\n# Kapitel Zwei\n\n## Gamma";
+    const { sections, chapters } = parseTree(doc);
+    expect(sections.map((s) => s.title)).toEqual(["Vorspann", "Alpha", "Beta", "Gamma"]);
+    expect(chapters).toEqual([
+      { title: null, secFrom: 0, secTo: 1 },
+      { title: "Kapitel Eins", secFrom: 1, secTo: 3 },
+      { title: "Kapitel Zwei", secFrom: 3, secTo: 4 },
+    ]);
+    // Globaler Index (für "sec-"+si-Anker) bleibt fortlaufend über alle
+    // Kapitel hinweg, unabhängig von der Kapitel-Zugehörigkeit.
+    expect(sections.map((s) => s.chapter)).toEqual([0, 1, 1, 2]);
+  });
+
+  it("nur H1 ohne H2: leere Kapitel (secFrom === secTo) sind erlaubt", () => {
+    const doc = "# T\n\n## A\n\n# Kapitel Eins\n\n# Kapitel Zwei\n\n## B";
+    const { sections, chapters } = parseTree(doc);
+    expect(chapters).toEqual([
+      { title: null, secFrom: 0, secTo: 1 },
+      { title: "Kapitel Eins", secFrom: 1, secTo: 1 },
+      { title: "Kapitel Zwei", secFrom: 1, secTo: 2 },
+    ]);
+    expect(sections.map((s) => s.chapter)).toEqual([0, 2]);
+  });
+
+  it("H1 mit ###-Unterthemen in Abschnitten: subs bleiben unter ihrem Abschnitt, unabhängig vom Kapitel", () => {
+    const doc = "# T\n\n## A\n\n### SubA\n\n- x\n\n# Kapitel Eins\n\n## B\n\n### SubB\n\n- y";
+    const { sections, chapters } = parseTree(doc);
+    expect(sections.map((s) => s.title)).toEqual(["A", "B"]);
+    expect(sections[0].subs.map((s) => s.title)).toEqual(["SubA"]);
+    expect(sections[1].subs.map((s) => s.title)).toEqual(["SubB"]);
+    expect(chapters.map((c) => c.title)).toEqual([null, "Kapitel Eins"]);
+    expect(sections.map((s) => s.chapter)).toEqual([0, 1]);
+  });
+
+  it("### mitten in einer Zeile bzw. #### bleiben unverändert unstrukturell (fence-blinde Grenze bewusst geteilt mit ##)", () => {
+    // Kein Zeilenanfang -> keine Struktur, egal welche Ebene.
+    const { sections, chapters } = parseTree("# T\n\n## A\n\nText mit # mittendrin\n\n#### Zu tief");
+    expect(chapters).toEqual([]);
+    expect(sections[0].lines.some((l) => l.text === "Text mit # mittendrin")).toBe(true);
+    expect(sections[0].lines.some((l) => l.text === "#### Zu tief")).toBe(true);
+  });
+
+  // v7.14-Nachbesserung (Code-Review vor dem Commit, 🔴-Finding): Die
+  // anfängliche "sawSection"-Heuristik erkannte eine "# "-Kapitelzeile nur,
+  // wenn VORHER schon ein "##" gesehen wurde – stand das erste echte Kapitel
+  // VOR dem ersten "##" (der Normalfall direkt nach der Titelzeile), wurde
+  // es fälschlich zu Fließtext neben dem Titel. Ersetzt durch eine reine
+  // Positions-Regel: NUR die allererste nicht-leere Zeile des Dokuments ist
+  // (wenn sie "# " ist) der Titel, JEDE weitere "# "-Zeile ist ein Kapitel –
+  // unabhängig davon, ob vor oder nach dem ersten "##". Die folgenden Tests
+  // bauen die Fixtures BEWUSST OHNE ein "##" vor der ersten Kapitelzeile
+  // (die vorherigen Tests oben hatten alle diese Form und hätten den Bug
+  // nicht gefangen).
+  describe("Titel-Ausnahme per Position (Nachbesserung, Kapitel VOR dem ersten ##)", () => {
+    it("exakt das Review-Regressionsszenario: # Titel / # Kapitel A / ## A1 / # Kapitel B / ## B1", () => {
+      const doc = "# Titel\n\n# Kapitel A\n\n## A1\n\n# Kapitel B\n\n## B1";
+      const { sections, chapters, pre } = parseTree(doc);
+      expect(sections.map((s) => s.title)).toEqual(["A1", "B1"]);
+      // Kein implizites Kapitel nötig: Kapitel A beginnt direkt, ohne
+      // vorangehende, verwaiste Abschnitte.
+      expect(chapters).toEqual([
+        { title: "Kapitel A", secFrom: 0, secTo: 1 },
+        { title: "Kapitel B", secFrom: 1, secTo: 2 },
+      ]);
+      expect(sections.map((s) => s.chapter)).toEqual([0, 1]);
+      // Die Titelzeile "# Titel" bleibt die einzige "#"-Zeile in "pre".
+      expect(pre.some((l) => l.text === "# Titel")).toBe(true);
+      expect(pre.some((l) => l.text === "# Kapitel A")).toBe(false);
+      expect(pre.some((l) => l.text === "# Kapitel B")).toBe(false);
+    });
+
+    it("nur EIN Kapitel direkt nach der Titelzeile (kein ## davor) wird erkannt", () => {
+      const doc = "# Titel\n\n# Kapitel A\n\n## A1";
+      const { sections, chapters } = parseTree(doc);
+      expect(chapters).toEqual([{ title: "Kapitel A", secFrom: 0, secTo: 1 }]);
+      expect(sections.map((s) => s.title)).toEqual(["A1"]);
+      expect(sections[0].chapter).toBe(0);
+    });
+
+    it("ein Dokument OHNE separate Titelzeile behandelt seine erste '# '-Zeile trotzdem als Titel (nicht als Kapitel)", () => {
+      // Ungewöhnlicher, aber möglicher Fall: das Dokument beginnt direkt mit
+      // einer "#"-Zeile, die zugleich die erste nicht-leere Zeile ist – sie
+      // zählt konsistent zur selben Positions-Regel als "Titel" (dokumentierte
+      // Vereinfachung, siehe parseTree-Kommentar); "A" davor bekommt ein
+      // implizites titelloses Kapitel, "Kapitel Zwei" wird normal erkannt.
+      const doc = "# Kapitel Eins\n\n## A\n\n# Kapitel Zwei\n\n## B";
+      const { sections, chapters } = parseTree(doc);
+      expect(chapters).toEqual([
+        { title: null, secFrom: 0, secTo: 1 },
+        { title: "Kapitel Zwei", secFrom: 1, secTo: 2 },
+      ]);
+      expect(sections.map((s) => s.chapter)).toEqual([0, 1]);
+    });
+  });
+});
+
 describe("renumberCitations", () => {
   it("nummeriert dokumentweit ab 1, gleiche URL = gleiche Nummer", () => {
     const md = "- a[0](https://b.de)\n- b[7](https://a.de) c[0](https://b.de)";
@@ -106,6 +215,98 @@ describe("DocView: Grundgerüst", () => {
     expect(html.match(/checked=""/g) || html.match(/checked/g)).toBeTruthy();
     expect(html).toContain("offen");
     expect(html).toContain("fertig");
+  });
+});
+
+// v7.14 (Nutzerwunsch "zweistufige Gliederung"): H1-Kapitel über den
+// H2-Abschnitten, im Dokument genauso klappbar wie bisher H2.
+describe("DocView: Kapitel (#, v7.14)", () => {
+  const CH_DOC =
+    "# T\n\n## Vorspann\n\n- VorspannText\n\n" +
+    "# Kapitel Eins\n\n## Alpha\n\n- AlphaText\n\n## Beta\n\n- BetaText\n\n" +
+    "# Kapitel Zwei\n\n## Gamma\n\n- GammaText";
+
+  it("Alt-Dokument ohne echtes #-Kapitel rendert exakt wie bisher (kein zusätzlicher Kopf, kein h1-Doppel)", () => {
+    const html = render("# T\n\n## A\n\n- x\n\n## B\n\n- y");
+    expect(html).not.toContain("chap-");
+    expect(html).toContain('id="sec-0"');
+    expect(html).toContain('id="sec-1"');
+    // Die Titelzeile "# T" erscheint genau EINMAL als h1 (aus "pre"), nicht
+    // zusätzlich als Kapitel-Kopf.
+    expect(html.match(/<h1[^>]*>T<\/h1>/g)).toHaveLength(1);
+  });
+
+  it("echte Kapitel bekommen einen eigenen, klappbaren Kopf mit chap-Anker; das implizite Vorspann-Kapitel bleibt flach ohne Kopf", () => {
+    const html = render(CH_DOC);
+    expect(html).toContain('id="chap-1"');
+    expect(html).toContain("Kapitel Eins");
+    expect(html).toContain('id="chap-2"');
+    expect(html).toContain("Kapitel Zwei");
+    // Kein Kopf/Anker fürs implizite Kapitel 0 (Vorspann bleibt flach).
+    expect(html).not.toContain('id="chap-0"');
+    // Globale sec-Indizes bleiben über alle Kapitel hinweg fortlaufend.
+    expect(html).toContain('id="sec-0"');
+    expect(html).toContain('id="sec-3"');
+    expect(html).toContain("VorspannText");
+    expect(html).toContain("AlphaText");
+    expect(html).toContain("BetaText");
+    expect(html).toContain("GammaText");
+  });
+
+  // v7.14-Nachbesserung (Code-Review vor dem Commit, 🔴-Finding): Die
+  // Fixture oben ("## Vorspann" VOR "# Kapitel Eins") hätte den Bug der
+  // ursprünglichen sawSection-Heuristik NICHT gefangen – dieser Test baut
+  // das Kapitel bewusst OHNE ein "##" davor auf (Review-Regressionsszenario).
+  it("Kapitel direkt nach der Titelzeile (kein ## davor) wird korrekt gruppiert – kein loses zweites <h1>, kein Kapitel verschluckt", () => {
+    const doc = "# Titel\n\n# Kapitel A\n\n## A1\n\n- A1Text\n\n# Kapitel B\n\n## B1\n\n- B1Text";
+    const html = render(doc);
+    // Genau EIN <h1> im gesamten Dokument (die Titelzeile) – "Kapitel A"
+    // erscheint NICHT als loses zweites <h1> (das war der 🔴-Fehler).
+    expect(html.match(/<h1[^>]*>/g)).toHaveLength(1);
+    expect(html).toContain('id="chap-0"');
+    expect(html).toContain("Kapitel A");
+    expect(html).toContain('id="chap-1"');
+    expect(html).toContain("Kapitel B");
+    expect(html).not.toContain('id="chap-2"');
+    expect(html).toContain("A1Text");
+    expect(html).toContain("B1Text");
+  });
+
+  it('Klapp-Zustand nutzt den Schlüssel "c:"+Titel, getrennt von den bestehenden "s:"-Schlüsseln', () => {
+    const closed = renderToStaticMarkup(
+      <DocView text={CH_DOC} collapsed={{ "c:Kapitel Eins": true }} onToggle={() => {}}
+        imgMap={{}} onImgClick={() => {}} onToggleTask={() => {}} />
+    );
+    // Kapitel-Kopf bleibt sichtbar (klickbar zum Wiederaufklappen) …
+    expect(closed).toContain("Kapitel Eins");
+    // … aber ALLE seine Abschnitte samt ihrer eigenen Köpfe verschwinden.
+    expect(closed).not.toContain("AlphaText");
+    expect(closed).not.toContain("BetaText");
+    expect(closed).not.toContain(">Alpha<");
+    expect(closed).not.toContain(">Beta<");
+    // Andere Kapitel/das implizite Vorspann-Kapitel bleiben unberührt.
+    expect(closed).toContain("VorspannText");
+    expect(closed).toContain("GammaText");
+    expect(closed).toContain("Kapitel Zwei");
+  });
+
+  it("ein leeres Kapitel (noch keine ##-Abschnitte) bekommt trotzdem einen sichtbaren, klappbaren Kopf", () => {
+    const html = render("# T\n\n## A\n\n- x\n\n# Leeres Kapitel\n\n# Kapitel Zwei\n\n## B\n\n- y");
+    expect(html).toContain("Leeres Kapitel");
+    expect(html).toContain('id="chap-1"');
+  });
+
+  it("Alt-Klappzustände (\"s:\"-Schlüssel) bleiben unverändert gültig, auch innerhalb eines Kapitels", () => {
+    const closed = renderToStaticMarkup(
+      <DocView text={CH_DOC} collapsed={{ "s:Alpha": true }} onToggle={() => {}}
+        imgMap={{}} onImgClick={() => {}} onToggleTask={() => {}} />
+    );
+    // Nur der Inhalt von Alpha ist weg, der Kopf "Alpha" bleibt sichtbar
+    // (wie ein einzelner eingeklappter ##-Abschnitt schon immer).
+    expect(closed).toContain(">Alpha<");
+    expect(closed).not.toContain("AlphaText");
+    expect(closed).toContain("BetaText");
+    expect(closed).toContain("Kapitel Eins");
   });
 });
 
