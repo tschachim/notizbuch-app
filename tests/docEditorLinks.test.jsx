@@ -11,7 +11,7 @@
 // Markdown-Serialisierung. Nur DIESE Datei braucht jsdom (per-Datei-
 // Override), der Rest der Suite bleibt bei environment:"node"
 // (vitest.config.js).
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { Editor } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import Link from "@tiptap/extension-link";
@@ -25,6 +25,7 @@ import {
   unescapeMd, validateLinkTitle, normalizeLinkUrl,
 } from "../src/components/DocEditor.jsx";
 import { mathToPlaceholders } from "../src/lib/math.jsx";
+import { setLinkProviders } from "../src/lib/linkProviders.jsx";
 
 // Exakt die Link-Konfiguration aus DocEditor.jsx (v7.8, inkl. isAllowedUri
 // aus der Finding-2-Nachbesserung) – ein Test mit abweichender Konfiguration
@@ -448,5 +449,66 @@ describe("Editor: applyLink-Pfad (per insertContent simuliert, wie im Link-Popov
     const out = unescapeMd(editor.storage.markdown.getMarkdown());
     editor.destroy();
     expect(out).toBe("# T\n\n## A\n\n[Neuer Titel](https://example.org/neu)");
+  });
+});
+
+// v7.9 (Nutzerwunsch "DevOps/Confluence-Icons"): LinkDecorations bekommt
+// zusätzlich zur Klassenvergabe (cite-link/doc-link, siehe oben) eine
+// Widget-Decoration mit dem Provider-Icon VOR einem generischen Link mit
+// Provider-Match – NIE vor einer Quellen-Fußnote. setLinkProviders()
+// befüllt dieselbe Modul-Registry, die computeLinkDecorations über
+// providerFor/getLinkProviders liest (DocEditor.jsx importiert aus
+// lib/linkProviders.jsx) – afterEach räumt sie wieder auf.
+describe("Editor: Provider-Icon-Decoration vor generischen Links (v7.9)", () => {
+  afterEach(() => setLinkProviders([]));
+
+  it("ein dev.azure.com-Link bekommt eine Icon-Widget-Decoration (Klasse 'provider-link-icon'), ganz ohne Konfiguration", () => {
+    const md = "# T\n\n## A\n\n[Ticket](https://dev.azure.com/acme/Proj/_workitems/edit/1)";
+    const editor = buildEditor(md);
+    const html = editor.view.dom.innerHTML;
+    editor.destroy();
+    expect(html).toContain("provider-link-icon");
+    expect(html).toContain("<svg");
+  });
+
+  it("ein Confluence-Link (eingebauter Provider über das Host-Muster *.atlassian.net) bekommt ebenfalls ein Icon-Widget", () => {
+    const md = "# T\n\n## A\n\n[Handbuch](https://acme.atlassian.net/wiki/spaces/TEAM/pages/1)";
+    const editor = buildEditor(md);
+    const html = editor.view.dom.innerHTML;
+    editor.destroy();
+    expect(html).toContain("provider-link-icon");
+    expect(html).toContain("<svg");
+  });
+
+  it("eine Fußnote mit DERSELBEN dev.azure.com-URL bekommt KEIN Icon-Widget", () => {
+    const md = "# T\n\n## A\n\nFakt[3](https://dev.azure.com/acme/Proj/_workitems/edit/1) hier.";
+    const editor = buildEditor(md);
+    const html = editor.view.dom.innerHTML;
+    editor.destroy();
+    expect(html).not.toContain("provider-link-icon");
+  });
+
+  it("ein konfigurierter custom-Provider zeigt sein Emoji im Widget statt eines SVGs", () => {
+    setLinkProviders([{ id: "c1", type: "custom", name: "Intranet", prefix: "https://intranet.example/", icon: "🏠" }]);
+    const md = "# T\n\n## A\n\n[Seite](https://intranet.example/x)";
+    const editor = buildEditor(md);
+    const html = editor.view.dom.innerHTML;
+    editor.destroy();
+    expect(html).toContain("provider-link-icon");
+    expect(html).toContain("🏠");
+    expect(html).not.toContain("<svg");
+  });
+
+  it("ohne passenden Provider erscheint kein Icon-Widget", () => {
+    const md = "# T\n\n## A\n\n[Extern](https://example.org/x)";
+    const editor = buildEditor(md);
+    const html = editor.view.dom.innerHTML;
+    editor.destroy();
+    expect(html).not.toContain("provider-link-icon");
+  });
+
+  it("die Icon-Decoration ist eine reine View-Decoration und beeinflusst die Markdown-Serialisierung NICHT (No-op-Roundtrip bleibt stabil)", () => {
+    const md = "# T\n\n## A\n\nSiehe [Ticket](https://dev.azure.com/acme/Proj/_workitems/edit/1) dazu.";
+    expect(roundtrip(md)).toBe(md);
   });
 });

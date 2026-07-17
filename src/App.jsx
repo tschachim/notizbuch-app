@@ -27,6 +27,7 @@ import { renderMathText, expandMathInNodes } from "./lib/math.jsx";
 import { expandFencedCodeInNodes } from "./lib/code.jsx";
 import { chatToMarkdown, archiveBaseName, mergeChats } from "./lib/archive.js";
 import { loadSettings, saveSettings, clearSettings } from "./lib/settings.js";
+import { setLinkProviders } from "./lib/linkProviders.jsx";
 import SettingsDialog from "./components/SettingsDialog.jsx";
 import DocEditor from "./components/DocEditor.jsx";
 import QuickNotes from "./components/QuickNotes.jsx";
@@ -110,7 +111,19 @@ const fmtStamp = (ts) =>
 // collapsedAll: { notizbuchId: { sectionKey: true } }
 // order: Notizbuch-IDs in Dropdown-Reihenfolge (Admin-Seite)
 // quicknotes: { notizbuchId: [{ id, text, x, y, w, h }] } – wandert mit
-const serializeState = (chat, model, collapsedAll, active, order, quicknotes) =>
+//
+// SICHERHEIT (v7.9, Link-Provider): Diese Funktion nimmt bewusst NUR die
+// sechs Parameter unten entgegen – "settings" (owner/repo/pat/apiKey UND
+// die neuen Link-Provider samt PAT/E-Mail) wird ihr NIE übergeben. Das ist
+// keine zusätzliche Filterung, sondern strukturell: settings lebt
+// ausschließlich in settingsRef/localStorage (siehe lib/settings.js) und
+// hat schlicht keinen Pfad in dieses JSON. Exportiert, damit ein Test
+// (tests/linkProviders.test.jsx) mit einem realitätsnah befüllten Zustand
+// prüfen kann, dass kein Provider-PAT jemals in state.json landen kann –
+// bei jeder künftigen Änderung an dieser Funktion soll ein Reviewer diesen
+// Kommentar UND den Test sehen, bevor er versehentlich ein settings-Objekt
+// hier mit hineinzieht.
+export const serializeState = (chat, model, collapsedAll, active, order, quicknotes) =>
   JSON.stringify(
     {
       v: 2, active: active || ROOT_NB_ID, chat, model,
@@ -579,6 +592,10 @@ export default function NotizbuchApp() {
     if (s) {
       settingsRef.current = s;
       setSettings(s);
+      // Link-Provider-Registry (v7.9): markdown.jsx/DocEditor.jsx lesen sie
+      // über getLinkProviders() – kein neues Prop quer durch beide
+      // Komponentenbäume (siehe DECISIONS).
+      setLinkProviders(s.linkProviders || []);
       connect(s);
     } else {
       setChat([WELCOME]);
@@ -590,11 +607,15 @@ export default function NotizbuchApp() {
 
   const handleSaveSettings = async (cfg) => {
     const ok = await connect(cfg);
-    if (ok) saveSettings(cfg);
+    if (ok) {
+      saveSettings(cfg);
+      setLinkProviders(cfg.linkProviders || []);
+    }
   };
 
   const handleLogout = () => {
     clearSettings();
+    setLinkProviders([]);
     window.location.reload();
   };
 
@@ -2116,7 +2137,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.8</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.9</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"

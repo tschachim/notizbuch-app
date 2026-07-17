@@ -48,6 +48,29 @@ verschwindet; im Dokument-Modus öffnet der Gliederungs-Knopf den Drawer
 von rechts; Abschnitts-Tipp springt und schließt den Drawer; kein
 horizontales Scrollen der Seite.
 
+**A4 [VERBUNDEN] Link-Provider verwalten.** Einstellungen-Dialog öffnen.
+Erwartet: Abschnitt „Link-Provider“ unterhalb des Modell-Dropdowns, mit
+Hinweistext, dass Zugangsdaten nur auf diesem Gerät bleiben, und einem
+Knopf „Provider hinzufügen“. Klicken, Typ „Eigener Anbieter“ wählen
+(bei diesem Typ gibt es KEINE Zugangsdaten-Felder, nur ein Emoji-Icon-
+Feld), Name „QA-Test Provider“, URL-Präfix „https://qa-test.example/“,
+Icon z. B. „🧪“ eintragen, „Hinzufügen“ klicken. Erwartet: Eintrag
+erscheint in der Liste mit Emoji-Icon, Name und Präfix. „Bearbeiten“ am
+eben angelegten Eintrag klicken, Namen zu „QA-Test Provider geändert“
+ändern, übernehmen. Erwartet: Name in der Liste aktualisiert. „Löschen“
+klicken. Erwartet: Eintrag verschwindet wieder, KEINE neue Version/
+Commit dadurch (Provider leben nur in `state.json`-fernem localStorage).
+⚠️ NIEMALS die PAT-/API-Token-Felder bei den Typen „Azure DevOps“/
+„Confluence“ befüllen (Zugangsdaten-Regel) – bei Bedarf nur Name/
+URL-Präfix zur Anzeigeprüfung der Formularfelder ausfüllen, danach ohne
+Zugangsdaten wieder löschen oder Abbrechen klicken.
+Zusatzcheck (Sicherheits-Fix): Typ „Confluence“ wählen – das
+URL-Präfix-Feld ist hier bewusst LEER vorbelegt (kein Platzhalter mehr).
+„Hinzufügen“ bleibt deaktiviert, solange das Präfix keinen echten Host
+mit Punkt enthält (z. B. bei leerem Feld oder nur „https://“) – erst ein
+Präfix wie „https://qa-test.atlassian.net/“ schaltet den Knopf frei.
+Nicht speichern, danach Abbrechen/Feld wieder leeren.
+
 ## B. Notizbuch-Verwaltung
 
 **B1 [VERBUNDEN] Notizbuch anlegen.** Dropdown → „⚙ Notizbücher
@@ -195,6 +218,19 @@ Tab (`target=_blank`); eine daneben stehende Quellen-Fußnote bleibt
 unverändert eine kleine hochgestellte Zahl – beide Link-Arten dürfen
 sich optisch nicht vermischen.
 
+**C12 [VERBUNDEN] Link-Provider-Icon in der Dokument-Ansicht.** Nutzt
+denselben Azure-Ticket-Link wie C11 (bei Bedarf identisch anlegen).
+Ansicht öffnen. Erwartet: Direkt VOR dem Link erscheint ein kleines
+Provider-Icon (blauer Farbton, andeutungsweise Azure-DevOps-Logo) –
+dieses Icon braucht KEINEN zusätzlichen Netzzugriff/API-Aufruf und
+funktioniert auch OHNE dass unter Einstellungen ein Provider mit
+Zugangsdaten hinterlegt wurde (Azure DevOps/Confluence sind eingebaute
+Provider, siehe DECISIONS.md #56). Die daneben stehende Quellen-Fußnote
+(kleine hochgestellte Zahl) bekommt KEIN Icon. Falls unter
+Einstellungen (A4) versuchsweise ein Confluence-Link vorhanden ist
+(URL-Muster `https://<team>.atlassian.net/wiki/spaces/…/pages/…`):
+gleiches Verhalten, andere Icon-Farbe/-Form.
+
 ## D. Manuelles Bearbeiten (WYSIWYG)
 
 **D1 [VERBUNDEN] Editor-Roundtrip.** Stift-Knopf → im QA-Notizbuch einen
@@ -294,6 +330,25 @@ verschachtelten runden Klammern, `"` oder `<`/`>` wird beim Einfügen
 automatisch prozent-encodiert (z. B. `%20` für ein Leerzeichen) – eine
 einzelne Ebene balancierter Klammern (z. B. ein Wikipedia-Link) bleibt
 dagegen unverändert lesbar.
+
+**D8 [VERBUNDEN][API] „Titel ermitteln“ im Link-Dialog.** NUR ausführen,
+wenn unter Einstellungen (siehe A4) bereits ein Provider MIT
+Zugangsdaten (PAT bzw. E-Mail+API-Token) hinterlegt ist – der Tester
+trägt selbst NIEMALS Zugangsdaten ein; ist keiner konfiguriert, diesen
+Fall als ÜBERSPRUNGEN melden (kein Finding). Editor öffnen, Link-Knopf
+klicken, als URL ein passendes Ziel des konfigurierten Providers
+eintragen (z. B. bei Azure DevOps eine
+`https://dev.azure.com/<org>/<projekt>/_workitems/edit/<id>`-URL).
+Erwartet: Ein zusätzlicher Knopf „Titel ermitteln“ (Funkeln-Icon)
+erscheint im Popover – NUR bei diesem Provider, nicht bei einer
+beliebigen anderen URL. Klicken. Erwartet: kurzer Ladezustand (Spinner
+im Knopf), danach ENTWEDER das Titelfeld automatisch befüllt (Erfolg –
+bei Azure DevOps im Format „{Typ} {ID}: {Titel}“) ODER eine
+verständliche Fehlermeldung im Popover (z. B. bei einer
+Confluence-CORS-Sperre des Atlassian-Tenants – KEIN Bug, dokumentierte
+Grenze, siehe DECISIONS.md #56). Bei Erfolg: Titel vor dem Einfügen bei
+Bedarf noch anpassen, „Einfügen“ klicken, speichern. Erwartet: Link
+erscheint in der Ansicht wie in C11/C12 beschrieben (inkl. Icon).
 
 ## E. Schnellnotizen
 

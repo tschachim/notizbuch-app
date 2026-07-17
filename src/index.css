@@ -175,6 +175,16 @@ html, body { overflow-x: hidden; }
   text-decoration: underline;
   font-weight: 400;
 }
+/* Link-Provider-Icon (v7.9): Widget-Decoration direkt vor einem generischen
+   Link mit Provider-Match (DevOps/Confluence/eigen), siehe
+   buildProviderIconDom in lib/linkProviders.jsx. Nie vor einer
+   Quellen-Fußnote (cite-link). */
+.tiptap-doc .provider-link-icon {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  margin-right: 0.2rem;
+}
 /* LaTeX-Formel-Nodes (v7.3): gerenderte Ansicht bekommt eine gestrichelte
    Kontur als Klick-Affordanz ("hier steckt eine bearbeitbare Formel"),
    das Eingabefeld übernimmt Font/Größe des umgebenden Texts. */

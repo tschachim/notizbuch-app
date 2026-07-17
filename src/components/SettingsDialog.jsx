@@ -1,6 +1,21 @@
 import { useState } from "react";
-import { Settings, X, Loader2, LogOut, Check } from "lucide-react";
+import { Settings, X, Loader2, LogOut, Check, Link2, Plus, Pencil, Trash2 } from "lucide-react";
 import { MODELS } from "../lib/anthropic.js";
+import { PROVIDER_TYPE_INFO, ProviderIcon, hostOf } from "../lib/linkProviders.jsx";
+
+// Neuer, leerer Provider-Formularzustand für den gewählten Typ (v7.9,
+// Nutzerwunsch "Link-Provider konfigurierbar"). id bleibt null, solange kein
+// bestehender Eintrag bearbeitet wird (saveProviderForm unten vergibt dann
+// eine neue).
+const emptyProviderForm = (type) => ({
+  id: null,
+  type,
+  name: PROVIDER_TYPE_INFO[type].defaultName,
+  prefix: PROVIDER_TYPE_INFO[type].defaultPrefix,
+  icon: "🔗",
+  pat: "",
+  email: "",
+});
 
 /* Settings-Dialog: erscheint beim Erststart und über das Zahnrad.
    Zugangsdaten trägt ausschließlich der Nutzer hier ein; sie landen
@@ -13,6 +28,14 @@ export default function SettingsDialog({
   const [repo, setRepo] = useState((initial && initial.repo) || "notizbuch-data");
   const [pat, setPat] = useState((initial && initial.pat) || "");
   const [apiKey, setApiKey] = useState((initial && initial.apiKey) || "");
+  // Link-Provider (v7.9): eigener, von owner/repo/pat/apiKey UNABHÄNGIGER
+  // Zustand – Provider sind optional, die bestehende Pflichtfeld-Logik
+  // (siehe "complete" unten) bleibt unberührt.
+  const [linkProviders, setLinkProvidersState] = useState(
+    () => (initial && Array.isArray(initial.linkProviders) ? initial.linkProviders : [])
+  );
+  // Formular für "Provider hinzufügen"/Bearbeiten; null = geschlossen.
+  const [providerForm, setProviderForm] = useState(null);
 
   const complete = owner.trim() && repo.trim() && pat.trim() && apiKey.trim();
 
@@ -23,8 +46,71 @@ export default function SettingsDialog({
       repo: repo.trim(),
       pat: pat.trim(),
       apiKey: apiKey.trim(),
+      linkProviders,
     });
   };
+
+  const startAddProvider = () => setProviderForm(emptyProviderForm("azure-devops"));
+  const startEditProvider = (p) => setProviderForm({ ...p });
+  const cancelProviderForm = () => setProviderForm(null);
+
+  // Typwechsel im Formular: Name/Präfix nur dann auf den Default des neuen
+  // Typs umstellen, wenn der Nutzer sie noch nicht selbst angepasst hat
+  // (sonst würde ein Typwechsel bereits Getipptes überschreiben).
+  const changeProviderType = (type) => {
+    setProviderForm((f) => {
+      if (!f) return f;
+      const oldInfo = PROVIDER_TYPE_INFO[f.type];
+      const newInfo = PROVIDER_TYPE_INFO[type];
+      return {
+        ...f,
+        type,
+        name: f.name === oldInfo.defaultName ? newInfo.defaultName : f.name,
+        prefix: f.prefix === oldInfo.defaultPrefix ? newInfo.defaultPrefix : f.prefix,
+      };
+    });
+  };
+
+  // SICHERHEITS-FIX (Review-Finding 3): ein Präfix ohne echten Host (z. B.
+  // das frühere Confluence-Default "https://" allein) matchte jede
+  // http(s)-URL und hätte Zugangsdaten an jeden Host geschickt (Finding S2,
+  // siehe DECISIONS.md #56). providerFormValid verlangt deshalb für JEDEN
+  // Provider-Typ (auch custom – ein Präfix ohne Host ist nie legitim) einen
+  // per new URL() auflösbaren Host mit mindestens einem Punkt (hostOf,
+  // dieselbe Funktion wie die eigentliche Durchsetzung in
+  // sanitizeLinkProviders/lib/linkProviders.jsx – diese Prüfung hier ist nur
+  // die UX-Vorprüfung, die spätere Sanitisierung bleibt der echte
+  // Sicherheits-Gatekeeper).
+  const providerPrefixHost = providerForm ? hostOf(providerForm.prefix.trim()) : null;
+  const providerFormValid =
+    !!providerForm &&
+    !!providerForm.name.trim() &&
+    /^https?:\/\//i.test(providerForm.prefix.trim()) &&
+    !!providerPrefixHost &&
+    providerPrefixHost.includes(".");
+
+  const saveProviderForm = () => {
+    if (!providerForm || !providerFormValid) return;
+    const entry = {
+      id: providerForm.id || ("lp-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7)),
+      type: providerForm.type,
+      name: providerForm.name.trim(),
+      prefix: providerForm.prefix.trim(),
+      icon: providerForm.type === "custom" ? (providerForm.icon || "🔗").trim() : "",
+      pat: providerForm.pat || "",
+      email: providerForm.email || "",
+    };
+    setLinkProvidersState((list) => {
+      const idx = list.findIndex((p) => p.id === entry.id);
+      if (idx === -1) return [...list, entry];
+      const copy = list.slice();
+      copy[idx] = entry;
+      return copy;
+    });
+    setProviderForm(null);
+  };
+
+  const deleteProvider = (id) => setLinkProvidersState((list) => list.filter((p) => p.id !== id));
 
   const field = "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 font-mono";
   const label = "block text-xs font-medium text-slate-600 mb-1 mt-3";
@@ -83,6 +169,123 @@ export default function SettingsDialog({
               <option key={m.id} value={m.id}>{m.label}</option>
             ))}
           </select>
+
+          {/* Link-Provider (v7.9, Nutzerwunsch "DevOps/Confluence-Icons +
+              Titel-Ermittlung"): rein optional, betrifft NICHT die
+              "complete"-Pflichtfeldprüfung oben. Azure DevOps/Confluence
+              funktionieren als Icon bereits OHNE jeden Eintrag hier (siehe
+              lib/linkProviders.jsx, eingebaute Provider) – ein Eintrag hier
+              ergänzt nur ein PAT (schaltet die Titel-Ermittlung frei) bzw.
+              weitere Präfixe/eigene Provider. */}
+          <div className="mt-5 pt-3 border-t border-slate-200">
+            <div className="flex items-center gap-1.5 mb-1">
+              <Link2 size={14} className="text-indigo-700" />
+              <span className="text-sm font-semibold text-slate-800">Link-Provider</span>
+            </div>
+            <p className="text-xs text-slate-400 mb-2">
+              Zugangsdaten bleiben nur auf diesem Gerät (localStorage) und
+              landen nie in einem Repo. Azure DevOps- und Confluence-Links
+              bekommen ihr Icon auch ohne Eintrag hier – erst ein Eintrag mit
+              Zugangsdaten schaltet die automatische Titel-Ermittlung frei.
+            </p>
+
+            {linkProviders.length > 0 && (
+              <ul className="mb-2 space-y-1">
+                {linkProviders.map((p) => (
+                  <li key={p.id} className="flex items-center gap-2 px-2 py-1.5 rounded-lg border border-slate-200 bg-slate-50">
+                    <ProviderIcon provider={p} className="shrink-0" />
+                    <span className="text-sm text-slate-800 truncate">{p.name}</span>
+                    <span className="text-xs text-slate-400 font-mono truncate flex-1">{p.prefix}</span>
+                    <button onClick={() => startEditProvider(p)}
+                      className="p-1 rounded text-slate-500 hover:bg-slate-200" title="Bearbeiten">
+                      <Pencil size={13} />
+                    </button>
+                    <button onClick={() => deleteProvider(p.id)}
+                      className="p-1 rounded text-rose-600 hover:bg-rose-50" title="Löschen">
+                      <Trash2 size={13} />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {!providerForm ? (
+              <button
+                onClick={startAddProvider}
+                className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs hover:bg-slate-50"
+              >
+                <Plus size={13} /> Provider hinzufügen
+              </button>
+            ) : (
+              <div className="p-2.5 rounded-lg border border-indigo-200 bg-indigo-50/40">
+                <label className={label + " mt-0"}>Typ</label>
+                <select className={field} value={providerForm.type} onChange={(e) => changeProviderType(e.target.value)}>
+                  <option value="azure-devops">Azure DevOps</option>
+                  <option value="confluence">Confluence</option>
+                  <option value="custom">Eigener Anbieter</option>
+                </select>
+
+                <label className={label}>Name</label>
+                <input className={field} value={providerForm.name}
+                  onChange={(e) => setProviderForm((f) => ({ ...f, name: e.target.value }))} />
+
+                <label className={label}>URL-Präfix</label>
+                <input className={field} value={providerForm.prefix}
+                  onChange={(e) => setProviderForm((f) => ({ ...f, prefix: e.target.value }))}
+                  placeholder="https://…" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
+
+                {providerForm.type === "azure-devops" && (
+                  <>
+                    <label className={label}>Personal Access Token (Work Items: Read)</label>
+                    <input className={field} type="password" autoComplete="off" value={providerForm.pat}
+                      onChange={(e) => setProviderForm((f) => ({ ...f, pat: e.target.value }))}
+                      placeholder="optional – schaltet Titel-Ermittlung frei" />
+                  </>
+                )}
+
+                {providerForm.type === "confluence" && (
+                  <>
+                    <label className={label}>E-Mail (Atlassian-Konto)</label>
+                    <input className={field} value={providerForm.email} autoComplete="off"
+                      onChange={(e) => setProviderForm((f) => ({ ...f, email: e.target.value }))}
+                      placeholder="optional – für Titel-Ermittlung" />
+                    <label className={label}>API-Token</label>
+                    <input className={field} type="password" autoComplete="off" value={providerForm.pat}
+                      onChange={(e) => setProviderForm((f) => ({ ...f, pat: e.target.value }))}
+                      placeholder="optional – schaltet Titel-Ermittlung frei" />
+                    <p className="text-xs text-slate-400 mt-1">
+                      Automatische Titel-Ermittlung scheitert je nach
+                      Atlassian-CORS-Policy – dann Titel manuell eintragen.
+                    </p>
+                  </>
+                )}
+
+                {providerForm.type === "custom" && (
+                  <>
+                    <label className={label}>Icon (Emoji)</label>
+                    <input className={field} value={providerForm.icon} maxLength={4}
+                      onChange={(e) => setProviderForm((f) => ({ ...f, icon: e.target.value }))}
+                      placeholder="🔗" />
+                  </>
+                )}
+
+                <div className="flex items-center gap-1.5 mt-3">
+                  <button
+                    onClick={saveProviderForm}
+                    disabled={!providerFormValid}
+                    className={"px-2 py-1 rounded bg-indigo-700 text-white text-xs " +
+                      (providerFormValid ? "hover:bg-indigo-800" : "opacity-40")}
+                  >
+                    {providerForm.id ? "Übernehmen" : "Hinzufügen"}
+                  </button>
+                  <button onClick={cancelProviderForm}
+                    className="px-2 py-1 rounded border border-slate-300 text-slate-600 text-xs hover:bg-slate-50">
+                    Abbrechen
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
 
           {error && (
             <div className="mt-3 px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800">

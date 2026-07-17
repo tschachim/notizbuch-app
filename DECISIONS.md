@@ -1533,3 +1533,258 @@ aus `referenz-app.jsx` übernommen.
         Link. Akzeptiert (Backtracking-Schutz wiegt schwerer, 300 Zeichen
         sind für einen Linktitel bereits weit jenseits jeder sinnvollen
         Länge).
+
+56. **Link-Provider: DevOps/Confluence-Icons + Titel-Ermittlung**
+    (`src/lib/linkProviders.jsx`, `src/lib/markdown.jsx`,
+    `src/components/DocEditor.jsx`, `src/components/SettingsDialog.jsx`,
+    `src/lib/settings.js`, v7.9, Nutzerwunsch: Links auf Azure-DevOps-
+    Work-Items/Confluence-Seiten sollen im Viewer UND Editor ein
+    Provider-Icon vor dem Link zeigen, und der Linktitel soll sich im
+    Editor auf Knopfdruck aus dem Ziel ermitteln lassen).
+    - **Neues Blatt-Modul `src/lib/linkProviders.jsx`:** importiert NICHTS
+      aus `markdown.jsx`/`math.jsx`/`DocEditor.jsx` (Zirkelbezug-Regel wie
+      `code.jsx`) – `markdown.jsx` UND `DocEditor.jsx` importieren
+      umgekehrt AUS dieser Datei. Die Titel-Bereinigungsregel (bisher nur
+      als `validateLinkTitle` in `DocEditor.jsx`, siehe Punkt 55) wurde
+      dafür nach hier verschoben (`cleanupLinkTitle`) – `DocEditor.jsx`s
+      `validateLinkTitle` ist jetzt ein dünner, weiterhin exportierter
+      Wrapper darum, damit ein automatisch ermittelter Titel (z. B. von
+      Azure DevOps) durch GENAU dieselbe Prüfung läuft wie ein manuell
+      eingegebener, ohne die Regel doppelt zu pflegen oder einen
+      Zirkelimport zu brauchen.
+    - **Eingebaute vs. konfigurierte Provider:** Zwei Provider sind IMMER
+      aktiv, ganz ohne Konfiguration – nur Icon, KEIN PAT, KEIN Fetch:
+      Azure DevOps (fester Präfix `https://dev.azure.com/`, zentral
+      gehostet) und Confluence (Host-MUSTER `*.atlassian.net`, weil
+      Confluence Cloud pro Kunde unter einer eigenen Subdomain läuft – ein
+      fester Präfix wäre hier unmöglich; die nackte Domain `atlassian.net`
+      OHNE Team-Subdomain zählt bewusst NICHT als Treffer). Der
+      Einstellungen-Dialog erlaubt zusätzlich, Provider mit Zugangsdaten zu
+      KONFIGURIEREN (localStorage, siehe unten) – typischerweise MIT
+      demselben Präfix wie ein eingebauter Provider, nur um ein PAT zu
+      hinterlegen. **`providerFor(url, configured)`-Regel: ein
+      konfigurierter Provider gewinnt IMMER gegen einen eingebauten,
+      unabhängig von der Präfixlänge** (sonst bliebe der eingebaute,
+      PAT-lose Provider – trotz Nutzer-Konfiguration – der Treffer, und die
+      Titel-Ermittlung bliebe unerreichbar); NUR innerhalb einer Kategorie
+      (konfiguriert bzw. eingebaut) entscheidet der LÄNGSTE Präfix.
+      Matching ist eine reine String-/Host-Prüfung ohne jeden Netzzugriff.
+    - **Sicherheitsregel 1 (Gerätelokalität): Provider-PAT/E-Mail leben
+      AUSSCHLIESSLICH im localStorage-Settings-Objekt**, exakt wie der
+      GitHub-PAT/Anthropic-API-Key (`src/lib/settings.js`,
+      `notizbuch:settings`) – Konsequenz: Provider müssen PRO GERÄT neu
+      konfiguriert werden (kein Sync über `state.json`). `serializeState`
+      (`src/App.jsx`) nimmt strukturell gar kein `settings`-Objekt entgegen
+      (nur Chat/Modell/Collapsed/aktives Notizbuch/Reihenfolge/
+      Schnellnotizen) – ein Provider-PAT kann dadurch gar nicht erst in
+      `state.json` landen, keine zusätzliche Filterung nötig. Test
+      (`tests/linkProviders.test.jsx`) baut einen realitätsnahen Zustand
+      (Chat, Schnellnotizen, konfigurierte Provider MIT PAT über
+      `setLinkProviders`) und prüft, dass `serializeState`s Ausgabe weder
+      den PAT-Wert noch den Schlüssel `linkProviders` enthält.
+    - **Sicherheitsregel 2 (kein Netzzugriff beim Rendern): Icons kommen
+      ausschließlich aus `providerFor()`**, einer reinen URL-Präfix-/
+      Host-Prüfung. Der Titel-Fetch (`fetchLinkTitle`) läuft NUR auf
+      explizite Nutzeraktion im Link-Popover (neuer Knopf „Titel
+      ermitteln“, sichtbar/aktiv nur wenn die eingegebene URL zu einem
+      KONFIGURIERTEN Provider MIT Zugangsdaten passt – `custom`-Provider
+      unterstützen grundsätzlich keine Titel-Ermittlung, kein bekanntes
+      REST-API) – niemals automatisch beim Tippen/Anzeigen.
+    - **`fetchLinkTitle(url, provider, { fetchImpl, timeoutMs })` wirft
+      NIE**, liefert `{ ok:true, title }` oder `{ ok:false, reason }`.
+      Azure DevOps: `GET …/_apis/wit/workitems/{id}?fields=System.Title,
+      System.WorkItemType&api-version=7.1` mit Basic-Auth (`":"+PAT`),
+      Titel-Format `"{WorkItemType} {id}: {System.Title}"`. Confluence:
+      Seiten-ID aus `/wiki/spaces/{space}/pages/{id}` geparst, `GET
+      …/wiki/rest/api/content/{id}` mit Basic-Auth (`E-Mail+":"+API-Token`),
+      Titel aus dem `title`-Feld. **Bekannte Grenze (dokumentiert, kein
+      Bug):** Atlassian Cloud blockiert Browser-CORS für die Content-API
+      häufig – ein `fetch`-Netzwerkfehler (`TypeError`, keine weiteren
+      Details verfügbar) wird zu einer verständlichen
+      `"Netzwerk/CORS-Fehler …"`-reason normalisiert; das Icon funktioniert
+      in diesem Fall trotzdem weiter (kommt ja ohne Netzzugriff aus), nur
+      die automatische Titel-Ermittlung scheitert – der Einstellungen-
+      Dialog weist bei Confluence explizit darauf hin. Ein
+      `AbortController`-Timeout (~6 s) verhindert ein hängendes Popover.
+      Ein ermittelter Titel läuft durch `cleanupLinkTitle` – ist er rein
+      numerisch (z. B. eine Confluence-Seite, die zufällig „2024“ heißt),
+      wird er wie ein manuell eingegebener abgelehnt (Fußnoten-Kollision,
+      siehe Punkt 55), der Nutzer trägt den Titel dann manuell ein.
+    - **Icons:** zwei kleine, bewusst VEREINFACHTE Inline-SVGs (Azure
+      DevOps/Confluence, ~13 px, Markenfarbe, `aria-hidden`) – KEIN
+      pixelgenauer Marken-Logo-Nachbau (fragile Handarbeits-Pfade wären
+      nicht Ziel dieses Features), Farbe+Form dienen nur als
+      Wiedererkennungs-Hinweis. Die Form-Daten stecken je Provider in EINER
+      Konstante, die ZWEI Renderer konsumieren: React-Komponenten
+      (`AzureDevOpsIcon`/`ConfluenceIcon`/`ProviderIcon`, für den Viewer)
+      UND `buildProviderIconDom` (rohes DOM-Element ohne React, für die
+      ProseMirror-Widget-Decoration im Editor) – die Optik bleibt dadurch
+      an genau einer Stelle definiert. `custom`-Provider zeigen statt eines
+      SVGs das vom Nutzer hinterlegte Emoji (Fallback 🔗).
+    - **Viewer (`src/lib/markdown.jsx`):** vor den drei generischen
+      Link-Formen (`[Titel](url)` mit sprechendem Titel, `<url>`-Autolink,
+      nackte URL im Fließtext – siehe Punkt 55) wird bei Provider-Match ein
+      `<span aria-hidden>`-Icon davor gerendert; Quellen-Fußnoten
+      (`[n](url)`, `<sup>`) bekommen NIE ein Icon (eigener Rendering-Zweig,
+      der die Icon-Komponente gar nicht aufruft). Zugriff auf die
+      Provider-Liste über `getLinkProviders()` (Modul-Registry, siehe
+      unten) statt über ein neues Prop quer durch `DocView`.
+    - **Editor (`src/components/DocEditor.jsx`):** `LinkDecorations`
+      (Punkt 55) bekommt zusätzlich zur `cite-link`/`doc-link`-Klasse eine
+      `Decoration.widget` mit dem Icon-DOM-Knoten VOR jedem `doc-link`-Run
+      mit Provider-Match (`cite-link`-Runs nie) – läuft wie die
+      Klassenvergabe NUR beim Dokument-Rebuild (`tr.docChanged`), keine
+      zusätzliche Performance-Last bei reinem Cursor-Bewegen. Decorations
+      sind reine View-Ebene und beeinflussen `editor.storage.markdown.
+      getMarkdown()` strukturell nicht (Test: No-op-Roundtrip bleibt auch
+      mit sichtbarem Icon-Widget byte-identisch). Neuer Knopf „Titel
+      ermitteln“ (lucide `Sparkles`, Spinner via `Loader2` während des
+      Fetches) im Link-Popover, sichtbar nur bei Provider-Match MIT
+      Zugangsdaten (`providerHasCredentials`); Klick füllt bei Erfolg NUR
+      das Titelfeld (Nutzer kann vor dem Einfügen noch anpassen), bei
+      Fehler erscheint die `reason` in der bestehenden Fehleranzeige des
+      Popovers. Kein Auto-Fetch beim Tippen (Sicherheitsregel 2).
+    - **Einstellungen (`src/components/SettingsDialog.jsx`,
+      `src/lib/settings.js`, `src/App.jsx`):** neues, optionales Feld
+      `linkProviders` (Array) – betrifft NICHT die bestehende
+      Pflichtfeld-Prüfung (owner/repo/pat/apiKey). `loadSettings` filtert
+      kaputte Einträge defensiv über `sanitizeLinkProviders`
+      (`linkProviders.jsx`, zirkelfrei importierbar aus `settings.js`,
+      da `linkProviders.jsx` selbst ein Blatt ist); `setLinkProviders`
+      wendet dieselbe Sanitisierung nochmal an (Defense-in-Depth). Neuer
+      Abschnitt „Link-Provider“ im Dialog: Liste konfigurierter Provider
+      (Icon/Name/Präfix, Bearbeiten/Löschen) + Formular „Provider
+      hinzufügen“ (Typ-Select mit typspezifischen Default-Werten für
+      Name/Präfix, PAT bzw. E-Mail+API-Token als `type="password"`
+      `autoComplete="off"`, bei `custom` ein Emoji-Feld statt
+      Zugangsdaten) mit Hinweistext zur Gerätelokalität und zur
+      Confluence-CORS-Grenze. `App.jsx` ruft `setLinkProviders(...)` beim
+      Settings-Load UND -Save auf; Abmelden (`clearSettings`) setzt die
+      Registry zusätzlich explizit auf `[]` zurück (auch wenn der
+      anschließende `window.location.reload()` das ohnehin täte – explizit
+      für Testbarkeit/Klarheit).
+    - **Modul-Registry-Muster:** `setLinkProviders(list)`/
+      `getLinkProviders()` sind ein einfacher In-Modul-Zustand (kein neues
+      Prop quer durch `DocView`/`DocEditor`, die an mehreren Stellen in
+      `App.jsx` eingebunden werden) – `App.jsx` ist die EINZIGE Schreib-
+      stelle, `markdown.jsx`/`DocEditor.jsx` lesen nur. Gleiches
+      Grundmuster wie die bereits bestehenden zentralen Hilfsmodule
+      (`math.jsx`/`code.jsx`), nur mit echtem veränderlichem Zustand statt
+      reiner Funktionen.
+    - **Tests:** `tests/linkProviders.test.jsx` (neu) – `providerFor`
+      (längster Präfix je Kategorie, konfiguriert schlägt eingebaut auch
+      bei kürzerem Präfix, kein Match, Confluence-Host-Muster inkl.
+      „nackte Domain matcht nicht“, Groß/Klein); `parseWorkItemUrl`
+      (gültig, Query/Hash, Trailing-Slash, URL-encodetes Projekt, fehlende
+      ID, fremder Pfad/Host, zusätzliche Pfadsegmente); `fetchLinkTitle`
+      mit gemocktem `fetchImpl` (DevOps-Erfolg inkl. Titel-Format,
+      Klammer-Bereinigung im Titel, 401/404, Netzwerk-/CORS-`TypeError`,
+      `AbortController`-Timeout, Confluence-Erfolg + rein-numerischer
+      Titel wird abgelehnt + CORS-Fall, custom/ohne-PAT-Ablehnung OHNE
+      `fetchImpl`-Aufruf); `providerHasCredentials`; `cleanupLinkTitle`;
+      `sanitizeLinkProviders`/Registry; Icon-Komponenten
+      (`renderToStaticMarkup`); die Sicherheits-Test aus Regel 1 (siehe
+      oben). `tests/markdown.test.jsx` – neuer Block „Link-Provider-Icons“
+      (DevOps-Icon vor Link/nackter URL, KEIN Icon vor Fußnote, custom-
+      Emoji, kein Icon ohne Provider). `tests/docEditorLinks.test.jsx` –
+      neuer Block „Provider-Icon-Decoration“ (Widget-Klasse vor DevOps-/
+      Confluence-Link, custom-Emoji im Widget, kein Widget vor Fußnote/
+      ohne Provider, No-op-Roundtrip bleibt mit sichtbarem Icon-Widget
+      byte-identisch). `tests/misc.test.js` – `loadSettings` mit/ohne/
+      kaputtem `linkProviders`; bestehender Roundtrip-Test angepasst
+      (erwartet jetzt zusätzlich `linkProviders: []`).
+    - Restrisiken: (a) Die beiden Icon-SVGs sind bewusst KEINE exakten
+      Marken-Logos – rein visuelle Vereinfachung, kein funktionales Risiko.
+      (b) Die Confluence-Titel-Ermittlung scheitert je nach Atlassian-
+      CORS-Policy häufig aus dem Browser heraus – dokumentierte Grenze,
+      Nutzer trägt den Titel dann manuell ein, im Dialog vermerkt. (c) ~~Ein
+      Provider-PAT mit demselben Präfix wie ein eingebauter Provider
+      gewinnt IMMER gegen diesen, selbst wenn der Nutzer versehentlich ein
+      viel zu kurzes/allgemeines Präfix konfiguriert (z. B. nur
+      `https://`) – … Akzeptiert …~~ **KORRIGIERT, siehe Nachbesserung
+      unten** – dieses „akzeptierte" Restrisiko war tatsächlich als
+      Credential-Exfiltration ausnutzbar und wurde im Sicherheits-Review vor
+      dem Commit als 🔴-Finding gemeldet und behoben, nicht länger
+      akzeptiert.
+    - **Nachbesserung (Sicherheits-Review vor dem Commit, v7.9 bleibt v7.9 –
+      reine Korrektur des noch uncommitteten Stands, kein neues Feature):**
+      Der Code-Reviewer fand, dass ein Confluence-Link-Titel-Fetch
+      Zugangsdaten an einen FREMDEN Host schicken konnte, wenn der
+      Provider-Präfix keinen Trailing-Slash hatte oder (Nutzerfehler,
+      Restrisiko c oben) keinen echten Host enthielt. Drei zusammenwirkende
+      Ursachen, alle behoben:
+      1. **Host-Verankerung in `fetchLinkTitle`** (`src/lib/linkProviders.jsx`,
+         Confluence-Zweig, 🔴 primärer Fix): Die API-URL/der Basic-Auth-
+         Header wurden aus dem Host der EINGEGEBENEN Link-URL gebaut
+         (`cm[1]`, aus `CONFLUENCE_PAGE_URL_RE`), nicht aus dem Host des
+         KONFIGURIERTEN Providers – jede beliebige
+         `*/wiki/spaces/*/pages/*`-URL, unabhängig vom Host, hätte das PAT/
+         die E-Mail dorthin geschickt. Fix: vor dem Senden wird
+         `hostOf(cm[1])` gegen `hostOf(provider.prefix)` verglichen, bei
+         Nichtübereinstimmung (oder wenn der Provider-Präfix gar keinen
+         Host liefert) bricht `fetchLinkTitle` MIT
+         `{ ok:false, reason:"URL-Host passt nicht zum konfigurierten
+         Provider." }` ab, OHNE `fetchImpl` aufzurufen. Bewusst als
+         eigenständige Prüfung IN `fetchLinkTitle` selbst (nicht nur in
+         `providerFor`/`matchLength`) – Defense-in-Depth: die Stelle, die
+         tatsächlich Zugangsdaten verschickt, darf sich nicht blind auf eine
+         vorgelagerte Auswahl verlassen.
+      2. **`matchLength`-Grenzhärtung** (`src/lib/linkProviders.jsx`, 🟡):
+         ein reines `startsWith()` ist keine URL-Grenze – ein Präfix
+         `https://acme.atlassian.net` (ohne `/`) matchte bisher auch
+         `https://acme.atlassian.net.evil.example/…` (Suffix-Angriff: der
+         Präfix-String ist zwar ein Zeichenketten-Präfix, aber eine ANDERE
+         Autorität). Fix: ein Präfix ohne abschließenden `/` matcht nur noch,
+         wenn das Zeichen der URL unmittelbar danach `/`, `?`, `#` oder das
+         Stringende ist. Deckt zugleich das (nicht separat behobene, aber
+         dadurch automatisch entschärfte) Icon-Spoofing-Risiko ab: ein
+         fremder Host bekam vorher unter Umständen auch fälschlich ein
+         Provider-Icon im Viewer/Editor angezeigt.
+      3. **`sanitizeLinkProviders` verlangt einen echten Host im Präfix**
+         (`src/lib/linkProviders.jsx`, 🟡 – die eigentliche
+         Durchsetzungsstelle, da sie sowohl beim `loadSettings` als auch bei
+         jedem `setLinkProviders`-Aufruf läuft): ein Präfix ohne Host (der
+         alte Confluence-Formular-Default `https://` allein!) matchte über
+         den `endsWith("/")`-Kurzschluss in `matchLength` JEDE http(s)-URL –
+         ein Nutzer, der das Präfix-Feld beim Anlegen eines
+         Confluence-Providers versehentlich unverändert ließ, hätte damit
+         PAT+E-Mail an jeden beliebigen Host geschickt, sobald der
+         „Titel ermitteln"-Knopf für IRGENDEINEN `*/wiki/spaces/*/pages/*`-
+         Link erschien. Fix: `hasRealHostPrefix()` verlangt `new
+         URL(prefix)`-Parsbarkeit UND einen Host mit mindestens einem Punkt
+         – gilt für ALLE Provider-Typen (auch `custom`, ein Präfix ohne Host
+         ist nie legitim). `PROVIDER_TYPE_INFO.confluence.defaultPrefix`
+         wurde von `"https://"` auf `""` geändert (kein Platzhalter, der
+         ohnehin ungültig wäre – der Nutzer muss aktiv den eigenen
+         `*.atlassian.net`-Tenant eintragen); `SettingsDialog.jsx`s
+         `providerFormValid` spiegelt dieselbe Host-Regel als
+         UX-Vorprüfung (importiert das jetzt exportierte `hostOf` aus
+         `linkProviders.jsx`, keine zweite Kopie der Logik).
+      - **Tests:** `tests/linkProviders.test.jsx` – neuer Block
+        „Sicherheit: Confluence-Credentials gehen NUR an den Host des
+        konfigurierten Providers" (Suffix-Angriffs-URL wird abgelehnt OHNE
+        `fetchImpl` je aufzurufen, per `vi.fn()`-Spy geprüft; ein per
+        Direktkonstruktion hostloser Provider `https://` fetcht ebenfalls
+        nie; Positiv-Kontrolle mit legitimer URL funktioniert weiter;
+        `sanitizeLinkProviders` lässt ein hostloses Präfix nicht in die
+        Registry, auch nicht bei `custom`); zwei neue `matchLength`-
+        Grenzfälle in der `providerFor`-Suite (Präfix ohne `/` matcht den
+        echten Host, nicht den Suffix-Angriffshost; URL exakt gleich dem
+        Präfix matcht noch; ein direkt angehängtes Zeichen ohne Trenner
+        matcht nicht). Empirisch am Review-Tag zusätzlich per Isolations-
+        Probe verifiziert (alte vs. neue `matchLength`-Logik gegeneinander
+        mit denselben Angriffs-Strings ausgeführt): S1 (Suffix-Angriff)
+        matchte ALT, NEU nicht mehr; S2 (hostloses `https://`-Präfix) matcht
+        auf reiner `matchLength`-Ebene weiterhin (das ist erwartet – Fix 2
+        allein deckt S2 nicht ab, siehe oben), wird aber durch Fix 3
+        (kann gar nicht erst gespeichert werden) UND Fix 1 (blockiert den
+        Fetch selbst bei einem trotzdem direkt konstruierten hostlosen
+        Provider-Objekt) zuverlässig verhindert.
+      - Bewusst NICHT angefasst (vom Review als 🔵 Nice-to-have eingestuft,
+        auf ausdrücklichen Wunsch für dieses Fix-Paket zurückgestellt):
+        Widget-Decorations ohne explizite `key`-Spezifikation im
+        ProseMirror-Plugin, sowie ein case-insensitiver Pfad-Vergleich in
+        `matchLength` (Pfad-Segmente sind streng genommen case-sensitiv,
+        die aktuelle Groß/Klein-unabhängige Prüfung gilt nur für
+        Schema+Host, s. o. – ein rein pfad-bezogener Edge-Case ohne
+        Sicherheitsrelevanz).

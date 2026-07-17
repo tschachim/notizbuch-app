@@ -154,7 +154,10 @@ describe("settings (localStorage)", () => {
   it("Roundtrip speichert und lädt vollständige Zugangsdaten", () => {
     const s = { owner: "o", repo: "r", pat: "p", apiKey: "k" };
     saveSettings(s);
-    expect(loadSettings()).toEqual(s);
+    // v7.9: loadSettings ergänzt fehlendes linkProviders defensiv zu []
+    // (siehe sanitizeLinkProviders, lib/linkProviders.jsx) – bestehende,
+    // vor v7.9 gespeicherte Settings-Objekte haben dieses Feld noch nicht.
+    expect(loadSettings()).toEqual({ ...s, linkProviders: [] });
     clearSettings();
     expect(loadSettings()).toBeNull();
   });
@@ -163,5 +166,47 @@ describe("settings (localStorage)", () => {
     expect(loadSettings()).toBeNull();
     store.set("notizbuch:settings", "{kaputtes json");
     expect(loadSettings()).toBeNull();
+  });
+
+  // v7.9 (Link-Provider): loadSettings reicht ein GÜLTIGES linkProviders-
+  // Array unverändert (normalisiert) durch und filtert kaputte Einträge
+  // defensiv heraus, statt an einem manuell editierten/älteren
+  // localStorage-Objekt zu crashen.
+  it("gültiges linkProviders-Array bleibt (normalisiert) erhalten", () => {
+    const s = {
+      owner: "o", repo: "r", pat: "p", apiKey: "k",
+      linkProviders: [
+        { id: "lp1", type: "azure-devops", name: "DevOps", prefix: "https://dev.azure.com/", pat: "test-pat" },
+      ],
+    };
+    saveSettings(s);
+    const loaded = loadSettings();
+    expect(loaded.linkProviders).toEqual([
+      { id: "lp1", type: "azure-devops", name: "DevOps", prefix: "https://dev.azure.com/", icon: "", pat: "test-pat", email: "" },
+    ]);
+  });
+
+  it("kaputte linkProviders-Einträge werden gefiltert, gültige bleiben", () => {
+    const s = {
+      owner: "o", repo: "r", pat: "p", apiKey: "k",
+      linkProviders: [
+        { id: "ok", type: "custom", name: "Intranet", prefix: "https://intranet.example/", icon: "🏠" },
+        { id: "kaputt-typ", type: "unbekannt", name: "X", prefix: "https://x.example/" }, // unbekannter Typ
+        { id: "kaputt-prefix", type: "custom", name: "Y", prefix: "ftp://y.example/" }, // kein http(s)
+        { name: "ohne-id", type: "custom", prefix: "https://z.example/" }, // fehlende id
+        null,
+        "kaputt",
+      ],
+    };
+    saveSettings(s);
+    const loaded = loadSettings();
+    expect(loaded.linkProviders).toEqual([
+      { id: "ok", type: "custom", name: "Intranet", prefix: "https://intranet.example/", icon: "🏠", pat: "", email: "" },
+    ]);
+  });
+
+  it("fehlendes/kaputtes linkProviders-Feld ergibt ein leeres Array (kein Crash)", () => {
+    saveSettings({ owner: "o", repo: "r", pat: "p", apiKey: "k", linkProviders: "kaputt" });
+    expect(loadSettings().linkProviders).toEqual([]);
   });
 });

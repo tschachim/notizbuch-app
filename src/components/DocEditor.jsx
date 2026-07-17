@@ -21,7 +21,7 @@ import { Markdown } from "tiptap-markdown";
 import {
   Bold, Italic, Code, Code2, List, ListOrdered, ListChecks, Heading2, Heading3,
   Minus, Undo2, Redo2, Strikethrough, Palette, Highlighter, Table as TableIcon,
-  Sigma, SquareFunction, Link2 as LinkIcon,
+  Sigma, SquareFunction, Link2 as LinkIcon, Sparkles, Loader2,
 } from "lucide-react";
 import {
   mathToPlaceholders, renderKatexHtml, MATH_SERIALIZED_RE, MATH_INLINE_TAG, MATH_BLOCK_TAG,
@@ -29,6 +29,10 @@ import {
 } from "../lib/math.jsx";
 import { splitFenceSegments } from "../lib/code.jsx";
 import { LINK_URL_RE } from "../lib/markdown.jsx";
+import {
+  cleanupLinkTitle, providerFor, providerHasCredentials, fetchLinkTitle,
+  getLinkProviders, buildProviderIconDom,
+} from "../lib/linkProviders.jsx";
 
 /* WYSIWYG-Editor für die manuelle Bearbeitung der Wissensbasis.
    TipTap mit Markdown-Round-Trip, beschränkt auf den Dialekt, den der
@@ -619,6 +623,20 @@ function computeLinkDecorations(doc) {
     if (run) {
       const isCite = /^\d+$/.test(run.text);
       decos.push(Decoration.inline(run.from, run.to, { class: isCite ? "cite-link" : "doc-link" }));
+      // Provider-Icon (v7.9): NUR vor generischen Links, NIE vor einer
+      // Quellen-Fußnote (Sicherheitsregel 2 im Auftrag – Icons rein aus dem
+      // URL-Präfix, ohne jeden Netzzugriff, siehe providerFor/
+      // lib/linkProviders.jsx). Läuft wie die Klassenvergabe oben NUR beim
+      // Rebuild (docChanged, siehe apply() unten), nicht bei jedem
+      // Selektionswechsel.
+      if (!isCite) {
+        const provider = providerFor(run.href, getLinkProviders());
+        if (provider) {
+          decos.push(
+            Decoration.widget(run.from, () => buildProviderIconDom(provider), { side: -1 })
+          );
+        }
+      }
     }
     run = null;
   };
@@ -679,15 +697,18 @@ export const LinkDecorations = Extension.create({
 // bewusst aus) mitten im Titel beenden und den Link zerschneiden. Beide
 // Funktionen sind exportiert (wie unescapeMd/MdTable oben), damit Tests
 // die ECHTEN Funktionen prüfen statt einer im Test nachgebauten Kopie.
+//
+// v7.9: Die eigentliche Regel steckt jetzt in cleanupLinkTitle
+// (lib/linkProviders.jsx) – ein automatisch per "Titel ermitteln" (siehe
+// unten) ermittelter Titel (z. B. von Azure DevOps) muss durch GENAU
+// dieselbe Prüfung laufen wie ein manuell eingegebener, und
+// linkProviders.jsx darf aus Zirkelbezug-Gründen nicht aus DocEditor.jsx
+// importieren (siehe Kopfkommentar dort) – also läuft der Import in
+// dieser Richtung: DocEditor.jsx nutzt cleanupLinkTitle, statt die Regel
+// ein zweites Mal zu pflegen. validateLinkTitle bleibt als Name/Export
+// erhalten (bestehende Tests/Aufrufer referenzieren ihn).
 export function validateLinkTitle(raw) {
-  const title = String(raw ?? "").trim();
-  if (!title) return { error: "Bitte einen Titel angeben." };
-  if (/^\d+$/.test(title)) {
-    return {
-      error: "Reine Zahlen sind für Quellen-Fußnoten reserviert – bitte einen sprechenden Titel wählen.",
-    };
-  }
-  return { title: title.replace(/\[/g, "(").replace(/\]/g, ")") };
+  return cleanupLinkTitle(raw);
 }
 
 // URL-Validierung/-Normalisierung für den Link-Dialog: fehlt ein Schema,
@@ -766,6 +787,9 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
   // Formularzustand des Link-Popovers (siehe openLinkPicker/applyLink
   // unten); null solange das Popover geschlossen ist.
   const [linkForm, setLinkForm] = useState(null); // { title, url, error, existing }
+  // "Titel ermitteln" (v7.9): true während fetchLinkTitle läuft (Spinner im
+  // Knopf, siehe fetchTitleForLink unten).
+  const [titleFetching, setTitleFetching] = useState(false);
   // TipTap feuert Transaktionen ohne React-Re-Render; kleiner Zähler,
   // damit die Aktiv-Zustände der Toolbar-Knöpfe mitziehen.
   const [, setTick] = useState(0);
@@ -912,7 +936,42 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
     const title = editor.state.doc.textBetween(from, to, " ");
     const url = hadLink ? editor.getAttributes("link").href || "" : "";
     setLinkForm({ title, url, error: null, existing: hadLink });
+    setTitleFetching(false);
     setPicker("link");
+  };
+
+  // "Titel ermitteln" (v7.9): NUR aktiv, wenn die aktuell eingegebene URL zu
+  // einem KONFIGURIERTEN Provider MIT Zugangsdaten passt (providerFor +
+  // providerHasCredentials, lib/linkProviders.jsx) – ein eingebauter
+  // Provider (nur Icon, kein PAT) oder ein custom-Provider (kein bekanntes
+  // API) liefert hier bewusst null, der Knopf bleibt dann unsichtbar. Die
+  // URL wird vorher durch normalizeLinkUrl geschickt (gleiche Normalisierung
+  // wie beim Einfügen), damit z. B. eine noch ohne "https://" eingegebene
+  // URL trotzdem erkannt wird; ein aktueller Normalisierungsfehler (leere
+  // URL, falsches Schema) liefert schlicht keinen Provider.
+  const linkTitleProvider = (() => {
+    if (!linkForm) return null;
+    const n = normalizeLinkUrl(linkForm.url);
+    if (n.error) return null;
+    const p = providerFor(n.url, getLinkProviders());
+    return p && providerHasCredentials(p) ? p : null;
+  })();
+
+  // Fetch läuft AUSSCHLIESSLICH auf diesen Klick (Sicherheitsregel 2 im
+  // Auftrag) – niemals automatisch beim Tippen. Ein Fehler wird in
+  // linkForm.error angezeigt (bestehende Fehleranzeige im Popover), ein
+  // Erfolg füllt NUR das Titelfeld – der Nutzer kann das Ergebnis vor dem
+  // Einfügen noch anpassen.
+  const fetchTitleForLink = async () => {
+    if (!linkTitleProvider || titleFetching) return;
+    const n = normalizeLinkUrl(linkForm.url);
+    if (n.error) return;
+    setTitleFetching(true);
+    const res = await fetchLinkTitle(n.url, linkTitleProvider);
+    setTitleFetching(false);
+    setLinkForm((f) =>
+      f ? (res.ok ? { ...f, title: res.title, error: null } : { ...f, error: res.reason }) : f
+    );
   };
 
   // Ersetzt die aktuelle Selektion (bzw. fügt an der Cursor-Position ein)
@@ -935,12 +994,14 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
     }).run();
     setPicker(null);
     setLinkForm(null);
+    setTitleFetching(false);
   };
 
   const removeLink = () => {
     editor.chain().focus().extendMarkRange("link").unsetLink().run();
     setPicker(null);
     setLinkForm(null);
+    setTitleFetching(false);
   };
 
   const openLinkUrl = () => {
@@ -1062,6 +1123,19 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
                 placeholder="https://…"
                 className="w-full mb-2 px-2 py-1 text-sm border border-slate-300 rounded"
               />
+              {linkTitleProvider && (
+                <button
+                  type="button"
+                  onClick={fetchTitleForLink}
+                  disabled={titleFetching}
+                  title={"Titel automatisch von " + linkTitleProvider.name + " ermitteln"}
+                  className={"mb-2 inline-flex items-center gap-1 px-2 py-1 rounded border border-indigo-200 text-indigo-700 text-xs " +
+                    (titleFetching ? "opacity-50" : "hover:bg-indigo-50")}
+                >
+                  {titleFetching ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+                  Titel ermitteln
+                </button>
+              )}
               {linkForm.error && <div className="mb-2 text-xs text-rose-700">{linkForm.error}</div>}
               <div className="flex items-center gap-1.5">
                 <button onClick={applyLink}

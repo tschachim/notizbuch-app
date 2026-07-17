@@ -12,6 +12,7 @@ import {
   DISPLAY_MATH_START_RE, matchDisplayBlock,
 } from "./math.jsx";
 import { FENCE_OPEN_RE, matchFenceBlock, splitFenceSegments, CodeBlockView } from "./code.jsx";
+import { providerFor, getLinkProviders, ProviderIcon } from "./linkProviders.jsx";
 
 export const IMG_LINE_RE = /^!\[([^\]]*)\]\(img:([a-zA-Z0-9]+)\)$/;
 export const IMG_REF_RE = /!\[[^\]]*\]\(img:([a-zA-Z0-9]+)\)/g;
@@ -248,6 +249,25 @@ function trimBareUrl(url) {
 const DOC_LINK_CLASS =
   "text-indigo-700 underline decoration-indigo-300 hover:decoration-indigo-600 break-all";
 
+// Provider-Icon vor einem generischen Link (v7.9, Nutzerwunsch
+// "DevOps/Confluence-Icons"): NUR aus dem URL-Präfix bestimmt (providerFor,
+// lib/linkProviders.jsx – reine String-Prüfung, KEIN Netzzugriff, siehe
+// Sicherheitsregel 2 im Auftrag), NIE vor einer Quellen-Fußnote (die läuft
+// über einen eigenen Zweig in renderInline, der diese Komponente gar nicht
+// aufruft, siehe unten). getLinkProviders() liest die Modul-Registry, die
+// App.jsx beim Settings-Load/-Save befüllt (setLinkProviders) – kein neues
+// Prop quer durch DocView hindurch nötig, analog zum bereits bestehenden
+// Muster für Bild-/Toggle-Callbacks, nur eben ohne Callback (reiner Lesezugriff).
+function ProviderLinkIcon({ url }) {
+  const provider = providerFor(url, getLinkProviders());
+  if (!provider) return null;
+  return (
+    <span className="inline-flex items-center align-middle mr-1" aria-hidden="true">
+      <ProviderIcon provider={provider} />
+    </span>
+  );
+}
+
 // Zerlegt einen von INLINE_TOKEN_RE bereits erkannten "[Titel](url)"-Treffer
 // in Titel/URL. War bislang eine zweite, im renderInline-Zweig ad-hoc
 // gebaute Kopie derselben Obermengen-Regex (Review-Finding 3 des
@@ -286,6 +306,7 @@ function renderInline(text) {
       // nach "<" verlangt wird (span/mark-Tags erfüllen das nie).
       const autoM = /^<(https?:\/\/[^\s>]+)>$/.exec(tok);
       if (autoM) {
+        parts.push(<ProviderLinkIcon key={k++} url={autoM[1]} />);
         parts.push(
           <a
             key={k++}
@@ -327,6 +348,7 @@ function renderInline(text) {
       // abgeschnittener Punkt) bleibt als normaler Text stehen und läuft
       // beim nächsten Schleifendurchlauf einfach mit durch.
       const url = trimBareUrl(tok);
+      parts.push(<ProviderLinkIcon key={k++} url={url} />);
       parts.push(
         <a key={k++} href={url} target="_blank" rel="noopener noreferrer" title={url} className={DOC_LINK_CLASS}>
           {url}
@@ -360,6 +382,7 @@ function renderInline(text) {
           </sup>
         );
       } else {
+        parts.push(<ProviderLinkIcon key={k++} url={url} />);
         parts.push(
           <a key={k++} href={url} target="_blank" rel="noopener noreferrer" title={url} className={DOC_LINK_CLASS}>
             {renderInline(title)}

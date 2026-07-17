@@ -1,6 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { DocView, parseTree, renumberCitations, TASK_RE, IMG_LINE_RE } from "../src/lib/markdown.jsx";
+import { setLinkProviders } from "../src/lib/linkProviders.jsx";
 
 const render = (text, imgMap = {}) =>
   renderToStaticMarkup(
@@ -284,6 +285,60 @@ describe("DocView: generische Links (v7.8)", () => {
     expect(html300).toContain(">" + t300 + "</a>");
     expect(html301).toContain("[" + t301 + "](");
     expect(html301).not.toContain(">" + t301 + "</a>");
+  });
+});
+
+// v7.9 (Nutzerwunsch "DevOps/Confluence-Icons"): providerFor bestimmt das
+// Icon ausschließlich aus dem URL-Präfix (lib/linkProviders.jsx), OHNE
+// jeden Netzzugriff – die Registry wird hier über setLinkProviders() wie
+// von App.jsx befüllt, afterEach räumt sie wieder auf (Modul-Singleton
+// bleibt sonst über die Tests dieser Datei hinweg gesetzt). WICHTIG: der
+// Wrapper-Umschalter jedes Abschnitts (ChevronDown, lucide-react) rendert
+// selbst schon ein `<svg aria-hidden="true">` – ein bloßes
+// toContain("<svg") wäre daher IMMER true, sobald ein Abschnitt existiert.
+// Die Tests prüfen deshalb gezielt den Wrapper-Span unseres Icons
+// (ICON_WRAP, eindeutige Klassenkombination) bzw. die Markenfarben.
+describe("DocView: Link-Provider-Icons (v7.9)", () => {
+  afterEach(() => setLinkProviders([]));
+
+  const ICON_WRAP = 'class="inline-flex items-center align-middle mr-1" aria-hidden="true"';
+
+  it("ein dev.azure.com-Link bekommt (eingebauter Provider, keine Konfiguration nötig) ein Icon VOR dem Link", () => {
+    const html = render("# T\n\n## A\n\n[Ticket](https://dev.azure.com/acme/Proj/_workitems/edit/1)");
+    expect(html).toContain(ICON_WRAP);
+    expect(html).toMatch(
+      /aria-hidden="true"><svg[^>]*fill="#0078D4"[\s\S]*?<\/svg><\/span><a[^>]*href="https:\/\/dev\.azure\.com\/acme\/Proj\/_workitems\/edit\/1"/
+    );
+  });
+
+  it("dieselbe URL als nackte Fließtext-URL bekommt ebenfalls ein Icon", () => {
+    const html = render("# T\n\n## A\n\n- Siehe https://dev.azure.com/acme/Proj/_workitems/edit/1 dazu.");
+    expect(html).toContain(ICON_WRAP);
+    expect(html).toContain('fill="#0078D4"');
+  });
+
+  it("eine Quellen-Fußnote mit derselben dev.azure.com-URL bekommt KEIN Icon", () => {
+    const html = render("# T\n\n## A\n\nFakt[3](https://dev.azure.com/acme/Proj/_workitems/edit/1) dazu.");
+    expect(html).not.toContain(ICON_WRAP);
+    expect(html).not.toContain('fill="#0078D4"');
+    expect(html).toMatch(/<sup/);
+  });
+
+  it("ein konfigurierter custom-Provider zeigt sein Emoji-Icon statt eines SVGs", () => {
+    setLinkProviders([
+      { id: "c1", type: "custom", name: "Intranet", prefix: "https://intranet.example/", icon: "🏠" },
+    ]);
+    const html = render("# T\n\n## A\n\n[Seite](https://intranet.example/x)");
+    expect(html).toContain(ICON_WRAP);
+    expect(html).toContain("🏠");
+    expect(html).not.toContain('fill="#0078D4"');
+    expect(html).not.toContain('fill="#2684FF"');
+  });
+
+  it("ohne passenden Provider erscheint gar kein Icon", () => {
+    const html = render("# T\n\n## A\n\n[Extern](https://example.org/x)");
+    expect(html).not.toContain(ICON_WRAP);
+    expect(html).toMatch(/<a[^>]*href="https:\/\/example\.org\/x"/);
   });
 });
 
