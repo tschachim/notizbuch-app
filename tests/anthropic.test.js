@@ -216,6 +216,44 @@ describe("buildChatReply", () => {
     expect(sources).toEqual([{ url: "https://neu.de", title: "Neu" }]);
   });
 
+  it("verwirft den Vorab-Block bei rein formaler Abweichung vom toolReply (v7.10: Whitespace/Case/Satzzeichen)", () => {
+    // Root Cause v7.7 (2× live beobachtet): Das Modell schreibt dieselbe
+    // Einschätzung als Vorab-Textblock UND minimal anders formatiert ins
+    // reply-Feld – der alte exakte Vergleich erkannte das nicht, der Chat
+    // zeigte den Absatz doppelt. Nur Groß/Klein-Unterschied:
+    expect(buildChatReply(
+      { content: [{ type: "text", text: "Der Eintrag widerspricht dem Termin vom 10.01." }] },
+      HITS, "der eintrag widerspricht dem termin vom 10.01."
+    ).reply).toBe("Der Eintrag widerspricht dem Termin vom 10.01.");
+    // Nur Whitespace-Folgen unterschiedlich (mehrfach vs. einfach):
+    expect(buildChatReply(
+      { content: [{ type: "text", text: "Achtung:   zwei   Leerzeichen." }] },
+      HITS, "Achtung: zwei Leerzeichen."
+    ).reply).toBe("Achtung:   zwei   Leerzeichen.");
+    // Nur abschließendes Satzzeichen unterschiedlich (Punkt vs. keins vs. Auslassungspunkte):
+    expect(buildChatReply(
+      { content: [{ type: "text", text: "Keine Widersprüche gefunden" }] },
+      HITS, "Keine Widersprüche gefunden…"
+    ).reply).toBe("Keine Widersprüche gefunden");
+  });
+
+  it("behält den Vorab-Block bei echt unterschiedlichem Inhalt (keine Fuzzy-/Containment-Logik)", () => {
+    // Gegenprobe zum obigen Fix: ein inhaltlich anderer, nur ÄHNLICHER Satz
+    // darf NICHT verschluckt werden – nur normalisierte GLEICHHEIT dedupt.
+    const { reply } = buildChatReply(
+      { content: [{ type: "text", text: "Der Termin am 10.01. kollidiert mit dem Projektabschluss." }] },
+      HITS, "Kurz notiert."
+    );
+    expect(reply).toBe("Der Termin am 10.01. kollidiert mit dem Projektabschluss.\n\nKurz notiert.");
+    // Kurzer legitimer Vorab-Satz, der zufällig Teilstring von reply ist,
+    // bleibt ebenfalls erhalten (keine Containment-Logik).
+    const { reply: r2 } = buildChatReply(
+      { content: [{ type: "text", text: "Alles klar." }] },
+      HITS, "Alles klar, zusätzlich noch ein Hinweis auf Notizbuch X."
+    );
+    expect(r2).toBe("Alles klar.\n\nAlles klar, zusätzlich noch ein Hinweis auf Notizbuch X.");
+  });
+
   it("funktioniert unverändert mit leerer Trefferliste (v7.6: callClaude ruft dies jetzt auch ohne Websuche auf)", () => {
     // Ohne Suche übergibt callClaude ein leeres hits-Array – buildChatReply
     // selbst kennt "usedSearch" nicht, muss also auch ganz ohne Treffer

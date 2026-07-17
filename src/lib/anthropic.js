@@ -372,10 +372,20 @@ export function buildChatReply(data, hits, toolReply) {
   }
   const combined = parts.join("").trim();
   const tr = typeof toolReply === "string" ? toolReply.trim() : "";
-  // Exakter Vergleich statt includes: eine kurze legitime Bestätigung darf
-  // nicht unterdrückt werden, nur weil sie zufällig als Teilstring vorkommt.
+  // Normalisierter statt exakter Vergleich (v7.10, QA-Finding aus zwei
+  // Live-Beobachtungen): Ein reiner String-Vergleich erkannte es nicht, wenn
+  // das Modell dieselbe Einschätzung als Vorab-Textblock UND minimal anders
+  // formuliert (nur Groß/Klein, Whitespace oder abschließende Satzzeichen
+  // unterschiedlich) ins reply-Feld schrieb – Ergebnis war ein doppelter,
+  // fast identischer Absatz im Chat. Normalisierung: trim, Whitespace-Folgen
+  // zu einem Leerzeichen, Kleinschreibung, abschließende Satzzeichen
+  // (".", "!", "…") entfernt. BEWUSST keine Containment-/Fuzzy-Logik –
+  // ein kurzer Vorab-Satz, der zufällig als Teilstring im reply vorkommt,
+  // darf NICHT verschluckt werden, nur eine wirklich (bis auf Formatierung)
+  // identische Aussage wird verworfen.
+  const normDedup = (s) => s.replace(/\s+/g, " ").toLowerCase().replace(/[.!…]+$/, "").trim();
   const reply = combined
-    ? combined + (tr && combined !== tr ? "\n\n" + tr : "")
+    ? combined + (tr && normDedup(combined) !== normDedup(tr) ? "\n\n" + tr : "")
     : tr;
 
   // Indizes (auch modellgeschriebene wie "3-1") auf die kompakte Liste der

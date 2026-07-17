@@ -14,6 +14,7 @@ import {
   makeNotebookIcon,
 } from "./lib/images.js";
 import { MODELS, callClaude } from "./lib/anthropic.js";
+import { buildFeedbackTrigger, isNoFeedback } from "./lib/feedback.js";
 import {
   ShaConflictError, utf8ToB64, ghGetFile, ghGetBlob, ghListDir, ghPutFile,
   ghDeleteFile, ghListCommits, ghCommitMeta, ghCheckRepo,
@@ -1769,30 +1770,15 @@ export default function NotizbuchApp() {
           .join("\n");
       }
     } catch (e) { /* Diff ist optional */ }
-    if (diffText.length > 8000) diffText = ""; // Token-Deckel bei Großumbauten
     const nb = activeNotebook();
-    const trigger =
-      "[Systemhinweis: Der Nutzer hat das Notizbuch „" + nb.name + "“ soeben MANUELL bearbeitet, " +
-      "nicht über den Chat. Der neue Stand steht bereits oben im Dokument und ist so gewollt.\n" +
-      (diffText
-        ? "Diff der Änderung:\n" + diffText + "\n\n"
-        : "Die Änderung ist umfangreich (kein kompakter Diff verfügbar) – prüfe das Gesamtdokument.\n\n") +
-      "Prüfe die Änderung im Kontext ALLER Notizbücher gemäß deiner Aufgabe 3 " +
-      "(Verbindungen, Widersprüche, Dubletten, Lücken, nächste Schritte, verletzte Konventionen). " +
-      "Fällt dir etwas Nennenswertes auf, melde es kurz in reply. " +
-      "Fällt dir NICHTS Nennenswertes auf, antworte in reply exakt mit \"##OK##\" und sonst nichts. " +
-      "Lass ops in jedem Fall leer und commit null – kein Notizbuch darf durch diese Prüfung verändert werden.]";
+    const trigger = buildFeedbackTrigger(nb.name, diffText);
     setBusy(true);
     setBusyLabel("prüft die Änderung …");
     try {
       const nbCtx = await buildNbCtx();
       const res = await callClaude(cfg.apiKey, trigger, nbCtx, stateRef.current.chat, model, null, null);
       const reply = (res.reply || "").trim();
-      // Sentinel bevorzugt; zusätzlich häufige „nichts zu melden“-Floskeln abfangen.
-      const norm = reply.toLowerCase().replace(/[#.!,\s]/g, "");
-      const nothing = !reply || norm === "ok" || norm === "okay" || reply === "Notiert." ||
-        /^(alles (konsistent|in ordnung|klar|gut)|keine auffälligkeiten|nichts auffälliges|passt so)/i.test(reply);
-      if (!nothing) {
+      if (!isNoFeedback(reply)) {
         // ops werden hier bewusst NIE angewendet – reine Rückmeldung.
         setChat((prev) => [...prev,
           { role: "user", info: true, ts: Date.now(), text: "Notizbuch „" + nb.name + "“ manuell bearbeitet" },
@@ -2137,7 +2123,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.9</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.10</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"

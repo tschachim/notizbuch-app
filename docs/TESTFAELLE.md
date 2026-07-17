@@ -236,7 +236,14 @@ gleiches Verhalten, andere Icon-Farbe/-Form.
 **D1 [VERBUNDEN] Editor-Roundtrip.** Stift-Knopf → im QA-Notizbuch einen
 Stichpunkt „QA-Edit Beta“ ergänzen, fett markieren, speichern. Erwartet:
 Ansicht zeigt den fetten Eintrag; keine anderen Inhalte verändert;
-neue Version in der Historie.
+neue Version in der Historie. Nur bei bestehender API-Verbindung
+zusätzlich (Auto-Kommentar nach manueller Bearbeitung, siehe
+DECISIONS.md #57): Kurz abwarten, ob eine Info-Pille „… manuell
+bearbeitet“ mit anschließender Assistent-Nachricht erscheint. Erwartet,
+falls sie erscheint: Sie erscheint HÖCHSTENS EINMAL – kein doppelter,
+fast identischer Absatz in derselben Nachricht. Fällt dem Modell nichts
+auf, erscheint GAR KEINE Nachricht (kein sichtbares Info-Pille+leere
+Antwort-Paar) und NIEMALS ein sichtbares „##OK##“ im Chat-Text.
 
 **D2 [VERBUNDEN] Tabelle.** Im Editor per Tabellen-Knopf eine 2×3-Tabelle
 aufziehen, Kopf und eine Zelle füllen, speichern. Erwartet: gerenderte

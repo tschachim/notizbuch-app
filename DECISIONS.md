@@ -1788,3 +1788,85 @@ aus `referenz-app.jsx` übernommen.
         die aktuelle Groß/Klein-unabhängige Prüfung gilt nur für
         Schema+Host, s. o. – ein rein pfad-bezogener Edge-Case ohne
         Sicherheitsrelevanz).
+
+57. **Doppelter Auto-Kommentar nach manueller Bearbeitung – dreischichtiger
+    Fix** (`src/lib/feedback.js` NEU, `src/lib/anthropic.js`, `src/App.jsx`,
+    v7.10, 2× von E2E-Testern beobachtetes Alt-🔵 aus v7.7). Nach einer
+    manuellen Editor-Bearbeitung schaut das Modell einmal über die Änderung
+    (`requestFeedback`); die Rückmeldung erschien manchmal ZWEIMAL
+    hintereinander im selben Chat-Eintrag, fast identisch formuliert. Zwei
+    zusammenwirkende Ursachen im selben Pfad:
+    - **Ursache 1 (Doppelung):** `buildChatReply` (siehe Punkt 53/v7.6)
+      kombiniert Vorab-Textblöcke seit v7.6 IMMER mit dem toolReply
+      (Sicherheitsnetz gegen Inhaltsverlust – bleibt bewusst bestehen). Der
+      bisherige Dublettenschutz verglich aber EXAKT: Schrieb das Modell die
+      Einschätzung als Vorab-Text UND (minimal anders formuliert – nur
+      Groß/Klein, Whitespace oder abschließendes Satzzeichen abweichend)
+      zusätzlich ins reply-Feld, erkannte der exakte Vergleich das nicht,
+      die Einschätzung landete doppelt im Chat.
+    - **Ursache 2 (sichtbares ##OK##):** Der `requestFeedback`-Trigger bittet
+      das Modell, bei „nichts Nennenswertes“ in reply EXAKT `"##OK##"` zu
+      antworten; der App-Code prüfte das bislang nur per exaktem
+      Gesamttext-Vergleich (`norm === "ok"` u. ä.). Schrieb das Modell
+      trotzdem Vorab-Text vor dem Tool-Aufruf UND `##OK##` ins reply-Feld,
+      kombinierte `buildChatReply` beides zu `"<Vorab-Text>\n\n##OK##"` – der
+      Vergleich griff nicht mehr, der Nutzer sah eine Chat-Nachricht mit
+      sichtbarem `##OK##`.
+    - **Fix, drei Schichten (alle umgesetzt, bewusst nicht nur eine):**
+      1. **Prompt-Vertrag:** `buildFeedbackTrigger` (neu in
+         `src/lib/feedback.js`) ergänzt im Trigger-Text die Klausel
+         „Schreibe KEINEN Text vor dem Tool-Aufruf – die GESAMTE Rückmeldung
+         gehört ausschließlich in das reply-Feld.“ – dieselbe Technik wie
+         die bestehenden ANTWORTFORMAT-/INTERNET-RECHERCHE-Verträge im
+         System-Prompt (Punkt 53). Bekämpft die Ursache an der Quelle, statt
+         sich allein auf die Code-Sicherheitsnetze zu verlassen.
+      2. **`isNoFeedback` robuster** (`src/lib/feedback.js`): liefert `true`
+         bei leerem reply, bei normalisiertem Gesamttext „ok“/„okay“/
+         „notiert“, bei den bestehenden Floskeln – NEU zusätzlich, wenn der
+         String `"##OK##"` IRGENDWO enthalten ist (deckt Ursache 2 ab).
+         Bewusst NUR eine literale Enthalten-Prüfung des Sentinels, KEINE
+         Fuzzy-Erkennung auf Wortteile – „ok“ als Teilstring von „okkult“
+         darf nicht als „nichts zu melden“ durchgehen (Regressionstest
+         pinnt genau das).
+      3. **`buildChatReply`-Dublettenschutz normalisiert**
+         (`src/lib/anthropic.js`): statt exaktem String-Vergleich jetzt eine
+         normalisierte Gleichheit (trim, Whitespace-Folgen zu einem
+         Leerzeichen, Kleinschreibung, abschließende Satzzeichen
+         `.`/`!`/`…` entfernt) zwischen Vorab-Block und toolReply. Bei
+         normalisierter Gleichheit gewinnt toolReply, der Vorab-Block wird
+         verworfen. BEWUSST KEINE Containment-/Fuzzy-Logik (zu riskant für
+         echte Inhalte – ein kurzer, legitimer Vorab-Satz, der zufällig als
+         Teilstring im reply vorkommt, darf nicht verschluckt werden):
+         geprüft wird ausschließlich normalisierte GLEICHHEIT, nicht
+         Ähnlichkeit. Deckt damit gezielt genau den v7.7-Fall ab (dieselbe
+         Aussage, nur anders formatiert), lässt inhaltlich unterschiedliche
+         Vorab-Blöcke aber unangetastet.
+    - **`src/lib/feedback.js` (neu):** `buildFeedbackTrigger(nbName,
+      diffText)` baut den kompletten Trigger-String; der 8000-Zeichen-Deckel
+      für den Diff (Token-Schutz bei Großumbauten) wanderte aus `App.jsx`
+      mit hierher, damit der Vertrag an EINER Stelle steht und per Test
+      pinnbar ist. `App.jsx#requestFeedback` nutzt beide Helfer, keine
+      Logik-Kopie bleibt zurück; Verhalten sonst unverändert (ops nie
+      angewendet, best effort, kein Fehler-Spam bei Fehlern).
+    - **Tests:** `tests/feedback.test.js` (neu) – `buildFeedbackTrigger`:
+      alle Vertragsklauseln (MANUELL-Hinweis, Diff- und Kein-Diff-Variante,
+      Deckel exakt bei 8000/8001 Zeichen, ops-leer/commit-null, ##OK##-Regel,
+      Kein-Vorab-Text-Klausel); `isNoFeedback`: leer/whitespace, Sentinel
+      pur und mit Satzzeichen/Groß-Klein-Varianten, Floskeln, ##OK## mitten
+      im Text (→ true, deckt Ursache 2), echte Beobachtung (→ false), „ok“
+      als Wortteil in „okkult“/„provokant“ (→ false, kein Fuzzy-Match).
+      `tests/anthropic.test.js` ergänzt: `buildChatReply` verwirft den
+      Vorab-Block bei rein formaler Abweichung (Case/Whitespace/
+      Satzzeichen) vom toolReply, behält ihn bei echt unterschiedlichem
+      Inhalt (inkl. Containment-Gegenprobe: ein kurzer Vorab-Satz, der
+      Teilstring des reply ist, bleibt erhalten) – bestehende Tests zu
+      JSON-Payload-Filter und usedSearch-Recherchepfad unverändert grün
+      (keine Anpassung nötig, da sie entweder exakt gleich oder eindeutig
+      verschieden formulierte Texte verwenden).
+    - Restrisiko (bewusst akzeptiert): Schicht 3 fängt nur FORMALE
+      Abweichungen ab; formuliert das Modell die Einschätzung trotz Schicht
+      1 inhaltlich UNTERSCHIEDLICH als Vorab-Text und im reply-Feld (z. B.
+      unterschiedliche Wortwahl, nicht nur Formatierung), bleibt eine
+      Doppelung theoretisch möglich – dagegen hilft nur der Prompt-Vertrag
+      aus Schicht 1, der beim Live-Finding laut Root-Cause-Analyse die
+      eigentliche Ursache war.
