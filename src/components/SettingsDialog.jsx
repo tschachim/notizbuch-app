@@ -17,11 +17,66 @@ const emptyProviderForm = (type) => ({
   email: "",
 });
 
+/* ---------------- Reine Helfer (v7.13, direkt testbar ohne Rendering) ---------------- */
+// Aus der Komponente herausgezogen: bestehende Testkonvention laut
+// vitest.config.js ("App.jsx nur E2E") gilt auch für Komponenten – aber die
+// eigentliche BUGFIX-Logik dieser Version (E2E-Finding 🟡 "Provider gehen
+// beim Schließen per X verloren") steckt genau hier (Liste korrekt mutieren,
+// damit onProvidersChange/App.jsx sie sofort persistieren kann) und ist
+// dadurch OHNE Rendering/Interaktion direkt unit-testbar, siehe
+// tests/settingsDialog.test.jsx. Gleiches Muster wie die aus DocEditor.jsx
+// herausgezogenen Helfer (autoFetchProviderFor/applyAutoFetchResult, v7.12).
+
+// Formularvalidierung – SICHERHEITS-FIX (Review-Finding 3, v7.9): ein
+// Präfix ohne echten Host (z. B. das frühere Confluence-Default "https://"
+// allein) matchte jede http(s)-URL und hätte Zugangsdaten an jeden Host
+// geschickt (Finding S2, siehe DECISIONS.md #56). Verlangt deshalb für
+// JEDEN Provider-Typ (auch custom – ein Präfix ohne Host ist nie legitim)
+// einen per new URL() auflösbaren Host mit mindestens einem Punkt (hostOf,
+// dieselbe Funktion wie die eigentliche Durchsetzung in
+// sanitizeLinkProviders/lib/linkProviders.jsx – diese Prüfung hier ist nur
+// die UX-Vorprüfung, die spätere Sanitisierung bleibt der echte
+// Sicherheits-Gatekeeper).
+export function providerFormIsValid(providerForm) {
+  if (!providerForm || !providerForm.name.trim()) return false;
+  const prefix = providerForm.prefix.trim();
+  if (!/^https?:\/\//i.test(prefix)) return false;
+  const host = hostOf(prefix);
+  return !!host && host.includes(".");
+}
+
+// Baut den zu speichernden Provider-Eintrag aus dem (bereits validierten)
+// Formularzustand – vergibt bei einem NEUEN Eintrag (providerForm.id ist
+// null) eine frische id, ein bearbeiteter Eintrag behält seine bestehende.
+export function buildProviderEntry(providerForm) {
+  return {
+    id: providerForm.id || ("lp-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7)),
+    type: providerForm.type,
+    name: providerForm.name.trim(),
+    prefix: providerForm.prefix.trim(),
+    icon: providerForm.type === "custom" ? (providerForm.icon || "🔗").trim() : "",
+    pat: providerForm.pat || "",
+    email: providerForm.email || "",
+  };
+}
+
+// Fügt einen Eintrag ein (unbekannte id) oder ersetzt ihn (bestehende id,
+// Bearbeiten-Fall) – reine Funktion, mutiert `list` nicht (neue Array-
+// Referenz, damit React-States/onProvidersChange sauber darauf reagieren).
+export function upsertProvider(list, entry) {
+  const idx = list.findIndex((p) => p.id === entry.id);
+  return idx === -1 ? [...list, entry] : list.map((p, i) => (i === idx ? entry : p));
+}
+
+export function removeProvider(list, id) {
+  return list.filter((p) => p.id !== id);
+}
+
 /* Settings-Dialog: erscheint beim Erststart und über das Zahnrad.
    Zugangsdaten trägt ausschließlich der Nutzer hier ein; sie landen
    nur im localStorage dieses Geräts, nie in einem Repo. */
 export default function SettingsDialog({
-  initial, model, onModelChange, onSave, onLogout, onClose,
+  initial, model, onModelChange, onSave, onProvidersChange = () => {}, onLogout, onClose,
   connecting, error, hasSettings,
 }) {
   const [owner, setOwner] = useState((initial && initial.owner) || "");
@@ -71,46 +126,34 @@ export default function SettingsDialog({
     });
   };
 
-  // SICHERHEITS-FIX (Review-Finding 3): ein Präfix ohne echten Host (z. B.
-  // das frühere Confluence-Default "https://" allein) matchte jede
-  // http(s)-URL und hätte Zugangsdaten an jeden Host geschickt (Finding S2,
-  // siehe DECISIONS.md #56). providerFormValid verlangt deshalb für JEDEN
-  // Provider-Typ (auch custom – ein Präfix ohne Host ist nie legitim) einen
-  // per new URL() auflösbaren Host mit mindestens einem Punkt (hostOf,
-  // dieselbe Funktion wie die eigentliche Durchsetzung in
-  // sanitizeLinkProviders/lib/linkProviders.jsx – diese Prüfung hier ist nur
-  // die UX-Vorprüfung, die spätere Sanitisierung bleibt der echte
-  // Sicherheits-Gatekeeper).
-  const providerPrefixHost = providerForm ? hostOf(providerForm.prefix.trim()) : null;
-  const providerFormValid =
-    !!providerForm &&
-    !!providerForm.name.trim() &&
-    /^https?:\/\//i.test(providerForm.prefix.trim()) &&
-    !!providerPrefixHost &&
-    providerPrefixHost.includes(".");
+  // providerFormValid/saveProviderForm/deleteProvider nutzen die reinen,
+  // exportierten Helfer oben (providerFormIsValid/buildProviderEntry/
+  // upsertProvider/removeProvider) – die eigentliche Logik ist dort direkt
+  // testbar, hier bleibt nur noch die React-State-Anbindung.
+  const providerFormValid = providerFormIsValid(providerForm);
 
+  // v7.13 (E2E-Finding 🟡 "Provider gehen beim Schließen per X verloren"):
+  // saveProviderForm/deleteProvider berechnen die neue Liste jetzt SYNCHRON
+  // (statt über den funktionalen setState-Updater), damit sie im selben
+  // Zug per onProvidersChange an App.jsx gemeldet werden kann – App.jsx
+  // persistiert sie dort sofort (sofern bereits eine Verbindung besteht,
+  // siehe handleProvidersChange), unabhängig vom "Speichern & Verbinden"-
+  // Knopf. Sicher, weil beide Handler ausschließlich durch direkte
+  // Nutzerklicks ausgelöst werden (keine konkurrierende Mutation von
+  // linkProviders zwischen zwei Klicks).
   const saveProviderForm = () => {
     if (!providerForm || !providerFormValid) return;
-    const entry = {
-      id: providerForm.id || ("lp-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7)),
-      type: providerForm.type,
-      name: providerForm.name.trim(),
-      prefix: providerForm.prefix.trim(),
-      icon: providerForm.type === "custom" ? (providerForm.icon || "🔗").trim() : "",
-      pat: providerForm.pat || "",
-      email: providerForm.email || "",
-    };
-    setLinkProvidersState((list) => {
-      const idx = list.findIndex((p) => p.id === entry.id);
-      if (idx === -1) return [...list, entry];
-      const copy = list.slice();
-      copy[idx] = entry;
-      return copy;
-    });
+    const next = upsertProvider(linkProviders, buildProviderEntry(providerForm));
+    setLinkProvidersState(next);
+    onProvidersChange(next);
     setProviderForm(null);
   };
 
-  const deleteProvider = (id) => setLinkProvidersState((list) => list.filter((p) => p.id !== id));
+  const deleteProvider = (id) => {
+    const next = removeProvider(linkProviders, id);
+    setLinkProvidersState(next);
+    onProvidersChange(next);
+  };
 
   const field = "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 font-mono";
   const label = "block text-xs font-medium text-slate-600 mb-1 mt-3";
@@ -188,6 +231,23 @@ export default function SettingsDialog({
               bekommen ihr Icon auch ohne Eintrag hier – erst ein Eintrag mit
               Zugangsdaten schaltet die automatische Titel-Ermittlung frei.
             </p>
+
+            {/* v7.13 (Randfall Erststart/unverbunden, siehe App.jsx
+                handleProvidersChange): OHNE bestehende Verbindung (noch kein
+                owner/repo/pat/apiKey persistiert) gibt es nichts, in das
+                sich eine Provider-Änderung sofort einfügen ließe – Provider
+                bleiben in diesem Fall bewusst NUR im Dialog-State und werden
+                erst mit dem Verbinden-Formular zusammen übernommen. Anders
+                als bei einer bestehenden Verbindung (dort persistiert
+                onProvidersChange sofort, X verwirft dann NUR noch die
+                Formularfelder) wäre das X hier also weiterhin ein stiller
+                Datenverlust – deshalb der explizite Hinweis. */}
+            {!hasSettings && (
+              <p className="text-xs text-amber-600 mb-2">
+                Wird erst mit „Speichern &amp; Verbinden“ übernommen (noch
+                keine bestehende Verbindung).
+              </p>
+            )}
 
             {linkProviders.length > 0 && (
               <ul className="mb-2 space-y-1">

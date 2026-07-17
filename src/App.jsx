@@ -614,6 +614,35 @@ export default function NotizbuchApp() {
     }
   };
 
+  // Link-Provider SOFORT persistieren (v7.13, E2E-Finding 🟡: bisher wurden
+  // Provider-Änderungen NUR beim Klick auf "Speichern & Verbinden" in
+  // localStorage geschrieben – schloss der Nutzer den Dialog stattdessen per
+  // X, gingen frisch angelegte/bearbeitete/gelöschte Provider still
+  // verloren, ohne jeden Hinweis). SettingsDialog ruft diesen Callback bei
+  // JEDER Provider-Listenänderung (Hinzufügen/Bearbeiten-Übernehmen/Löschen)
+  // auf, unabhängig vom restlichen Verbinden-Formular (owner/repo/pat/
+  // apiKey bleiben rein lokaler Dialog-Zustand, wie bisher – nur die
+  // Provider-Liste wird hier separat behandelt). NUR wirksam, wenn bereits
+  // ein verbundener Settings-Stand existiert (settingsRef.current !== null):
+  // ohne bestehendes owner/repo/pat/apiKey gäbe es nichts, in das sich die
+  // Provider-Liste sinnvoll einfügen ließe – loadSettings() verlangt
+  // zwingend alle vier Felder (lib/settings.js), ein Objekt NUR mit
+  // linkProviders würde beim nächsten Laden als "nicht verbunden" verworfen
+  // und müsste die gesamte connected-Logik (an vielen Stellen in App.jsx an
+  // settingsRef.current/connected geknüpft) unnötig verkomplizieren. Im
+  // Erststart-/unverbundenen Fall bleiben Provider deshalb bewusst NUR im
+  // Dialog-State (wie vor v7.13) und werden erst mit "Speichern &
+  // Verbinden" übernommen – SettingsDialog zeigt dafür einen Hinweistext,
+  // solange hasSettings falsch ist (siehe dort).
+  const handleProvidersChange = (list) => {
+    if (!settingsRef.current) return;
+    const next = { ...settingsRef.current, linkProviders: list };
+    settingsRef.current = next;
+    setSettings(next);
+    saveSettings(next);
+    setLinkProviders(list);
+  };
+
   const handleLogout = () => {
     clearSettings();
     setLinkProviders([]);
@@ -2164,7 +2193,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.12</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.13</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -3128,6 +3157,7 @@ export default function NotizbuchApp() {
           model={model}
           onModelChange={changeModel}
           onSave={handleSaveSettings}
+          onProvidersChange={handleProvidersChange}
           onLogout={handleLogout}
           onClose={() => setShowSettings(false)}
           connecting={connecting}

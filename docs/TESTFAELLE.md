@@ -55,11 +55,25 @@ Knopf „Provider hinzufügen“. Klicken, Typ „Eigener Anbieter“ wählen
 (bei diesem Typ gibt es KEINE Zugangsdaten-Felder, nur ein Emoji-Icon-
 Feld), Name „QA-Test Provider“, URL-Präfix „https://qa-test.example/“,
 Icon z. B. „🧪“ eintragen, „Hinzufügen“ klicken. Erwartet: Eintrag
-erscheint in der Liste mit Emoji-Icon, Name und Präfix. „Bearbeiten“ am
-eben angelegten Eintrag klicken, Namen zu „QA-Test Provider geändert“
-ändern, übernehmen. Erwartet: Name in der Liste aktualisiert. „Löschen“
+erscheint in der Liste mit Emoji-Icon, Name und Präfix; KEIN Hinweistext
+„Wird erst mit ‚Speichern & Verbinden‘ übernommen“ sichtbar (nur im
+unverbundenen Zustand relevant, siehe Zusatzcheck unten).
+
+Persistenz-Check (v7.13, behobenes E2E-Finding 🟡 „Provider gehen beim
+Schließen per X verloren“): Dialog jetzt per **X-Knopf** (NICHT „Speichern
+& Verbinden“) schließen, danach Einstellungen erneut öffnen. Erwartet:
+„QA-Test Provider“ ist WEITERHIN in der Liste vorhanden (sofort
+persistiert, unabhängig vom Verbinden-Formular) – KEIN stiller
+Datenverlust mehr.
+
+Danach „Bearbeiten“ am Eintrag klicken, Namen zu „QA-Test Provider
+geändert“ ändern, übernehmen. Erwartet: Name in der Liste aktualisiert.
+Dialog per X schließen und erneut öffnen: Erwartet, dass die Änderung
+(„QA-Test Provider geändert“) ebenfalls erhalten bleibt. „Löschen“
 klicken. Erwartet: Eintrag verschwindet wieder, KEINE neue Version/
 Commit dadurch (Provider leben nur in `state.json`-fernem localStorage).
+Dialog per X schließen und erneut öffnen: Erwartet, dass der Eintrag
+weiterhin gelöscht bleibt (Löschen persistiert ebenso sofort).
 ⚠️ NIEMALS die PAT-/API-Token-Felder bei den Typen „Azure DevOps“/
 „Confluence“ befüllen (Zugangsdaten-Regel) – bei Bedarf nur Name/
 URL-Präfix zur Anzeigeprüfung der Formularfelder ausfüllen, danach ohne
@@ -70,6 +84,16 @@ URL-Präfix-Feld ist hier bewusst LEER vorbelegt (kein Platzhalter mehr).
 mit Punkt enthält (z. B. bei leerem Feld oder nur „https://“) – erst ein
 Präfix wie „https://qa-test.atlassian.net/“ schaltet den Knopf frei.
 Nicht speichern, danach Abbrechen/Feld wieder leeren.
+
+Zusatzcheck (Randfall Erststart/unverbunden, v7.13, NUR wenn ohne aktive
+Verbindung erreichbar, z. B. nach „Abmelden“ – danach den Test-Provider
+und alle Testdaten wie gewohnt wiederherstellen/neu verbinden): Im
+Einstellungen-Dialog OHNE bestehende Verbindung erscheint im
+Link-Provider-Abschnitt ein Hinweistext „Wird erst mit ‚Speichern &
+Verbinden‘ übernommen (noch keine bestehende Verbindung).“ – hier gilt
+die Sofort-Persistenz von oben bewusst NICHT (kein owner/repo/pat/apiKey
+vorhanden, in das sich die Provider-Liste einfügen ließe), der
+Hinweistext macht das transparent statt es stillschweigend zu verlieren.
 
 ## B. Notizbuch-Verwaltung
 

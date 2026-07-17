@@ -2198,3 +2198,88 @@ aus `referenz-app.jsx` übernommen.
           Grammatik-Drift-Pin), Gesamtstand 546/546 grün,
           `linkProviders.jsx` 98.61 % Statements/89.65 % Branches/99.57 %
           Lines.
+
+59. **Link-Provider gehen beim Schließen per X verloren – Sofort-
+    Persistenz, v7.13** (`src/components/SettingsDialog.jsx`, `src/App.jsx`,
+    E2E-Finding 🟡 nach dem v7.12-Deploy). Repro: Provider im
+    Einstellungen-Dialog anlegen, Dialog per **X** schließen (NICHT
+    „Speichern & Verbinden“), erneut öffnen → Provider war weg. Ursache:
+    `SettingsDialog` hielt Provider-Änderungen NUR im eigenen, lokalen
+    `useState` – geschrieben wurde `localStorage` ausschließlich beim Klick
+    auf „Speichern & Verbinden“ (`submit()` → `onSave(cfg)`), das X (`onClose`)
+    verwarf beim Unmount stillschweigend den gesamten Dialog-Zustand
+    inklusive frisch angelegter/bearbeiteter/gelöschter Provider – OHNE
+    jeden Hinweis (stiller Datenverlust, widersprach der A4-Erwartung).
+    - **Fix (verbundener Fall, der Normalfall):** `SettingsDialog` bekommt
+      einen neuen Callback `onProvidersChange(list)`, der bei JEDER
+      Provider-Listenänderung aufgerufen wird (Hinzufügen/Bearbeiten-
+      Übernehmen/Löschen), UNABHÄNGIG vom restlichen Verbinden-Formular.
+      `App.jsx`s `handleProvidersChange` persistiert bei bestehender
+      Verbindung (`settingsRef.current !== null`) sofort: neues
+      Settings-Objekt (`{ ...settingsRef.current, linkProviders: list }`)
+      in `settingsRef`/den `settings`-State UND via `saveSettings()` in
+      `localStorage`, plus `setLinkProviders(list)` (Modul-Registry, damit
+      Icons/Auto-Titel-Fetch sofort den neuen Stand sehen). Der X-Knopf
+      verwirft damit nur noch die Verbindungs-Feldeingaben
+      (owner/repo/pat/apiKey) – wie schon vorher gewollt, Provider-
+      Änderungen NIE mehr.
+    - **Randfall Erststart/unverbunden (`settingsRef.current === null`):**
+      bewusst die EINFACHERE der beiden im Auftrag skizzierten Lösungen
+      gewählt – Provider bleiben in diesem Fall weiterhin NUR im
+      Dialog-State und werden erst zusammen mit „Speichern & Verbinden“
+      übernommen (unverändert zum bisherigen Verhalten), dafür ein neuer
+      Hinweistext im Link-Provider-Abschnitt, der NUR ohne bestehende
+      Verbindung erscheint: „Wird erst mit ‚Speichern & Verbinden‘
+      übernommen (noch keine bestehende Verbindung).“ **Bewusst NICHT**
+      gewählt: `loadSettings()` (`lib/settings.js`) so erweitern, dass ein
+      Objekt NUR mit `linkProviders` (ohne owner/repo/pat/apiKey) toleriert
+      wird – `loadSettings()` verlangt aktuell zwingend ALLE vier Felder,
+      und die `connected`-Logik in `App.jsx` hängt an sehr vielen Stellen
+      direkt an `settingsRef.current`/`connected` (siehe die zahlreichen
+      `if (connected && settingsRef.current)`-Wächter quer durch die
+      Datei). Ein Settings-Objekt, das `loadSettings()` als „vorhanden“
+      durchließe, OBWOHL der Nutzer nie verbunden hat, hätte `hasSettings`
+      fälschlich auf `true` gesetzt (z. B. würde der „Abmelden“-Knopf
+      erscheinen) und beim nächsten Laden vermutlich einen automatischen,
+      vom Nutzer nie ausgelösten `connect()`-Versuch mit leeren
+      owner/repo/pat/apiKey angestoßen (verwirrender Fehler-Banner ohne
+      jede Nutzeraktion) – ein unverhältnismäßiges Risiko für einen
+      seltenen Randfall (Erststart VOR der ersten erfolgreichen
+      Verbindung), gegen einen expliziten, gut sichtbaren Hinweistext.
+    - **Reine Helfer extrahiert** (`src/components/SettingsDialog.jsx`,
+      gleiches Muster wie `DocEditor.jsx`s `autoFetchProviderFor`/
+      `applyAutoFetchResult`, v7.12): `providerFormIsValid(providerForm)`
+      (bisherige inline `providerFormValid`-Berechnung, unverändertes
+      Verhalten inkl. der Host-Pflicht aus Punkt 56), `buildProviderEntry
+      (providerForm)` (Feld-Normalisierung + Id-Vergabe), `upsertProvider
+      (list, entry)`/`removeProvider(list, id)` (reine Listen-Mutation,
+      neue Array-Referenz). `saveProviderForm`/`deleteProvider` berechnen
+      die neue Liste jetzt SYNCHRON (statt über den funktionalen
+      `setState`-Updater) und rufen `onProvidersChange(next)` im selben
+      Zug auf – sicher, weil beide Handler ausschließlich durch direkte
+      Nutzerklicks ausgelöst werden (keine konkurrierende Mutation
+      zwischen zwei Klicks).
+    - **Tests:** neue Datei `tests/settingsDialog.test.jsx` (20 Fälle,
+      Node-Umgebung, kein DOM nötig) – `providerFormIsValid` (gültiges
+      Formular, `null`, leerer Name, Nicht-http(s)-Schema, hostloses
+      Präfix, Host ohne Punkt, gilt auch für `custom`); `buildProviderEntry`
+      (frische `lp-`-Id für neue Einträge, bestehende Id bleibt beim
+      Bearbeiten, Name/Präfix getrimmt, Icon nur bei `custom`, pat/email-
+      Fallback); `upsertProvider`/`removeProvider` (Anhängen, Ersetzen an
+      Position, unbekannte Id lässt Liste unverändert, keine Mutation der
+      Eingabeliste); zwei `renderToStaticMarkup`-Tests für den neuen
+      Hinweistext (erscheint NUR bei `hasSettings:false`). Die im Auftrag
+      geforderte „sanitize/persist-Roundtrip der Provider-Liste über
+      `saveSettings`/`loadSettings` mit vollständigem Settings-Objekt“ war
+      bereits VOR v7.13 durch `tests/misc.test.js` abgedeckt (Block
+      „settings (localStorage)“, u. a. „gültiges linkProviders-Array bleibt
+      (normalisiert) erhalten“) – `settings.js` selbst wurde in v7.13 nicht
+      geändert (der Fix betrifft ausschließlich, WANN `saveSettings`
+      aufgerufen wird, nicht WIE es funktioniert), daher kein neuer Test
+      dort nötig, nur zur Kontrolle erneut grün verifiziert.
+    - Restrisiko: Der Erststart-Randfall bleibt bewusst so, wie er war
+      (Provider gehen beim X-Schließen VOR der ersten Verbindung weiterhin
+      verloren) – jetzt aber transparent über den Hinweistext statt
+      stillschweigend. Sollte das in der Praxis weiterhin zu Verwirrung
+      führen, wäre der nächste Schritt eine kontrollierte Erweiterung von
+      `loadSettings()`/der `connected`-Logik, kein weiterer Text-Hinweis.
