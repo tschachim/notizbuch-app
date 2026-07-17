@@ -848,6 +848,33 @@ export function extractOutline(doc) {
   return items;
 }
 
+// Klick in der Gliederungs-Leiste (v7.15-Fix, E2E-Finding 🟡 "Klick setzt
+// den Cursor nicht um"): Bei ECHTEN Maus-Klicks (anders als synthetischen
+// .click()-Aufrufen in Tests) verschiebt der Browser den Fokus per Default
+// schon beim mousedown auf den Button, BEVOR der onClick-Handler überhaupt
+// läuft – die anschließende Selection-Transaktion setzte zwar den
+// ProseMirror-State korrekt, das sichtbare Tippen landete aber weiterhin an
+// der ALTEN DOM-Cursor-Position (Editor/DOM-Selection liefen auseinander).
+// Fix zweigeteilt: (a) der Button (siehe unten) verhindert den
+// Fokus-Diebstahl von vornherein über onMouseDown+preventDefault, (b) diese
+// Funktion ist jetzt eine eigenständige, EXPORTIERTE reine Editor-Operation
+// (kein Inline-Closure im Button mehr) – testbar ohne echten Maus-Klick.
+// "pos" ist die Position DES heading-Nodes selbst (vor seinem Inhalt);
+// "pos+1" ist der Anfang des Inhalts – nur dort landet eine TextSelection
+// wirklich INNERHALB der Überschrift (bei "pos" normalisiert ProseMirror auf
+// die nächstgelegene gültige Text-Position davor). Stale-Position-Guard:
+// eine seit der letzten Outline-Berechnung veraltete Position (Dokument
+// inzwischen kürzer, z. B. nach einem Undo) wird verworfen statt eine
+// ungültige Selection zu erzeugen bzw. zu werfen. Gibt true zurück, wenn
+// gesprungen wurde (Tests prüfen so ohne DOM, ob der Guard gegriffen hat).
+export function jumpToHeading(editor, pos) {
+  if (!editor) return false;
+  const target = pos + 1;
+  if (target < 0 || target > editor.state.doc.content.size) return false;
+  editor.chain().focus().setTextSelection(target).scrollIntoView().run();
+  return true;
+}
+
 export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving, navWidth }) {
   const baseline = useRef(null);
   const [error, setError] = useState(null);
@@ -959,15 +986,6 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
     () => extractOutline(editor ? editor.state.doc : null),
     [editor && editor.state.doc] // eslint-disable-line react-hooks/exhaustive-deps
   );
-
-  // Klick in der Gliederungs-Leiste: Cursor an den Anfang der Überschrift
-  // setzen, in den sichtbaren Bereich scrollen, Fokus zurück in den Editor
-  // (läuft über die TipTap-Chain-API, die intern denselben view.dispatch
-  // nutzt wie ein manueller Aufruf).
-  const gotoHeading = (pos) => {
-    if (!editor) return;
-    editor.chain().focus().setTextSelection(pos + 1).scrollIntoView().run();
-  };
 
   const save = () => {
     if (!editor || saving) return;
@@ -1436,7 +1454,13 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
             // die volle Leistenbreite und würde nach rechts überstehen.
             <div key={i + item.pos} className={item.level === 2 ? "pl-3" : undefined}>
               <button
-                onClick={() => gotoHeading(item.pos)}
+                // onMouseDown+preventDefault (v7.15-Fix): verhindert, dass
+                // der Browser den DOM-Fokus schon beim Mausdruck auf den
+                // Button verschiebt, BEVOR onClick überhaupt läuft – sonst
+                // driften DOM-Selection und ProseMirror-Selection auseinander
+                // (siehe jumpToHeading-Kommentar oben).
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => jumpToHeading(editor, item.pos)}
                 title={item.text || (item.level === 1 ? "Kapitel" : "Abschnitt")}
                 className={"block w-full text-left truncate rounded-r-xl border border-l-0 shadow-sm mb-1.5 " +
                   (item.level === 1

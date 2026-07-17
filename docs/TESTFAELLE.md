@@ -277,6 +277,17 @@ einen Abschnitt VOR dem ersten Kapitel (falls vorhanden/anlegbar):
 Erwartet, dass dieser Vorspann-Bereich flach bleibt – kein zusätzlicher
 Kapitel-Kopf/keine Einrückung davor.
 
+Zusatzcheck (v7.15, behobenes E2E-Finding 🟡 „Kapitel-Inhalt ohne
+##-Unterabschnitt rutscht an den Dokumentanfang“): Im Editor per
+Kapitel-Knopf (#) ein neues Kapitel „QA-Test Neu“ ans Dokumentende setzen
+und DIREKT darunter (OHNE eigenen ##-Abschnitt) einen kurzen Absatztext
+eintippen, speichern. Erwartet: Der Absatztext erscheint in der
+Dokument-Ansicht DIREKT unter dem neuen Kapitel-Kopf „QA-Test Neu“ (ganz
+am Dokumentende) – NICHT vor dem ersten regulären Abschnitt (z. B.
+„Inbox“) direkt unter dem Dokumenttitel. Das Kapitel „QA-Test Neu“
+erscheint in der Leiste rechts wie jedes andere Kapitel (siehe oben);
+Zuklappen des Kapitel-Kopfs verbirgt auch diesen Freitext.
+
 **C14 [VERBUNDEN][API] Struktur-Vorschlag anfordern (zweistufige
 Gliederung, v7.14).** Voraussetzung: Das QA-Notizbuch hat mehrere
 `##`-Abschnitte (bei Bedarf vorher 2–3 kurze QA-Testeinträge in

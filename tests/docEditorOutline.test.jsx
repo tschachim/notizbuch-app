@@ -22,7 +22,7 @@ import StarterKit from "@tiptap/starter-kit";
 import Link from "@tiptap/extension-link";
 import { Markdown } from "tiptap-markdown";
 import {
-  extractOutline, FencedCodeBlock, LinkDecorations, MathInline, MathBlock, unescapeMd,
+  extractOutline, jumpToHeading, FencedCodeBlock, LinkDecorations, MathInline, MathBlock, unescapeMd,
 } from "../src/components/DocEditor.jsx";
 import { mathToPlaceholders } from "../src/lib/math.jsx";
 
@@ -132,6 +132,73 @@ describe("extractOutline (reine Funktion, DocEditor.jsx)", () => {
         [2, "B1"],
       ]);
     });
+  });
+});
+
+// v7.15-Fix (E2E-Finding 🟡 "Klick in der Gliederungs-Leiste setzt den
+// Cursor nicht um"): jumpToHeading ist die eigenständige, exportierte
+// Editor-Operation hinter dem Leisten-Klick (Button-seitiger
+// onMouseDown+preventDefault-Fix ist reines DOM-Verhalten und bleibt E2E,
+// siehe TESTFAELLE D10). Diese Tests prüfen headless, dass die
+// Selection/das Dokument nach dem Sprung tatsächlich an der Zielposition
+// steht – kein echter Maus-Klick nötig.
+describe("jumpToHeading (reine Editor-Operation, DocEditor.jsx, v7.15-Fix)", () => {
+  const MD = "# T\n\n## Reisen\n\nText A\n\n## Arbeit\n\nText B";
+
+  it("springt in die Ziel-Überschrift: selection.$from steht danach in genau diesem heading-Node", () => {
+    const editor = buildEditor(MD);
+    const outline = extractOutline(editor.state.doc);
+    const target = outline.find((o) => o.text === "Arbeit");
+    expect(target).toBeDefined();
+
+    // Cursor startet ganz am Dokumentanfang (Simulation "Cursor am
+    // Dokumentanfang", siehe Repro).
+    editor.commands.setTextSelection(1);
+
+    const jumped = jumpToHeading(editor, target.pos);
+    expect(jumped).toBe(true);
+
+    const { $from } = editor.state.selection;
+    expect($from.parent.type.name).toBe("heading");
+    expect($from.parent.textContent).toBe("Arbeit");
+    editor.destroy();
+  });
+
+  it("ein UNMITTELBAR danach eingefügtes Zeichen landet in der Ziel-Überschrift, nicht an der alten Cursor-Position", () => {
+    const editor = buildEditor(MD);
+    const outline = extractOutline(editor.state.doc);
+    const target = outline.find((o) => o.text === "Reisen");
+    editor.commands.setTextSelection(editor.state.doc.content.size - 1); // Cursor ans andere Ende
+    jumpToHeading(editor, target.pos);
+    editor.commands.insertContent("X");
+    // Die Überschrift, die gerade den Cursor enthält, muss "Reisen" (mit
+    // eingefügtem X) sein - nicht die letzte Überschrift/der letzte Absatz.
+    const { $from } = editor.state.selection;
+    expect($from.parent.type.name).toBe("heading");
+    expect($from.parent.textContent).toContain("Reisen");
+    expect($from.parent.textContent).toContain("X");
+    editor.destroy();
+  });
+
+  it("liefert false und wirft nie bei fehlendem Editor", () => {
+    expect(jumpToHeading(null, 5)).toBe(false);
+    expect(jumpToHeading(undefined, 5)).toBe(false);
+  });
+
+  it("Stale-Position-Guard: eine Position jenseits des aktuellen Dokumentendes wird verworfen, Selection bleibt unverändert", () => {
+    const editor = buildEditor(MD);
+    const before = editor.state.selection.from;
+    const farBeyond = editor.state.doc.content.size + 1000;
+    const jumped = jumpToHeading(editor, farBeyond);
+    expect(jumped).toBe(false);
+    expect(editor.state.selection.from).toBe(before);
+    editor.destroy();
+  });
+
+  it("eine negative Position wird verworfen (kein Absturz)", () => {
+    const editor = buildEditor(MD);
+    expect(jumpToHeading(editor, -5)).toBe(false);
+    editor.destroy();
   });
 });
 

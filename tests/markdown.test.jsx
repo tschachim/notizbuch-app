@@ -40,6 +40,11 @@ describe("parseTree", () => {
 // v7.14 (Nutzerwunsch "zweistufige Gliederung"): "# Titel" gruppiert
 // mehrere ##-Abschnitte zu einem Kapitel. "sections" bleibt eine flache
 // Liste mit globalem Index (jede Section trägt zusätzlich "chapter").
+// Helfer: chapters ohne "lines" vergleichen, wenn ein Test nicht den
+// Freitext-Inhalt selbst prüft (sonst müssten Tests, die die Kapitelform
+// prüfen, jede Leerzeilen-"Dead-Zone" mitpinnen).
+const chapShape = (chapters) => chapters.map(({ title, secFrom, secTo }) => ({ title, secFrom, secTo }));
+
 describe("parseTree: Kapitel (# , v7.14)", () => {
   it("ohne echtes #-Kapitel bleibt chapters leer – Alt-Verhalten byte-/verhaltensgleich (die Titelzeile wird NIE zum Kapitel)", () => {
     const { sections, chapters } = parseTree("# T\n\n## A\n\n## B");
@@ -53,7 +58,7 @@ describe("parseTree: Kapitel (# , v7.14)", () => {
     const doc = "# T\n\n## Vorspann\n\n# Kapitel Eins\n\n## Alpha\n\n## Beta\n\n# Kapitel Zwei\n\n## Gamma";
     const { sections, chapters } = parseTree(doc);
     expect(sections.map((s) => s.title)).toEqual(["Vorspann", "Alpha", "Beta", "Gamma"]);
-    expect(chapters).toEqual([
+    expect(chapShape(chapters)).toEqual([
       { title: null, secFrom: 0, secTo: 1 },
       { title: "Kapitel Eins", secFrom: 1, secTo: 3 },
       { title: "Kapitel Zwei", secFrom: 3, secTo: 4 },
@@ -66,7 +71,7 @@ describe("parseTree: Kapitel (# , v7.14)", () => {
   it("nur H1 ohne H2: leere Kapitel (secFrom === secTo) sind erlaubt", () => {
     const doc = "# T\n\n## A\n\n# Kapitel Eins\n\n# Kapitel Zwei\n\n## B";
     const { sections, chapters } = parseTree(doc);
-    expect(chapters).toEqual([
+    expect(chapShape(chapters)).toEqual([
       { title: null, secFrom: 0, secTo: 1 },
       { title: "Kapitel Eins", secFrom: 1, secTo: 1 },
       { title: "Kapitel Zwei", secFrom: 1, secTo: 2 },
@@ -110,7 +115,7 @@ describe("parseTree: Kapitel (# , v7.14)", () => {
       expect(sections.map((s) => s.title)).toEqual(["A1", "B1"]);
       // Kein implizites Kapitel nötig: Kapitel A beginnt direkt, ohne
       // vorangehende, verwaiste Abschnitte.
-      expect(chapters).toEqual([
+      expect(chapShape(chapters)).toEqual([
         { title: "Kapitel A", secFrom: 0, secTo: 1 },
         { title: "Kapitel B", secFrom: 1, secTo: 2 },
       ]);
@@ -124,7 +129,7 @@ describe("parseTree: Kapitel (# , v7.14)", () => {
     it("nur EIN Kapitel direkt nach der Titelzeile (kein ## davor) wird erkannt", () => {
       const doc = "# Titel\n\n# Kapitel A\n\n## A1";
       const { sections, chapters } = parseTree(doc);
-      expect(chapters).toEqual([{ title: "Kapitel A", secFrom: 0, secTo: 1 }]);
+      expect(chapShape(chapters)).toEqual([{ title: "Kapitel A", secFrom: 0, secTo: 1 }]);
       expect(sections.map((s) => s.title)).toEqual(["A1"]);
       expect(sections[0].chapter).toBe(0);
     });
@@ -137,11 +142,51 @@ describe("parseTree: Kapitel (# , v7.14)", () => {
       // implizites titelloses Kapitel, "Kapitel Zwei" wird normal erkannt.
       const doc = "# Kapitel Eins\n\n## A\n\n# Kapitel Zwei\n\n## B";
       const { sections, chapters } = parseTree(doc);
-      expect(chapters).toEqual([
+      expect(chapShape(chapters)).toEqual([
         { title: null, secFrom: 0, secTo: 1 },
         { title: "Kapitel Zwei", secFrom: 1, secTo: 2 },
       ]);
       expect(sections.map((s) => s.chapter)).toEqual([0, 1]);
+    });
+  });
+
+  // v7.15-Fix (E2E-Finding 🟡 "Kapitel-Inhalt ohne ##-Unterabschnitt rutscht
+  // an den Dokumentanfang"): Kapitel bekommen jetzt eigene "lines" (analog zu
+  // sections/subs) für Freitext DIREKT unter der Kapitelzeile, VOR dem
+  // ersten "##" dieses Kapitels bzw. ganz ohne jeden "##"-Abschnitt. "pre"
+  // bleibt ausschließlich für Inhalt VOR dem allerersten Kapitel/Abschnitt.
+  describe("Kapitel-Freitext ohne ##-Abschnitt (v7.15-Fix)", () => {
+    it("exaktes Repro: ein Kapitel am Dokumentende mit NUR Freitext (kein ##) bekommt seine Zeilen, NICHT pre", () => {
+      const doc = "# Titel\n\n## Inbox\n\n- alter Eintrag\n\n# QA-Test Neu\n\nAbsatztext hier.";
+      const { pre, sections, chapters } = parseTree(doc);
+      expect(sections.map((s) => s.title)).toEqual(["Inbox"]);
+      // Zwei Kapitel: das implizite (enthält "Inbox") + "QA-Test Neu" (0
+      // Abschnitte, aber Freitext).
+      expect(chapShape(chapters)).toEqual([
+        { title: null, secFrom: 0, secTo: 1 },
+        { title: "QA-Test Neu", secFrom: 1, secTo: 1 },
+      ]);
+      expect(chapters[1].lines.some((l) => l.text === "Absatztext hier.")).toBe(true);
+      // Der Kern des Bugs: der Freitext darf NICHT in "pre" landen.
+      expect(pre.some((l) => l.text === "Absatztext hier.")).toBe(false);
+    });
+
+    it("Freitext VOR dem ersten ## eines Kapitels UND Abschnitte danach: Freitext gehört zum Kapitel, nicht zu pre oder zum ersten Abschnitt", () => {
+      const doc = "# Titel\n\n# Kapitel A\n\nEinleitungstext.\n\n## A1\n\n- Punkt";
+      const { pre, sections, chapters } = parseTree(doc);
+      expect(chapShape(chapters)).toEqual([{ title: "Kapitel A", secFrom: 0, secTo: 1 }]);
+      expect(chapters[0].lines.some((l) => l.text === "Einleitungstext.")).toBe(true);
+      expect(pre.some((l) => l.text === "Einleitungstext.")).toBe(false);
+      // Der Einleitungstext gehört NICHT zum Abschnitt A1.
+      expect(sections[0].lines.some((l) => l.text === "Einleitungstext.")).toBe(false);
+      expect(sections[0].lines.some((l) => l.text === "- Punkt")).toBe(true);
+    });
+
+    it("Alt-Verhalten ohne jedes #-Kapitel bleibt unverändert: Freitext vor dem ersten ## bleibt in pre", () => {
+      const doc = "# T\n\nFreier Vorspann-Text.\n\n## A\n\n- x";
+      const { pre, chapters } = parseTree(doc);
+      expect(chapters).toEqual([]);
+      expect(pre.some((l) => l.text === "Freier Vorspann-Text.")).toBe(true);
     });
   });
 });
@@ -270,6 +315,35 @@ describe("DocView: Kapitel (#, v7.14)", () => {
     expect(html).not.toContain('id="chap-2"');
     expect(html).toContain("A1Text");
     expect(html).toContain("B1Text");
+  });
+
+  // v7.15-Fix (E2E-Finding 🟡): exakter Live-Repro (Editor: H1-Knopf "QA-Test
+  // Neu" ans Ende + Absatztext direkt darunter ohne ##, gespeichert).
+  it("Freitext direkt unter einer #-Kapitelzeile (ohne ##) erscheint unter dem chap-Kopf, NICHT vor dem ersten Abschnitt", () => {
+    const doc = "# Titel\n\n## Inbox\n\n- alter Eintrag\n\n# QA-Test Neu\n\nAbsatztext hier.";
+    const html = render(doc);
+    // Genau EIN <h1> (Titelzeile) – der Freitext hängt NICHT lose in "pre".
+    expect(html.match(/<h1[^>]*>/g)).toHaveLength(1);
+    expect(html).toContain('id="chap-1"');
+    expect(html).toContain("QA-Test Neu");
+    expect(html).toContain("Absatztext hier.");
+    // Reihenfolge: der Freitext steht NACH "alter Eintrag" (Inbox-Abschnitt)
+    // im HTML, nicht davor (vorher rutschte er an den Dokumentanfang).
+    expect(html.indexOf("alter Eintrag")).toBeLessThan(html.indexOf("Absatztext hier."));
+  });
+
+  // v7.15-Re-Review (🟡): Die übliche Leerzeile nach der Kapitelzeile landet
+  // ebenfalls in chap.lines – sie darf KEINEN leeren pt-2-Div (Extra-Abstand
+  // vor dem ersten Abschnitt) erzeugen. Nur echter Freitext rendert den Div.
+  it("Kapitel mit nur der üblichen Leerzeile vor dem ersten ## erzeugt keinen leeren Freitext-Div", () => {
+    const html = render("# T\n\n# Kap A\n\n## A1\n\n- A1Text\n\n# Kap B\n\n## B1\n\n- B1Text");
+    expect(html).not.toContain('<div class="pt-2"></div>');
+    expect(html).toContain("A1Text");
+    expect(html).toContain("B1Text");
+    // Gegenprobe: echter Freitext unter der Kapitelzeile rendert den Div weiterhin.
+    const mitText = render("# T\n\n# Kap A\n\nEinleitung.\n\n## A1\n\n- A1Text");
+    expect(mitText).toContain("Einleitung.");
+    expect(mitText).not.toContain('<div class="pt-2"></div>');
   });
 
   it('Klapp-Zustand nutzt den Schlüssel "c:"+Titel, getrennt von den bestehenden "s:"-Schlüsseln', () => {

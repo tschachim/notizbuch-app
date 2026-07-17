@@ -298,3 +298,54 @@ describe('applyOps: optionales "chapter"-Feld (v7.14)', () => {
     expect(out.split("# Kapitel B")[0]).toContain("- x");
   });
 });
+
+// v7.15-Regressionstest (E2E-Finding 🟡, Auftrag Punkt "ops.js-Konsistenz
+// gegenprüfen"): parseTree bekam eigene "lines" für Kapitel-Freitext ohne
+// ##-Abschnitt (markdown.jsx-Fix). ops.js selbst arbeitet weiterhin direkt
+// auf den rohen Zeilen (kein Bezug zu parseTree), die #{1,2}-Grenzen
+// (BOUNDARY_RE/CHAPTER_RE) sollten ein Kapitel mit reinem Freitext daher
+// schon vorher korrekt begrenzt haben – dieser Test pinnt das ab.
+describe("applyOps: Kapitel mit reinem Freitext (kein ##) – Konsistenz mit dem parseTree-Fix (v7.15)", () => {
+  const DOC_FREETEXT = `# Wissensbasis
+
+# QA-Test Neu
+
+Freitext ohne Abschnitt.
+
+# Kapitel B
+
+## Zwei
+
+- b
+`;
+
+  it("append_to_section legt einen neuen ##-Abschnitt INNERHALB eines reinen Freitext-Kapitels an, der Freitext bleibt erhalten", () => {
+    const out = applyOps(DOC_FREETEXT, [
+      { type: "append_to_section", heading: "## Neu", content: "- x", chapter: "QA-Test Neu" },
+    ]);
+    const kapNeu = out.split("# Kapitel B")[0];
+    expect(kapNeu).toContain("Freitext ohne Abschnitt.");
+    expect(kapNeu).toContain("## Neu");
+    expect(kapNeu).toContain("- x");
+    // Nicht ins falsche Kapitel gerutscht.
+    expect(out.split("# Kapitel B")[1]).not.toContain("## Neu");
+    expect(out).toContain("# Kapitel B");
+    expect(out).toContain("## Zwei");
+    expect(out).toContain("- b");
+  });
+
+  it("delete_section/replace_section mit chapter auf ein reines Freitext-Kapitel finden korrekt keinen ##-Abschnitt (No-op), Freitext bleibt unangetastet", () => {
+    const outDelete = applyOps(DOC_FREETEXT, [
+      { type: "delete_section", heading: "## Nicht Da", chapter: "QA-Test Neu" },
+    ]);
+    expect(outDelete).toBe(DOC_FREETEXT);
+
+    const outReplace = applyOps(DOC_FREETEXT, [
+      { type: "replace_section", heading: "## Ergebnis", content: "- y", chapter: "QA-Test Neu" },
+    ]);
+    const kapNeu = outReplace.split("# Kapitel B")[0];
+    expect(kapNeu).toContain("Freitext ohne Abschnitt.");
+    expect(kapNeu).toContain("## Ergebnis");
+    expect(kapNeu).toContain("- y");
+  });
+});

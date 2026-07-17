@@ -2474,16 +2474,16 @@ aus `referenz-app.jsx` übernommen.
       Codeblöcken/Links, leeres Kapitel, `toggleHeading(1)`),
       `tests/anthropic.test.js` (Prompt-Verträge). Gesamtstand vor der
       Nachbesserung unten: 605/605 grün (vorher 571).
-    - **Bewusste Restrisiken:** (1) Fence-Blindheit von `#`/`##` (geteilt,
-      dokumentiert, nicht behoben – Konsistenz mit der bestehenden
-      Grenze wichtiger als ein Sonderfall nur für Kapitel). (2) Freitext
-      direkt unter einer `"# "`-Zeile OHNE folgenden `"##"`-Abschnitt
-      landet weiterhin in `pre` (rendert ganz oben statt beim Kapitel) –
-      seltener Rand­fall (die Konvention verlangt Inhalte innerhalb von
-      `##`-Abschnitten), gleiche Behandlung wie Freitext vor dem
-      allerersten `##` seit jeher. (3) Die Editor-Gliederungs-Leiste
-      zeigt nur Level 1/2 (keine `###`-Unterthemen) – bewusst, analog zur
-      Dokument-Leiste, die ebenfalls nur `##` listet.
+    - **Bewusste Restrisiken (Stand v7.14, vor der v7.15-Nachbesserung
+      unten):** (1) Fence-Blindheit von `#`/`##` (geteilt, dokumentiert,
+      nicht behoben – Konsistenz mit der bestehenden Grenze wichtiger als
+      ein Sonderfall nur für Kapitel; gilt weiterhin). (2) Freitext direkt
+      unter einer `"# "`-Zeile OHNE folgenden `"##"`-Abschnitt landet
+      weiterhin in `pre` (rendert ganz oben statt beim Kapitel) – **wurde
+      als E2E-Finding 🟡 real bestätigt und in v7.15 behoben, siehe
+      "Nachbesserung 2" unten.** (3) Die Editor-Gliederungs-Leiste zeigt
+      nur Level 1/2 (keine `###`-Unterthemen) – bewusst, analog zur
+      Dokument-Leiste, die ebenfalls nur `##` listet; gilt weiterhin.
     - **Nachbesserung (Code-Review vor dem Commit, v7.14 bleibt v7.14 –
       reine Korrektur des noch uncommitteten Stands, kein neues Feature):**
       Ein 🔴-Finding, behoben:
@@ -2550,3 +2550,90 @@ aus `referenz-app.jsx` übernommen.
       - **Nicht angefasst** (laut Review bereits solide verifiziert):
         `src/lib/ops.js`, der System-Prompt (`src/lib/anthropic.js`), die
         Leisten-UX in `src/App.jsx`.
+    - **Nachbesserung 2 (v7.15, E2E-Findings 🟡 nach dem v7.14-Deploy):**
+      Zwei vom Tester am Live-Deploy bestätigte Findings, beide behoben:
+      1. **Kapitel-Freitext ohne `##`-Abschnitt rutschte an den
+         Dokumentanfang** (`src/lib/markdown.jsx`, `parseTree`/`DocView`,
+         🟡 – das in der v7.14-Fassung dokumentierte Restrisiko 2 wurde
+         damit real bestätigt). Repro: im Editor per H1-Knopf ein neues
+         Kapitel ans Ende setzen, direkt darunter Absatztext OHNE
+         `##`-Zeile, speichern – der Absatz erschien in der Dokument-
+         Ansicht VOR dem ersten Abschnitt (in `pre`), während der leere
+         `chap-`-Anker des neuen Kapitels ganz unten stand. Ursache: `cur`
+         wird beim Verarbeiten einer `#`-Kapitelzeile auf `null` gesetzt,
+         nachfolgende Zeilen fielen dadurch (mangels offenem `##`-
+         Abschnitt) in den `pre`-Zweig, unabhängig davon, ob bereits ein
+         Kapitel offen war. **Fix:** Kapitel bekommen jetzt – analog zu
+         `sections`/`subs` – ein eigenes `lines`-Array
+         (`{ title, secFrom, secTo, lines }`); Zeilen werden per
+         `curSub ? curSub.lines : cur ? cur.lines : (chapterIdx >= 0 ?
+         chapters[chapterIdx].lines : pre)` zugeordnet – NUR wenn WEDER
+         eine Unterthema- noch eine Abschnitts- noch eine Kapitel-Zeile
+         offen ist, landet Inhalt noch in `pre`. `pre` ist dadurch jetzt
+         wirklich ausschließlich Inhalt VOR dem allerersten Kapitel/
+         Abschnitt (Titelzeile + echter Vorspann). `DocView` rendert
+         `chap.lines` (falls vorhanden) direkt unter dem Kapitel-Kopf, vor
+         den (eingerückten) Abschnitten, und klappt mit dem Kapitel
+         ein/aus – ein Kapitel mit reinem Freitext (0 Abschnitte) ist damit
+         ein legitimer, sichtbarer Zustand. Der `sections.length > 0`-Guard
+         fürs IMPLIZITE Kapitel bleibt unverändert (der betrifft nur den
+         Auto-generierten `title:null`-Eintrag, nicht explizite, vom Nutzer
+         angelegte Kapitel). `ops.js` selbst brauchte KEINE Änderung: die
+         `#{1,2}`-Bereichsgrenzen (`BOUNDARY_RE`/`CHAPTER_RE`) grenzen
+         Kapitel bereits rein über Zeilenpositionen ab, unabhängig davon,
+         ob `parseTree` diesen Inhalt als `lines` oder `pre` einordnet –
+         ein Regressionstest bestätigt das.
+      2. **Editor-Gliederungsleiste: Klick setzte den Cursor nicht um**
+         (`src/components/DocEditor.jsx`, 🟡). Repro (echte Maus-Klicks):
+         Cursor am Dokumentanfang, Klick auf einen Leisten-Eintrag, sofort
+         tippen – der Text erschien an der ALTEN Cursor-Position,
+         `window.getSelection()` blieb unverändert. Ursache: ein
+         `<button>` verschiebt den DOM-Fokus per Browser-Default schon beim
+         `mousedown` auf sich selbst, NOCH VOR dem `onClick`-Handler – die
+         anschließende `editor.chain().focus().setTextSelection(...)`
+         setzte zwar den ProseMirror-State korrekt, DOM-Selection und
+         PM-Selection liefen aber sichtbar auseinander (bei synthetischen
+         `.click()`-Aufrufen in Tests trat das nicht auf, deshalb unbemerkt
+         beim Schreiben von v7.14). **Fix:** (a) der Leisten-Button bekommt
+         `onMouseDown={(e) => e.preventDefault()}` (verhindert den
+         Fokus-Diebstahl von vornherein), (b) die bisherige Inline-Closure
+         `gotoHeading` wurde durch eine eigenständige, EXPORTIERTE reine
+         Funktion `jumpToHeading(editor, pos)` ersetzt – testbar ohne
+         echten Maus-Klick. Zusätzlich zwei kleine Härtungen dabei
+         mitgenommen: `pos + 1` statt `pos` (Position DES heading-Nodes vs.
+         Anfang seines Inhalts – nur Letzteres landet die TextSelection
+         WIRKLICH innerhalb der Überschrift, `pos` selbst normalisiert
+         ProseMirror auf die nächstgelegene Position davor) und ein
+         Stale-Position-Guard (`target` muss innerhalb `[0,
+         doc.content.size]` liegen, sonst No-op statt einer ungültigen
+         Selection/eines Absturzes – relevant, wenn die Outline seit dem
+         letzten Tastendruck veraltet ist, z. B. nach einem Undo).
+      - **Tests:** `tests/markdown.test.jsx` – neuer Block "Kapitel-
+        Freitext ohne ##-Abschnitt (v7.15-Fix)": exaktes Live-Repro
+        (Freitext-Kapitel am Dokumentende, Text landet in `chapters[].lines`
+        statt `pre`), Freitext VOR dem ersten `##` eines Kapitels MIT
+        Abschnitten danach, Alt-Verhalten ohne jedes `#`-Kapitel
+        unverändert (Freitext bleibt in `pre`); neuer DocView-Test (Freitext
+        erscheint unter dem `chap-`-Anker, in Dokumentreihenfolge NACH dem
+        vorherigen Abschnitt, kein loses `<h1>`). Bestehende
+        `chapters`-Fixtures auf einen `chapShape`-Helfer umgestellt
+        (vergleicht ohne `lines`), damit sie nicht jede Leerzeilen-
+        "Dead-Zone" mitpinnen müssen. `tests/ops.test.js` – neuer Block
+        "Kapitel mit reinem Freitext (kein ##)": `append_to_section`/
+        `replace_section`/`delete_section` mit `chapter`-Feld auf ein
+        Freitext-only-Kapitel bleiben korrekt begrenzt, Freitext bleibt
+        erhalten. `tests/docEditorOutline.test.jsx` – neuer Block
+        "jumpToHeading": Sprung landet mit `selection.$from` nachweislich
+        IM Ziel-heading-Node, ein unmittelbar danach eingefügtes Zeichen
+        landet dort (nicht an der alten Position), `null`/`undefined`-Editor
+        und eine Position jenseits von `doc.content.size` bzw. negative
+        Positionen liefern `false` statt zu werfen/die Selection zu
+        verändern. Echtes Maus-Fokus-Verhalten (der `onMouseDown`-Fix
+        selbst) bleibt E2E-Sache (`docs/TESTFAELLE.md` D10 unverändert
+        gültig). Gesamtstand danach 622/622 grün (vorher 611), Coverage
+        `src/lib` weiterhin deutlich über dem 60-%-Gate (`markdown.jsx`
+        93,3 %, `ops.js` 97,3 % Statements).
+      - **Nicht angefasst:** der System-Prompt (`src/lib/anthropic.js`),
+        `ops.js`-Kernlogik (nur Regressionstest ergänzt), die Leisten-UX in
+        `src/App.jsx` (keine Änderung nötig – `chapter.lines` wird dort
+        nirgends gebraucht, die Leiste listet nur Titel).

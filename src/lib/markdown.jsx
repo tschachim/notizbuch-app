@@ -35,7 +35,14 @@ const TABLE_SEP_RE = /^\s*\|(\s*:?-+:?\s*\|)+\s*$/;
    dabei bewusst eine FLACHE Liste mit globalem Index (Scroll-Spy, gotoSection
    & alle bestehenden Konsumenten bleiben minimal-invasiv) – jede Section
    trägt zusätzlich "chapter" (Index in "chapters"). "chapters" ist
-   [{ title, secFrom, secTo }] mit HALBOFFENEM Bereich [secFrom, secTo).
+   [{ title, secFrom, secTo, lines }] mit HALBOFFENEM Bereich [secFrom,
+   secTo). "lines" (v7.15-Fix, E2E-Finding 🟡) sind – analog zu
+   sections/subs – die Zeilen DIREKT unter der Kapitelzeile, VOR dem ersten
+   "##" dieses Kapitels (oder das gesamte Kapitel, falls es gar keinen
+   "##"-Abschnitt hat): ein Kapitel darf also reinen Freitext OHNE jeden
+   Abschnitt enthalten, DocView rendert "lines" direkt unter dem
+   Kapitel-Kopf. "pre" bleibt dadurch AUSSCHLIESSLICH für Inhalt VOR dem
+   allerersten Kapitel/Abschnitt (Titelzeile + echter Vorspann).
 
    Abwärtskompatibilität HART (Kernentscheidung, siehe DECISIONS – v7.14
    Nachbesserung nach Code-Review, löst die anfängliche "sawSection"-
@@ -99,13 +106,26 @@ export function parseTree(text) {
       // außer der einen Titelzeile, unabhängig davon, ob schon ein "##"
       // gesehen wurde.
       if (chapterIdx >= 0) chapters[chapterIdx].secTo = sections.length;
-      else if (sections.length > 0) chapters.push({ title: null, secFrom: 0, secTo: sections.length }); // implizit, nur wenn nicht leer
-      chapters.push({ title: line.replace(/^#\s+/, "").trim(), secFrom: sections.length, secTo: sections.length });
+      else if (sections.length > 0) chapters.push({ title: null, secFrom: 0, secTo: sections.length, lines: [] }); // implizit, nur wenn nicht leer
+      chapters.push({ title: line.replace(/^#\s+/, "").trim(), secFrom: sections.length, secTo: sections.length, lines: [] });
       chapterIdx = chapters.length - 1;
       cur = null;
       curSub = null;
+    } else if (curSub) {
+      curSub.lines.push({ text: line, idx });
+    } else if (cur) {
+      cur.lines.push({ text: line, idx });
+    } else if (chapterIdx >= 0) {
+      // v7.15-Fix (E2E-Finding 🟡): Freitext NACH einer #-Kapitelzeile, aber
+      // VOR dem ersten ##-Abschnitt dieses Kapitels (oder ganz ohne jeden
+      // ##-Abschnitt) gehört zum KAPITEL, nicht zu "pre" – vorher landete
+      // er fälschlich ganz oben im Dokument, weit weg von seinem Kapitel-
+      // Kopf (Repro: H1-Knopf im Editor + Absatztext direkt darunter ohne
+      // ##, gespeichert – der Text erschien vor dem ersten Abschnitt
+      // "Inbox" statt unter dem neuen Kapitel-Kopf).
+      chapters[chapterIdx].lines.push({ text: line, idx });
     } else {
-      (curSub ? curSub.lines : cur ? cur.lines : pre).push({ text: line, idx });
+      pre.push({ text: line, idx });
     }
   });
   if (chapterIdx >= 0) chapters[chapterIdx].secTo = sections.length;
@@ -751,8 +771,21 @@ export function DocView({ text, collapsed, onToggle, imgMap, onImgClick, onToggl
             </div>
             {/* Eingeklapptes Kapitel verbirgt ALLE seine Abschnitte (samt
                 ihrer eigenen Köpfe) – anders als ein eingeklappter ##-
-                Abschnitt, der seinen eigenen Kopf sichtbar behält. */}
-            {!cIsC && sectionsOf(chap)}
+                Abschnitt, der seinen eigenen Kopf sichtbar behält. Freitext
+                DIREKT unter der Kapitelzeile (v7.15-Fix) klappt genauso mit
+                ein/aus und steht VOR den (eingerückten) Abschnitten. */}
+            {!cIsC && (
+              <>
+                {/* Nur bei ECHTEM Inhalt rendern: die übliche Leerzeile nach
+                    der Kapitelzeile landet ebenfalls in chap.lines und würde
+                    sonst einen leeren pt-2-Div (Extra-Abstand) erzeugen
+                    (Re-Review-Finding v7.15). */}
+                {chap.lines.some((l) => l.text.trim() !== "") && (
+                  <div className="pt-2">{renderBlocks(chap.lines, imgMap, onImgClick, "chap" + ci, onToggleTask)}</div>
+                )}
+                {sectionsOf(chap)}
+              </>
+            )}
           </div>
         );
       });
