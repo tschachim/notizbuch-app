@@ -330,7 +330,11 @@ automatischer Link (nur http/https werden verlinkt, siehe DECISIONS.md
 der Historie, Ansicht zeigt den Dialog-Link wie in C11, der zweite Link
 öffnet ebenfalls in einem neuen Tab. Editor OHNE JEDE weitere Änderung
 erneut öffnen und direkt speichern. Erwartet: KEIN Commit/keine neue
-Version (No-op-Roundtrip, wie schon bei D5/D6 für Formeln/Codeblöcke).
+Version (No-op-Roundtrip, wie schon bei D5/D6 für Formeln/Codeblöcke) –
+außer der zweite Link (`https://example.com`) passt zufällig zu einem
+unter Einstellungen konfigurierten Provider MIT Zugangsdaten (v7.12,
+siehe D9): dann löst das Speichern erwartungsgemäß EINEN Commit aus
+(Titel-Auflösung), das ist KEIN Bug.
 ⚠️ Bekannte, bewusste Normalisierung (KEIN Bug, bitte nicht melden): Eine
 im Link-Dialog eingegebene URL mit Leerzeichen, unbalancierten/
 verschachtelten runden Klammern, `"` oder `<`/`>` wird beim Einfügen
@@ -338,24 +342,58 @@ automatisch prozent-encodiert (z. B. `%20` für ein Leerzeichen) – eine
 einzelne Ebene balancierter Klammern (z. B. ein Wikipedia-Link) bleibt
 dagegen unverändert lesbar.
 
-**D8 [VERBUNDEN][API] „Titel ermitteln“ im Link-Dialog.** NUR ausführen,
-wenn unter Einstellungen (siehe A4) bereits ein Provider MIT
-Zugangsdaten (PAT bzw. E-Mail+API-Token) hinterlegt ist – der Tester
-trägt selbst NIEMALS Zugangsdaten ein; ist keiner konfiguriert, diesen
-Fall als ÜBERSPRUNGEN melden (kein Finding). Editor öffnen, Link-Knopf
-klicken, als URL ein passendes Ziel des konfigurierten Providers
-eintragen (z. B. bei Azure DevOps eine
-`https://dev.azure.com/<org>/<projekt>/_workitems/edit/<id>`-URL).
-Erwartet: Ein zusätzlicher Knopf „Titel ermitteln“ (Funkeln-Icon)
-erscheint im Popover – NUR bei diesem Provider, nicht bei einer
-beliebigen anderen URL. Klicken. Erwartet: kurzer Ladezustand (Spinner
-im Knopf), danach ENTWEDER das Titelfeld automatisch befüllt (Erfolg –
-bei Azure DevOps im Format „{Typ} {ID}: {Titel}“) ODER eine
-verständliche Fehlermeldung im Popover (z. B. bei einer
-Confluence-CORS-Sperre des Atlassian-Tenants – KEIN Bug, dokumentierte
-Grenze, siehe DECISIONS.md #56). Bei Erfolg: Titel vor dem Einfügen bei
-Bedarf noch anpassen, „Einfügen“ klicken, speichern. Erwartet: Link
-erscheint in der Ansicht wie in C11/C12 beschrieben (inkl. Icon).
+**D8 [VERBUNDEN][API] Automatische Titel-Ermittlung im Link-Dialog (v7.12).**
+NUR ausführen, wenn unter Einstellungen (siehe A4) bereits ein Provider
+MIT Zugangsdaten (PAT bzw. E-Mail+API-Token) hinterlegt ist – der
+Tester trägt selbst NIEMALS Zugangsdaten ein; ist keiner konfiguriert,
+diesen Fall als ÜBERSPRUNGEN melden (kein Finding). Editor öffnen,
+Link-Knopf klicken, als URL ein passendes Ziel des konfigurierten
+Providers eintragen (z. B. bei Azure DevOps eine
+`https://dev.azure.com/<org>/<projekt>/_workitems/edit/<id>`-URL) –
+Zeichen für Zeichen eintippen ODER in einem Zug einfügen. Erwartet: Ein
+Knopf „Titel ermitteln“ (Funkeln-Icon) erscheint im Popover, sobald die
+URL zum Provider passt – NUR bei diesem Provider, nicht bei einer
+beliebigen anderen URL. OHNE weiteren Klick: Nach kurzer Verzögerung
+(rund eine halbe bis eine Sekunde, Spinner erscheint kurz im Knopf)
+befüllt sich das Titelfeld automatisch – bei Azure DevOps im Format
+„{Typ} {ID}: {Titel}“ – ODER es erscheint eine verständliche
+Fehlermeldung im Popover. Bei einem GÜLTIGEN PAT: Titel wird automatisch
+befüllt. War das hinterlegte PAT ungültig/abgelaufen/falsch zugeordnet:
+Erwartet eine KLARE Auth-Meldung, z. B. „PAT ungültig oder abgelaufen,
+oder PAT gehört nicht zur Organisation ‚…‘.“ bzw. bei fehlender
+Berechtigung ein Hinweis auf den Scope „Work Items: Read“ – NICHT mehr
+die frühere, irreführende „Netzwerk/CORS“-Meldung (Auftrag v7.12 Teil A,
+DECISIONS.md #58 – DevOps antwortet bei ungültiger Auth mit einem
+CORS-losen Redirect statt 401, das wurde jetzt entlarvt). Bei einer
+ECHTEN Confluence-CORS-Sperre des Atlassian-Tenants bleibt „Netzwerk/
+CORS“ weiterhin die korrekte, dokumentierte Meldung (KEIN Bug). Danach:
+Titelfeld manuell überschreiben (z. B. „Mein eigener Titel“), URL
+geringfügig ändern (ein Zeichen anhängen und wieder löschen) und kurz
+abwarten. Erwartet: Der manuell eingegebene Titel bleibt UNVERÄNDERT –
+ein automatischer Fetch überschreibt ihn NIE. Der Knopf „Titel
+ermitteln“ bleibt zusätzlich als manueller Retry nutzbar. Bei Erfolg:
+Titel vor dem Einfügen bei Bedarf noch anpassen, „Einfügen“ klicken,
+speichern. Erwartet: Link erscheint in der Ansicht wie in C11/C12
+beschrieben (inkl. Icon).
+
+**D9 [VERBUNDEN][API] Auto-Auflösung beim Speichern/in Chat-Ops (v7.12).**
+Nur ausführen, wenn wie bei D8 bereits ein Provider MIT Zugangsdaten
+konfiguriert ist (sonst ÜBERSPRUNGEN, kein Finding). (a) Editor-Pfad:
+Ein Dokument mit einem noch UNAUFGELÖSTEN Link zum konfigurierten
+Provider anlegen – z. B. per Copy-Paste eine nackte
+`https://dev.azure.com/<org>/<projekt>/_workitems/edit/<id>`-URL (OHNE
+den Link-Dialog zu benutzen) mitten in einen Absatz einfügen, Editor
+öffnen falls nötig neu laden, dann OHNE JEDE weitere Änderung direkt
+speichern. Erwartet: Anders als der sonstige No-op-Roundtrip (siehe
+D5–D7) löst dieses Speichern JETZT einen Commit aus, die nackte URL im
+Dokument wird zu einem sprechenden Linktitel aufgelöst. (b) Chat-Pfad:
+Im Chat eine Notiz mit genau so einer nackten Provider-URL diktieren
+(z. B. „Notiere: <URL> muss noch geprüft werden“). Erwartet: Nach der
+Antwort zeigt das Dokument die URL ebenfalls als aufgelösten Link
+(Titel statt roher URL) – die Auflösung passiert im Hintergrund, ohne
+zusätzliche Nutzeraktion und ohne sichtbaren Fehlertext im Chat, selbst
+wenn die Auflösung im Hintergrund scheitern sollte (dann bleibt die URL
+schlicht unverändert stehen).
 
 ## E. Schnellnotizen
 

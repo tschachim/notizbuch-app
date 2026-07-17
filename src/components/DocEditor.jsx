@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import { getHTMLFromFragment, Node, Extension } from "@tiptap/core";
 import { Fragment } from "@tiptap/pm/model";
@@ -779,6 +779,45 @@ export function normalizeLinkUrl(raw) {
   return { url };
 }
 
+// Auto-Fetch im Link-Popover (v7.12, Nutzerwunsch "automatische Titel-
+// Ermittlung überall"): löst DECISIONS #56 ("Fetch nur auf Klick") ab, der
+// manuelle Knopf "Titel ermitteln" (fetchTitleForLink unten) bleibt als
+// Retry erhalten. Debounce-Dauer bewusst als benannte Konstante (Auftrag:
+// "~600 ms").
+const AUTO_FETCH_DEBOUNCE_MS = 600;
+
+// Reine Helfer, aus der Komponente herausgezogen, damit sie OHNE Editor-
+// Instanz/DOM testbar sind (siehe tests/docEditorLinks.test.jsx). Beide
+// werfen nie.
+
+// Liefert den zur (noch rohen, ggf. schemalosen) URL passenden Provider,
+// WENN er Zugangsdaten trägt – sonst null. Identische Regel wie
+// linkTitleProvider (siehe openLinkPicker/fetchTitleForLink unten), nur ohne
+// React-State-Abhängigkeit, damit der manuelle Knopf und der Auto-Fetch
+// GENAU dieselbe Prüfung durchlaufen.
+export function autoFetchProviderFor(rawUrl, configuredProviders) {
+  const n = normalizeLinkUrl(rawUrl);
+  if (n.error) return null;
+  const p = providerFor(n.url, configuredProviders);
+  return p && providerHasCredentials(p) ? p : null;
+}
+
+// Entscheidet nach einem (ggf. bereits veralteten) Auto-Fetch-Ergebnis, ob
+// und wie linkForm aktualisiert wird: NUR solange das Titelfeld noch "frei"
+// ist – leer ODER weiterhin der zuletzt AUTOMATISCH eingetragene Wert
+// (lastAutoTitle). Ein manuell getippter Titel wird dadurch nie
+// überschrieben UND nie nachträglich mit einem für den Nutzer ohnehin
+// irrelevanten Fehlertext gestört. Liefert bei "nicht mehr frei" dieselbe
+// linkForm-Referenz zurück (unverändert) – Aufrufer können daran erkennen,
+// ob tatsächlich etwas angewendet wurde (siehe runAutoFetch unten).
+export function applyAutoFetchResult(linkForm, lastAutoTitle, res) {
+  if (!linkForm) return linkForm;
+  const stillFree = linkForm.title.trim() === "" || linkForm.title === lastAutoTitle;
+  if (!stillFree) return linkForm;
+  if (res && res.ok) return { ...linkForm, title: res.title, error: null };
+  return { ...linkForm, error: res ? res.reason : linkForm.error };
+}
+
 export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving }) {
   const baseline = useRef(null);
   const [error, setError] = useState(null);
@@ -788,8 +827,18 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
   // unten); null solange das Popover geschlossen ist.
   const [linkForm, setLinkForm] = useState(null); // { title, url, error, existing }
   // "Titel ermitteln" (v7.9): true während fetchLinkTitle läuft (Spinner im
-  // Knopf, siehe fetchTitleForLink unten).
+  // Knopf, siehe fetchTitleForLink unten) – v7.12: derselbe Zustand/Spinner
+  // wird auch vom automatischen Debounce-Fetch (scheduleAutoFetch/
+  // runAutoFetch unten) verwendet, kein separater Lade-Indikator nötig.
   const [titleFetching, setTitleFetching] = useState(false);
+  // Debounce-Zustand des Auto-Fetches (v7.12): { timer, controller } oder
+  // null. Ref statt State, weil er nie gerendert wird und synchron in
+  // Event-Handlern gelesen/verworfen werden muss (siehe scheduleAutoFetch).
+  const titleAutoRef = useRef(null);
+  // Der zuletzt AUTOMATISCH eingetragene Titel (siehe applyAutoFetchResult
+  // oben) – null, solange noch keiner gesetzt wurde bzw. nach dem Öffnen/
+  // Schließen des Popovers zurückgesetzt.
+  const lastAutoTitleRef = useRef(null);
   // TipTap feuert Transaktionen ohne React-Re-Render; kleiner Zähler,
   // damit die Aktiv-Zustände der Toolbar-Knöpfe mitziehen.
   const [, setTick] = useState(0);
@@ -922,6 +971,28 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
     editor.chain().focus().insertContent({ type: displayMode ? "mathBlock" : "mathInline", attrs: { tex: "" } }).run();
   };
 
+  // Verwirft einen wartenden (setTimeout) oder laufenden Auto-Fetch-Versuch
+  // (v7.12): AbortController-Signal wird von runAutoFetch nach jedem await
+  // geprüft, ein bereits verschickter fetchImpl-Request läuft zwar im
+  // Hintergrund weiter, sein Ergebnis wird aber verworfen statt angewendet.
+  const cancelAutoFetch = () => {
+    if (titleAutoRef.current) {
+      clearTimeout(titleAutoRef.current.timer);
+      titleAutoRef.current.controller.abort();
+      titleAutoRef.current = null;
+    }
+  };
+
+  // Beim Unmount (Editor geschlossen/Notizbuch gewechselt) einen evtl. noch
+  // wartenden Timer aufräumen, sonst könnte er nach dem Unmount versuchen,
+  // setState auf einer nicht mehr gemounteten Komponente aufzurufen.
+  useEffect(() => cancelAutoFetch, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const closeLinkPicker = () => {
+    cancelAutoFetch();
+    setPicker(null);
+  };
+
   // Öffnet das Link-Popover und belegt Titel/URL vor: Steht der Cursor in
   // einem bestehenden Link, wird die Selektion per extendMarkRange auf die
   // GESAMTE Mark-Spanne ausgedehnt (Titel+URL kommen dann von dort, und
@@ -930,6 +1001,8 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
   // sie ist und liefert den vorbelegten Titel; ohne Auswahl bleiben beide
   // Felder leer (neuer Link wird an der Cursor-Position eingefügt).
   const openLinkPicker = () => {
+    cancelAutoFetch();
+    lastAutoTitleRef.current = null;
     const hadLink = editor.isActive("link");
     if (hadLink) editor.chain().focus().extendMarkRange("link").run();
     const { from, to } = editor.state.selection;
@@ -948,30 +1021,60 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
   // URL wird vorher durch normalizeLinkUrl geschickt (gleiche Normalisierung
   // wie beim Einfügen), damit z. B. eine noch ohne "https://" eingegebene
   // URL trotzdem erkannt wird; ein aktueller Normalisierungsfehler (leere
-  // URL, falsches Schema) liefert schlicht keinen Provider.
-  const linkTitleProvider = (() => {
-    if (!linkForm) return null;
-    const n = normalizeLinkUrl(linkForm.url);
-    if (n.error) return null;
-    const p = providerFor(n.url, getLinkProviders());
-    return p && providerHasCredentials(p) ? p : null;
-  })();
+  // URL, falsches Schema) liefert schlicht keinen Provider. autoFetchProviderFor
+  // (oben) kapselt GENAU dieselbe Prüfung für den Auto-Fetch (scheduleAutoFetch
+  // unten) – EIN Regelwerk für beide Auslöser.
+  const linkTitleProvider = linkForm ? autoFetchProviderFor(linkForm.url, getLinkProviders()) : null;
 
-  // Fetch läuft AUSSCHLIESSLICH auf diesen Klick (Sicherheitsregel 2 im
-  // Auftrag) – niemals automatisch beim Tippen. Ein Fehler wird in
-  // linkForm.error angezeigt (bestehende Fehleranzeige im Popover), ein
-  // Erfolg füllt NUR das Titelfeld – der Nutzer kann das Ergebnis vor dem
-  // Einfügen noch anpassen.
+  // Fetch auf Knopfdruck (v7.9-Verhalten, bleibt als manueller Retry
+  // erhalten – v7.12 löst NUR die Beschränkung "ausschließlich auf Klick"
+  // ab, siehe scheduleAutoFetch unten). Ein Fehler wird in linkForm.error
+  // angezeigt (bestehende Fehleranzeige im Popover), ein Erfolg füllt NUR
+  // das Titelfeld – der Nutzer kann das Ergebnis vor dem Einfügen noch
+  // anpassen. Ein laufender/wartender Auto-Fetch wird verworfen (der
+  // manuelle Klick hat Vorrang, kein doppelter Request für dieselbe URL).
   const fetchTitleForLink = async () => {
     if (!linkTitleProvider || titleFetching) return;
+    cancelAutoFetch();
     const n = normalizeLinkUrl(linkForm.url);
     if (n.error) return;
     setTitleFetching(true);
     const res = await fetchLinkTitle(n.url, linkTitleProvider);
     setTitleFetching(false);
+    if (res.ok) lastAutoTitleRef.current = res.title; // ein weiterer Auto-Fetch darf ihn noch verfeinern
     setLinkForm((f) =>
       f ? (res.ok ? { ...f, title: res.title, error: null } : { ...f, error: res.reason }) : f
     );
+  };
+
+  // Auto-Fetch beim URL-Eintippen/-Einfügen (v7.12, Nutzerwunsch "egal wo
+  // sie herkommt"): debounced ~600 ms (AUTO_FETCH_DEBOUNCE_MS), damit nicht
+  // bei JEDEM Tastendruck ein Request rausgeht. Eine neue Eingabe verwirft
+  // über cancelAutoFetch() zuverlässig einen noch wartenden/laufenden
+  // vorherigen Versuch (AbortController), bevor ein neuer Timer startet.
+  // Kein Timer, wenn die (normalisierte) URL zu keinem konfigurierten
+  // Provider MIT Zugangsdaten passt – dann gibt es nichts zu fetchen.
+  const scheduleAutoFetch = (rawUrl) => {
+    cancelAutoFetch();
+    const provider = autoFetchProviderFor(rawUrl, getLinkProviders());
+    if (!provider) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => runAutoFetch(rawUrl, provider, controller), AUTO_FETCH_DEBOUNCE_MS);
+    titleAutoRef.current = { timer, controller };
+  };
+
+  const runAutoFetch = async (rawUrl, provider, controller) => {
+    const n = normalizeLinkUrl(rawUrl);
+    if (n.error || controller.signal.aborted) return;
+    setTitleFetching(true);
+    const res = await fetchLinkTitle(n.url, provider);
+    setTitleFetching(false);
+    if (controller.signal.aborted) return; // von einer neueren Eingabe überholt
+    setLinkForm((f) => {
+      const next = applyAutoFetchResult(f, lastAutoTitleRef.current, res);
+      if (next !== f && res.ok) lastAutoTitleRef.current = res.title;
+      return next;
+    });
   };
 
   // Ersetzt die aktuelle Selektion (bzw. fügt an der Cursor-Position ein)
@@ -992,6 +1095,7 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
       text: t.title,
       marks: [{ type: "link", attrs: { href: u.url } }],
     }).run();
+    cancelAutoFetch();
     setPicker(null);
     setLinkForm(null);
     setTitleFetching(false);
@@ -999,6 +1103,7 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
 
   const removeLink = () => {
     editor.chain().focus().extendMarkRange("link").unsetLink().run();
+    cancelAutoFetch();
     setPicker(null);
     setLinkForm(null);
     setTitleFetching(false);
@@ -1099,7 +1204,7 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
 
         <div className="relative">
           <button
-            onClick={() => (picker === "link" ? setPicker(null) : openLinkPicker())}
+            onClick={() => (picker === "link" ? closeLinkPicker() : openLinkPicker())}
             className={btn(editor.isActive("link"))}
             title="Link einfügen/bearbeiten"
           >
@@ -1119,7 +1224,13 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
               <input
                 type="text"
                 value={linkForm.url}
-                onChange={(e) => setLinkForm((f) => ({ ...f, url: e.target.value, error: null }))}
+                onChange={(e) => {
+                  const url = e.target.value;
+                  setLinkForm((f) => ({ ...f, url, error: null }));
+                  // Auto-Fetch beim Tippen/Einfügen (v7.12) – debounced, siehe
+                  // scheduleAutoFetch oben.
+                  scheduleAutoFetch(url);
+                }}
                 placeholder="https://…"
                 className="w-full mb-2 px-2 py-1 text-sm border border-slate-300 rounded"
               />

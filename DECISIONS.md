@@ -1953,3 +1953,248 @@ aus `referenz-app.jsx` übernommen.
       Few-Shot-Beispiel), NICHT ein erneuter Versuch mit Fuzzy-Matching auf
       Wortebene – dessen strukturelle Untauglichkeit für dieses Problem ist
       jetzt empirisch belegt (siehe Messwerte oben).
+
+58. **Azure-DevOps-302-Maskierung entlarvt + automatische Titel-Ermittlung
+    „egal wo sie herkommt“, v7.12** (`src/lib/linkProviders.jsx`,
+    `src/components/DocEditor.jsx`, `src/App.jsx`, Nutzer-Live-Befund +
+    Nutzerwunsch). Zwei Teile.
+    - **Teil A – DevOps-Fehlerdiagnose (empirisch verifiziert, curl gegen
+      dev.azure.com/reasult):** Der Nutzer bekam trotz eingetragenem PAT
+      „Netzwerk/CORS“-Fehler bei der Titel-Ermittlung eines DevOps-Links.
+      Ursache: der CORS-Preflight der Azure-DevOps-REST-API ist unauffällig
+      (`Access-Control-Allow-Origin: *`), aber OHNE gültige Auth antwortet
+      die API NICHT mit 401, sondern mit einem **302-Redirect** zur
+      Login-Seite (`spsprodweu3.vssps.visualstudio.com`) – die hat KEINE
+      CORS-Header, der Browser-`fetch` wirft daran ein nichtssagendes
+      `TypeError`, das `fetchLinkTitle` bisher unterschiedslos zu
+      „Netzwerk/CORS-Fehler“ normalisierte. **Jeder** Auth-Fehler (PAT
+      ungültig/abgelaufen, falsche Organisation, fehlender Scope) maskierte
+      sich dadurch als Netzwerkproblem – der Nutzer konnte nie erkennen,
+      dass sein PAT das eigentliche Problem war. Mit dem Header
+      `X-TFS-FedAuthRedirect: Suppress` (vom Preflight nachweislich
+      erlaubt) antwortet die API stattdessen sauber `401` als JSON. Fix in
+      `fetchLinkTitle` (azure-devops-Zweig, Confluence-Zweig bewusst NICHT
+      angefasst – dessen CORS-Grenze ist real und bleibt bestehen):
+      1. Header `X-TFS-FedAuthRedirect: Suppress` immer mitsenden.
+      2. Zusätzlich `redirect: "manual"` im fetch-Init (Gürtel+Hosenträger):
+         sollte der Header dennoch ignoriert werden, liefert der Browser
+         eine Response mit `type: "opaqueredirect"` (`status: 0`) statt dem
+         Login-Ziel zu folgen und dort an CORS zu scheitern – wird unten
+         wie 401 behandelt statt als generischer Netzwerkfehler.
+      3. Klares, statuscode-spezifisches Fehler-Mapping
+         (`azureDevOpsErrorReason`): 401 → „PAT ungültig oder abgelaufen,
+         oder PAT gehört nicht zur Organisation ‚{org}‘.“; 403 → „PAT-
+         Berechtigung fehlt (Scope ‚Work Items: Read‘) oder Organisations-
+         Richtlinie blockiert PAT-Zugriff.“; 404 → „Work Item {id} nicht
+         gefunden.“; `opaqueredirect` → wie 401. Reason enthält NIE das
+         PAT/den Authorization-Header (org/id kommen aus `parseWorkItemUrl`,
+         nicht aus der – bei einem Auth-Fehler ohnehin leeren – Antwort).
+      - **Tests** (`tests/linkProviders.test.jsx`, neuer Block „Auth-Fehler-
+        Mapping“): Suppress-Header + `redirect:"manual"` im Request
+        nachgewiesen; 401/403/404/`opaqueredirect`-Mapping mit exaktem
+        Text; PAT-Wert taucht nicht in der reason auf; ein Erfolgsfall und
+        die Host-Verankerung aus Punkt 56 bleiben als Regressionstest grün.
+    - **Teil B – automatische Titel-Ermittlung überall (Nutzerwunsch):**
+      Punkt 56s Grundsatz „Fetch NUR auf explizite Nutzeraktion im
+      Link-Popover, NIE beim Rendern“ wird abgelöst durch „Fetch bei
+      Einfügen/Speichern, NIE beim Rendern“ – der Netzzugriff bleibt
+      weiterhin an genau zwei Bedingungen geknüpft (konfigurierter Provider
+      MIT Zugangsdaten deckt die URL ab; Host-Verankerung aus Punkt 56
+      unverändert), nur die AUSLÖSER werden mehr:
+      1. **Gemeinsamer Auflöser `resolveProviderLinkTitles(md, opts)`**
+         (`src/lib/linkProviders.jsx`, neu) → `Promise<string>`, wirft nie.
+         Scannt das Dokument AUSSERHALB von Fences (`splitFenceSegments`,
+         `code.jsx` – GEFAHRLOS importierbar, da `code.jsx` selbst ein
+         Blatt ist) und Codespans (Split wie `renumberCitations`,
+         `markdown.jsx`) nach drei unaufgelösten Link-Formen: (a) nackte
+         URL, (b) `<url>`-Autolink, (c) `[Titel](url)` NUR bei
+         Titel===URL – EIN Scan-Regex (`PROVIDER_LINK_SCAN_RE`), das
+         zugleich Bilder (`![…](…)`, IMMER übersprungen) und Quellen-
+         Fußnoten/echte Titel (Titel≠URL, IMMER übersprungen) korrekt
+         ausklammert, indem die frühere/größere Alternative die spätere
+         URL-Teilmenge konsumiert (gleiches Muster wie `INLINE_TOKEN_RE`,
+         `markdown.jsx`). **Zwei URL-Grammatiken dupliziert** (Zirkelbezug:
+         `linkProviders.jsx` ist ein Blatt, `markdown.jsx` importiert
+         umgekehrt daraus): `BRACKETED_URL_SRC` (= `LINK_URL_RE`, EINE
+         Ebene balancierter Klammern) für (b)/Bild-Ziele, `NAKED_URL_SRC`
+         (= `INLINE_TOKEN_RE`s lose Alternative `[^\s<>]+`) für die nackte
+         URL – bewusst NICHT dieselbe Grammatik wie (b): eine nackte URL
+         erlaubt (wie im Viewer) auch UNBALANCIERTE Klammern im rohen
+         Match, die Grenze zieht erst `trimBareUrl` (ebenfalls aus
+         `markdown.jsx` dupliziert) NACH dem Match – sonst hätte z. B. ein
+         DevOps-Link in Prosa-Klammern `(siehe https://…/edit/9)` die
+         schließende Klammer fälschlich in die URL übernommen. Pro
+         Fundstelle (max. `maxLinks`, Default 5, dokumentweit gezählt –
+         NICHT nur Kandidaten mit Provider-Match, siehe Restrisiko unten):
+         `providerFor`+`providerHasCredentials` → bei Treffer
+         `fetchLinkTitle` (parallel via `Promise.allSettled`); bei `ok`
+         Ersetzung durch `[<Titel>](url)` (der Titel ist bereits durch
+         `cleanupLinkTitle` bereinigt, `fetchLinkTitle` prüft das schon
+         selbst); bei Fehler ODER fehlendem Provider bleibt die Fundstelle
+         BYTE-GENAU unverändert (still, kein UI-Spam). Gleiche URL
+         mehrfach im Dokument → nur EIN `fetchLinkTitle`-Aufruf (Cache über
+         eine `Map`, pro Aufruf von `resolveProviderLinkTitles` neu), das
+         Ergebnis wird auf ALLE ihre Fundstellen angewendet. Idempotent von
+         selbst: ein aufgelöster Link hat Titel≠URL und wird bei einem
+         zweiten Lauf nicht mehr als Kandidat erkannt. **Schneller No-op**
+         (kein Scan, kein `fetchImpl`-Aufruf), wenn KEIN konfigurierter
+         Provider überhaupt Zugangsdaten trägt – die häufigste Nutzer-
+         Konstellation (kein Provider konfiguriert) bleibt dadurch praktisch
+         kostenlos.
+      2. **Link-Dialog** (`src/components/DocEditor.jsx`): Auto-Fetch beim
+         URL-Eintippen/-Einfügen, debounced 600 ms
+         (`AUTO_FETCH_DEBOUNCE_MS`) über `scheduleAutoFetch`/`runAutoFetch`
+         – ein `AbortController` pro Debounce-Zyklus (`titleAutoRef`,
+         `cancelAutoFetch`) verwirft bei jeder neuen Eingabe zuverlässig
+         einen noch wartenden ODER bereits laufenden vorherigen Versuch
+         (dessen Ergebnis wird nach Rückkehr verworfen, nicht mehr
+         angewendet). Zwei reine, exportierte Helfer dafür aus der
+         Komponente herausgezogen (ohne Editor-Instanz/DOM testbar):
+         `autoFetchProviderFor(url, configured)` (identische Prüfung wie
+         der manuelle Knopf, jetzt EINMAL für beide Auslöser) und
+         `applyAutoFetchResult(linkForm, lastAutoTitle, res)` – füllt/
+         korrigiert das Titelfeld NUR, solange es noch leer ist ODER
+         weiterhin den zuletzt AUTOMATISCH eingetragenen Wert trägt
+         (`lastAutoTitleRef`); ein manuell getippter Titel wird dadurch
+         NIE überschrieben und NIE nachträglich mit einer für den Nutzer
+         irrelevanten Fehlermeldung gestört (liefert bei „nicht mehr frei“
+         dieselbe `linkForm`-Referenz zurück, Aufrufer erkennt daran, ob
+         etwas angewendet wurde). Der bestehende „Titel ermitteln“-Knopf
+         (Punkt 56) bleibt als manueller Retry UND verwirft seinerseits
+         einen laufenden Auto-Fetch (Klick hat Vorrang); derselbe
+         `titleFetching`-Zustand/Spinner wird für BEIDE Auslöser verwendet
+         (kein zweiter Lade-Indikator nötig – der Knopf erscheint ohnehin
+         erst, sobald die URL zu einem Provider passt, und zeigt dann den
+         Spinner, sobald der Debounce feuert). Fehlertext läuft wie bisher
+         in `linkForm.error` (jetzt mit den klaren Teil-A-Meldungen).
+      3. **Editor-Speichern** (`src/App.jsx`, `saveEdit`): Das GANZE
+         Dokument läuft VOR `renumberCitations`/der übrigen Bereinigung
+         durch `resolveProviderLinkTitles` – deckt sowohl frisch
+         eingefügte/eingetippte Links (Markdown-Paste) als auch ALTE, noch
+         unaufgelöste Links ab (Titel===URL, z. B. vor v7.12 gespeichert) –
+         Letzteres bewusst gewollt (siehe Restrisiko unten). `saveEdit`
+         musste dafür umgebaut werden (Await jetzt VOR dem „hat sich was
+         geändert“-Vergleich, da die Auflösung selbst die einzige Änderung
+         sein kann): `setSavingEdit(true)` umschließt jetzt Auflösung +
+         Bereinigung + Commit gemeinsam in einem `try/finally`, ein
+         `conflict`-Flag ersetzt das frühere `return` mitten im `try`
+         (Editor bleibt bei einem SHA-Konflikt weiterhin offen, Inhalt
+         bleibt erhalten – unverändertes Verhalten, nur ohne toten Code
+         nach einem `return` in `try`). `resolveProviderLinkTitles` wirft
+         nie – ein Fetch-Fehler lässt den Text unaufgelöst, das Speichern
+         läuft ungehindert weiter.
+      4. **Chat-Ops** (`src/App.jsx`, `send()`): Vor der Gruppierung nach
+         Ziel-Notizbuch läuft JEDES `op.content` (sofern String) einzeln
+         durch `resolveProviderLinkTitles` – NIE das Bestandsdokument
+         (`applyOps` wendet das Fragment ohnehin gezielt auf einen
+         Abschnitt an; Chat-Änderungen bleiben dadurch minimal-invasiv wie
+         bisher). `Promise.all` über alle ops, danach unverändert weiter
+         mit den (jetzt aufgelösten) ops.
+      - **Tests:** `tests/linkProviders.test.jsx` erweitert (Teil A, siehe
+        oben); NEUE Datei `tests/resolveProviderLinkTitles.test.jsx` (Teil
+        B, 24 Fälle: alle drei Ersetzungsformen; Fußnote/echter Titel/Bild/
+        `img:`-Referenz bleiben unangetastet; Fence UND Codespan bleiben
+        unangetastet, auch wenn dieselbe URL AUSSERHALB aufgelöst wird;
+        Fetch-Fehler (404, TypeError) lassen die Fundstelle unverändert;
+        URL-Dedupe (ein Fetch für zwei Fundstellen derselben URL, BEIDE
+        werden ersetzt); `maxLinks`-Deckel Default UND explizit gesetzt;
+        Idempotenz (zweiter Lauf: 0 weitere Fetches, Ergebnis identisch);
+        gemischtes Dokument mit mehreren Providern (nur passende Treffer
+        werden aufgelöst); trailing Satzzeichen/Prosa-Klammern um eine
+        nackte URL werden korrekt abgetrennt, inkl. einer zur URL
+        gehörenden balancierten Klammer, die dabei erhalten bleibt (echte
+        Auflösung als Nachweis, kein Original-bleibt-gleich-Vakuumtest);
+        schneller No-op ohne/mit-credentiallosem Provider, `fetchImpl`
+        NIE gerufen; leerer/`null`/`undefined`-Input; **beim Schreiben
+        gefundener Test-Fallstrick, kein Produktivbug:** ein Test ohne
+        explizites `fetchImpl` hätte in der Node-Testumgebung (Node ≥18
+        hat ein GLOBALES `fetch`) einen ECHTEN Netzwerk-Request an
+        `dev.azure.com` ausgelöst und nur zufällig „bestanden“, weil der
+        Request in der Sandbox fehlschlug – kein deterministischer Test;
+        behoben mit `vi.stubGlobal("fetch", undefined)`). `tests/
+        docEditorLinks.test.jsx` – neuer Block für `autoFetchProviderFor`/
+        `applyAutoFetchResult` (Provider-mit/ohne-Credentials, kein Match,
+        ungültige URL; Titelfeld leer/zuletzt-automatisch wird gefüllt,
+        manuell getippter Titel wird NIE überschrieben – weder bei Erfolg
+        noch bei Fehler, geprüft über Referenzgleichheit; `linkForm===null`
+        bleibt `null`).
+      - Restrisiken: (a) ~~Der `maxLinks`-Deckel zählt JEDE unaufgelöste
+        Fundstelle (auch ohne passenden Provider) gegen das Kontingent,
+        nicht nur tatsächlich auflösbare – ein Dokument mit vielen
+        provider-fremden nackten URLs VOR einem einzelnen echten
+        Provider-Link könnte dessen Auflösung verdrängen. Akzeptiert…~~
+        **KORRIGIERT, siehe Nachbesserung unten** – dieses „akzeptierte"
+        Restrisiko war tatsächlich real reproduzierbar (empirisch belegt:
+        fünf `example.org`-URLs vor einem DevOps-Link verhinderten dessen
+        Auflösung vollständig) und wurde im Code-Review vor dem Commit als
+        🟡-Finding gemeldet und behoben, nicht länger akzeptiert. (b) Ein
+        Speichern OHNE jede sonstige inhaltliche Änderung kann jetzt einen
+        Commit auslösen, wenn das Dokument einen alten `Titel===URL`-Link
+        enthält – bewusst gewollt (Auftrag), aber ein Nutzer, der den
+        Editor nur öffnet und ohne jede Absicht sofort wieder speichert,
+        bekommt dadurch überraschend einen neuen Commit. (c) Die
+        DevOps-302-Erkenntnis stammt aus curl-Proben gegen EINE
+        Organisation (`dev.azure.com/reasult`) – sollte eine andere
+        Azure-DevOps-Organisation/ein Sovereign-Cloud-Tenant abweichendes
+        Verhalten zeigen, greift der Fix ggf. nicht vollständig; der
+        `redirect:"manual"`-Fallback deckt zumindest den Fall ab, dass der
+        Suppress-Header selbst ignoriert wird. Bewusst NICHT angefasst (vom
+        Review als 🔵 eingestuft, dokumentiert statt behoben): Ein
+        `redirect:"manual"`-Restrisiko (die opaqueredirect-Erkennung deckt
+        nur den einen empirisch geprüften Fall ab) sowie kosmetische
+        Zwischenstände während des Auto-Fetch-Debounce im Link-Popover.
+      - **Nachbesserung (Code-Review vor dem Commit, v7.12 bleibt v7.12 –
+        reine Korrektur des noch uncommitteten Stands, kein neues Feature):**
+        Drei Findings, alle behoben:
+        1. **`maxLinks`-Aushungerung** (`src/lib/linkProviders.jsx`,
+           `scanChunkForProviderLinks`, 🟡): der Provider-Match
+           (`providerFor`+`providerHasCredentials`, beides synchron) wird
+           jetzt SCHON IM SCAN geprüft – nur eine Fundstelle MIT echtem
+           Match+Zugangsdaten verbraucht den `maxLinks`-Deckel und wird zum
+           Kandidaten (der Kandidat trägt jetzt zusätzlich `provider`,
+           `resolveProviderLinkTitles` muss `providerFor` in der
+           Fetch-Phase dadurch nicht mehr redundant nochmal aufrufen).
+           `maxLinks` bedeutet seither „maximal so viele Provider-Links MIT
+           Match pro Lauf auflösen", nicht mehr „maximal so viele
+           unaufgelöste Fundstellen überhaupt anfassen" – vorher hätten
+           mehrere provider-fremde URLs (z. B. externe Wissensbasis-Links)
+           VOR einem einzelnen echten Provider-Link dessen Auflösung
+           verlässlich verhindert (empirisch mit fünf `example.org`-URLs +
+           einem DevOps-Link nachgestellt). **Tests:** zwei neue Fälle im
+           Block „maxLinks-Deckel" (`tests/resolveProviderLinkTitles.test.jsx`)
+           – genau das Review-Szenario (5 Fremd-URLs + 1 DevOps-Link → der
+           DevOps-Link WIRD aufgelöst, die Fremd-URLs bleiben unangetastet)
+           sowie die Kehrseite (mehr als `maxLinks` ECHTE Provider-Links →
+           der Deckel greift weiterhin, sonst wäre der Fix selbst eine
+           Regression).
+        2. **Grammatik-Drift ohne Schutz** (`src/lib/linkProviders.jsx`,
+           `src/lib/markdown.jsx`, 🟡): `BRACKETED_URL_SRC`/`NAKED_URL_SRC`
+           sind jetzt EXPORTIERT; `trimBareUrl` wurde NICHT länger als
+           Duplikat gepflegt, sondern nach `linkProviders.jsx` verschoben,
+           dort exportiert und von `markdown.jsx` importiert (zirkelfrei,
+           da `markdown.jsx` bereits `providerFor`/`getLinkProviders` von
+           dort importiert – linkProviders.jsx importiert umgekehrt nichts
+           aus `markdown.jsx`) – EINE Quelle statt eines reinen Pin-Tests,
+           wo technisch möglich. Für die beiden verbleibenden, weiterhin
+           zwingend duplizierten Grammatik-Konstanten (Zirkelbezug
+           verhindert einen direkten Import in DIESE Richtung) wurde die
+           lose Bare-URL-Alternative aus `markdown.jsx`s `INLINE_TOKEN_RE`
+           als eigener exportierter Name `BARE_URL_INLINE_SRC` herausgezogen
+           (`LINK_URL_RE` war schon exportiert). **Test:** neuer Block
+           „Grammatik-Drift-Pin" importiert BEIDE Module direkt (ein
+           Testfile darf das, ohne selbst Teil eines Laufzeit-Zirkels zu
+           werden – zirkelgefährdet wäre nur ein Import zwischen
+           `linkProviders.jsx` und `markdown.jsx` selbst) und pinnt
+           `BRACKETED_URL_SRC === LINK_URL_RE.source` sowie
+           `NAKED_URL_SRC === BARE_URL_INLINE_SRC`.
+        3. **Stiller Datenverlust bei gebrochenem "wirft nie"-Vertrag**
+           (`src/App.jsx`, `saveEdit`, 🔵): `resolveProviderLinkTitles`
+           bekommt jetzt ein `.catch(() => md)` – bräche der Vertrag doch
+           einmal, wäre `cleaned` sonst nie zugewiesen und die manuelle
+           Bearbeitung ginge beim Schließen des Editors STILL verloren
+           (kein Commit, kein Fehler-Banner). Der Fallback stellt sicher,
+           dass mindestens der unaufgelöste Text gespeichert wird.
+        - **Tests:** 4 neue Fälle (2 maxLinks-Regression + 2
+          Grammatik-Drift-Pin), Gesamtstand 546/546 grün,
+          `linkProviders.jsx` 98.61 % Statements/89.65 % Branches/99.57 %
+          Lines.

@@ -1,26 +1,38 @@
 /* ------------------------------------------------------------------ */
 /* Link-Provider (v7.9, Nutzerwunsch: „Icons für DevOps/Confluence-Links */
-/* + Titel-Ermittlung aus dem Ziel")                                    */
+/* + Titel-Ermittlung aus dem Ziel"; v7.12: automatische Titel-           */
+/* Ermittlung "egal wo sie herkommt" – siehe resolveProviderLinkTitles    */
+/* unten und DECISIONS #58)                                             */
 /*                                                                      */
 /* BLATT im Abhängigkeitsbaum wie code.jsx: importiert NICHTS aus       */
 /* markdown.jsx/math.jsx/DocEditor.jsx (Zirkelbezug-Regel, siehe        */
 /* code.jsx-Kopfkommentar) – markdown.jsx UND DocEditor.jsx importieren */
-/* umgekehrt AUS dieser Datei (Icons, Matching, Titel-Fetch). Die        */
-/* Titel-Bereinigungsregel (cleanupLinkTitle) lag bisher als             */
-/* validateLinkTitle NUR in DocEditor.jsx – jetzt hier EINMAL definiert  */
-/* und von DocEditor.jsx re-exportiert/aufgerufen (siehe dort), damit    */
-/* sowohl der Link-Dialog als auch ein automatisch ermittelter Titel     */
-/* (fetchLinkTitle unten) exakt dieselbe Regel durchlaufen, ohne dass     */
-/* linkProviders.jsx aus DocEditor.jsx importieren müsste.               */
+/* umgekehrt AUS dieser Datei (Icons, Matching, Titel-Fetch). code.jsx   */
+/* selbst ist ebenfalls ein Blatt (importiert nichts von hier) und darf  */
+/* deshalb GEFAHRLOS importiert werden (splitFenceSegments unten, für    */
+/* resolveProviderLinkTitles). Die Titel-Bereinigungsregel                */
+/* (cleanupLinkTitle) lag bisher als validateLinkTitle NUR in            */
+/* DocEditor.jsx – jetzt hier EINMAL definiert und von DocEditor.jsx     */
+/* re-exportiert/aufgerufen (siehe dort), damit sowohl der Link-Dialog    */
+/* als auch ein automatisch ermittelter Titel (fetchLinkTitle unten)     */
+/* exakt dieselbe Regel durchlaufen, ohne dass linkProviders.jsx aus      */
+/* DocEditor.jsx importieren müsste.                                    */
 /*                                                                      */
 /* SICHERHEIT: PAT/E-Mail eines Providers leben ausschließlich im        */
 /* localStorage-Settings-Objekt (App.jsx ruft setLinkProviders() beim    */
 /* Settings-Load/-Save, NIE beim Schreiben von state.json). Ein          */
-/* Titel-Fetch (fetchLinkTitle) läuft NUR auf explizite Nutzeraktion im   */
-/* Link-Popover (DocEditor.jsx, Knopf „Titel ermitteln") – NIE beim       */
-/* Rendern/Anzeigen: Icons kommen ausschließlich aus providerFor(), einer */
-/* reinen String-Prüfung auf das URL-Präfix, ohne jeden Netzzugriff.      */
+/* Titel-Fetch (fetchLinkTitle) lief bis v7.9 NUR auf explizite           */
+/* Nutzeraktion im Link-Popover (Knopf „Titel ermitteln"). v7.12 löst     */
+/* das ab: Fetch jetzt zusätzlich automatisch beim Eintippen/Einfügen     */
+/* einer URL (debounced, DocEditor.jsx) UND beim Speichern/bei Chat-Ops   */
+/* (resolveProviderLinkTitles, App.jsx – siehe dort und DECISIONS #58)    */
+/* – aber IMMER NUR, wenn ein KONFIGURIERTER Provider MIT Zugangsdaten    */
+/* die URL abdeckt, und NIE beim bloßen Rendern/Anzeigen: Icons kommen    */
+/* weiterhin ausschließlich aus providerFor(), einer reinen String-       */
+/* Prüfung auf das URL-Präfix, ohne jeden Netzzugriff.                    */
 /* ------------------------------------------------------------------ */
+
+import { splitFenceSegments } from "./code.jsx";
 
 const PROVIDER_TYPES = new Set(["azure-devops", "confluence", "custom"]);
 const isNonEmptyString = (v) => typeof v === "string" && v.trim().length > 0;
@@ -322,6 +334,40 @@ async function timedFetch(fetchImpl, url, init, timeoutMs) {
   }
 }
 
+// DevOps-302-Maskierung (Auftrag v7.12 Teil A, empirisch gegen dev.azure.com
+// verifiziert, siehe DECISIONS #58): OHNE gültige Auth antwortet die Azure-
+// DevOps-REST-API NICHT mit 401, sondern mit einem 302-Redirect zur
+// Login-Seite (spsprodweu3.vssps.visualstudio.com). Diese Login-Seite trägt
+// KEINE CORS-Header – der Browser-fetch scheitert daran mit einem
+// nichtssagenden TypeError, das timedFetch (s.o.) bislang unterschiedslos
+// zu "Netzwerk/CORS-Fehler …" normalisiert hat. Ergebnis: JEDER Auth-Fehler
+// (ungültiges/abgelaufenes PAT, falsche Organisation, fehlender Scope) sah
+// für den Nutzer wie ein Netzwerkproblem aus, nie wie ein Auth-Problem.
+// Der Header unten (vom CORS-Preflight nachweislich erlaubt) lässt die API
+// bei fehlender/ungültiger Auth stattdessen sauber mit 401 als JSON
+// antworten; redirect:"manual" ist Gürtel+Hosenträger, falls der Header
+// dennoch ignoriert wird: der Browser liefert dann statt eines TypeErrors
+// eine Response mit type:"opaqueredirect" (status 0), die unten EBENFALLS
+// als Auth-Fehler erkannt wird statt als generischer Netzwerkfehler.
+const AZURE_SUPPRESS_REDIRECT_HEADERS = { "X-TFS-FedAuthRedirect": "Suppress" };
+
+// Klare, deutsche Fehlertexte je Statuscode (Auftrag v7.12 Teil A) – bewusst
+// OHNE jeden Bezug zum PAT-Wert/Authorization-Header (reason landet direkt
+// im UI, siehe DocEditor.jsx). org/id kommen aus parseWorkItemUrl, nicht aus
+// der Antwort (die liefert bei einem Auth-Fehler ohnehin keine Nutzdaten).
+function azureDevOpsErrorReason(status, wi) {
+  if (status === 401) {
+    return "PAT ungültig oder abgelaufen, oder PAT gehört nicht zur Organisation ‚" + wi.org + "‘.";
+  }
+  if (status === 403) {
+    return "PAT-Berechtigung fehlt (Scope ‚Work Items: Read‘) oder Organisations-Richtlinie blockiert PAT-Zugriff.";
+  }
+  if (status === 404) {
+    return "Work Item " + wi.id + " nicht gefunden.";
+  }
+  return "Azure DevOps antwortete mit Status " + status + ".";
+}
+
 // fetchLinkTitle(url, provider, { fetchImpl, timeoutMs }) → { ok:true, title }
 // oder { ok:false, reason } – wirft NIE. fetchImpl ist injizierbar (Tests
 // mocken damit die HTTP-Antwort statt echt zu fetchen); ohne fetchImpl wird
@@ -348,11 +394,19 @@ export async function fetchLinkTitle(url, provider, opts = {}) {
     const { res, errorReason } = await timedFetch(
       fetchImpl,
       api,
-      { headers: { Authorization: basicAuthHeader("", provider.pat) } },
+      {
+        headers: { Authorization: basicAuthHeader("", provider.pat), ...AZURE_SUPPRESS_REDIRECT_HEADERS },
+        redirect: "manual",
+      },
       timeoutMs
     );
     if (errorReason) return { ok: false, reason: errorReason };
-    if (!res.ok) return { ok: false, reason: "Azure DevOps antwortete mit Status " + res.status + "." };
+    // opaqueredirect: der Suppress-Header wurde ignoriert/griff nicht, der
+    // Browser wollte dem 302 zur Login-Seite folgen – mit redirect:"manual"
+    // bricht er das VOR dem CORS-losen Ziel ab, statt dort zu scheitern.
+    // Praktisch nur bei einem Auth-Fehler möglich (siehe Kopfkommentar oben).
+    if (res.type === "opaqueredirect") return { ok: false, reason: azureDevOpsErrorReason(401, wi) };
+    if (!res.ok) return { ok: false, reason: azureDevOpsErrorReason(res.status, wi) };
     let data;
     try {
       data = await res.json();
@@ -517,4 +571,253 @@ export function buildProviderIconDom(provider) {
   wrap.setAttribute("aria-hidden", "true");
   wrap.appendChild(el);
   return wrap;
+}
+
+/* ---------------- Automatische Titel-Ermittlung (v7.12, DECISIONS #58) ---------------- */
+// resolveProviderLinkTitles(md, opts): scannt EIN Dokument/Fragment nach
+// unaufgelösten Provider-Links und ersetzt sie, wenn möglich, durch
+// "[<ermittelter Titel>](url)" – aufgerufen aus DocEditor.jsx (Auto-Fetch
+// beim Tippen, siehe dort) UND App.jsx (vor commitDocNb im Editor-
+// Speicherpfad, vor der ops-Anwendung im Chat-Pfad). Ersetzt "Fetch nur auf
+// Klick" (v7.9, siehe DECISIONS #56) NICHT – der manuelle Knopf im
+// Link-Popover bleibt als Retry –, ergänzt es aber um automatische
+// Auslöser. Wirft NIE (wie fetchLinkTitle, auf dem es aufbaut).
+
+// URL-Grammatiken dupliziert aus markdown.jsx (LINK_URL_RE bzw.
+// INLINE_TOKEN_RE; linkProviders.jsx ist laut Kopfkommentar ein BLATT, aus
+// dem markdown.jsx umgekehrt importiert – ein Reimport wäre ein
+// Zirkelbezug, die Duplikation hier ist die Kehrseite davon). ZWEI
+// unterschiedliche Grammatiken, exakt wie im Viewer:
+// - BRACKETED_URL_SRC (= LINK_URL_RE): für "[Titel](url)"/Bild-Ziele – EINE
+//   Ebene balancierter runder Klammern, sonst weder Klammern noch Whitespace.
+// - NAKED_URL_SRC (= INLINE_TOKEN_RE's letzte Alternative, dort als
+//   BARE_URL_INLINE_SRC exportiert): für eine nackte URL im Fließtext –
+//   bewusst LOOSER (jedes Nicht-Whitespace/Nicht-"<>"-Zeichen, AUCH
+//   unbalancierte Klammern), weil der Viewer genau diese Grammatik für
+//   "nackte URL" verwendet und die Grenze erst NACHTRÄGLICH über
+//   trimBareUrl (unten) zieht – z. B. lässt ein Wikipedia-Link in
+//   Prosa-Klammern ("(siehe https://…/Steak_(Fleisch))") sich nur mit
+//   dieser Reihenfolge (erst großzügig matchen, dann trimmen) korrekt von
+//   der umschließenden Prosa-Klammer trennen.
+//
+// REVIEW-FIX (🟡 Grammatik-Drift, vor dem Commit gemeldet): beide
+// Konstanten sind jetzt EXPORTIERT, damit ein Test
+// (tests/resolveProviderLinkTitles.test.jsx) BEIDE Module direkt
+// importieren und `LINK_URL_RE.source === BRACKETED_URL_SRC` sowie
+// `BARE_URL_INLINE_SRC === NAKED_URL_SRC` pinnen kann (ein Testfile darf
+// zwei Blätter importieren, ohne selbst Teil eines Laufzeit-Zirkels zu
+// werden – nur linkProviders.jsx→markdown.jsx bzw. umgekehrt wäre einer).
+// trimBareUrl wurde dagegen NICHT dupliziert gehalten, sondern nach hier
+// verschoben und exportiert (siehe unten) – markdown.jsx importiert es von
+// hier, GENAU wie es bereits providerFor/getLinkProviders von hier
+// importiert (zirkelfrei, da linkProviders.jsx nichts aus markdown.jsx
+// importiert). Eine EINZIGE Quelle statt eines Pin-Tests, wo es möglich war.
+export const BRACKETED_URL_SRC = "https?:\\/\\/(?:[^\\s()]|\\([^\\s()]*\\))+";
+export const NAKED_URL_SRC = "https?:\\/\\/[^\\s<>]+";
+
+// Erkennt in EINEM Durchlauf alle relevanten Konstrukte, damit die jeweils
+// FRÜHESTE Fundstelle gewinnt und eine bereits konsumierte URL (z. B. die
+// eines "[Titel](url)") nicht anschließend nochmal als "nackte URL"
+// auftaucht – gleiches Grundmuster wie INLINE_TOKEN_RE in markdown.jsx.
+// Reihenfolge/Gruppen: (1) Bild "![...](...)" – IMMER überspringen, auch
+// mit http(s)-Ziel (Auftrag: "NIE anfassen"); (2)+(3) "[Titel](url)" – der
+// Aufrufer prüft anschließend Titel===URL (Fußnoten/echte Titel bleiben
+// sonst unangetastet); (4) "<url>"-Autolink; (5) nackte URL.
+const PROVIDER_LINK_SCAN_RE = new RegExp(
+  "(!\\[[^\\]\\n]*\\]\\(" + BRACKETED_URL_SRC + "\\))" +
+  "|\\[([^\\]\\n]{1,300})\\]\\((" + BRACKETED_URL_SRC + ")\\)" +
+  "|<(https?:\\/\\/[^\\s>]+)>" +
+  "|(" + NAKED_URL_SRC + ")",
+  "g"
+);
+
+// Codespan-Grenze wie renumberCitations (markdown.jsx): Inhalt zwischen
+// Backticks bleibt literal, wird nie auf Provider-Links durchsucht.
+const CODESPAN_SPLIT_RE = /(`[^`\n]+`)/;
+
+// GEMEINSAME Quelle für die Grenzziehung einer nackten URL (Review-Fix
+// "Grammatik-Drift", vor dem Commit gemeldet – siehe Kommentar bei
+// BRACKETED_URL_SRC/NAKED_URL_SRC oben): lag bis v7.12 als reines Duplikat
+// in markdown.jsx (dort seit v7.8, GFM-ähnliches Trailing-Trimming), jetzt
+// EINMAL hier definiert und exportiert – markdown.jsx importiert diese
+// Funktion von hier (zirkelfrei, linkProviders.jsx importiert nichts aus
+// markdown.jsx), statt eine zweite, per Hand synchron zu haltende Kopie zu
+// pflegen.
+//
+// Verhalten: abschließende Satzzeichen gehören fast immer zum umgebenden
+// Satz, nicht zur URL ("Siehe https://x.de/a." soll den Punkt NICHT
+// mitverlinken; genauso ".../edit/123." beim Auto-Titel-Fetch unten). Eine
+// schließende ")" ist die Ausnahme: Sie bleibt Teil der URL, wenn sie eine
+// im bereits akzeptierten Teil der URL offene "(" schließt (Wikipedia-
+// Artikel mit Klammer im Titel, z. B. .../wiki/Steak_(Fleisch)) – sonst
+// wird auch sie abgetrennt (z. B. eine URL in Klammern im Fließtext:
+// "(https://x.de/a)" soll die Satzklammer nicht mitverlinken). Der
+// abgeschnittene Rest bleibt normaler Text (siehe scanChunkForProviderLinks
+// unten bzw. der trimBareUrl-Aufruf in markdown.jsx' renderInline).
+export function trimBareUrl(url) {
+  let end = url.length;
+  for (;;) {
+    if (end === 0) break;
+    const ch = url[end - 1];
+    if (".,;:!?".includes(ch)) { end--; continue; }
+    if (ch === ")") {
+      const prefix = url.slice(0, end - 1);
+      const opens = (prefix.match(/\(/g) || []).length;
+      const closes = (prefix.match(/\)/g) || []).length;
+      if (opens > closes) break; // gehört zu einer offenen "(" -> URL endet hier
+      end--;
+      continue;
+    }
+    break;
+  }
+  return url.slice(0, end);
+}
+
+// Scannt EINEN Chunk (bereits außerhalb Fences/Codespans) und hängt an
+// `out` entweder unveränderten Text (String) oder einen Kandidaten
+// ({ __providerLink:true, url, fallback, provider }) an. `cap` ist ein über
+// den GESAMTEN Dokumentdurchlauf geteiltes { remaining }-Objekt (maxLinks-
+// Deckel, dokumentweit über alle Chunks/Segmente hinweg gezählt – die
+// Reihenfolge der Fundstellen entspricht der Dokumentreihenfolge, da
+// splitFenceSegments/CODESPAN_SPLIT_RE die Reihenfolge erhalten). `configured`
+// ist die Provider-Liste (getLinkProviders()-Stand des Aufrufers).
+//
+// REVIEW-FIX (🟡 maxLinks-Aushungerung, vor dem Commit gemeldet): der
+// Provider-Match (providerFor + providerHasCredentials) wird jetzt HIER IM
+// SCAN geprüft (beides reine, synchrone Funktionen) – NUR eine Fundstelle
+// mit echtem Provider-Match UND Zugangsdaten verbraucht den maxLinks-
+// Deckel und wird zum Kandidaten. Vorher zählte JEDE grammatikalisch
+// unaufgelöste Fundstelle gegen den Deckel, unabhängig vom Provider-Match:
+// mehrere provider-fremde URLs (z. B. externe Wissensbasis-Links wie
+// example.org) VOR einem echten, auflösbaren Provider-Link (z. B. ein
+// DevOps-Ticket) hätten den Deckel bereits erschöpft, BEVOR der echte Link
+// überhaupt geprüft wurde – das Kernversprechen ("Provider-Links werden
+// aufgelöst") wäre in dieser Konstellation nie eingelöst worden. maxLinks
+// bedeutet jetzt "maximal so viele Provider-Links (mit Match+Zugangsdaten)
+// pro Lauf auflösen", nicht mehr "maximal so viele unaufgelöste Fundstellen
+// überhaupt anfassen".
+function scanChunkForProviderLinks(text, cap, out, configured) {
+  let last = 0;
+  PROVIDER_LINK_SCAN_RE.lastIndex = 0;
+  let m;
+  while ((m = PROVIDER_LINK_SCAN_RE.exec(text))) {
+    const full = m[0];
+    const start = m.index;
+    if (start > last) out.push(text.slice(last, start));
+
+    if (m[1] !== undefined) { // Bild: nie anfassen (auch nicht auf den Deckel anrechnen)
+      out.push(full);
+      last = start + full.length;
+      continue;
+    }
+
+    let url = null;
+    let fallback = full;
+    let consumedLen = full.length;
+    if (m[2] !== undefined) {
+      if (m[2] === m[3]) url = m[3]; // NUR wenn Titel === URL (sonst Fußnote/echter Titel)
+    } else if (m[4] !== undefined) {
+      url = m[4]; // <url>-Autolink
+    } else {
+      const trimmed = trimBareUrl(m[5]);
+      if (trimmed) { url = trimmed; fallback = trimmed; consumedLen = trimmed.length; }
+    }
+
+    // Provider-Match SOFORT prüfen (siehe Review-Fix-Kommentar oben) – eine
+    // Fundstelle ohne passenden/credential-losen Provider verbraucht den
+    // Deckel nicht und bleibt unangetastet, GENAU wie eine Fußnote/ein
+    // echter Titel.
+    const provider = url === null ? null : providerFor(url, configured);
+    const hasCreds = provider ? providerHasCredentials(provider) : false;
+
+    if (!hasCreds || cap.remaining <= 0) {
+      // Kein Kandidat (Fußnote/echter Titel/kaputte Bare-URL/kein Provider-
+      // Match) ODER Deckel bereits durch ANDERE auflösbare Links erreicht:
+      // Original byte-genau stehen lassen, nichts verbraucht.
+      out.push(full);
+      last = start + full.length;
+      continue;
+    }
+
+    cap.remaining--;
+    out.push({ __providerLink: true, url, fallback, provider });
+    // Ein evtl. abgeschnittener Rest (Satzzeichen) bleibt normaler Text und
+    // wird über die nächste `text.slice(last, ...)`-Ausgabe mit ausgegeben.
+    last = start + consumedLen;
+  }
+  if (last < text.length) out.push(text.slice(last));
+}
+
+// resolveProviderLinkTitles(md, { fetchImpl, timeoutMs, maxLinks }) →
+// Promise<string>. Löst pro Aufruf höchstens `maxLinks` (Default 5)
+// Provider-Links MIT Match+Zugangsdaten auf (dokumentweit gezählt, NICHT
+// pro Segment – siehe Review-Fix-Kommentar bei scanChunkForProviderLinks:
+// eine Fundstelle OHNE Provider-Match verbraucht den Deckel nicht mehr),
+// der Rest bleibt unangetastet. Gleiche URL mehrfach: nur EIN
+// fetchLinkTitle-Aufruf (Cache pro Aufruf), das Ergebnis wird auf ALLE ihre
+// Fundstellen angewendet. Ein Fetch-Fehler lässt die betroffene Fundstelle
+// byte-genau unverändert (still, kein UI-Spam – siehe Aufrufer in App.jsx).
+// Idempotent: ein aufgelöster Link hat Titel !== URL und wird bei einem
+// zweiten Lauf nicht mehr als Kandidat erkannt.
+export async function resolveProviderLinkTitles(md, opts = {}) {
+  const text = String(md ?? "");
+  if (!text) return text;
+
+  const configured = getLinkProviders();
+  // Schneller No-op (Auftrag: "ohne passende Provider ist alles ein
+  // schneller No-op"): kein einziger konfigurierter Provider trägt
+  // Zugangsdaten -> es kann ohnehin nichts aufgelöst werden, das Dokument
+  // wird nicht mal gescannt, fetchImpl nie berührt.
+  if (!configured.some(providerHasCredentials)) return text;
+
+  const fetchImpl = opts.fetchImpl || (typeof fetch === "function" ? fetch : null);
+  if (!fetchImpl) return text;
+  const timeoutMs = opts.timeoutMs;
+  const maxLinks = Number.isFinite(opts.maxLinks) ? opts.maxLinks : 5;
+
+  // Fences (code.jsx) UND Codespans (wie renumberCitations, markdown.jsx)
+  // bleiben komplett unangetastet. `out` ist eine FLACHE Token-Liste für
+  // das GESAMTE Dokument (Strings + Kandidaten-Objekte); die Trenner
+  // zwischen Fence-Segmenten sind "\n" (siehe splitFenceSegments-Doku:
+  // "segments.map(s => s.raw).join('\n')"), innerhalb eines Segments
+  // dagegen "" (reiner String-Split ohne Separator). configured wird
+  // durchgereicht, damit der Provider-Match SCHON im Scan entschieden wird
+  // (Review-Fix maxLinks-Aushungerung).
+  const out = [];
+  const cap = { remaining: maxLinks };
+  splitFenceSegments(text).forEach((seg, si) => {
+    if (si > 0) out.push("\n");
+    if (seg.code) { out.push(seg.raw); return; }
+    seg.raw.split(CODESPAN_SPLIT_RE).forEach((chunk, i) => {
+      if (i % 2) out.push(chunk); // Codespan: unangetastet
+      else scanChunkForProviderLinks(chunk, cap, out, configured);
+    });
+  });
+
+  const providerLinks = out.filter((t) => t && t.__providerLink);
+  const uniqueUrls = [...new Set(providerLinks.map((t) => t.url))];
+  if (!uniqueUrls.length) return text; // nichts gefunden -> kein Fetch, keine Rekonstruktion nötig
+
+  // Provider ist bereits je Kandidat bekannt (Scan hat das Match schon
+  // geprüft) – für dieselbe URL liefert providerFor ohnehin immer denselben
+  // Provider (reine Funktion von (url, configured)), die erste Fundstelle
+  // reicht als Quelle.
+  const providerByUrl = new Map(providerLinks.map((t) => [t.url, t.provider]));
+
+  const results = new Map(); // url -> fetchLinkTitle-Ergebnis
+  await Promise.allSettled(uniqueUrls.map(async (url) => {
+    const res = await fetchLinkTitle(url, providerByUrl.get(url), { fetchImpl, timeoutMs });
+    results.set(url, res);
+  }));
+
+  // fetchLinkTitle liefert bei ok:true bereits einen durch cleanupLinkTitle
+  // bereinigten Titel (keine "[ ]", nicht rein numerisch) – hier NICHT
+  // nochmal bereinigen, das würde nur unnötig doppelt arbeiten.
+  return out
+    .map((token) => {
+      if (typeof token === "string") return token;
+      const res = results.get(token.url);
+      return res && res.ok ? "[" + res.title + "](" + token.url + ")" : token.fallback;
+    })
+    .join("");
 }

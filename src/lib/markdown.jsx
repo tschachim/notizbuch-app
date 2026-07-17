@@ -12,7 +12,7 @@ import {
   DISPLAY_MATH_START_RE, matchDisplayBlock,
 } from "./math.jsx";
 import { FENCE_OPEN_RE, matchFenceBlock, splitFenceSegments, CodeBlockView } from "./code.jsx";
-import { providerFor, getLinkProviders, ProviderIcon } from "./linkProviders.jsx";
+import { providerFor, getLinkProviders, ProviderIcon, trimBareUrl } from "./linkProviders.jsx";
 
 export const IMG_LINE_RE = /^!\[([^\]]*)\]\(img:([a-zA-Z0-9]+)\)$/;
 export const IMG_REF_RE = /!\[[^\]]*\]\(img:([a-zA-Z0-9]+)\)/g;
@@ -106,10 +106,21 @@ export const LINK_URL_RE = /https?:\/\/(?:[^\s()]|\([^\s()]*\))+/;
 // Konstante, macht den Gesamtaufwand wieder linear in der Zeilenlänge –
 // ein Titel über 300 Zeichen ist ohnehin kein sinnvoller Linktitel und
 // bleibt (wie bisher bei kaputten/unbekannten Mustern) einfach Klartext.
+// Grammatik für eine NACKTE URL im Fließtext (letzte Alternative unten) –
+// bewusst LOOSER als LINK_URL_RE (jedes Nicht-Whitespace/Nicht-"<>"-
+// Zeichen, AUCH unbalancierte Klammern): die genaue Grenze zieht erst
+// trimBareUrl (siehe renderInline unten) NACH dem Match. Exportiert (Review-
+// Fix "Grammatik-Drift", v7.12): linkProviders.jsx dupliziert dieselbe
+// Grammatik als NAKED_URL_SRC (Zirkelbezug-Grund wie bei LINK_URL_RE oben –
+// linkProviders.jsx darf nicht von hier importieren) – ein Test
+// (tests/resolveProviderLinkTitles.test.jsx) pinnt beide Module gegeneinander
+// (`BARE_URL_INLINE_SRC === NAKED_URL_SRC`), damit künftige Änderungen HIER
+// nicht unbemerkt von der Kopie dort abweichen.
+export const BARE_URL_INLINE_SRC = "https?:\\/\\/[^\\s<>]+";
 const INLINE_TOKEN_RE = new RegExp(
   "(\\*\\*[^*\\n]+\\*\\*|~~[^~\\n]+~~|\\*[^*\\n]+\\*|(?<![\\w\\d])_[^_\\n]+_(?![\\w\\d])|`[^`\\n]+`" +
   "|\\[[^\\]\\n]{1,300}\\]\\(" + LINK_URL_RE.source + "\\)" +
-  "|<https?:\\/\\/[^\\s>]+>|<(?:span|mark)\\b[^>]*>|https?:\\/\\/[^\\s<>]+)"
+  "|<https?:\\/\\/[^\\s>]+>|<(?:span|mark)\\b[^>]*>|" + BARE_URL_INLINE_SRC + ")"
 );
 
 // Formeln ($…$, $$…$$, \$) werden NICHT als weitere Alternative in
@@ -221,25 +232,11 @@ function extractStyles(openTag, tag) {
 // eine im bereits akzeptierten Teil der URL offene "(" schließt (Wikipedia-
 // Artikel mit Klammer im Titel, z. B. .../wiki/Steak_(Fleisch)) – sonst
 // wird auch sie abgetrennt (z. B. eine URL in Klammern im Fließtext:
-// "(https://x.de/a)" soll die Satzklammer nicht mitverlinken).
-function trimBareUrl(url) {
-  let end = url.length;
-  for (;;) {
-    if (end === 0) break;
-    const ch = url[end - 1];
-    if (".,;:!?".includes(ch)) { end--; continue; }
-    if (ch === ")") {
-      const prefix = url.slice(0, end - 1);
-      const opens = (prefix.match(/\(/g) || []).length;
-      const closes = (prefix.match(/\)/g) || []).length;
-      if (opens > closes) break; // gehört zu einer offenen "(" -> URL endet hier
-      end--;
-      continue;
-    }
-    break;
-  }
-  return url.slice(0, end);
-}
+// "(https://x.de/a)" soll die Satzklammer nicht mitverlinken). v7.12
+// (Review-Fix "Grammatik-Drift"): lebt jetzt EINMAL in linkProviders.jsx
+// (dort exportiert, auch für resolveProviderLinkTitles/den Auto-Titel-
+// Auflöser gebraucht) und wird hier importiert (siehe oben) – zirkelfrei,
+// da linkProviders.jsx nichts aus dieser Datei importiert.
 
 // Gemeinsame Optik für generische Links (Autolink, nackte URL UND
 // [Titel](url) mit sprechendem Titel) – bewusst ANDERS als die kompakte

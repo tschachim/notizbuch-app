@@ -294,19 +294,10 @@ describe("fetchLinkTitle: Azure DevOps", () => {
     expect(res).toEqual({ ok: true, title: "Bug 33487: Fix (Login) Bug" });
   });
 
-  it("401/404 liefern eine klare, statusbasierte reason", async () => {
-    const res401 = await fetchLinkTitle(AZURE_URL, AZURE_PROVIDER, {
-      fetchImpl: async () => jsonResponse({}, false, 401),
-    });
-    expect(res401.ok).toBe(false);
-    expect(res401.reason).toMatch(/401/);
-
-    const res404 = await fetchLinkTitle(AZURE_URL, AZURE_PROVIDER, {
-      fetchImpl: async () => jsonResponse({}, false, 404),
-    });
-    expect(res404.ok).toBe(false);
-    expect(res404.reason).toMatch(/404/);
-  });
+  // Statusbasiertes Fehler-Mapping: siehe eigener Block "fetchLinkTitle:
+  // Azure DevOps – Auth-Fehler-Mapping" weiter unten (Auftrag v7.12 Teil A,
+  // löst die frühere generische "Status 401."-reason durch klare deutsche
+  // Auth-Meldungen ab, siehe DECISIONS #58).
 
   it("ein Netzwerk-/CORS-Fehler (TypeError) wird sauber zu einer verständlichen reason, wirft NICHT", async () => {
     const fetchImpl = async () => { throw new TypeError("Failed to fetch"); };
@@ -344,6 +335,86 @@ describe("fetchLinkTitle: Azure DevOps", () => {
     });
     const res = await fetchLinkTitle(AZURE_URL, AZURE_PROVIDER, { fetchImpl });
     expect(res).toEqual({ ok: false, reason: "Antwort von Azure DevOps konnte nicht gelesen werden." });
+  });
+});
+
+// Auftrag v7.12 Teil A (DevOps-302-Maskierung, empirisch gegen dev.azure.com
+// verifiziert, siehe DECISIONS #58): OHNE gültige Auth antwortet die Azure-
+// DevOps-API nicht mit 401, sondern mit einem 302-Redirect zur Login-Seite,
+// deren fehlende CORS-Header den Browser-fetch als nichtssagendes TypeError
+// scheitern lassen ("Netzwerk/CORS-Fehler" statt einer Auth-Meldung). Fix:
+// X-TFS-FedAuthRedirect:Suppress-Header (lässt die API sauber 401 liefern)
+// + redirect:"manual" (Gürtel+Hosenträger: eine evtl. trotzdem auftretende
+// Redirect-Response wird als opaqueredirect erkannt, nicht als Netzwerkfehler
+// missgedeutet). Reason-Texte sind jetzt statuscode-spezifisch UND enthalten
+// nie das PAT/den Authorization-Header.
+describe("fetchLinkTitle: Azure DevOps – Auth-Fehler-Mapping (DevOps-302-Maskierung, v7.12 Teil A)", () => {
+  it("sendet den X-TFS-FedAuthRedirect:Suppress-Header UND redirect:'manual' bei JEDER Anfrage", async () => {
+    let seenInit = null;
+    const fetchImpl = async (url, init) => { seenInit = init; return jsonResponse({ fields: {} }); };
+    await fetchLinkTitle(AZURE_URL, AZURE_PROVIDER, { fetchImpl });
+    expect(seenInit.headers["X-TFS-FedAuthRedirect"]).toBe("Suppress");
+    expect(seenInit.redirect).toBe("manual");
+    // Der Authorization-Header bleibt daneben unverändert bestehen (Fix darf
+    // die bestehende Auth nicht verdrängen).
+    expect(seenInit.headers.Authorization).toMatch(/^Basic /);
+  });
+
+  it("401 -> klare Auth-Meldung MIT Organisationsname, OHNE den PAT-Wert zu nennen", async () => {
+    const res = await fetchLinkTitle(AZURE_URL, AZURE_PROVIDER, {
+      fetchImpl: async () => jsonResponse({}, false, 401),
+    });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("PAT ungültig oder abgelaufen, oder PAT gehört nicht zur Organisation ‚acme‘.");
+    expect(res.reason).not.toContain(AZURE_PROVIDER.pat);
+  });
+
+  it("403 -> Scope-/Richtlinien-Hinweis", async () => {
+    const res = await fetchLinkTitle(AZURE_URL, AZURE_PROVIDER, {
+      fetchImpl: async () => jsonResponse({}, false, 403),
+    });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe(
+      "PAT-Berechtigung fehlt (Scope ‚Work Items: Read‘) oder Organisations-Richtlinie blockiert PAT-Zugriff."
+    );
+  });
+
+  it("404 -> 'Work Item {id} nicht gefunden.'", async () => {
+    const res = await fetchLinkTitle(AZURE_URL, AZURE_PROVIDER, {
+      fetchImpl: async () => jsonResponse({}, false, 404),
+    });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("Work Item 33487 nicht gefunden.");
+  });
+
+  it("opaqueredirect (redirect:'manual' greift, KEIN sichtbarer Statuscode) wird wie 401 behandelt", async () => {
+    // Simuliert exakt das Browser-Verhalten bei redirect:"manual", wenn die
+    // API TROTZ Suppress-Header mit dem 302 zur Login-Seite antwortet: die
+    // resultierende Response hat status 0 und type "opaqueredirect", KEIN
+    // regulärer 401-Statuscode ist sichtbar.
+    const fetchImpl = async () => ({ ok: false, status: 0, type: "opaqueredirect" });
+    const res = await fetchLinkTitle(AZURE_URL, AZURE_PROVIDER, { fetchImpl });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("PAT ungültig oder abgelaufen, oder PAT gehört nicht zur Organisation ‚acme‘.");
+  });
+
+  it("ein sonstiger Statuscode fällt weiterhin auf eine generische, statusbasierte reason zurück", async () => {
+    const res = await fetchLinkTitle(AZURE_URL, AZURE_PROVIDER, {
+      fetchImpl: async () => jsonResponse({}, false, 500),
+    });
+    expect(res.reason).toBe("Azure DevOps antwortete mit Status 500.");
+  });
+
+  // Regressionstest: die Host-Verankerung/Sicherheitsfixe aus v7.9
+  // (DECISIONS #56) dürfen durch die Header-/redirect-Änderung nicht
+  // betroffen sein – ein Erfolgsfall bleibt unverändert funktionsfähig.
+  it("Regression: ein regulärer Erfolgsfall funktioniert unverändert (Host-Verankerung/Format bleiben stabil)", async () => {
+    const fetchImpl = async (url) => {
+      expect(url).toContain("/acme/Proj/_apis/wit/workitems/33487");
+      return jsonResponse({ fields: { "System.Title": "Login schlägt fehl", "System.WorkItemType": "Bug" } });
+    };
+    const res = await fetchLinkTitle(AZURE_URL, AZURE_PROVIDER, { fetchImpl });
+    expect(res).toEqual({ ok: true, title: "Bug 33487: Login schlägt fehl" });
   });
 });
 

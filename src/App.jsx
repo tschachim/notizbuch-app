@@ -28,7 +28,7 @@ import { renderMathText, expandMathInNodes } from "./lib/math.jsx";
 import { expandFencedCodeInNodes } from "./lib/code.jsx";
 import { chatToMarkdown, archiveBaseName, mergeChats } from "./lib/archive.js";
 import { loadSettings, saveSettings, clearSettings } from "./lib/settings.js";
-import { setLinkProviders } from "./lib/linkProviders.jsx";
+import { setLinkProviders, resolveProviderLinkTitles } from "./lib/linkProviders.jsx";
 import SettingsDialog from "./components/SettingsDialog.jsx";
 import DocEditor from "./components/DocEditor.jsx";
 import QuickNotes from "./components/QuickNotes.jsx";
@@ -1008,10 +1008,25 @@ export default function NotizbuchApp() {
       let commit = null;
 
       if (res.ops.length) {
+        // Auto-Titel-Auflösung (v7.12 Teil B, Auftrag "automatische
+        // Titel-Ermittlung überall"): NUR das neue op.content-Fragment läuft
+        // durch resolveProviderLinkTitles, NIE das Bestandsdokument – Chat-
+        // Änderungen bleiben minimal-invasiv (applyOps wendet das Fragment
+        // ohnehin gezielt auf einen Abschnitt an). resolveProviderLinkTitles
+        // wirft laut eigenem Vertrag nie; ein Fetch-Fehler lässt content
+        // unverändert.
+        const resolvedOps = await Promise.all(
+          res.ops.map(async (op) =>
+            op && typeof op.content === "string"
+              ? { ...op, content: await resolveProviderLinkTitles(op.content) }
+              : op
+          )
+        );
+
         // Ops nach Ziel-Notizbuch gruppieren (Default und unbekannte Namen → aktives)
         const byName = new Map(notebooksRef.current.map((n) => [n.name.trim().toLowerCase(), n]));
         const groups = new Map();
-        for (const op of res.ops) {
+        for (const op of resolvedOps) {
           const target =
             (op && typeof op.notebook === "string" && byName.get(op.notebook.trim().toLowerCase())) ||
             activeNotebook();
@@ -1808,28 +1823,51 @@ export default function NotizbuchApp() {
   // Bekommt das fertige Markdown aus dem WYSIWYG-Editor.
   const saveEdit = async (md) => {
     if (busy) return; // keine parallelen Prüf-/Sendeläufe
-    const cleaned = md.trim()
-      ? renumberCitations(md.replace(/\n{3,}/g, "\n\n").trim() + "\n")
-      : INITIAL_DOC;
-    if (cleaned !== doc) {
-      const oldDoc = doc;
-      const nbId = activeNbRef.current;
-      setSavingEdit(true);
-      try {
+    const oldDoc = doc;
+    const nbId = activeNbRef.current;
+    setSavingEdit(true);
+    let cleaned;
+    let conflict = false;
+    try {
+      // Auto-Titel-Auflösung (v7.12 Teil B, Auftrag "automatische Titel-
+      // Ermittlung überall"): läuft über das GANZE Dokument, VOR der
+      // übrigen Bereinigung/renumberCitations – deckt sowohl frisch
+      // eingefügte/eingetippte Provider-Links ab (Paste beim Editieren,
+      // vom Link-Popover-Auto-Fetch evtl. schon aufgelöst, aber z. B. auch
+      // per Markdown-Paste möglich) ALS AUCH alte, noch unaufgelöste Links
+      // (Titel===URL, z. B. vor v7.12 gespeichert) – Letzteres bewusst
+      // gewollt (siehe Auftrag), auch wenn dadurch ein Speichern OHNE
+      // sonstige inhaltliche Änderung einen Commit auslösen kann.
+      // resolveProviderLinkTitles wirft laut eigenem Vertrag nie – ein
+      // Fetch-Fehler lässt den Text einfach unaufgelöst, das Speichern
+      // läuft ungehindert weiter (Await hier im vorhandenen
+      // Speicher-Busy-Zustand savingEdit, siehe oben). Defensiver
+      // .catch()-Fallback auf das UNAUFGELÖSTE md (Review-Fix 🔵, vor dem
+      // Commit gemeldet): bräche der "wirft nie"-Vertrag doch einmal, wäre
+      // `cleaned` sonst nie zugewiesen und die manuelle Bearbeitung ginge
+      // beim Schließen des Editors STILL verloren (kein Commit, kein
+      // Fehler-Banner) – der Fallback stellt sicher, dass mindestens der
+      // unaufgelöste Text gespeichert wird.
+      const resolvedMd = await resolveProviderLinkTitles(md).catch(() => md);
+      cleaned = resolvedMd.trim()
+        ? renumberCitations(resolvedMd.replace(/\n{3,}/g, "\n\n").trim() + "\n")
+        : INITIAL_DOC;
+      if (cleaned !== oldDoc) {
         if (connected && settingsRef.current) {
           const ok = await commitDocNb(settingsRef.current, nbId, cleaned, "Manuelle Bearbeitung");
-          if (!ok) return; // Konflikt: Editor offen lassen, Inhalt bleibt erhalten
+          conflict = !ok;
         }
-        docCache.current[nbId] = cleaned;
-        setDoc(cleaned);
-      } finally {
-        setSavingEdit(false);
+        if (!conflict) {
+          docCache.current[nbId] = cleaned;
+          setDoc(cleaned);
+        }
       }
-      setEditing(false);
-      requestFeedback(oldDoc, cleaned); // bewusst nicht awaited
-      return;
+    } finally {
+      setSavingEdit(false);
     }
+    if (conflict) return;
     setEditing(false);
+    if (cleaned !== oldDoc) requestFeedback(oldDoc, cleaned); // bewusst nicht awaited
   };
 
   /* ---------- Historie (echte Git-Commits) ---------- */
@@ -2126,7 +2164,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.11</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.12</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"

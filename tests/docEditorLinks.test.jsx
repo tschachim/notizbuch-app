@@ -23,6 +23,7 @@ import { Markdown } from "tiptap-markdown";
 import {
   FencedCodeBlock, MdTable, MathInline, MathBlock, LinkDecorations,
   unescapeMd, validateLinkTitle, normalizeLinkUrl,
+  autoFetchProviderFor, applyAutoFetchResult,
 } from "../src/components/DocEditor.jsx";
 import { mathToPlaceholders } from "../src/lib/math.jsx";
 import { setLinkProviders } from "../src/lib/linkProviders.jsx";
@@ -367,6 +368,65 @@ describe("normalizeLinkUrl: Zeichen-Encoding statt Ablehnung (Nachbesserung Find
 
   it("kombiniert Leerzeichen + unbalancierte Klammer + Anführungszeichen korrekt", () => {
     expect(normalizeLinkUrl('https://x.de/a b)c"d')).toEqual({ url: "https://x.de/a%20b%29c%22d" });
+  });
+});
+
+// v7.12 (Nutzerwunsch "automatische Titel-Ermittlung überall"): Auto-Fetch
+// im Link-Popover, aus der Komponente herausgezogene reine Helfer (siehe
+// DocEditor.jsx, scheduleAutoFetch/runAutoFetch). Kein React/TipTap nötig.
+describe("autoFetchProviderFor (Link-Popover, DocEditor.jsx)", () => {
+  const AZURE_WITH_PAT = { id: "az", type: "azure-devops", name: "DevOps", prefix: "https://dev.azure.com/", pat: "test-pat" };
+  const CUSTOM_NO_CREDS = { id: "c", type: "custom", name: "Intranet", prefix: "https://intranet.example/", icon: "🏠" };
+
+  it("liefert den Provider, wenn die (noch schemalose) URL zu einem konfigurierten Provider MIT Zugangsdaten passt", () => {
+    const p = autoFetchProviderFor("dev.azure.com/acme/Proj/_workitems/edit/1", [AZURE_WITH_PAT]);
+    expect(p).toBe(AZURE_WITH_PAT);
+  });
+
+  it("liefert null, wenn der passende Provider KEINE Zugangsdaten trägt (custom)", () => {
+    expect(autoFetchProviderFor("https://intranet.example/x", [CUSTOM_NO_CREDS])).toBeNull();
+  });
+
+  it("liefert null für eine URL, die zu keinem konfigurierten Provider passt", () => {
+    expect(autoFetchProviderFor("https://example.org/x", [AZURE_WITH_PAT])).toBeNull();
+  });
+
+  it("liefert null für eine leere/ungültige Eingabe, statt zu werfen (normalizeLinkUrl-Fehler)", () => {
+    expect(autoFetchProviderFor("", [AZURE_WITH_PAT])).toBeNull();
+    expect(autoFetchProviderFor("javascript:alert(1)", [AZURE_WITH_PAT])).toBeNull();
+  });
+});
+
+describe("applyAutoFetchResult (Link-Popover, DocEditor.jsx)", () => {
+  it("füllt ein LEERES Titelfeld bei Erfolg", () => {
+    const linkForm = { title: "", url: "https://dev.azure.com/x/y/_workitems/edit/1", error: null };
+    const next = applyAutoFetchResult(linkForm, null, { ok: true, title: "Bug 1: X" });
+    expect(next).toEqual({ ...linkForm, title: "Bug 1: X", error: null });
+  });
+
+  it("überschreibt den ZULETZT AUTOMATISCH gesetzten Titel bei einem erneuten Erfolg (URL wurde nachgebessert)", () => {
+    const linkForm = { title: "Bug 1: Alter Titel", url: "https://dev.azure.com/x/y/_workitems/edit/1", error: null };
+    const next = applyAutoFetchResult(linkForm, "Bug 1: Alter Titel", { ok: true, title: "Bug 1: Neuer Titel" });
+    expect(next.title).toBe("Bug 1: Neuer Titel");
+  });
+
+  it("überschreibt NIEMALS einen manuell eingegebenen Titel (weder bei Erfolg noch bei Fehler)", () => {
+    const linkForm = { title: "Mein eigener Titel", url: "https://dev.azure.com/x/y/_workitems/edit/1", error: null };
+    const successResult = applyAutoFetchResult(linkForm, null, { ok: true, title: "Automatisch ermittelt" });
+    expect(successResult).toBe(linkForm); // unveränderte Referenz = "nichts angewendet"
+
+    const errorResult = applyAutoFetchResult(linkForm, null, { ok: false, reason: "404" });
+    expect(errorResult).toBe(linkForm);
+  });
+
+  it("trägt bei einem Fehler die reason ein, solange das Titelfeld noch frei ist", () => {
+    const linkForm = { title: "", url: "https://dev.azure.com/x/y/_workitems/edit/1", error: null };
+    const next = applyAutoFetchResult(linkForm, null, { ok: false, reason: "Work Item 1 nicht gefunden." });
+    expect(next).toEqual({ ...linkForm, error: "Work Item 1 nicht gefunden." });
+  });
+
+  it("liefert null unverändert für ein bereits geschlossenes Popover (linkForm===null)", () => {
+    expect(applyAutoFetchResult(null, null, { ok: true, title: "X" })).toBeNull();
   });
 });
 
