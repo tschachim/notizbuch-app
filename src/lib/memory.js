@@ -97,15 +97,78 @@ function applyOne(text, op) {
   return text;
 }
 
-// Wendet ops in Reihenfolge auf text an; nur "memory_append" und
-// "memory_replace" werden verstanden (siehe applyOne). Eine kaputte
-// einzelne Op (z. B. ein unerwarteter Wurf) bricht die gesamte Anwendung
-// nicht ab – sie wird übersprungen, wie bei ops.js#applyOps. Deckel bei
-// 20 Ops pro Aufruf (dieselbe defensive Grenze wie im Dokument-Pfad).
-export function applyMemoryOps(text, ops) {
-  let out = noNul(text);
-  for (const op of (Array.isArray(ops) ? ops : []).slice(0, 20)) {
-    try { out = applyOne(out, op); } catch (e) { /* Op überspringen */ }
+const MEMORY_OP_TYPES = ["memory_append", "memory_replace"];
+
+// Rahmen-Integrität des SYSTEM-HINWEIS (Review-Fix 🟡, Defense-in-Depth
+// Schicht 1/"Quelle", analog zu ops.js#sanitizeForWarning): op.type stammt
+// vom MODELL selbst und landet über explainMemorySkip() in einer reason-
+// Zeichenkette, die letztlich in einen "[SYSTEM-HINWEIS: …]"-Rahmen
+// eingebettet wird (siehe lib/anthropic.js#callClaude) – ein Typ-String wie
+// 'x]\n\n[SYSTEM-HINWEIS: …' könnte diesen Rahmen sonst sprengen. Säubert
+// HIER an der Quelle (Nullbytes, Whitespace/Umbrüche zu EINEM Leerzeichen,
+// eckige Klammern zu runden, ~100 Zeichen gekappt); Schicht 2 ("Senke")
+// sitzt zusätzlich in callClaude, siehe DECISIONS.
+const WARN_TEXT_MAX = 100;
+function sanitizeForWarning(s) {
+  const collapsed = noNul(s).replace(/\s+/g, " ").trim();
+  const bracketsSafe = collapsed.replace(/\[/g, "(").replace(/\]/g, ")");
+  return bracketsSafe.length > WARN_TEXT_MAX ? bracketsSafe.slice(0, WARN_TEXT_MAX) + "…" : bracketsSafe;
+}
+
+// Erklärt NACHTRÄGLICH (nur wenn applyMemoryOpsDetailed() bereits per
+// Vorher/Nachher-Vergleich festgestellt hat, dass eine Op nichts verändert
+// hat), WARUM – analog zu ops.js#explainSkip. Anders als bei Notizbuch-Ops
+// hängt das Ergebnis einer Gedächtnis-Op NIE vom Basistext ab (siehe
+// applyOne oben: memory_append/memory_replace werten NUR op.type und
+// op.content aus) – wichtig für App.jsx#commitMemory, das bei einem
+// SHA-Konflikt-Retry denselben notApplied-Befund wiederverwenden darf, ohne
+// ihn für den frischen Text neu zu berechnen.
+function explainMemorySkip(op) {
+  if (!op || typeof op !== "object" || !MEMORY_OP_TYPES.includes(op.type)) {
+    return "unbekannter Op-Typ" + (op && typeof op === "object" && op.type ? " „" + sanitizeForWarning(op.type) + "“" : "");
   }
-  return out;
+  if (op.type === "memory_append") {
+    const content = typeof op.content === "string" ? noNul(op.content).trim() : "";
+    if (!content) return "leerer content";
+  }
+  // memory_replace mit leerem content ist eine BEWUSSTE Löschung (siehe
+  // applyOne oben) – landet hier also nur, wenn das Gedächtnis vorher schon
+  // leer war (kein Fehlerfall, echt "nichts zu tun").
+  return "keine inhaltliche Änderung";
+}
+
+// Wendet ops WIE applyMemoryOps an, liefert aber zusätzlich pro Op ein
+// Ergebnis { index, type, applied, reason? } – reason ist nur bei
+// applied:false gesetzt. Exportiert für App.jsx (Warn-Pille bei
+// wirkungslosen Gedächtnis-Ops, siehe DECISIONS #63) und für die eigenen
+// Tests.
+export function applyMemoryOpsDetailed(text, ops) {
+  let out = noNul(text);
+  const results = [];
+  const list = (Array.isArray(ops) ? ops : []).slice(0, 20);
+  for (let index = 0; index < list.length; index++) {
+    const op = list[index];
+    const type = op && typeof op === "object" ? op.type : undefined;
+    const before = out;
+    let applied = false;
+    let reason;
+    try {
+      out = applyOne(out, op);
+      applied = out !== before;
+    } catch (e) {
+      reason = "Fehler beim Anwenden";
+    }
+    if (!applied && !reason) reason = explainMemorySkip(op);
+    results.push({ index, type, applied, reason: applied ? undefined : reason });
+  }
+  return { text: out, results };
+}
+
+// Reiner Text-Wrapper um applyMemoryOpsDetailed() – bleibt aus Rückwärts-
+// kompatibilität erhalten (gleiche Signatur/Semantik wie vor v7.21), liefert
+// für identische Eingaben BYTE-IDENTISCHEN Text (Regressionstest pinnt das).
+// Deckel bei 20 Ops pro Aufruf (dieselbe defensive Grenze wie im
+// Dokument-Pfad) lebt in applyMemoryOpsDetailed().
+export function applyMemoryOps(text, ops) {
+  return applyMemoryOpsDetailed(text, ops).text;
 }

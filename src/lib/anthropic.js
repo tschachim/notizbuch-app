@@ -336,6 +336,13 @@ Erlaubte ops (werden in Reihenfolge angewendet, beziehen sich immer auf ##-Haupt
 - {"type":"memory_append","content":"- Stichpunkt"}  → hängt einen Stichpunkt ans GLOBALE, notizbuchübergreifende GEDÄCHTNIS an (siehe GEDÄCHTNIS-Abschnitt oben) – KEIN "heading"/"notebook"/"chapter" nötig oder zulässig
 - {"type":"memory_replace","content":"kompletter neuer Gedächtnistext"}  → ersetzt das GESAMTE globale Gedächtnis (Konsolidierung, z. B. Dubletten zusammenführen oder Veraltetes korrigieren)
 
+OPS-ZUVERLÄSSIGKEIT (WICHTIG):
+- Kündige NIEMALS eine Änderung an, die nicht im SELBEN Tool-Aufruf als op mitgesendet wird – reply-Text ersetzt keine ops. Wenn du sagst, dass du etwas speicherst/löschst/überträgst, MÜSSEN die passenden ops im selben Aufruf stehen.
+- Es gibt NUR diese op-Typen: append_to_section, replace_section, delete_section, rewrite, memory_append, memory_replace. Erfinde keine Varianten (z. B. memory_add) – unbekannte Typen werden verworfen und dir als ⚠️ gemeldet.
+- delete_section/replace_section adressieren nur ##-Hauptabschnitte. Um ein ###-Unterthema zu entfernen/ändern: replace_section des gesamten ##-Abschnitts mit dem bereinigten Inhalt.
+- Überführen-Muster: Bei „überführe X ins Gedächtnis und entferne es aus dem Notizbuch“: memory_append UND die passende Notizbuch-Op (i. d. R. delete_section oder replace_section) im SELBEN ops-Array.
+- Erscheint in der Historie eine ⚠️-Meldung über nicht angewendete ops, war deine vorige Änderung WIRKUNGSLOS – korrigiere sie im nächsten Turn (richtiger Typ/exakte Abschnitts-Überschrift) statt Erfolg anzunehmen.
+
 REINE FRAGEN (WICHTIG): Enthält die Nachricht nichts Speicherwürdiges – eine bloße Frage (auch zu Notizbüchern oder Dateianhängen: „Was steht …?“, „Erkläre …“, „Fasse zusammen …“), Smalltalk –, dann gib "ops":[] und "commit":null zurück. Nutze eine solche Antwort NIEMALS, um nebenbei aufzuräumen, Platzhalter zu entfernen oder umzustrukturieren – das Dokument bleibt unangetastet. Die Frage selbst wird dabei im reply VOLLSTÄNDIG und inhaltlich beantwortet (siehe ANTWORTFORMAT) – ein Verweis auf bereits im Notizbuch stehende Inhalte ist nur eine Ergänzung und ersetzt niemals die eigentliche Antwort. (Angehängte BILDER sind davon ausgenommen: sie werden gemäß dem BILDER-Abschnitt immer eingebunden. GEDÄCHTNIS-Ops ("memory_append"/"memory_replace") sind davon EBENFALLS ausgenommen und bei einer reinen Frage ausdrücklich weiter erwünscht, wenn dabei dauerhaft Nützliches über den Nutzer erkennbar wird – Gedächtnispflege ist KEIN Notizbuch-Aufräumen. ALLE Notizbuch-Ops (append_to_section/replace_section/delete_section/rewrite) bleiben bei reinen Fragen dagegen unverändert verboten: "ops" darf bei einer reinen Frage also memory_*-Einträge enthalten, aber KEINE Notizbuch-Ops.)`;
 
   return { staticBlock, dynamicBlock };
@@ -631,6 +638,25 @@ export function buildChatReply(data, hits, toolReply) {
   return { reply: remapped, sources: cited };
 }
 
+// Rahmen-Integrität des SYSTEM-HINWEIS (Review-Fix 🟡, Defense-in-Depth
+// Schicht 2/"Senke"): m.warning (App.jsx#buildOpsWarning) trägt Op-
+// Metadaten, die letztlich vom MODELL selbst stammen (Abschnitts-/Kapitel-
+// Titel, Op-Typ) – lib/ops.js#explainSkip/lib/memory.js#explainMemorySkip
+// säubern das bereits AN DER QUELLE (Schicht 1). Diese Funktion ist eine
+// UNABHÄNGIGE zweite Schicht direkt an der gefährlichen Verwendungsstelle:
+// egal was hereinkommt (auch eine künftige Warn-Quelle, die die
+// Quell-Sanitisierung vergisst), Zeilenumbrüche werden zu " · " und eckige
+// Klammern zu runden – der "[SYSTEM-HINWEIS: …]"-Rahmen kann dadurch NIE
+// vorzeitig geschlossen oder verdoppelt werden. Bewusst NUR hier an der
+// Senke angewendet, NICHT auf die React-Chat-Pille oder das Archiv-
+// Markdown (siehe DECISIONS): dort ist rohes m.warning unkritisch (React
+// escaped Text ohnehin, chatToMarkdown quotet zeilenweise mit ">").
+const sanitizeWarningForHistory = (w) =>
+  String(w || "")
+    .replace(/\r\n|\r|\n/g, " · ")
+    .replace(/\[/g, "(")
+    .replace(/\]/g, ")");
+
 // nbContext: { notebooks: [{ name, doc }], activeName }
 // fileInfo (optional): { name, text|null } – Dateianhang dieses Turns;
 // der Inhalt geht nur in DIESEN Aufruf, im Verlauf bleibt nur der Name.
@@ -638,6 +664,24 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
   // cite-Marker aus dem Verlauf strippen: ihre Indizes sind auf die pro
   // Nachricht gespeicherte Quellenliste umnummeriert und für das Modell
   // ohne Bedeutung – es soll sie nicht nachahmen.
+  //
+  // v7.21 (Ops-Zuverlässigkeit, History-Variante B3, siehe DECISIONS #63):
+  // eine ⚠️-Warnung über nicht angewendete Ops (App.jsx#send, Feld
+  // "m.warning") wird hier an den content-STRING derselben historischen
+  // Assistent-Nachricht angehängt, statt als eigene, zusätzliche Nachricht
+  // in die History gemappt zu werden. Bewusst NICHT als separate
+  // user-Nachricht (wie requestFeedbacks Info-Pillen, die IMMER als Paar
+  // {user-Pille, assistant-Antwort} zusammen committet werden und dadurch
+  // alternierend bleiben): eine nachträglich an eine BEREITS bestehende
+  // Assistent-Nachricht angehängte, aber NIE von einer eigenen Assistent-
+  // Antwort gefolgte user-Nachricht würde bei der NÄCHSTEN Chat-Runde zwei
+  // aufeinanderfolgende user-Einträge in "msgs" erzeugen (dieser Turn +
+  // die neue Nutzereingabe) – die Anthropic-API verlangt STRIKT
+  // alternierende Rollen und lehnt das mit einem 400-Fehler ab. Das
+  // Anhängen an die BESTEHENDE Assistent-Nachricht ist strukturell sicher
+  // (ändert die Anzahl/Rollenfolge der Nachrichten nicht) und erreicht das
+  // Modell trotzdem zuverlässig im nächsten Turn (siehe Test
+  // "History-Inklusion" in tests/anthropic.test.js).
   const msgs = priorChat
     .filter((m) => !m.error && (m.text || m.imgId || m.fileName))
     .slice(-12)
@@ -646,7 +690,8 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
       content:
         (m.imgId ? "[Bild " + m.imgId + "] " : "") +
         (m.fileName ? "[Datei „" + m.fileName + "“] " : "") +
-        stripCiteTags(m.text || ""),
+        stripCiteTags(m.text || "") +
+        (m.warning ? "\n\n[SYSTEM-HINWEIS: " + sanitizeWarningForHistory(m.warning) + "]" : ""),
     }));
 
   const content = [];

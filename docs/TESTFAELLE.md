@@ -391,6 +391,29 @@ prüfen – die App loggt bei JEDEM Modell-Aufruf eine Zeile
 „write“ statt „read“ zeigt (das ist der erwartete Cache-Aufbau) – nur
 melden, wenn AUCH beim zweiten/weiteren Aufruf `read` dauerhaft 0 bleibt.
 
+**C19 [VERBUNDEN][API] Ops-Zuverlässigkeit: Überführen-Muster + ⚠️-Warnung
+bei wirkungslosen Ops (v7.21, exaktes Nutzer-Szenario).** Im QA-Notizbuch
+zunächst per Chat einen Abschnitt „QA-Test Warenkunde“ mit 1–2
+Stichpunkten anlegen (1 API-Aufruf). Danach: „Überführe QA-Test Warenkunde
+ins Gedächtnis und lösche den Abschnitt aus dem Notizbuch.“ (1
+API-Aufruf). Erwartet: Im SELBEN Turn erscheinen 🧠-Badge (Gedächtnis
+aktualisiert) UND der Abschnitt „QA-Test Warenkunde“ ist im Notizbuch
+verschwunden – KEIN mehrfaches Nachfragen/Wiederholen nötig. In den
+Einstellungen unter „Globales Gedächtnis“ prüfen, dass der Inhalt jetzt
+dort steht. Danach den Testeintrag wie bei C16 beschrieben wieder aus dem
+Gedächtnis entfernen.
+Negativ-Probe (bewusst provozierter Fehlschlag, zeigt die neue
+Fehlerbehandlung): Im Chat einen Löschauftrag auf einen NICHT
+existierenden Abschnittsnamen geben, z. B. „Lösche den Abschnitt ‚QA-Test
+Nichtvorhanden‘.“ (1 API-Aufruf). Erwartet: Eine ⚠️-Warn-Pille (amber,
+Warndreieck-Icon) erscheint unter der Chat-Antwort mit einem Text wie
+„⚠️ Nicht angewendet: delete_section „QA-Test Nichtvorhanden“ (Abschnitt
+„QA-Test Nichtvorhanden“ nicht gefunden)“ – KEIN 💾-Badge, das Notizbuch
+bleibt unverändert. Danach im Chat nachfragen: „Was ist mit dem
+Löschauftrag von eben?“ (1 API-Aufruf). Erwartet: Das Modell erkennt aus
+der ⚠️-Warnung in der Historie, dass die vorige Änderung wirkungslos war
+(keine Behauptung, es sei „bereits erledigt“).
+
 ## D. Manuelles Bearbeiten (WYSIWYG)
 
 **D1 [VERBUNDEN] Editor-Roundtrip.** Stift-Knopf → im QA-Notizbuch einen

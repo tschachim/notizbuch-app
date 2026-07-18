@@ -28,12 +28,13 @@ const fmtStamp = (ts) =>
 // voraus sein, der lokale Stand bis zu einem Debounce) zu einem
 // vollständigen Verlauf vereinen: Duplikate über (ts, Rolle, Text, …)
 // erkennen, Ergebnis chronologisch. Nachrichten ohne ts (Begrüßung)
-// bleiben außen vor. Der Dedup-Key bewusst OHNE "commit"/"memory" (v7.16):
-// ts wird bei jeder Nachricht per Date.now() vergeben (praktisch eindeutig)
-// und identifiziert damit dieselbe Nachricht bereits zuverlässig – zwei
-// unabhängig ENTSTANDENE Nachrichten mit exakt gleichem ts+role+text+imgId+
-// fileName, aber unterschiedlichem commit/memory, sind kein realistischer
-// Fall (dieselbe Antwort desselben Turns hat immer dieselben Metadaten).
+// bleiben außen vor. Der Dedup-Key bewusst OHNE "commit"/"memory"/"warning"
+// (v7.16, erweitert v7.21): ts wird bei jeder Nachricht per Date.now()
+// vergeben (praktisch eindeutig) und identifiziert damit dieselbe Nachricht
+// bereits zuverlässig – zwei unabhängig ENTSTANDENE Nachrichten mit exakt
+// gleichem ts+role+text+imgId+fileName, aber unterschiedlichem commit/
+// memory/warning, sind kein realistischer Fall (dieselbe Antwort desselben
+// Turns hat immer dieselben Metadaten).
 export function mergeChats(local, remote) {
   const key = (m) =>
     m.ts + "|" + (m.role || "") + "|" + (m.text || "") + "|" +
@@ -140,6 +141,15 @@ export function chatToMarkdown(chat, opts = {}) {
     if (m.memory) {
       parts.push("");
       parts.push("> 🧠 Gedächtnis aktualisiert");
+    }
+    // ⚠️-Warn-Badge (v7.21, Ops-Zuverlässigkeit, siehe DECISIONS #63): kein
+    // Sonderpfad nötig, das ⚠️-Präfix aus App.jsx#buildOpsWarning reicht –
+    // NUR mehrzeilig (mehrere gebündelte Ops) bekommt JEDE Zeile ihr eigenes
+    // ">"-Zitatpräfix, sonst würde Markdown den Block nach der ersten Zeile
+    // wieder verlassen.
+    if (m.warning) {
+      parts.push("");
+      for (const line of noNul(m.warning).split("\n")) parts.push("> " + line);
     }
   }
 

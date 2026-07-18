@@ -151,6 +151,59 @@ describe("chatToMarkdown", () => {
     expect(md).toContain("> 🧠 Gedächtnis aktualisiert");
   });
 
+  // v7.21 (Ops-Zuverlässigkeit, siehe DECISIONS #63): ⚠️-Warn-Badge läuft
+  // wie die bestehenden Commit-/Gedächtnis-Zeilen ins Archiv, kein
+  // Sonderpfad – das ⚠️-Präfix aus App.jsx#buildOpsWarning reicht.
+  it("vermerkt eine EINZEILIGE ⚠️-Warnung als eigene Zitatzeile", () => {
+    const md = chatToMarkdown([
+      {
+        role: "assistant", ts: TS, text: "Erledigt.",
+        warning: '⚠️ Nicht angewendet: delete_section „Warenkunde“ (Abschnitt „Warenkunde“ nicht gefunden)',
+      },
+    ]);
+    expect(md).toContain('> ⚠️ Nicht angewendet: delete_section „Warenkunde“ (Abschnitt „Warenkunde“ nicht gefunden)');
+  });
+
+  it("eine MEHRZEILIGE ⚠️-Warnung bekommt auf JEDER Zeile ein eigenes '>' (bleibt ein zusammenhängendes Markdown-Zitat)", () => {
+    const md = chatToMarkdown([
+      {
+        role: "assistant", ts: TS, text: "Teilweise erledigt.",
+        warning: "⚠️ Nicht angewendet:\n– delete_section „Warenkunde“ (Abschnitt „Warenkunde“ nicht gefunden)\n– memory_append (leerer content)",
+      },
+    ]);
+    expect(md).toContain("> ⚠️ Nicht angewendet:");
+    expect(md).toContain('> – delete_section „Warenkunde“ (Abschnitt „Warenkunde“ nicht gefunden)');
+    expect(md).toContain("> – memory_append (leerer content)");
+  });
+
+  it("ohne warning-Feld erscheint KEINE ⚠️-Zeile", () => {
+    const md = chatToMarkdown([{ role: "assistant", ts: TS, text: "Alles gut." }]);
+    expect(md).not.toContain("⚠️");
+  });
+
+  it("ein Turn mit Commit UND Warnung zeigt beide Zeilen (Teilerfolg ehrlich abgebildet)", () => {
+    const md = chatToMarkdown([
+      {
+        role: "assistant", ts: TS, text: "Teilweise erledigt.", commit: "Warenkunde bereinigt",
+        warning: "⚠️ Nicht angewendet: memory_append (leerer content)",
+      },
+    ]);
+    expect(md).toContain("> 💾 Ins Notizbuch übernommen: „Warenkunde bereinigt“");
+    expect(md).toContain("> ⚠️ Nicht angewendet: memory_append (leerer content)");
+  });
+
+  it("entfernt Nullbytes auch aus der ⚠️-Warnung", () => {
+    // String.fromCharCode(0) statt eines Escape-Literals (Konvention wie
+    // memory.js#NUL) - vermeidet jedes Risiko, dass ein rohes Steuerzeichen
+    // im Quelltext selbst landet.
+    const NUL = String.fromCharCode(0);
+    const md = chatToMarkdown([
+      { role: "assistant", ts: TS, text: "x", warning: "Nicht angewendet: delete_section „B" + NUL + "se“ (...)" },
+    ]);
+    expect(md).not.toContain(NUL);
+    expect(md).toContain("Bse");
+  });
+
   it("liefert bei leerem Verlauf nur den Kopf", () => {
     const md = chatToMarkdown([]);
     expect(md).toContain("0 Nachrichten");

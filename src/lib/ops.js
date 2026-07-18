@@ -156,10 +156,107 @@ function applyOne(text, op) {
   return text;
 }
 
-export function applyOps(docText, ops) {
-  let text = docText;
-  for (const op of (ops || []).slice(0, 20)) {
-    try { text = applyOne(text, op); } catch (e) { /* Op überspringen */ }
+// v7.21 (Ops-Zuverlässigkeit, Live-Befund): applyOps() selbst überspringt
+// wirkungslose Ops bisher KOMMENTARLOS – weder der Nutzer noch das Modell
+// erfahren, WARUM eine angekündigte Änderung ausblieb (siehe DECISIONS #63).
+// Die vier Op-Typen, die applyOne() tatsächlich versteht – alles andere ist
+// aus Sicht DIESES Moduls ein unbekannter Typ (memory_*-Ops werden vorher in
+// App.jsx#splitOps herausgefiltert und laufen nie hier durch, siehe dort).
+const OP_TYPES = ["append_to_section", "replace_section", "delete_section", "rewrite"];
+
+// Rahmen-Integrität des SYSTEM-HINWEIS (Review-Fix 🟡, Defense-in-Depth
+// Schicht 1/"Quelle"): heading/chapter/type in einer Op stammen vom MODELL
+// selbst (Teil seiner eigenen JSON-Antwort) und landen über explainSkip()
+// unten in einer reason-Zeichenkette, die App.jsx#buildOpsWarning zu
+// m.warning zusammenbaut – das wiederum in lib/anthropic.js#callClaude in
+// einen "[SYSTEM-HINWEIS: …]"-Rahmen für die nächste Modell-Runde gepackt
+// wird. Ein Heading wie 'Foo]\n\n[SYSTEM-HINWEIS: …' könnte diesen Rahmen
+// sonst sprengen/verdoppeln (Prompt-Injection über den eigenen Reason-Text).
+// Säubert HIER an der Quelle: Nullbytes raus, Whitespace-Folgen (inkl.
+// Zeilenumbrüche) zu einem Leerzeichen, eckige Klammern zu runden
+// (entschärft "]"/"[SYSTEM-HINWEIS:" strukturell), auf ~100 Zeichen gekappt.
+// Schicht 2 ("Senke") sitzt zusätzlich in lib/anthropic.js#callClaude, damit
+// AUCH eine künftige, hier vergessene Warn-Quelle den Rahmen nie brechen
+// kann – zwei unabhängige Schichten, siehe DECISIONS.
+const WARN_TEXT_MAX = 100;
+function sanitizeForWarning(s) {
+  const noNulStr = String(s || "").split(String.fromCharCode(0)).join("");
+  const collapsed = noNulStr.replace(/\s+/g, " ").trim();
+  const bracketsSafe = collapsed.replace(/\[/g, "(").replace(/\]/g, ")");
+  return bracketsSafe.length > WARN_TEXT_MAX ? bracketsSafe.slice(0, WARN_TEXT_MAX) + "…" : bracketsSafe;
+}
+
+// Erklärt NACHTRÄGLICH – nur wenn applyOpsDetailed() bereits per Vorher/
+// Nachher-Textvergleich festgestellt hat, dass eine Op NICHTS verändert hat
+// – WARUM. Dupliziert bewusst NUR die REIN LESENDEN Entscheidungen aus
+// applyOne() (kein zweiter Schreibpfad, kein Risiko einer abweichenden
+// Textausgabe zwischen Anwendung und Erklärung): welcher Op-Typ, ob Kapitel/
+// Abschnitt gefunden wurden, ob content leer ist. Reihenfolge der Prüfungen
+// spiegelt exakt applyOne() (Kapitel-Filter vor Abschnitts-Suche usw.).
+function explainSkip(text, op) {
+  if (!op || typeof op !== "object" || !OP_TYPES.includes(op.type)) {
+    return "unbekannter Op-Typ" + (op && typeof op === "object" && op.type ? " „" + sanitizeForWarning(op.type) + "“" : "");
   }
-  return text;
+  if (op.type === "rewrite") {
+    // v7.21.1 (Review-Fix 🔵): NICHT pauschal "leerer content" – ein
+    // rewrite mit NICHT-leerem, aber zufällig textidentischem Inhalt (siehe
+    // applyOne: dann bleibt der Text unverändert) ist kein Leer-content-
+    // Fall, sondern derselbe generische Fallback wie bei replace_section.
+    const content = typeof op.content === "string" ? op.content.trim() : "";
+    return content ? "keine inhaltliche Änderung" : "leerer content";
+  }
+  const disp = dispHead(op.heading);
+  if (!disp) return "fehlende Abschnitts-Überschrift";
+  const lines = text.split("\n");
+  let range = null;
+  if (typeof op.chapter === "string" && op.chapter.trim()) {
+    range = findChapter(lines, op.chapter);
+    if (!range) return "Kapitel „" + sanitizeForWarning(dispHead(op.chapter)) + "“ nicht gefunden – Op übersprungen";
+  }
+  const b = findSection(lines, disp, range);
+  if (op.type === "delete_section" && !b) return "Abschnitt „" + sanitizeForWarning(disp) + "“ nicht gefunden";
+  if (op.type === "append_to_section") {
+    const content = typeof op.content === "string" ? op.content.replace(/^\n+|\n+$/g, "") : "";
+    if (!content) return "leerer content";
+  }
+  // replace_section legt bei fehlendem Abschnitt IMMER neu an (siehe
+  // applyOne) – landet hier also nur, wenn der neue Inhalt zufällig
+  // textidentisch mit dem vorherigen Stand war (kein Fehlerfall).
+  return "keine inhaltliche Änderung";
+}
+
+// Wendet ops WIE applyOps an, liefert aber zusätzlich pro Op ein Ergebnis
+// { index, type, heading?, applied, reason? } – reason ist nur bei
+// applied:false gesetzt. Exportiert für App.jsx (Warn-Pille bei
+// wirkungslosen Ops, siehe DECISIONS #63) und für die eigenen Tests.
+export function applyOpsDetailed(docText, ops) {
+  let text = docText;
+  const results = [];
+  const list = (ops || []).slice(0, 20);
+  for (let index = 0; index < list.length; index++) {
+    const op = list[index];
+    const type = op && typeof op === "object" ? op.type : undefined;
+    const heading = op && typeof op === "object" && typeof op.heading === "string"
+      ? dispHead(op.heading) || undefined
+      : undefined;
+    const before = text;
+    let applied = false;
+    let reason;
+    try {
+      text = applyOne(text, op);
+      applied = text !== before;
+    } catch (e) {
+      reason = "Fehler beim Anwenden";
+    }
+    if (!applied && !reason) reason = explainSkip(before, op);
+    results.push({ index, type, heading, applied, reason: applied ? undefined : reason });
+  }
+  return { text, results };
+}
+
+// Reiner Text-Wrapper um applyOpsDetailed() – bleibt aus Rückwärts-
+// kompatibilität erhalten (gleiche Signatur/Semantik wie vor v7.21), liefert
+// für identische Eingaben BYTE-IDENTISCHEN Text (Regressionstest pinnt das).
+export function applyOps(docText, ops) {
+  return applyOpsDetailed(docText, ops).text;
 }

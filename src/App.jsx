@@ -6,8 +6,8 @@ import {
   ArrowUp, ArrowDown, Plus, ListTree, Archive, Maximize2, Minimize2,
 } from "lucide-react";
 
-import { applyOps, dispHead } from "./lib/ops.js";
-import { applyMemoryOps } from "./lib/memory.js";
+import { applyOpsDetailed, dispHead } from "./lib/ops.js";
+import { applyMemoryOps, applyMemoryOpsDetailed } from "./lib/memory.js";
 import { diffLines, contextize } from "./lib/diff.js";
 import { DocView, IMG_REF_RE, TASK_RE, parseTree, renumberCitations } from "./lib/markdown.jsx";
 import {
@@ -142,10 +142,10 @@ export const serializeState = (chat, model, collapsedAll, active, order, quickno
 // Ops aus der Modellantwort in zwei Gruppen aufteilen (v7.16, globales
 // Gedächtnis): memory_* wirken auf das notizbuchübergreifende Gedächtnis
 // (eigene Datei/eigener Commit, siehe commitMemory), alles andere bleibt
-// der bisherige Notizbuch-Pfad (applyOps). Reihenfolge INNERHALB jeder
-// Gruppe bleibt erhalten – nur die Gruppenzugehörigkeit ändert sich. Reine
-// Funktion, exportiert für tests/memory.test.js (bzw. wo sinnvoll), analog
-// zum serializeState-Exportmuster oben.
+// der bisherige Notizbuch-Pfad (applyOpsDetailed). Reihenfolge INNERHALB
+// jeder Gruppe bleibt erhalten – nur die Gruppenzugehörigkeit ändert sich.
+// Reine Funktion, exportiert für tests/memory.test.js (bzw. wo sinnvoll),
+// analog zum serializeState-Exportmuster oben.
 export function splitOps(ops) {
   const memoryOps = [];
   const notebookOps = [];
@@ -154,6 +154,49 @@ export function splitOps(ops) {
     else notebookOps.push(op);
   }
   return { memoryOps, notebookOps };
+}
+
+// Rahmen-Integrität des SYSTEM-HINWEIS (Review-Fix 🟡, Ergänzung/Schicht 1b
+// "Quelle"): applyOpsDetailed()/applyMemoryOpsDetailed() liefern type/heading
+// UNGEFILTERT aus der Modellantwort (results[].type ist z. B. NICHT auf die
+// bekannten Op-Typen beschränkt – ein erfundener op.type landet 1:1 in
+// results[].type, siehe ops.js#applyOpsDetailed). explainSkip/
+// explainMemorySkip säubern bereits den reason-Text, NICHT aber diese beiden
+// separat eingebetteten Felder – ohne Säuberung HIER könnte ein bösartiger
+// type/heading/notebook-String den späteren "[SYSTEM-HINWEIS: …]"-Rahmen in
+// lib/anthropic.js#callClaude erreichen. Schicht 2 ("Senke", callClaude)
+// neutralisiert den kompletten m.warning-String zusätzlich als Sicherheitsnetz
+// für genau solche – auch künftig denkbare – vergessenen Einbettungsstellen;
+// diese Funktion soll sich aber nicht ALLEIN auf die Senke verlassen.
+const WARN_LABEL_MAX = 100;
+function sanitizeWarnLabel(s) {
+  const collapsed = String(s || "").replace(/\s+/g, " ").trim();
+  const bracketsSafe = collapsed.replace(/\[/g, "(").replace(/\]/g, ")");
+  return bracketsSafe.length > WARN_LABEL_MAX ? bracketsSafe.slice(0, WARN_LABEL_MAX) + "…" : bracketsSafe;
+}
+
+// Baut den Text einer ⚠️-Warn-Pille aus den NICHT angewendeten Ops eines
+// Turns (v7.21, Ops-Zuverlässigkeit – siehe DECISIONS #63: das Modell kann
+// bisher ohne jede Rückmeldung eine Änderung ankündigen, die stillschweigend
+// wirkungslos bleibt). "items": flache Liste von { type?, heading?,
+// notebook?, reason }, aus applyOpsDetailed()/applyMemoryOpsDetailed()-
+// Ergebnissen (nur die NICHT angewendeten, reason gesetzt) plus optional
+// einem "bare" Hinweis ohne type/heading (z. B. "Commit angekündigt, aber
+// keine Änderung wirksam geworden" – siehe send()). Bündelt MEHRERE nicht
+// angewendete Ops in EINER Pille (Auftrag) statt vieler einzelner. Liefert
+// null, wenn nichts zu warnen ist (Pille wird dann gar nicht gerendert).
+// Reine Funktion, exportiert für tests/appOps.test.js.
+export function buildOpsWarning(items) {
+  const list = (Array.isArray(items) ? items : []).filter((it) => it && it.reason);
+  if (!list.length) return null;
+  const describe = (it) => {
+    if (!it.type) return it.reason; // bare Hinweis ohne konkrete Op
+    const label = sanitizeWarnLabel(it.type) + (it.heading ? ' „' + sanitizeWarnLabel(it.heading) + '“' : "");
+    const where = it.notebook ? " in „" + sanitizeWarnLabel(it.notebook) + "“" : "";
+    return label + where + " (" + it.reason + ")";
+  };
+  if (list.length === 1) return "⚠️ Nicht angewendet: " + describe(list[0]);
+  return "⚠️ Nicht angewendet:\n" + list.map((it) => "– " + describe(it)).join("\n");
 }
 
 /* ------------------------------------------------------------------ */
@@ -803,20 +846,36 @@ export default function NotizbuchApp() {
   // Restrisiko (LWW, siehe DECISIONS): gewinnt der Konflikt ein zweites Mal
   // in Folge (zwei fast zeitgleiche Schreiber auf zwei Geräten), wird NICHT
   // endlos weiterversucht – der zweite Schreiber verliert seine Änderung
-  // mit einem Banner-Hinweis. Rückgabewert: true nur bei einem TATSÄCHLICH
-  // ausgelösten Commit (für das 🧠-Badge im Chat) – false sowohl bei einem
-  // wirkungslosen No-op (ops ergaben keine inhaltliche Änderung) als auch
-  // bei einem Fehlschlag (dann steht bereits ein Banner).
+  // mit einem Banner-Hinweis.
+  // Rückgabewert (v7.21, Ops-Zuverlässigkeit – siehe DECISIONS #63): jetzt
+  // {committed, notApplied} statt nur eines booleans. "committed" ist true
+  // nur bei einem TATSÄCHLICH ausgelösten Commit (für das 🧠-Badge im Chat) –
+  // false sowohl bei einem wirkungslosen No-op (ops ergaben keine
+  // inhaltliche Änderung) als auch bei einem Fehlschlag (dann steht bereits
+  // ein Banner). "notApplied" listet einzelne NICHT angewendete Ops
+  // (unbekannter memory_*-Typ, leerer content – siehe lib/memory.js#
+  // applyMemoryOpsDetailed) für die ⚠️-Warn-Pille in send(), UNABHÄNGIG vom
+  // Gesamt-Ausgang: auch wenn ANDERE Ops im selben Aufruf erfolgreich
+  // committet wurden, sollen die wirkungslosen einzelnen Ops nicht
+  // stillschweigend untergehen. notApplied hängt bei Gedächtnis-Ops NIE vom
+  // Basistext ab (siehe applyMemoryOpsDetailed/applyOne: memory_append/
+  // memory_replace werten NUR op.type/op.content aus) – beim SHA-Konflikt-
+  // Retry unten auf frischem Text bleibt die Liste deshalb bewusst
+  // unverändert gültig, statt ein zweites Mal berechnet zu werden.
   const commitMemory = useCallback(async (cfg, ops) => {
     const before = memoryRef.current;
-    const applied = applyMemoryOps(before, ops);
-    if (applied === before) return false;
+    const detailed = applyMemoryOpsDetailed(before, ops);
+    const notApplied = detailed.results
+      .filter((r) => !r.applied)
+      .map((r) => ({ type: r.type, reason: r.reason }));
+    const applied = detailed.text;
+    if (applied === before) return { committed: false, notApplied };
     try {
       const put = await ghPutFile(cfg, MEMORY_PATH, utf8ToB64(applied), "Gedächtnis aktualisiert", memorySha.current || undefined);
       memorySha.current = put.sha;
       memoryRef.current = applied;
       setMemory(applied);
-      return true;
+      return { committed: true, notApplied };
     } catch (e) {
       if (e instanceof ShaConflictError) {
         try {
@@ -826,18 +885,18 @@ export default function NotizbuchApp() {
           memorySha.current = put2.sha;
           memoryRef.current = reapplied;
           setMemory(reapplied);
-          return true;
+          return { committed: true, notApplied };
         } catch (e2) {
           setBanner({
             kind: "warn",
             text: "Gedächtnis konnte nicht gespeichert werden (zweimal in Folge ein Konflikt): " +
               (e2 && e2.message ? e2.message : e2),
           });
-          return false;
+          return { committed: false, notApplied };
         }
       }
       setBanner({ kind: "warn", text: "Gedächtnis konnte nicht gespeichert werden: " + (e && e.message ? e.message : e) });
-      return false;
+      return { committed: false, notApplied };
     }
   }, []);
 
@@ -1141,6 +1200,12 @@ export default function NotizbuchApp() {
 
       let commit = null;
       let memoryUpdated = false;
+      // v7.21 (Ops-Zuverlässigkeit, Live-Befund – siehe DECISIONS #63):
+      // sammelt ALLE nicht angewendeten Ops dieses Turns (Notizbuch UND
+      // Gedächtnis, über alle Ziel-Notizbücher hinweg) für EINE gebündelte
+      // ⚠️-Warn-Pille (siehe buildOpsWarning), statt sie wie bisher
+      // kommentarlos verschwinden zu lassen.
+      const notApplied = [];
 
       // Ops splitten (v7.16): memory_* wirken auf das globale, notizbuch-
       // übergreifende Gedächtnis (eigene Datei/eigener Commit, siehe
@@ -1149,7 +1214,9 @@ export default function NotizbuchApp() {
       // bleibt je Gruppe erhalten (siehe splitOps).
       const { memoryOps, notebookOps } = splitOps(res.ops);
       if (memoryOps.length) {
-        memoryUpdated = await commitMemory(cfg, memoryOps);
+        const memResult = await commitMemory(cfg, memoryOps);
+        memoryUpdated = memResult.committed;
+        for (const na of memResult.notApplied) notApplied.push(na);
       }
 
       if (notebookOps.length) {
@@ -1183,14 +1250,31 @@ export default function NotizbuchApp() {
         let conflict = false;
         for (const [nbId, ops] of groups) {
           const before = docCache.current[nbId] || "";
+          const nb = notebooksRef.current.find((n) => n.id === nbId);
+          // v7.21: applyOpsDetailed statt applyOps – liefert zusätzlich pro
+          // Op einen Grund, falls sie NICHTS verändert hat (unbekannter Typ,
+          // Abschnitt/Kapitel nicht gefunden, leerer content). Text-Ausgabe
+          // ist BYTE-IDENTISCH zu applyOps (reiner Wrapper, siehe ops.js).
+          const detailed = applyOpsDetailed(before, ops);
+          for (const r of detailed.results) {
+            if (!r.applied) notApplied.push({ type: r.type, heading: r.heading, notebook: nb ? nb.name : nbId, reason: r.reason });
+          }
           // Nach dem Anwenden dokumentweit durchnummerieren: neue Quellen-
           // Fußnoten kommen als [0](url)-Platzhalter aus den ops.
-          const applied = renumberCitations(applyOps(before, ops));
+          const applied = renumberCitations(detailed.text);
           if (applied === before) continue;
-          const nb = notebooksRef.current.find((n) => n.id === nbId);
           const ok = await commitDocNb(cfg, nbId, applied, res.commit || "Aktualisierung");
           if (!ok) { conflict = true; break; }
           changed.push({ id: nbId, name: nb ? nb.name : nbId, ops });
+        }
+        // v7.21: Das Modell kündigte per commit-Feld eine Änderung an, aber
+        // KEIN Notizbuch wurde tatsächlich verändert (alle Ops in dieser
+        // Gruppe waren wirkungslos) – genau der Live-Befund ("mehrfach als
+        // erledigt angekündigt, nichts passiert"). NUR relevant außerhalb
+        // eines SHA-Konflikts (der hat seine eigene, bereits aussagekräftige
+        // Fehlermeldung, siehe unten).
+        if (!conflict && res.commit && !changed.length) {
+          notApplied.push({ reason: "Commit angekündigt, aber keine Änderung wirksam geworden" });
         }
         if (conflict) {
           // SHA-Konflikt. Achtung: vorherige Notizbücher der Schleife können
@@ -1212,6 +1296,11 @@ export default function NotizbuchApp() {
             // auch wenn der Notizbuch-Teil dieses Turns konfliktet – beide
             // Ziele sind unabhängige Dateien/Commits (siehe oben).
             memory: memoryUpdated || undefined,
+            // v7.21: bereits gesammelte notApplied-Funde (z. B. aus den
+            // Gedächtnis-Ops oder aus VOR dem Konflikt erfolgreich
+            // durchlaufenen Notizbuch-Gruppen) bleiben auch im Konflikt-Fall
+            // sichtbar – teilweiser Erfolg soll ehrlich abgebildet werden.
+            warning: buildOpsWarning(notApplied) || undefined,
             text: saved.length
               ? "Teilweise gespeichert (" + saved.join(", ") + "). Ein weiteres Notizbuch wurde " +
                 "parallel geändert und NICHT gespeichert – bitte nur den fehlenden Teil neu erfassen " +
@@ -1268,6 +1357,18 @@ export default function NotizbuchApp() {
         ts: Date.now(),
         commit,
         memory: memoryUpdated || undefined,
+        // v7.21 (Ops-Zuverlässigkeit, siehe DECISIONS #63): gebündelte
+        // ⚠️-Warnung über nicht angewendete Ops dieses Turns – hängt als
+        // Feld an DERSELBEN Assistent-Nachricht (kein eigener Chat-Eintrag),
+        // bewusst NICHT als separate user-Pille wie requestFeedbacks
+        // Info-Pillen: eine zusätzliche, nachträglich angehängte user-Rolle
+        // OHNE folgende Assistent-Antwort würde beim NÄCHSTEN Senden zwei
+        // aufeinanderfolgende user-Nachrichten in die API-Historie bringen
+        // (Anthropic verlangt strikt alternierende Rollen – 400-Fehler).
+        // Die Warnung erreicht das Modell trotzdem im nächsten Turn, siehe
+        // lib/anthropic.js#callClaude (History-Mapping hängt sie an den
+        // content-String DIESER Assistent-Nachricht an).
+        warning: buildOpsWarning(notApplied) || undefined,
         sources: res.sources && res.sources.length ? res.sources : undefined,
       };
       const finalChat = [...chatWithUser, aMsg].slice(-80);
@@ -2456,7 +2557,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.20</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.21</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -2664,13 +2765,26 @@ export default function NotizbuchApp() {
                     <span>Gedächtnis aktualisiert</span>
                   </div>
                 )}
+                {/* ⚠️-Warn-Badge (v7.21, Ops-Zuverlässigkeit): gleiche Optik-
+                    Familie wie Commit-/Gedächtnis-Badge, aber amber statt
+                    indigo – meldet Ops, die das Modell angekündigt, aber die
+                    NICHTS am Notizbuch/Gedächtnis verändert haben (siehe
+                    DECISIONS #63). m.warning kann mehrzeilig sein (mehrere
+                    gebündelte Ops, siehe buildOpsWarning) – whitespace-pre-
+                    wrap erhält die Zeilenumbrüche. */}
+                {m.warning && (
+                  <div className="mt-1 inline-flex items-start gap-1.5 max-w-[88%] sm:max-w-md text-xs text-amber-800 bg-amber-50 border border-amber-300 rounded-lg px-2.5 py-1.5 whitespace-pre-wrap break-words">
+                    <AlertTriangle size={12} className="shrink-0 mt-0.5" />
+                    <span>{m.warning}</span>
+                  </div>
+                )}
                 {/* Dezenter Zeitstempel für alle übrigen Nachrichten (C4, v7.4).
                     WELCOME hat ts:0 (falsy) und bleibt bewusst ohne Zeit; bei
-                    einer Commit-/Gedächtnis-Badge keinen doppelten Stempel
-                    (die Commit-Badge zeigt die Zeit schon). Ausrichtung folgt
-                    items-end/items-start des umgebenden flex-col-Containers
-                    automatisch. */}
-                {!m.commit && !m.memory && m.ts ? (
+                    einer Commit-/Gedächtnis-/Warn-Badge keinen doppelten
+                    Stempel (die Commit-Badge zeigt die Zeit schon).
+                    Ausrichtung folgt items-end/items-start des umgebenden
+                    flex-col-Containers automatisch. */}
+                {!m.commit && !m.memory && !m.warning && m.ts ? (
                   <div className="mt-0.5 px-1 text-[10px] text-slate-400">{fmtTime(m.ts)}</div>
                 ) : null}
               </div>
