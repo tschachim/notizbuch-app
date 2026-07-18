@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
-  MODELS, webSearchToolFor, buildSystem, buildChatReply, callClaude, NOTEBOOK_TOOL,
-  parseLooseJson, isSubstantialReply, SUBSTANTIAL_REPLY_MIN_LENGTH,
+  MODELS, webSearchToolFor, buildSystem, buildSystemBlocks, buildChatReply, callClaude, NOTEBOOK_TOOL,
+  LOOKUP_TOOL, parseLooseJson, isSubstantialReply, SUBSTANTIAL_REPLY_MIN_LENGTH,
 } from "../src/lib/anthropic.js";
+import { MEMORY_SOFT_LIMIT, MEMORY_HARD_LIMIT } from "../src/lib/memory.js";
 
 describe("parseLooseJson (Reparatur kaputter Modell-Antworten)", () => {
   it("parst sauberes JSON und ```json-Zäune", () => {
@@ -408,19 +409,23 @@ describe("buildSystem", () => {
       expect(sys).toContain("Projekt „Foo“ nutzt Vite+React");
     });
 
-    it("ab dem Soft-Limit (8000 Zeichen) erscheint der Konsolidierungs-Hinweis mit Zeichenzahl", () => {
-      const big = "a".repeat(8001);
+    it("ab dem Soft-Limit erscheint der Konsolidierungs-Hinweis mit Zeichenzahl", () => {
+      const big = "a".repeat(MEMORY_SOFT_LIMIT + 1);
       const sys = buildSystem(nbs, "Wissensbasis", null, big);
-      expect(sys).toContain("Das Gedächtnis ist groß (8001 Zeichen)");
+      expect(sys).toContain("Das Gedächtnis ist groß (" + (MEMORY_SOFT_LIMIT + 1) + " Zeichen)");
       expect(sys).toContain("konsolidiere es bei nächster Gelegenheit per memory_replace");
-      // Gegenprobe: exakt am Limit (8000) erscheint der Hinweis NICHT.
-      const atLimit = "a".repeat(8000);
+      // Gegenprobe: exakt am Limit erscheint der Hinweis NICHT.
+      const atLimit = "a".repeat(MEMORY_SOFT_LIMIT);
       expect(buildSystem(nbs, "Wissensbasis", null, atLimit)).not.toContain("konsolidiere es bei nächster Gelegenheit");
     });
 
     it("dokumentiert die GEDÄCHTNIS-Aufgabe (proaktiv merken, kompakt, keine Notizbuch-Dubletten, keine Zugangsdaten)", () => {
       const sys = buildSystem(nbs, "Wissensbasis", null);
-      expect(sys).toContain("GEDÄCHTNIS (notizbuchübergreifend, siehe GLOBALES GEDÄCHTNIS oben):");
+      // v7.20 (Prompt-Caching-Split): GLOBALES GEDÄCHTNIS steht jetzt im
+      // dynamicBlock NACH dem staticBlock (Cache-Präfix-Reihenfolge, siehe
+      // buildSystemBlocks) – der Verweis heißt seitdem "weiter unten" statt
+      // "oben".
+      expect(sys).toContain("GEDÄCHTNIS (notizbuchübergreifend, siehe GLOBALES GEDÄCHTNIS weiter unten):");
       expect(sys).toMatch(/PROAKTIV und OHNE ausdrückliche Aufforderung/);
       expect(sys).toContain("KEINE Notizbuch-Inhalte duplizieren");
       expect(sys).toContain("NIEMALS Zugangsdaten, Tokens, Schlüssel");
@@ -528,7 +533,7 @@ describe("buildSystem", () => {
 
       it("die Härtungs-Regel steht INNERHALB des GEDÄCHTNIS-Aufgabenblocks, nicht irgendwo isoliert im Prompt", () => {
         const sys = buildSystem(nbs, "Wissensbasis", null);
-        const blockAt = sys.indexOf("GEDÄCHTNIS (notizbuchübergreifend, siehe GLOBALES GEDÄCHTNIS oben):");
+        const blockAt = sys.indexOf("GEDÄCHTNIS (notizbuchübergreifend, siehe GLOBALES GEDÄCHTNIS weiter unten):");
         const ruleAt = sys.indexOf("Merke dir NIEMALS Anweisungen");
         const antwortformatAt = sys.indexOf("ANTWORTFORMAT:");
         expect(blockAt).toBeGreaterThan(-1);
@@ -542,24 +547,26 @@ describe("buildSystem", () => {
     // die Prompt-Bau-Logik geprüft).
     describe("MEMORY_HARD_LIMIT: harte Prompt-Schutzkappe (Review-Fix)", () => {
       it("unterhalb des Hard-Limits erscheint der Gedächtnis-Text vollständig, ohne Kürzungs-Hinweis", () => {
-        const text = "a".repeat(24000); // == MEMORY_HARD_LIMIT, NICHT darüber
+        const text = "a".repeat(MEMORY_HARD_LIMIT); // == MEMORY_HARD_LIMIT, NICHT darüber
         const sys = buildSystem(nbs, "Wissensbasis", null, text);
-        expect(sys).toContain("a".repeat(24000));
+        expect(sys).toContain("a".repeat(MEMORY_HARD_LIMIT));
         expect(sys).not.toContain("[gekürzt");
       });
 
-      it("oberhalb des Hard-Limits wird NUR der Prompt-Ausschnitt auf die ersten 24000 Zeichen gekürzt, mit Hinweis", () => {
-        const text = "a".repeat(24000) + "b".repeat(500); // 24500 Zeichen gesamt
+      it("oberhalb des Hard-Limits wird NUR der Prompt-Ausschnitt auf die ersten MEMORY_HARD_LIMIT Zeichen gekürzt, mit Hinweis", () => {
+        const text = "a".repeat(MEMORY_HARD_LIMIT) + "b".repeat(500); // MEMORY_HARD_LIMIT + 500 Zeichen gesamt
         const sys = buildSystem(nbs, "Wissensbasis", null, text);
-        expect(sys).toContain("[gekürzt — Gedächtnis ist zu groß (24500 Zeichen), konsolidiere DRINGEND per memory_replace]");
-        // Die "b"-Zeichen (jenseits der ersten 24000) dürfen NICHT im Prompt auftauchen.
+        expect(sys).toContain(
+          "[gekürzt — Gedächtnis ist zu groß (" + (MEMORY_HARD_LIMIT + 500) + " Zeichen), konsolidiere DRINGEND per memory_replace]"
+        );
+        // Die "b"-Zeichen (jenseits von MEMORY_HARD_LIMIT) dürfen NICHT im Prompt auftauchen.
         expect(sys).not.toContain("b".repeat(500));
-        // Genau 24000 "a" stehen noch vollständig im Prompt.
-        expect(sys).toContain("a".repeat(24000));
+        // Genau MEMORY_HARD_LIMIT "a" stehen noch vollständig im Prompt.
+        expect(sys).toContain("a".repeat(MEMORY_HARD_LIMIT));
       });
 
       it("bei Hard-Cap erscheint NICHT zusätzlich der weichere Soft-Limit-Hinweis (kein widersprüchlicher Doppel-Hinweis)", () => {
-        const text = "a".repeat(30000);
+        const text = "a".repeat(MEMORY_HARD_LIMIT + 1000);
         const sys = buildSystem(nbs, "Wissensbasis", null, text);
         expect(sys).toContain("konsolidiere DRINGEND per memory_replace");
         expect(sys).not.toContain("konsolidiere es bei nächster Gelegenheit per memory_replace");
@@ -575,6 +582,106 @@ describe("buildSystem", () => {
     expect(sys).toContain('"ops":[] bleibt dabei leer'); // bestehender Vertrag bleibt als Substring erhalten
     expect(sys).toContain('Mit "ops":[] sind hier NOTIZBUCH-Ops gemeint (append_to_section/replace_section/delete_section/rewrite)');
     expect(sys).toContain("memory_append/memory_replace bleiben davon unberührt und auch beim reinen Struktur-Vorschlag erlaubt");
+  });
+});
+
+// v7.20 (Nutzer-Entscheidung: Gedächtnis-Limits anheben + Prompt-Caching):
+// buildSystem() wurde intern in zwei Blöcke aufgeteilt (staticBlock zuerst,
+// dynamicBlock danach – siehe der ausführliche Kommentar über
+// buildSystemBlocks() in src/lib/anthropic.js für die Cache-Präfix-
+// Begründung). Dieser Block prüft NUR die Block-Struktur selbst; die
+// eigentliche Cache-Control-Verdrahtung (system-Array, Tool-Breakpoint,
+// Nachrichten bewusst ungecached) wird weiter unten am echten Request-Body
+// im callClaude-Describe geprüft.
+describe("buildSystemBlocks (Prompt-Caching-Split, v7.20)", () => {
+  const nbs = [
+    { name: "Wissensbasis", doc: "# Wissensbasis\n\n## Inbox" },
+    { name: "Koch & Co", doc: "# Koch & Co" },
+  ];
+
+  it("liefert zwei nicht-leere Text-Blöcke: staticBlock und dynamicBlock", () => {
+    const blocks = buildSystemBlocks(nbs, "Wissensbasis", null, "");
+    expect(typeof blocks.staticBlock).toBe("string");
+    expect(typeof blocks.dynamicBlock).toBe("string");
+    expect(blocks.staticBlock.length).toBeGreaterThan(0);
+    expect(blocks.dynamicBlock.length).toBeGreaterThan(0);
+  });
+
+  it("staticBlock enthält die statischen Instruktions-Abschnitte, aber NICHT die dynamischen Abschnittsköpfe", () => {
+    const blocks = buildSystemBlocks(nbs, "Wissensbasis", null, "");
+    for (const marker of [
+      "DEINE AUFGABEN:", "EINORDNUNG IN NOTIZBÜCHER:", "KONVENTIONEN IN JEDEM NOTIZBUCH:",
+      "GLIEDERUNGS-VORSCHLAG", "FORMELN:", "BILDER:", "DATEIANHÄNGE:", "GEDÄCHTNIS (notizbuchübergreifend",
+      "ANTWORTFORMAT:", "Erlaubte ops", "REINE FRAGEN (WICHTIG)", "INTERNET-RECHERCHE:",
+    ]) {
+      expect(blocks.staticBlock).toContain(marker);
+    }
+    expect(blocks.staticBlock).not.toContain("AKTIVES NOTIZBUCH:");
+    expect(blocks.staticBlock).not.toContain("ALLE NOTIZBÜCHER:");
+    expect(blocks.staticBlock).not.toContain("GLOBALES GEDÄCHTNIS (notizbuchübergreifend, überlebt");
+  });
+
+  it("Gegenprobe: Notizbuch-Inhalte und Gedächtnis-Text tauchen NUR in dynamicBlock auf, niemals in staticBlock", () => {
+    const blocks = buildSystemBlocks(
+      [{ name: "Geheimnisvoll", doc: "# Geheimnisvoll\n\n## Ein einzigartiger Notizbuch-Marker ZQXJ7fakt" }],
+      "Geheimnisvoll", null, "- Ein einzigartiger Gedächtnis-Marker ABCD9fakt"
+    );
+    expect(blocks.dynamicBlock).toContain("ZQXJ7fakt");
+    expect(blocks.dynamicBlock).toContain("ABCD9fakt");
+    expect(blocks.dynamicBlock).toContain("AKTIVES NOTIZBUCH: Geheimnisvoll");
+    expect(blocks.staticBlock).not.toContain("ZQXJ7fakt");
+    expect(blocks.staticBlock).not.toContain("ABCD9fakt");
+    expect(blocks.staticBlock).not.toContain("Geheimnisvoll");
+  });
+
+  it("Gegenprobe: auch Wissensdateien (HINTERGRUNDWISSEN) tauchen NUR in dynamicBlock auf", () => {
+    const blocks = buildSystemBlocks(
+      nbs, "Wissensbasis",
+      { activeFiles: [{ name: "handbuch.txt", text: "Ein einzigartiger Wissens-Marker QWERT5fakt" }], others: [] },
+      ""
+    );
+    expect(blocks.dynamicBlock).toContain("QWERT5fakt");
+    expect(blocks.dynamicBlock).toContain("HINTERGRUNDWISSEN");
+    expect(blocks.staticBlock).not.toContain("QWERT5fakt");
+    expect(blocks.staticBlock).not.toContain("HINTERGRUNDWISSEN");
+  });
+
+  // WICHTIGSTER TEST dieses Auftrags (siehe Auftragstext): garantiert, dass
+  // buildSystem() (der beibehaltene Ein-String-Wrapper, den ALLE ~60
+  // bestehenden Prompt-Vertragstests weiter nutzen) und buildSystemBlocks()
+  // (die neue, cache-fähige Aufteilung, die callClaude() tatsächlich für die
+  // Requests verwendet) STRUKTURELL NIE auseinanderlaufen können – kein
+  // Prompt-Byte geht beim Zusammensetzen verloren oder wird verdoppelt. Das
+  // ist bewusst KEIN Vergleich gegen den git-historischen v7.19-Text (dessen
+  // Abschnitt-REIHENFOLGE hat sich mit diesem Auftrag absichtlich geändert,
+  // siehe Kommentar über buildSystemBlocks() – ein reordering ist für
+  // funktionierendes Caching zwingend), sondern eine STRUKTURELLE Garantie
+  // für JEDEN künftigen Aufruf: ändert jemand künftig NUR buildSystem() oder
+  // NUR buildSystemBlocks(), ohne den jeweils anderen Pfad mitzuziehen,
+  // schlägt dieser Test sofort fehl. Geprüft mit mehreren, realistisch
+  // befüllten Eingaben (leer, mit Wissen, mit Gedächtnis, mit mehreren
+  // Notizbüchern), damit kein Eingabe-Pfad (z. B. ein leerer vs. befüllter
+  // Zweig in memoryBlock/knowledgeBlock) unentdeckt divergieren kann.
+  it("Join-Gleichheits-Probe: buildSystem() === staticBlock + dynamicBlock, für mehrere Eingaben (WICHTIGSTER TEST)", () => {
+    const cases = [
+      [nbs, "Wissensbasis", null, ""],
+      [nbs, "Koch & Co", null, undefined],
+      [nbs, "Wissensbasis", { activeFiles: [{ name: "a.txt", text: "Wissensinhalt" }], others: [] }, "- Ein Gedächtnis-Fakt"],
+      [
+        [{ name: "Solo", doc: "# Solo\n\n## Einziger Abschnitt" }], "Solo",
+        { activeFiles: [], others: [{ notebook: "Anderes", files: ["x.pdf"] }] },
+        "a".repeat(40000), // über dem alten Soft-Limit, unter dem neuen (v7.20-Grenzfall)
+      ],
+    ];
+    for (const [caseNbs, activeName, knowledge, memory] of cases) {
+      const sys = buildSystem(caseNbs, activeName, knowledge, memory);
+      const blocks = buildSystemBlocks(caseNbs, activeName, knowledge, memory);
+      expect(sys).toBe(blocks.staticBlock + blocks.dynamicBlock);
+      // Zusätzlich: keine der beiden Seiten ist leer/verkürzt (Gegenprobe
+      // gegen eine trivial "immer gleiche leere Strings"-Implementierung).
+      expect(blocks.staticBlock.length).toBeGreaterThan(1000);
+      expect(blocks.dynamicBlock.length).toBeGreaterThan(0);
+    }
   });
 });
 
@@ -690,6 +797,15 @@ describe("callClaude (fetch gemockt)", () => {
 
   const respond = (body, ok = true, status = 200) =>
     fetch.mockResolvedValueOnce({ ok, status, json: async () => body });
+
+  // v7.20 (Prompt-Caching): body.system ist jetzt ein Array aus Text-Blöcken
+  // (statischer + dynamischer Teil, siehe buildSystemBlocks/postOnce) statt
+  // eines einzelnen Strings. Bestehende Tests, die auf Inhalte IRGENDWO im
+  // System-Prompt prüfen (nicht auf die Cache-Struktur selbst – dafür siehe
+  // den eigenen Block "Prompt-Caching (v7.20)" weiter unten), joinen die
+  // Blöcke zunächst wieder zu einem String – exakt das, was buildSystem()
+  // liefert (siehe dortiger Kommentar: reiner Join-Wrapper).
+  const systemText = (body) => body.system.map((b) => b.text).join("");
 
   it("liefert reply/ops/commit aus dem Tool-Aufruf und strippt cite-Tags aus ops ohne Suche", async () => {
     respond({
@@ -1093,8 +1209,8 @@ describe("callClaude (fetch gemockt)", () => {
     // 1. Request: lookup_wissen ist als Tool angeboten, System enthält Index-Eintrag
     const first = JSON.parse(fetch.mock.calls[0][1].body);
     expect(first.tools.map((t) => t.name)).toContain("lookup_wissen");
-    expect(first.system).toContain('volltext="nein"');
-    expect(first.system).not.toContain("KeyMapping Details"); // Volltext NICHT im Prompt
+    expect(systemText(first)).toContain('volltext="nein"');
+    expect(systemText(first)).not.toContain("KeyMapping Details"); // Volltext NICHT im Prompt
     // 2. Request: tool_result mit dem gefundenen Ausschnitt
     const second = JSON.parse(fetch.mock.calls[1][1].body);
     const toolResultMsg = second.messages[second.messages.length - 1];
@@ -1152,7 +1268,7 @@ describe("callClaude (fetch gemockt)", () => {
     }, [], "claude-sonnet-5", null, null);
     const body = JSON.parse(fetch.mock.calls[0][1].body);
     expect(body.tools.map((t) => t.name)).not.toContain("lookup_wissen");
-    expect(body.system).toContain("wenig"); // kleine Dateien weiter im Volltext
+    expect(systemText(body)).toContain("wenig"); // kleine Dateien weiter im Volltext
   });
 
   it("Dateianhang: Inhalt gedeckelt und escaped im Prompt, History nur Name", async () => {
@@ -1172,6 +1288,132 @@ describe("callClaude (fetch gemockt)", () => {
     respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] });
     await callClaude("key", "x", { ...NB_CTX, memory: "- Nutzer heißt Alex" }, [], "claude-sonnet-5", null, null);
     const body = JSON.parse(fetch.mock.calls[0][1].body);
-    expect(body.system).toContain("- Nutzer heißt Alex");
+    expect(systemText(body)).toContain("- Nutzer heißt Alex");
+  });
+
+  // v7.20 (Nutzer-Entscheidung: Prompt-Caching). Prüft die tatsächliche
+  // Request-Struktur (nicht nur buildSystemBlocks() selbst, siehe eigener
+  // Block dort) – die Zahlen/Feldnamen sind exakt den API-Fakten aus dem
+  // Auftrag entnommen (GA, kein Beta-Header, cache_control:{type:"ephemeral"}
+  // direkt an Content-Blöcken, Cache-Präfix-Reihenfolge tools → system →
+  // messages, max. 4 Breakpoints).
+  describe("Prompt-Caching (v7.20)", () => {
+    it("system ist ein Array aus GENAU zwei Text-Blöcken, beide mit cache_control:{type:'ephemeral'}", async () => {
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] });
+      await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+      const body = JSON.parse(fetch.mock.calls[0][1].body);
+      expect(Array.isArray(body.system)).toBe(true);
+      expect(body.system).toHaveLength(2);
+      for (const block of body.system) {
+        expect(block.type).toBe("text");
+        expect(typeof block.text).toBe("string");
+        expect(block.cache_control).toEqual({ type: "ephemeral" });
+      }
+      // KEIN Beta-Header nötig (Caching ist GA) – die bestehenden Header
+      // bleiben unverändert (Regressionsschutz gegen versehentlich
+      // ergänzte veraltete Beta-Header).
+      const headers = fetch.mock.calls[0][1].headers;
+      expect(Object.keys(headers).some((h) => /anthropic-beta/i.test(h))).toBe(false);
+    });
+
+    it("cache_control steht NUR am LETZTEN Tool-Eintrag (Such-Modus, ohne lookup_wissen)", async () => {
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] });
+      await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+      const body = JSON.parse(fetch.mock.calls[0][1].body);
+      expect(body.tools.map((t) => t.name)).toEqual(["web_search", "update_notebook"]);
+      expect(body.tools[0].cache_control).toBeUndefined();
+      expect(body.tools[1].cache_control).toEqual({ type: "ephemeral" });
+    });
+
+    it("cache_control steht weiterhin NUR am LETZTEN Tool-Eintrag, auch mit lookup_wissen als drittem Tool", async () => {
+      const ctxWithKnow = {
+        ...NB_CTX,
+        knowledge: { activeFiles: [{ name: "handbuch.pdf", text: "x".repeat(90000) }], others: [] },
+      };
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] });
+      await callClaude("key", "x", ctxWithKnow, [], "claude-sonnet-5", null, null);
+      const body = JSON.parse(fetch.mock.calls[0][1].body);
+      expect(body.tools.map((t) => t.name)).toEqual(["web_search", "lookup_wissen", "update_notebook"]);
+      expect(body.tools[0].cache_control).toBeUndefined();
+      expect(body.tools[1].cache_control).toBeUndefined();
+      expect(body.tools[2].cache_control).toEqual({ type: "ephemeral" });
+    });
+
+    it("Forced-Modus (Websuche nicht verfügbar): der einzige Tool-Eintrag bekommt ebenfalls cache_control", async () => {
+      respond({ error: { type: "invalid_request_error", message: "web_search tool is not available" } });
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ohne Suche", ops: [] })] });
+      await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+      const second = JSON.parse(fetch.mock.calls[1][1].body);
+      expect(second.tools).toEqual([{ ...NOTEBOOK_TOOL, cache_control: { type: "ephemeral" } }]);
+    });
+
+    it("insgesamt maximal 4 Cache-Breakpoints pro Request (2 system + 1 Tool = 3, unter dem API-Limit)", async () => {
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] });
+      await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+      const body = JSON.parse(fetch.mock.calls[0][1].body);
+      const countBreakpoints = (arr) => arr.filter((x) => x && x.cache_control).length;
+      const total = countBreakpoints(body.system) + countBreakpoints(body.tools);
+      expect(total).toBe(3);
+      expect(total).toBeLessThanOrEqual(4);
+    });
+
+    it("messages bekommen BEWUSST KEIN cache_control (gleitendes 12-Nachrichten-Fenster, Cache-Miss garantiert)", async () => {
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] });
+      const priorChat = Array.from({ length: 10 }, (_, i) => ({ role: "user", ts: i, text: "Nachricht " + i }));
+      await callClaude("key", "neueste Frage", NB_CTX, priorChat, "claude-sonnet-5", null, null);
+      const body = JSON.parse(fetch.mock.calls[0][1].body);
+      expect(body.messages.length).toBeGreaterThan(1);
+      for (const m of body.messages) {
+        expect(m.cache_control).toBeUndefined();
+        if (Array.isArray(m.content)) {
+          for (const block of m.content) expect(block.cache_control).toBeUndefined();
+        }
+      }
+    });
+
+    it("exportierte Tool-Konstanten (NOTEBOOK_TOOL/LOOKUP_TOOL) werden NIE mutiert – cache_control landet nur auf Klonen", async () => {
+      const ctxWithKnow = {
+        ...NB_CTX,
+        knowledge: { activeFiles: [{ name: "handbuch.pdf", text: "x".repeat(90000) }], others: [] },
+      };
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] });
+      await callClaude("key", "x", ctxWithKnow, [], "claude-sonnet-5", null, null);
+      expect(NOTEBOOK_TOOL.cache_control).toBeUndefined();
+      expect(LOOKUP_TOOL.cache_control).toBeUndefined();
+      // Ein zweiter Aufruf (anderer Kontext, kein Wissen) darf davon nicht
+      // beeinflusst sein – wäre bei versehentlicher Mutation der geteilten
+      // Konstante der Fall.
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] });
+      await callClaude("key", "y", NB_CTX, [], "claude-sonnet-5", null, null);
+      const second = JSON.parse(fetch.mock.calls[1][1].body);
+      expect(second.tools.map((t) => t.name)).toEqual(["web_search", "update_notebook"]);
+      expect(NOTEBOOK_TOOL.cache_control).toBeUndefined();
+    });
+
+    it("Verifikations-Hook: loggt usage.cache_read_input_tokens/cache_creation_input_tokens per console.debug", async () => {
+      const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+      try {
+        respond({
+          stop_reason: "end_turn",
+          content: [toolUse({ reply: "ok", ops: [] })],
+          usage: { cache_read_input_tokens: 1234, cache_creation_input_tokens: 56 },
+        });
+        await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+        expect(debugSpy).toHaveBeenCalledWith("[cache] read=1234 write=56");
+      } finally {
+        debugSpy.mockRestore();
+      }
+    });
+
+    it("Verifikations-Hook: fehlt usage in der Antwort (z. B. Fehlerfall), wird nicht geloggt/nicht geworfen", async () => {
+      const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+      try {
+        respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] }); // kein usage-Feld
+        await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+        expect(debugSpy).not.toHaveBeenCalled();
+      } finally {
+        debugSpy.mockRestore();
+      }
+    });
   });
 });

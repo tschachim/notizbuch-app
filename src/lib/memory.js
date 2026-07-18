@@ -18,7 +18,14 @@
 // Ab dieser Zeichenzahl bittet der System-Prompt das Modell, das
 // Gedächtnis bei nächster Gelegenheit selbst zu konsolidieren
 // (memory_replace) statt endlos weiter anzuhängen (siehe anthropic.js).
-export const MEMORY_SOFT_LIMIT = 8000;
+// Angehoben v7.20 (8000 → 32000, Nutzer-Entscheidung, zusammen mit
+// Prompt-Caching – Teil B desselben Auftrags, siehe lib/anthropic.js):
+// Ein wiederholt unverändert gesendetes Gedächtnis landet jetzt im
+// semi-dynamischen Cache-Block und wird bei einem Cache-Treffer nur noch
+// zu 0,1× des Input-Preises abgerechnet (Cache-Read-Rabatt) – ein größeres
+// Soft-Limit ist dadurch vertretbar, ohne die laufenden Kosten proportional
+// mitwachsen zu lassen (siehe Kostenrechnung bei MEMORY_HARD_LIMIT unten).
+export const MEMORY_SOFT_LIMIT = 32000;
 
 export const memoryTooLarge = (text) => String(text || "").length > MEMORY_SOFT_LIMIT;
 
@@ -31,7 +38,17 @@ export const memoryTooLarge = (text) => String(text || "").length > MEMORY_SOFT_
 // viel Text einträgt). Deutlich über MEMORY_SOFT_LIMIT: der Soft-Hinweis
 // bittet das Modell VORHER freiwillig zu konsolidieren, der Hard-Cap greift
 // erst, wenn das nicht geschehen ist.
-export const MEMORY_HARD_LIMIT = 24000;
+// Angehoben v7.20 (24000 → 100000, Nutzer-Entscheidung). Kostenrechnung zur
+// Anhebung: Bei einem VOLLEN Gedächtnis (100000 Zeichen, oberste Kante)
+// kostet eine einzelne Chat-Nachricht OHNE Prompt-Caching überschlägig
+// ~2,7–8,5 Ct (modellabhängig, Sonnet-Preisspanne, reine Input-Kosten des
+// Gedächtnis-Anteils) – MIT Prompt-Caching (Teil B desselben Auftrags:
+// system als Block-Array mit cache_control, das Gedächtnis liegt im
+// semi-dynamischen Block) sinkt das bei einem Cache-Treffer auf ca. 10 %
+// davon (Cache-Read = 0,1× Input-Preis), weil ein unverändertes Gedächtnis
+// nicht mehr voll, sondern nur noch als Cache-Read abgerechnet wird. Ohne
+// Teil B wäre diese Anhebung allein nicht vertretbar gewesen.
+export const MEMORY_HARD_LIMIT = 100000;
 
 // Nullbytes dürfen nie in die Datei gelangen (wie chatToMarkdown/
 // lib/archive.js#noNul) – aus JEDEM Text entfernen, der die Datei

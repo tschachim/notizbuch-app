@@ -3104,3 +3104,169 @@ aus `referenz-app.jsx` übernommen.
       Beleg, dass die überzähligen Zeichen NICHT im Prompt stehen, kein
       doppelter Soft-+Hard-Hinweis; GLIEDERUNGS-VORSCHLAG-Klarstellung als
       eigener Test. Gesamtstand danach 676/676 grün (vorher 668).
+
+62. **Gedächtnis-Limits angehoben + Prompt-Caching eingeführt** (v7.20,
+    Nutzer-Entscheidung). Zwei zusammenhängende Änderungen: Teil A hebt die
+    Gedächtnis-Obergrenzen deutlich an (mehr Platz fürs globale Gedächtnis),
+    Teil B macht das über Anthropics Prompt-Caching erst wirtschaftlich
+    vertretbar, indem der stabile Teil des System-Prompts zwischen Requests
+    wiederverwendet statt jedes Mal neu abgerechnet wird.
+
+    **Teil A – Gedächtnis-Limits (`src/lib/memory.js`):**
+    - `MEMORY_SOFT_LIMIT`: 8000 → 32000 Zeichen. `MEMORY_HARD_LIMIT`
+      (harte Prompt-Schutzkappe, nur der ins Prompt gesendete Ausschnitt,
+      die Datei `data/memory.md` bleibt immer ungekürzt): 24000 → 100000
+      Zeichen.
+    - **Kostenrechnung zur Rechtfertigung:** Bei einem VOLLEN Gedächtnis
+      (100000 Zeichen, oberste Kante) kostet eine einzelne Chat-Nachricht
+      OHNE Prompt-Caching überschlägig ~2,7–8,5 Ct (modellabhängig,
+      Sonnet-Preisspanne, reiner Input-Anteil des Gedächtnis-Texts) – bei
+      JEDER Nachricht neu, weil der komplette Text jedes Mal als normale
+      Eingabe abgerechnet wird. MIT Prompt-Caching (Teil B) sinkt das bei
+      einem Cache-Treffer auf ca. 10 % davon (Cache-Read = 0,1× Input-
+      Preis statt voller Preis) – Teil A wäre ohne Teil B nicht vertretbar
+      gewesen, das globale Gedächtnis lebt jetzt im semi-dynamischen
+      Cache-Block (siehe Teil B) und profitiert davon direkt.
+    - `src/components/SettingsDialog.jsx` brauchte KEINE Code-Änderung: der
+      Zeichenzähler importierte `MEMORY_SOFT_LIMIT` bereits aus
+      `lib/memory.js` (seit v7.16) statt eines hartkodierten Literals –
+      die Anzeige „X / 32000“ ergibt sich automatisch aus der neuen
+      Konstante.
+    - **Tests:** `tests/memory.test.js`/`tests/anthropic.test.js` – die
+      Grenzwert-Tests nutzen jetzt durchgängig `MEMORY_SOFT_LIMIT`/
+      `MEMORY_HARD_LIMIT` als Import statt Zahlenliterale (Grenzfall-
+      Semantik unverändert: exakt am Limit nicht gekürzt, ein Zeichen
+      darüber gekürzt) – ein zuvor mit `"a".repeat(30000)` hartkodierter
+      Hard-Cap-Test wäre mit dem neuen `MEMORY_HARD_LIMIT` (100000) STILL
+      GEGRÜNDET, aber am FALSCHEN Wert (30000 < 100000, hätte den Hard-Cap
+      gar nicht mehr ausgelöst) – ECHTER Fund beim Umstellen auf die
+      Konstante, gefixt auf `MEMORY_HARD_LIMIT + 1000`.
+
+    **Teil B – Prompt-Caching (`src/lib/anthropic.js`):** Die App ruft die
+    Messages-API direkt per `fetch` auf (`callClaude`). Caching ist GA
+    (kein Beta-Header), `cache_control:{"type":"ephemeral"}` direkt an
+    Content-Blöcken, TTL 5 Minuten (wird bei jedem Treffer aufgefrischt –
+    im interaktiven Chat praktisch durchgehend warm), Cache-Write 1,25×
+    Input-Preis, Cache-Read 0,1×. **Cache-Präfix-Reihenfolge ist STRIKT:
+    tools → system → messages; ein Breakpoint cached ALLES davor bis
+    einschließlich des markierten Blocks, maximal 4 Breakpoints, Mindest-
+    Cache-Länge bei Sonnet 1024 Tokens (kürzere markierte Präfixe werden
+    einfach nicht gecacht, kein Fehler).**
+    - **`buildSystem()` → `buildSystemBlocks()` (Kern-Umbau):** Der bisher
+      EINE System-Prompt-String wird jetzt in zwei GETRENNTEN Texten
+      geliefert: `staticBlock` (Aufgaben, ANTWORTFORMAT, Konventionen,
+      GEDÄCHTNIS-Regeln, ops-Doku, INTERNET-RECHERCHE, REINE FRAGEN –
+      alles, was sich zwischen Requests NIE ändert) und `dynamicBlock`
+      (AKTIVES NOTIZBUCH, ALLE NOTIZBÜCHER inkl. Wissensdateien und dem
+      globalen Gedächtnis-Inhalt – ändert sich bei jedem Notizbuch-Wechsel/
+      -Commit oder Gedächtnis-Update). **`staticBlock` steht ZWINGEND
+      ZUERST**: weil Cache-Breakpoints strikt präfixbasiert sind, würde ein
+      Breakpoint auf `staticBlock` NIE treffen, wenn davor noch sich
+      änderndes Material stünde – nur wenn der stabile Teil GANZ VORN
+      steht, bleibt sein Cache-Treffer unabhängig davon, ob sich später
+      ein Notizbuch oder das Gedächtnis ändert (bei reinen Frage-Folgen
+      ohne solche Änderung sind dann BEIDE Blöcke ein Treffer).
+    - **Echte Prompt-Umstellung, kein reiner Split:** In der v7.19-Version
+      stand der dynamische Teil (Heutiges Datum → AKTIVES NOTIZBUCH → ALLE
+      NOTIZBÜCHER) VOR den statischen Instruktionen. Für funktionierendes
+      Caching MUSSTE das umgedreht werden (`staticBlock` inkl. „Heutiges
+      Datum“ zuerst, `dynamicBlock` danach) – es gibt keinen Weg, das aus
+      der Präfix-Architektur der Cache-API zu vermeiden. **Zwei Textstellen
+      verwiesen bisher POSITIONSABHÄNGIG mit „oben“ auf Inhalte, die durch
+      die Umstellung jetzt NACH statt VOR ihnen stehen** – beide korrigiert:
+      „GEDÄCHTNIS (notizbuchübergreifend, siehe GLOBALES GEDÄCHTNIS
+      **weiter unten**)“ (vorher „oben“) und die Notizbuch-Namen-Regel in
+      EINORDNUNG IN NOTIZBÜCHER („die weiter unten unter ALLE NOTIZBÜCHER
+      genannten Notizbuch-Namen“, vorher „die oben vorhandenen“). Alle
+      ANDEREN „oben“/„unten“-Verweise im Prompt beziehen sich auf Stellen
+      INNERHALB desselben Blocks (z. B. WIEDERHOLUNGS-VERBOT → reply-Regel,
+      beide in `staticBlock`) und blieben deshalb unverändert korrekt.
+    - **`buildSystem()` bleibt erhalten** als reiner Join-Wrapper
+      (`staticBlock + dynamicBlock`, KEINE eigene Logik) – ausschließlich
+      für Aufrufer/Tests, die nur EINEN String brauchen (die ~60
+      bestehenden Prompt-Vertragstests in `tests/anthropic.test.js`
+      arbeiten unverändert mit `toContain`/`indexOf`, weil KEINER von
+      ihnen Positionen ÜBER die beiden Makro-Blöcke hinweg vergleicht –
+      alle Positionsvergleiche liegen jeweils INNERHALB eines Blocks und
+      bleiben bei einer Verschiebung der Blöcke ZUEINANDER unberührt).
+      `callClaude()` selbst nutzt NICHT `buildSystem()`, sondern direkt
+      `buildSystemBlocks()`, um die beiden Blöcke getrennt mit
+      `cache_control` zu versehen.
+    - **`tools`-Breakpoint:** `cache_control` auf dem LETZTEN Eintrag im
+      `tools`-Array (Cache-Präfix-Reihenfolge zählt `tools` VOR `system` –
+      ein Breakpoint dort deckt alle Tools als Präfix-Anfang mit ab).
+      Zusammen mit den zwei System-Blöcken macht das drei Breakpoints pro
+      Request, unter dem API-Limit von vier. Bewusst per KLON
+      (`{ ...NOTEBOOK_TOOL, cache_control: … }`) statt Mutation: `NOTEBOOK_TOOL`
+      und `LOOKUP_TOOL` sind exportierte, über mehrere Aufrufe/Tests
+      geteilte Konstanten – ein direktes Anhängen von `cache_control`
+      hätte sie querbeet für ALLE künftigen Aufrufe (inkl. Tests)
+      verändert (Regressionstest pinnt das explizit: die Konstanten bleiben
+      nach mehreren `callClaude()`-Aufrufen mit unterschiedlicher
+      Tool-Zusammensetzung unverändert `cache_control`-frei).
+    - **`messages` bekommt BEWUSST KEIN `cache_control`:** Die App sendet
+      ein gleitendes 12-Nachrichten-Fenster (`priorChat.slice(-12)`); sobald
+      dieses Fenster voll ist, ändert sich der Nachrichten-Präfix bei JEDER
+      neuen Chat-Nachricht (älteste fällt heraus, neue kommt hinten dazu) –
+      ein Cache-Treffer wäre praktisch garantiert ein Miss, ein Breakpoint
+      dort würde nur zusätzliche Cache-Write-Kosten (1,25× Input-Preis)
+      ohne realistische Treffer-Chance verursachen. Bewusst dokumentierte
+      Entscheidung, kein Versehen.
+    - **Alle callClaude-Pfade nutzen dieselbe Struktur automatisch:**
+      `staticBlock`/`dynamicBlock` werden EINMAL pro `callClaude()`-Aufruf
+      berechnet (nicht pro Request), aber JEDER `fetch`-Aufruf läuft durch
+      dieselbe `postOnce()`-Funktion – Erst-Request, `lookup_wissen`-Runden,
+      `pause_turn`-Fortsetzungen und Forced-Retries senden dadurch OHNE
+      Zusatzaufwand dieselbe Cache-Struktur; gerade die Mehrfach-Runden
+      INNERHALB eines Turns (identischer Präfix) profitieren maximal.
+    - **Verifikations-Hook:** `usage.cache_read_input_tokens`/
+      `usage.cache_creation_input_tokens` aus JEDER Antwort werden per
+      `console.debug("[cache] read=… write=…")` geloggt – dient dem
+      E2E-Nachweis (Browser-Konsole/Netzwerk-Log) und der Kostendiagnose,
+      bewusst KEINE UI (reines Diagnose-Logging, kein Nutzer-facing
+      Feature). Fehlt `usage` (z. B. Fehlerantwort), wird nichts geloggt
+      und nichts geworfen.
+    - **Tests** (`tests/anthropic.test.js`): neuer Block
+      „buildSystemBlocks (Prompt-Caching-Split, v7.20)“ – zwei nicht-leere
+      Blöcke, `staticBlock` enthält alle statischen Abschnittsköpfe aber
+      KEINE dynamischen (Gegenprobe mit eindeutigen Notizbuch-/Gedächtnis-/
+      Wissensdatei-Markern: tauchen NUR in `dynamicBlock` auf), und die
+      laut Auftrag **wichtigste** „Join-Gleichheits-Probe“:
+      `buildSystem(...) === buildSystemBlocks(...).staticBlock +
+      .dynamicBlock` für mehrere realistische Eingaben (leer, mit Wissen,
+      mit Gedächtnis über dem alten Soft-Limit, mehrere Notizbücher) –
+      **bewusst KEIN Vergleich gegen den git-historischen v7.19-Text**
+      (dessen Abschnitt-Reihenfolge hat sich mit diesem Auftrag
+      absichtlich geändert, s. o.), sondern eine STRUKTURELLE Garantie:
+      ändert künftig jemand NUR `buildSystem()` oder NUR
+      `buildSystemBlocks()` ohne den jeweils anderen Pfad mitzuziehen,
+      schlägt dieser Test sofort fehl – das ist der Mechanismus, der
+      „NULL Prompt-Drift“ für alle KÜNFTIGEN Änderungen absichert (für
+      DIESEN Umbau selbst bürgen die ~60 unverändert grünen inhaltlichen
+      Vertragstests, die jede einzelne Prompt-Klausel unabhängig prüfen).
+      Neuer Block „Prompt-Caching (v7.20)“ im `callClaude`-Describe: Struktur
+      von `body.system` (2 Blöcke, je `cache_control`), `cache_control` nur
+      am letzten Tool (mit UND ohne `lookup_wissen` als drittes Tool, sowie
+      im Forced-Modus), Gesamt-Breakpoints = 3 (≤ 4), `messages` durchgängig
+      OHNE `cache_control`, Konstanten-Mutationsschutz über zwei
+      aufeinanderfolgende Aufrufe mit unterschiedlicher Tool-Zusammen-
+      setzung, Verifikations-Hook (mit und ohne `usage`-Feld in der
+      Antwort). Drei bestehende Tests, die `body.system`/`first.system`
+      bisher als STRING prüften, auf einen neuen `systemText(body)`-Helfer
+      umgestellt (joined die Blöcke – exakt das, was `buildSystem()`
+      liefert). Gesamtstand danach 714/714 grün (vorher 700).
+    - **Bewusst NICHT angefasst:** `buildChatReply`, `dedupeFeedbackParagraphs`
+      (unabhängig von diesem Auftrag, siehe Punkt 57), `App.jsx` (außer dem
+      Versions-Bump) – Caching betrifft ausschließlich den Request-Aufbau
+      in `callClaude`/`buildSystem*`.
+    - **Restrisiko:** Die genannten Kostenersparnisse (~90 % bei Cache-
+      Treffer) hängen vom TATSÄCHLICHEN Cache-Verhalten der Anthropic-API
+      ab, das clientseitig nicht erzwungen werden kann – der
+      Verifikations-Hook liefert die Beobachtungsgrundlage, ersetzt aber
+      keine serverseitige Garantie. Ändert sich das aktive Notizbuch oder
+      Wissen HÄUFIG innerhalb kurzer Zeit (z. B. schneller Notizbuch-
+      Wechsel), bleibt nur der `staticBlock`-Breakpoint ein verlässlicher
+      Treffer, der `dynamicBlock` entsprechend häufiger ein Miss (Cache-
+      Write statt Cache-Read) – das ist erwartbar und laut Design in
+      Kauf genommen (die Kostenersparnis bezieht sich in erster Linie auf
+      den GRÖSSEREN, stabileren `staticBlock`-Anteil).

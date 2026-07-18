@@ -190,7 +190,32 @@ function memoryBlock(memory) {
 // Kein Code-Sicherheitsnetz (siehe "NICHT anfassen: buildChatReply" im
 // Auftrag) – rein promptseitige Eskalation, siehe DECISIONS für das
 // dokumentierte Restrisiko und den nächsten Schritt bei erneutem Auftreten.
-export function buildSystem(notebooks, activeName, knowledge, memory) {
+//
+// PROMPT-CACHING-SPLIT (v7.20, Nutzer-Entscheidung, siehe DECISIONS):
+// Anthropics Cache-Control-Breakpoints sind STRIKT PRÄFIX-BASIERT (tools →
+// system → messages; ein Breakpoint cached ALLES davor bis einschließlich
+// des markierten Blocks). Damit ein früher Breakpoint auch dann noch trifft,
+// wenn sich SPÄTERE Inhalte ändern (Notizbuch-Commit, Gedächtnis-Update),
+// MUSS der stabile Teil zuerst im "system"-Array stehen – deshalb liefert
+// buildSystemBlocks() jetzt zwei GETRENNTE Texte in fester Reihenfolge:
+// "staticBlock" (Aufgaben/ANTWORTFORMAT/Konventionen/GEDÄCHTNIS-Regeln/
+// ops-Doku – ändert sich zwischen Requests NIE) zuerst, danach
+// "dynamicBlock" (AKTIVES NOTIZBUCH + ALLE NOTIZBÜCHER inkl. Wissensdateien
+// und dem globalen Gedächtnis-Inhalt – ändert sich bei jedem Notizbuch-
+// Wechsel/-Commit oder Gedächtnis-Update). Das ist eine ECHTE Umstellung der
+// Prompt-REIHENFOLGE gegenüber v7.19 (dynamischer Teil stand vorher ZUERST,
+// direkt nach "Heutiges Datum") – ohne diese Umstellung könnte staticBlock
+// NIEMALS von der dynamischen Content-Änderung unabhängig gecacht werden
+// (siehe DECISIONS für die ausführliche Begründung). ZWEI Textstellen
+// verwiesen bisher POSITIONSABHÄNGIG ("oben") auf Inhalte, die jetzt NACH
+// statt VOR ihnen stehen – beide auf "weiter unten" korrigiert (siehe unten
+// im Text: "GEDÄCHTNIS (…siehe GLOBALES GEDÄCHTNIS weiter unten)" und die
+// Notizbuch-Namen-Regel in EINORDNUNG IN NOTIZBÜCHER). callClaude() bleibt
+// weiterhin die einzige Stelle, die die Blöcke mit cache_control versieht;
+// buildSystem() (unten) bleibt als reiner Join-Wrapper für alle Aufrufer/
+// Tests erhalten, die nur EINEN String brauchen (kein Prompt-Verhalten
+// geändert, nur die interne Reihenfolge/Aufteilung).
+export function buildSystemBlocks(notebooks, activeName, knowledge, memory) {
   const heute = new Date().toLocaleDateString("de-DE", {
     weekday: "long", year: "numeric", month: "2-digit", day: "2-digit",
   });
@@ -203,15 +228,24 @@ export function buildSystem(notebooks, activeName, knowledge, memory) {
       return `<notizbuch name="${escAttr(nb.name)}">\n${doc}\n</notizbuch>`;
     })
     .join("\n\n");
-  return (
-    `Du bist der Assistent eines persönlichen Notizbuch-Systems. Links läuft ein Chat, rechts pflegst du strukturierte Wissensbasen als Markdown-Dokumente. Es gibt MEHRERE Notizbücher; eines davon ist gerade aktiv (sichtbar).
 
-Heutiges Datum: ${heute}
+  // dynamicBlock trägt eine führende Leerzeile (statt eines separaten
+  // Join-Trenners) – so ergibt simple Konkatenation (staticBlock +
+  // dynamicBlock, GENAU wie die Anthropic-API mehrere "text"-System-Blöcke
+  // aneinanderreiht) dieselbe optische Absatztrennung wie der Rest des
+  // Prompts, ohne dass callClaude()/buildSystem() einen eigenen Trenner
+  // kennen müssten.
+  const dynamicBlock = `
 
 AKTIVES NOTIZBUCH: ${activeName}
 
 ALLE NOTIZBÜCHER:
-${docsBlock}${knowledgeBlock(knowledge, escAttr)}${memoryBlock(memory)}
+${docsBlock}${knowledgeBlock(knowledge, escAttr)}${memoryBlock(memory)}`;
+
+  const staticBlock =
+    `Du bist der Assistent eines persönlichen Notizbuch-Systems. Links läuft ein Chat, rechts pflegst du strukturierte Wissensbasen als Markdown-Dokumente. Es gibt MEHRERE Notizbücher; eines davon ist gerade aktiv (sichtbar).
+
+Heutiges Datum: ${heute}
 
 INTERNET-RECHERCHE:
 - Dir steht die Websuche (web_search) zur Verfügung. Nutze sie GROSSZÜGIG, wann immer sie die Antwort oder die Einordnung verbessert: unbekannte Begriffe, Produkte, Firmen, Orte, Personen, aktuelle Fakten, Preise, Termine, Versionen. Lieber einmal zu viel suchen als zu wenig.
@@ -236,7 +270,7 @@ EINORDNUNG IN NOTIZBÜCHER:
 - Arbeite bevorzugt im aktiven Notizbuch.
 - Gehört eine Information thematisch eindeutig in ein ANDERES vorhandenes Notizbuch, trage sie dort ein: setze dazu im op das Feld "notebook" auf dessen exakten Namen und erwähne die Einordnung kurz in reply (z. B. „Habe ich in ‚Kochrezepte' abgelegt.").
 - Ohne "notebook"-Feld wirkt ein op auf das aktive Notizbuch.
-- Verwende ausschließlich exakt die oben vorhandenen Notizbuch-Namen; lege niemals neue Notizbücher an.
+- Verwende ausschließlich exakt die weiter unten unter ALLE NOTIZBÜCHER genannten Notizbuch-Namen; lege niemals neue Notizbücher an.
 
 KONVENTIONEN IN JEDEM NOTIZBUCH:
 - Erste Zeile bleibt die Titelzeile des Notizbuchs: "# " + Name des Notizbuchs.
@@ -272,7 +306,7 @@ DATEIANHÄNGE:
 - Fakten aus einer Datei übernimmst du NUR ins Notizbuch, wenn der Nutzer das Festhalten verlangt (ausdrücklich oder klar erkennbar, z. B. „Lege das ab“). Eine bloße Frage zur Datei („Was steht darin?“) ist KEIN Speicherauftrag – dann "ops":[].
 - Anders als Bilder wird die Datei selbst automatisch archiviert – füge KEINE Datei-Referenzen ins Dokument ein.
 
-GEDÄCHTNIS (notizbuchübergreifend, siehe GLOBALES GEDÄCHTNIS oben):
+GEDÄCHTNIS (notizbuchübergreifend, siehe GLOBALES GEDÄCHTNIS weiter unten):
 - Merke dir PROAKTIV und OHNE ausdrückliche Aufforderung dauerhaft Nützliches über den Nutzer und seine Arbeit: Präferenzen, wiederkehrende Namen/Projekte/Systeme, Konventionen, getroffene Entscheidungen, Stil-Wünsche. Im Zweifel lieber merken, als den Nutzer es später erneut sagen zu lassen.
 - Nutze dafür die ops "memory_append" (einen neuen Punkt anhängen) bzw. "memory_replace" (Konsolidierung – ersetzt den GESAMTEN Gedächtnistext, z. B. um Dubletten zusammenzuführen oder Veraltetes zu korrigieren).
 - Kompakt in Stichpunkten, keine Wiederholungen: führe Dubletten beim nächsten Schreiben zusammen (memory_replace), korrigiere veraltete/überholte Einträge statt sie stehen zu lassen.
@@ -302,8 +336,22 @@ Erlaubte ops (werden in Reihenfolge angewendet, beziehen sich immer auf ##-Haupt
 - {"type":"memory_append","content":"- Stichpunkt"}  → hängt einen Stichpunkt ans GLOBALE, notizbuchübergreifende GEDÄCHTNIS an (siehe GEDÄCHTNIS-Abschnitt oben) – KEIN "heading"/"notebook"/"chapter" nötig oder zulässig
 - {"type":"memory_replace","content":"kompletter neuer Gedächtnistext"}  → ersetzt das GESAMTE globale Gedächtnis (Konsolidierung, z. B. Dubletten zusammenführen oder Veraltetes korrigieren)
 
-REINE FRAGEN (WICHTIG): Enthält die Nachricht nichts Speicherwürdiges – eine bloße Frage (auch zu Notizbüchern oder Dateianhängen: „Was steht …?“, „Erkläre …“, „Fasse zusammen …“), Smalltalk –, dann gib "ops":[] und "commit":null zurück. Nutze eine solche Antwort NIEMALS, um nebenbei aufzuräumen, Platzhalter zu entfernen oder umzustrukturieren – das Dokument bleibt unangetastet. Die Frage selbst wird dabei im reply VOLLSTÄNDIG und inhaltlich beantwortet (siehe ANTWORTFORMAT) – ein Verweis auf bereits im Notizbuch stehende Inhalte ist nur eine Ergänzung und ersetzt niemals die eigentliche Antwort. (Angehängte BILDER sind davon ausgenommen: sie werden gemäß dem BILDER-Abschnitt immer eingebunden. GEDÄCHTNIS-Ops ("memory_append"/"memory_replace") sind davon EBENFALLS ausgenommen und bei einer reinen Frage ausdrücklich weiter erwünscht, wenn dabei dauerhaft Nützliches über den Nutzer erkennbar wird – Gedächtnispflege ist KEIN Notizbuch-Aufräumen. ALLE Notizbuch-Ops (append_to_section/replace_section/delete_section/rewrite) bleiben bei reinen Fragen dagegen unverändert verboten: "ops" darf bei einer reinen Frage also memory_*-Einträge enthalten, aber KEINE Notizbuch-Ops.)`
-  );
+REINE FRAGEN (WICHTIG): Enthält die Nachricht nichts Speicherwürdiges – eine bloße Frage (auch zu Notizbüchern oder Dateianhängen: „Was steht …?“, „Erkläre …“, „Fasse zusammen …“), Smalltalk –, dann gib "ops":[] und "commit":null zurück. Nutze eine solche Antwort NIEMALS, um nebenbei aufzuräumen, Platzhalter zu entfernen oder umzustrukturieren – das Dokument bleibt unangetastet. Die Frage selbst wird dabei im reply VOLLSTÄNDIG und inhaltlich beantwortet (siehe ANTWORTFORMAT) – ein Verweis auf bereits im Notizbuch stehende Inhalte ist nur eine Ergänzung und ersetzt niemals die eigentliche Antwort. (Angehängte BILDER sind davon ausgenommen: sie werden gemäß dem BILDER-Abschnitt immer eingebunden. GEDÄCHTNIS-Ops ("memory_append"/"memory_replace") sind davon EBENFALLS ausgenommen und bei einer reinen Frage ausdrücklich weiter erwünscht, wenn dabei dauerhaft Nützliches über den Nutzer erkennbar wird – Gedächtnispflege ist KEIN Notizbuch-Aufräumen. ALLE Notizbuch-Ops (append_to_section/replace_section/delete_section/rewrite) bleiben bei reinen Fragen dagegen unverändert verboten: "ops" darf bei einer reinen Frage also memory_*-Einträge enthalten, aber KEINE Notizbuch-Ops.)`;
+
+  return { staticBlock, dynamicBlock };
+}
+
+// Rein historischer/bequemer Wrapper (v7.20): liefert EINEN String wie vor
+// dem Caching-Split – ausschließlich Konkatenation von buildSystemBlocks(),
+// KEINE eigene Logik. Bleibt für alle Aufrufer/Tests erhalten, die keinen
+// Cache-Control-Split brauchen (u. a. die ~60 bestehenden Prompt-
+// Vertragstests in tests/anthropic.test.js, die per toContain/indexOf auf
+// dem GESAMTTEXT prüfen). callClaude() selbst nutzt NICHT diese Funktion,
+// sondern direkt buildSystemBlocks() (siehe dort), um die beiden Blöcke
+// getrennt mit cache_control zu versehen.
+export function buildSystem(notebooks, activeName, knowledge, memory) {
+  const { staticBlock, dynamicBlock } = buildSystemBlocks(notebooks, activeName, knowledge, memory);
+  return staticBlock + dynamicBlock;
 }
 
 export const NOTEBOOK_TOOL = {
@@ -666,6 +714,28 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     return res || "Keine Treffer – versuche andere Suchbegriffe oder fordere einen Seitenbereich an.";
   };
 
+  // Prompt-Caching (v7.20, Nutzer-Entscheidung, siehe DECISIONS): EINMAL pro
+  // callClaude()-Aufruf berechnet, danach in JEDEM postOnce()-Request
+  // wiederverwendet (Erst-Request, lookup_wissen-Runden, pause_turn-
+  // Fortsetzungen, Forced-Retries – ALLE Pfade laufen durch dieselbe
+  // postOnce()-Funktion, profitieren also automatisch identisch). Beide
+  // Blöcke bekommen einen eigenen cache_control-Breakpoint: staticBlock
+  // (Aufgaben/ANTWORTFORMAT/Konventionen/GEDÄCHTNIS-Regeln/ops-Doku) bleibt
+  // über Notizbuch-Wechsel/-Commits und Gedächtnis-Updates hinweg ein
+  // Cache-Treffer, weil er ALS PRÄFIX vor dem sich ändernden dynamicBlock
+  // steht (AKTIVES NOTIZBUCH/ALLE NOTIZBÜCHER inkl. Wissensdateien/
+  // Gedächtnis) – siehe die ausführliche Reihenfolge-Begründung über
+  // buildSystemBlocks(). Bei reinen Frage-Folgen OHNE Notizbuch-/Gedächtnis-
+  // Änderung sind BEIDE Blöcke ein Treffer.
+  const { staticBlock, dynamicBlock } = buildSystemBlocks(
+    nbContext.notebooks, nbContext.activeName, nbContext.knowledge, nbContext.memory
+  );
+  const cacheControl = { type: "ephemeral" };
+  const systemBlocks = [
+    { type: "text", text: staticBlock, cache_control: cacheControl },
+    { type: "text", text: dynamicBlock, cache_control: cacheControl },
+  ];
+
   // Modi: "search"  = Websuche + lookup_wissen + update_notebook, tool_choice auto
   //       "forced"  = nur update_notebook, erzwungen (ohne Recherche)
   //       "none"    = ganz ohne Tools (JSON aus Text, letzte Rettung)
@@ -675,20 +745,36 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     const body = {
       model: modelId,
       max_tokens: MAX_TOKENS,
-      system: buildSystem(nbContext.notebooks, nbContext.activeName, nbContext.knowledge, nbContext.memory),
+      system: systemBlocks,
       messages,
     };
     if (mode === "search") {
-      body.tools = [
+      const toolsList = [
         webSearchToolFor(modelId),
         ...(lookupEnabled ? [LOOKUP_TOOL] : []),
         NOTEBOOK_TOOL,
       ];
+      // cache_control auf den LETZTEN Tool-Eintrag (Cache-Präfix-Reihenfolge
+      // ist tools → system → messages – der Tool-Breakpoint deckt ALLE Tools
+      // ab). Klon statt Mutation: NOTEBOOK_TOOL/LOOKUP_TOOL sind exportierte,
+      // von mehreren Aufrufen geteilte Konstanten – ein direktes Anhängen von
+      // cache_control würde sie querbeet für alle künftigen Aufrufe/Tests
+      // verändern.
+      const lastIdx = toolsList.length - 1;
+      toolsList[lastIdx] = { ...toolsList[lastIdx], cache_control: cacheControl };
+      body.tools = toolsList;
       body.tool_choice = { type: "auto" };
     } else if (mode === "forced") {
-      body.tools = [NOTEBOOK_TOOL];
+      body.tools = [{ ...NOTEBOOK_TOOL, cache_control: cacheControl }];
       body.tool_choice = { type: "tool", name: "update_notebook" };
     }
+    // "messages" bekommt BEWUSST KEIN cache_control (Auftrag v7.20, Teil B.3):
+    // Die App sendet ein gleitendes 12-Nachrichten-Fenster (priorChat.slice(-12)
+    // oben) – sobald dieses Fenster voll ist, ändert sich der Nachrichten-
+    // Präfix bei JEDER neuen Chat-Nachricht (die älteste fällt heraus, eine
+    // neue kommt hinten dazu), ein Cache-Treffer auf messages wäre also so gut
+    // wie garantiert ein Miss. Ein Breakpoint dort würde nur zusätzliche
+    // Cache-Write-Kosten (1,25× Input-Preis) ohne Treffer-Chance verursachen.
     let response;
     try {
       response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -709,6 +795,17 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     if (!response.ok && (!data || !data.error)) {
       // z. B. HTML-Fehlerseite eines Proxys – nicht als Formatfehler tarnen
       throw new Error("Anthropic-API-Fehler " + response.status);
+    }
+    // Verifikations-Hook (v7.20): kein UI, rein für E2E-Nachweis/Kosten-
+    // diagnose über die Browser-Konsole – cache_read_input_tokens > 0 zeigt
+    // einen Cache-Treffer, cache_creation_input_tokens > 0 einen (teureren)
+    // Cache-Write. Läuft für JEDEN Request dieser Funktion (siehe Kommentar
+    // oben zu den Aufrufpfaden).
+    if (data && data.usage) {
+      console.debug(
+        "[cache] read=" + (data.usage.cache_read_input_tokens || 0) +
+        " write=" + (data.usage.cache_creation_input_tokens || 0)
+      );
     }
     return data;
   };

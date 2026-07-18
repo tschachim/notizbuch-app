@@ -131,8 +131,8 @@ describe("applyMemoryOps: Nullbyte-Hygiene", () => {
 });
 
 describe("MEMORY_SOFT_LIMIT / memoryTooLarge", () => {
-  it("liegt bei 8000 Zeichen", () => {
-    expect(MEMORY_SOFT_LIMIT).toBe(8000);
+  it("liegt bei 32000 Zeichen (v7.20, angehoben von 8000 – siehe DECISIONS)", () => {
+    expect(MEMORY_SOFT_LIMIT).toBe(32000);
   });
 
   it("Grenzfall: exakt am Limit ist NICHT 'zu groß', ein Zeichen mehr schon", () => {

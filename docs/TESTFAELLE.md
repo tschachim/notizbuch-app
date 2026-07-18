@@ -101,7 +101,7 @@ unterhalb des Link-Provider-Abschnitts, mit Hinweistext
 („notizbuchübergreifend … überlebt das Chat-Archivieren … keine
 Zugangsdaten hier ablegen“), einer Textarea mit dem aktuellen
 Gedächtnis-Inhalt (leer beim ersten Mal: Platzhalter „(noch leer)“) und
-einem Zeichenzähler „X / 8000“. In die Textarea „QA-Test: Gedächtnis
+einem Zeichenzähler „X / 32000“ (v7.20, angehoben von 8000). In die Textarea „QA-Test: Gedächtnis
 manuell editiert“ eintragen, „Gedächtnis speichern“ klicken. Erwartet:
 Knopf zeigt kurz einen Ladezustand, danach kein Fehler-Banner. Dialog per
 X schließen und erneut öffnen: Erwartet, dass der eingetragene Text
@@ -373,6 +373,23 @@ wiederholten Absätze enthalten (derselbe Sachverhalt zweimal, nur leicht
 unterschiedlich formuliert, in EINER Bubble) – bei Auffälligkeiten als
 Finding melden (siehe DECISIONS.md #57 Nachtrag v7.17). Danach den
 Testeintrag wie in C16 beschrieben wieder aus dem Gedächtnis entfernen.
+
+**C18 [VERBUNDEN][API] Prompt-Caching greift bei aufeinanderfolgenden
+Nachrichten (v7.20).** Browser-Entwicklertools öffnen (Netzwerk-Tab),
+Filter auf „messages“ oder die Anthropic-Domain setzen. Im QA-Notizbuch
+zwei kurze Chat-Nachrichten kurz hintereinander senden (z. B. „Was steht
+aktuell in der Inbox?“, dann direkt danach „Und was noch?“ – 2
+API-Aufrufe, am besten innerhalb weniger Minuten, damit die 5-Minuten-TTL
+des Caches noch aktiv ist). Erwartet: In der Netzwerk-Antwort des
+ZWEITEN Requests (Feld `usage` im JSON-Body der Antwort) steht
+`cache_read_input_tokens` > 0 – Beleg, dass der stabile Teil des
+System-Prompts wiederverwendet statt neu abgerechnet wurde. Alternativ
+(falls Netzwerk-Log nicht einsehbar/zu unhandlich): Browser-Konsole
+prüfen – die App loggt bei JEDEM Modell-Aufruf eine Zeile
+„[cache] read=… write=…“ (console.debug); beim zweiten Aufruf sollte
+„read“ deutlich über 0 liegen. Kein Fehlschlag, falls der erste Aufruf
+„write“ statt „read“ zeigt (das ist der erwartete Cache-Aufbau) – nur
+melden, wenn AUCH beim zweiten/weiteren Aufruf `read` dauerhaft 0 bleibt.
 
 ## D. Manuelles Bearbeiten (WYSIWYG)
 
