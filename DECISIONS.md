@@ -2015,6 +2015,93 @@ aus `referenz-app.jsx` übernommen.
       Prompt), weiterhin OHNE Fuzzy-Matching im allgemeinen Pfad
       (strukturell untauglich für dieses Problem, s. o.).
 
+    **Nachtrag v7.18 – vierte Fundstelle, diesmal mit diagnostischem Beleg
+    des genauen Mechanismus** (`src/lib/anthropic.js`, Retest zu v7.17). Der
+    v7.17-Fix behob das ORIGINAL-Szenario (eine reine Frage, EIN sauberer
+    Antwortsatz), aber eine zweite Kontrollfrage im selben Lauf („Was weißt
+    du insgesamt über meine Format-Vorlieben?“) doppelte erneut. Diesmal
+    lieferte der zweite Absatz den Beweis für den Mechanismus: er lautete
+    sinngemäß „Aktuell ist nur die Präferenz für das 24-Stunden-Format
+    gespeichert – **siehe Antwort**.“ – ein SELBSTVERWEIS. Root Cause: Das
+    Modell schrieb (trotz des bestehenden Verbots, OHNE dass eine Websuche
+    lief) die eigentliche Antwort als Vorab-Textblock VOR dem Tool-Aufruf
+    und legte eine PARAPHRASE + Selbstverweis ins `reply`-Feld – `
+    buildChatReply` kombiniert Vorab-Text und `toolReply` unverändert seit
+    v7.6 (DECISIONS #53), der dortige Gleichheits-Check (v7.10, DECISIONS
+    #57) erkennt AUSSCHLIESSLICH normalisierte GLEICHHEIT, keine
+    Paraphrasen – exakt die bewusste v7.11-Entscheidung gegen Fuzzy-
+    Matching, die hier bestätigt unverändert bleibt (Auftragsvorgabe:
+    `buildChatReply`/`dedupeFeedbackParagraphs` NICHT anfassen).
+    - **Fix, vier Bausteine, alle rein promptseitig** (`src/lib/
+      anthropic.js#buildSystem`, siehe der ausführliche Code-Kommentar
+      direkt über der Funktion):
+      1. **Kein-Vorab-Text-Regel an die prominenteste Stelle gehoben:** Die
+         Regel stand bisher nur in der reply-Detailregel weiter unten –
+         jetzt zusätzlich (bewusst redundant) als ALLERERSTE Regel des
+         `ANTWORTFORMAT`-Blocks, noch vor dem WIEDERHOLUNGS-VERBOT (v7.17):
+         „Rufe das Tool ‚update_notebook‘ IMMER DIREKT auf, ohne davor
+         Antworttext zu schreiben – einzige Ausnahme: die Recherche-
+         Zusammenfassung bei aktiver Websuche.“ (Der Auftrag nannte den
+         Tool-Namen als „notizbuch_update“ – das war ein Dreher; der
+         tatsächliche, im Tool-Schema/`NOTEBOOK_TOOL` verwendete Name
+         `update_notebook` wurde stattdessen übernommen, sonst hätte die
+         Regel auf ein nicht existierendes Tool verwiesen.) Die
+         Redundanz-Begründung („warum steht das doppelt hier“) steht
+         bewusst NUR im Code-Kommentar, nicht im Prompt-Text selbst – der
+         an das Modell gesendete Satz bleibt knapp und imperativ, ohne
+         Meta-Kommentar über sich selbst.
+      2. **Selbstverweis-Verbot präzisiert** (reply-Detailregel): „reply
+         enthält NIEMALS Formulierungen wie ‚siehe Antwort‘, ‚siehe oben‘,
+         ‚wie oben beschrieben‘ oder Verweise auf einen anderen Teil
+         DERSELBEN Nachricht – für den Nutzer gibt es kein ‚oben‘: reply
+         IST die gesamte sichtbare Antwort.“ Ergänzt (nicht ersetzt) die
+         bestehende „lass reply NIE auf ‚oben‘ … verweisen“-Klausel aus
+         v7.6 mit den konkreten, im Live-Finding beobachteten
+         Formulierungen – abstrakte Regeln allein reichten offenbar nicht.
+      3. **Negativ-/Positiv-Beispiel im WIEDERHOLUNGS-VERBOT** (v7.17):
+         zwei kompakte Beispielzeilen direkt an die Klausel angehängt,
+         FALSCH (zwei Absätze, zweiter mit „– siehe Antwort“) und RICHTIG
+         (ein Absatz, kein zweiter Verweis) – modelliert exakt den
+         beobachteten Fall. Konkrete Beispiele wirken bei Prompt-Verträgen
+         erfahrungsgemäß stärker als reine Abstrakta (bereits bei den
+         INTERNET-RECHERCHE-/ZITIER-Regeln so gehandhabt).
+      4. **🔵 Chat-Formatierung:** Der Retest fand zusätzlich rohe
+         `**Sternchen**` in der Chat-Bubble (der Chat rendert kein
+         Fett/Kursiv, nur Formeln/Codeblöcke/Zitate, siehe Punkt 46/54).
+         Neue Klausel in `ANTWORTFORMAT`: „Verwende im reply KEIN
+         **fett**/*kursiv* – der Chat rendert das NICHT … Hervorhebung
+         stattdessen per Wortwahl oder Doppelpunkt-Struktur.“ Konsistent
+         zur bestehenden BILDER-Konvention („nichts fett“ für die
+         Bildunterschrift, Punkt siehe BILDER-Abschnitt).
+    - **Bewusst NICHT angefasst** (Auftragsvorgabe): `buildChatReply`/
+      `dedupeFeedbackParagraphs` (die v7.11-Entscheidung gegen Fuzzy-
+      Matching im Code bleibt endgültig bestehen – dieser Retest ist die
+      zweite empirische Bestätigung dafür, dass die Ursache promptseitig
+      liegt, nicht im fehlenden Code-Netz), `src/lib/memory.js`,
+      `SettingsDialog.jsx`, `App.jsx` (außer Versions-Bump).
+    - **Tests:** `tests/anthropic.test.js`, neuer Block „Eskalation gegen
+      Vorab-Text/Selbstverweis-Dopplung (v7.18)“ (4 Fälle: Erstregel-Position
+      nachweislich VOR dem WIEDERHOLUNGS-VERBOT und OHNE weitere Bullet-Zeile
+      dazwischen, präzisiertes Selbstverweis-Verbot mit den konkreten
+      Formulierungen, Negativ-/Positiv-Beispiel vorhanden UND nachweislich
+      nach der WIEDERHOLUNGS-VERBOT-Klausel platziert, Chat-Formatierungs-
+      Klausel). Gesamtstand danach 684/684 grün (vorher 680).
+    - **Restrisiko, ehrlich benannt:** Das ist die VIERTE Fundstelle
+      derselben Fehlerfamilie – prompt-seitige Eskalation kann ein
+      hinreichend unzuverlässiges Modellverhalten grundsätzlich nicht
+      hundertprozentig ausschließen, nur die Wahrscheinlichkeit weiter
+      senken. **Sollte das Muster nach dieser Eskalation ERNEUT auftreten,
+      ist der Prompt-Weg nach vernünftigem Ermessen ausgereizt** – dann ist
+      eine Entscheidung MIT DEM NUTZER fällig zwischen (a) einer engen
+      Code-Heuristik ausschließlich für den bestätigten Mechanismus (z. B.
+      `buildChatReply`/`App.jsx` verwirft einen reply-Text, der NACH einem
+      bereits kombinierten Vorab-Block ausschließlich aus einem Selbstverweis-
+      Muster wie „siehe Antwort“/„siehe oben“ auf denselben Inhalt besteht –
+      eng genug, um legitime „siehe Notizbuch X“-Verweise auf ANDERE Inhalte
+      nicht zu treffen) oder (b) bewusster Akzeptanz als verbleibendes 🔵-
+      Risiko ohne weiteren Fix. Diese Entscheidung wurde hier NICHT
+      vorweggenommen (Auftragsvorgabe: kein Code an `buildChatReply`).
+
 58. **Azure-DevOps-302-Maskierung entlarvt + automatische Titel-Ermittlung
     „egal wo sie herkommt“, v7.12** (`src/lib/linkProviders.jsx`,
     `src/components/DocEditor.jsx`, `src/App.jsx`, Nutzer-Live-Befund +

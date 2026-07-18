@@ -187,6 +187,61 @@ describe("buildSystem", () => {
     });
   });
 
+  // v7.18 (viertes Live-Finding derselben Fehlerfamilie, diagnostischer
+  // Beleg per Selbstverweis "– siehe Antwort"): Das Modell schrieb trotz des
+  // bestehenden Verbots einen Vorab-Textblock OHNE Websuche und paraphrasierte
+  // ihn per Selbstverweis ins reply-Feld – buildChatReply kombiniert beide
+  // (Gleichheits-Check erkennt reine Paraphrasen bewusst nicht, v7.11-
+  // Entscheidung bleibt). Eskalation rein promptseitig: siehe Kommentar über
+  // buildSystem() in src/lib/anthropic.js.
+  describe("Eskalation gegen Vorab-Text/Selbstverweis-Dopplung (v7.18)", () => {
+    it("die 'kein Vorab-Text ohne Websuche'-Regel steht (bewusst redundant) als ALLERERSTE Regel von ANTWORTFORMAT", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain(
+        'Rufe das Tool "update_notebook" IMMER DIREKT auf, ohne davor Antworttext zu schreiben – ' +
+        'einzige Ausnahme: die Recherche-Zusammenfassung bei aktiver Websuche'
+      );
+      const antwortformatAt = sys.indexOf("ANTWORTFORMAT:");
+      const erstRegelAt = sys.indexOf('Rufe das Tool "update_notebook" IMMER DIREKT auf');
+      const wiederholAt = sys.indexOf("WIEDERHOLUNGS-VERBOT");
+      expect(antwortformatAt).toBeGreaterThan(-1);
+      // Direkt nach dem ANTWORTFORMAT:-Header kommt (Whitespace/Bindestrich
+      // abgesehen) sofort diese Regel – VOR dem WIEDERHOLUNGS-VERBOT (v7.17).
+      expect(erstRegelAt).toBeGreaterThan(antwortformatAt);
+      expect(erstRegelAt).toBeLessThan(wiederholAt);
+      expect(sys.slice(antwortformatAt, erstRegelAt)).not.toMatch(/\n-\s*\S/); // keine andere Bullet-Zeile dazwischen
+    });
+
+    it("präzisiert das Selbstverweis-Verbot mit konkreten Formulierungen ('siehe Antwort'/'siehe oben'/'wie oben beschrieben')", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain(
+        'reply enthält NIEMALS Formulierungen wie „siehe Antwort“, „siehe oben“, „wie oben beschrieben“ ' +
+        'oder Verweise auf einen anderen Teil DERSELBEN Nachricht'
+      );
+      expect(sys).toContain("für den Nutzer gibt es kein „oben“: reply IST die gesamte sichtbare Antwort");
+    });
+
+    it("ergänzt ein Negativ-/Positiv-Beispiel exakt zum beobachteten Selbstverweis-Fall im WIEDERHOLUNGS-VERBOT", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("Beispiel FALSCH");
+      expect(sys).toContain("siehe Antwort");
+      expect(sys).toContain("Beispiel RICHTIG");
+      expect(sys).toContain("kein zweiter Verweis darauf");
+      // Beide Beispielzeilen stehen NACH dem WIEDERHOLUNGS-VERBOT-Satz, nicht davor.
+      const wiederholAt = sys.indexOf("WIEDERHOLUNGS-VERBOT");
+      const falschAt = sys.indexOf("Beispiel FALSCH");
+      expect(falschAt).toBeGreaterThan(wiederholAt);
+    });
+
+    it("verbietet **fett**/*kursiv* im reply, weil der Chat es nicht rendert (🔵)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("Chat-Formatierung");
+      expect(sys).toContain("Verwende im reply KEIN **fett**/*kursiv*");
+      expect(sys).toContain("der Chat rendert das NICHT");
+      expect(sys).toContain("Hervorhebung stattdessen per Wortwahl oder Doppelpunkt-Struktur");
+    });
+  });
+
   it("erlaubt LaTeX-Formeln nach Ermessen, inline und abgesetzt, in Chat UND Dokument (v7.3)", () => {
     const sys = buildSystem(nbs, "Wissensbasis", null);
     expect(sys).toContain("FORMELN");
