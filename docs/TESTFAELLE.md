@@ -366,8 +366,13 @@ Präferenzen?“ (1 API-Aufruf). Erwartet: Die Antwort bezieht sich
 erkennbar auf den in C16 hinterlegten Gedächtnis-Inhalt, OBWOHL der
 Chat-Verlauf durch die Archivierung geleert wurde – Beleg dafür, dass
 `data/memory.md` das Archivieren des Chats übersteht (eigene Datei,
-siehe DECISIONS.md #61). Danach den Testeintrag wie in C16 beschrieben
-wieder aus dem Gedächtnis entfernen.
+siehe DECISIONS.md #61).
+⚠️ Zusatz-Beobachtungspunkt (v7.17, Prompt-Nachschärfung nach einem im
+Nachhol-Lauf gefundenen 🟡): Die Chat-Antwort darf KEINE fast identisch
+wiederholten Absätze enthalten (derselbe Sachverhalt zweimal, nur leicht
+unterschiedlich formuliert, in EINER Bubble) – bei Auffälligkeiten als
+Finding melden (siehe DECISIONS.md #57 Nachtrag v7.17). Danach den
+Testeintrag wie in C16 beschrieben wieder aus dem Gedächtnis entfernen.
 
 ## D. Manuelles Bearbeiten (WYSIWYG)
 

@@ -141,6 +141,50 @@ describe("buildSystem", () => {
     expect(sys).toContain("OHNE Websuche gilt das NICHT: Schreibe dann keinen Text vor dem Tool-Aufruf");
     expect(sys).toContain("OHNE Websuche gehört IMMER die komplette Antwort in dieses reply-Feld");
     expect(sys).toContain("lass reply NIE auf „oben“ oder einen vorherigen Abschnitt verweisen");
+    // v7.17 (Review-Fund: paraphrasierte Absatz-Dopplung im ALLGEMEINEN
+    // Chat-Pfad, siehe eigener Block unten): der "komplette Antwort ins
+    // reply-Feld"-Vertrag wurde um einen Halbsatz verstärkt, der das
+    // WIEDERHOLUNGS-VERBOT explizit mit dem reply-Feld verknüpft.
+    expect(sys).toContain("Die GESAMTE Antwort gehört dabei in GENAU dieses eine Feld");
+  });
+
+  // v7.17 (Nachschärfung nach Review-Fund, DECISIONS #57 Nachtrag): dieselbe
+  // paraphrasierte Absatz-Dopplung wie in v7.10/v7.11 (dort im Feedback-Pfad
+  // per buildFeedbackTrigger-Klausel + dedupeFeedbackParagraphs gelöst) trat
+  // jetzt im ALLGEMEINEN Chat-Pfad auf (kein Feedback-Turn, keine Websuche –
+  // zwei fast identische Absätze INNERHALB des reply-Felds selbst). Für
+  // diesen Pfad gibt es bewusst KEIN Fuzzy-Matching im Code (siehe DECISIONS
+  // #57, Review-Messung) – die Gegenmaßnahme ist rein promptseitig.
+  describe("WIEDERHOLUNGS-VERBOT: keine paraphrasierten Absatz-Dopplungen im allgemeinen Chat-Pfad (v7.17)", () => {
+    it("verlangt, jede Aussage genau einmal zu formulieren – gilt für ALLE Chat-Antworten", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("WIEDERHOLUNGS-VERBOT");
+      expect(sys).toContain("Formuliere jede Aussage genau EINMAL");
+      expect(sys).toContain("wiederhole denselben Sachverhalt nicht in mehreren, leicht unterschiedlichen Formulierungen oder Absätzen");
+      expect(sys).toContain("Lieber EIN kompakter Absatz als zwei ähnliche");
+      expect(sys).toContain("gilt für JEDE Chat-Antwort, egal ob Speicherauftrag oder reine Frage");
+    });
+
+    it("verwässert NICHT die bestehende Kürze-/Vollständigkeits-Regel (Speicher-Aufträge kurz, reine Fragen vollständig)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      // Die bestehenden Verträge bleiben Wort für Wort erhalten (siehe die
+      // beiden Tests oben) – hier zusätzlich: die neue Klausel benennt
+      // BEIDE Fälle explizit, statt sie zu überschreiben.
+      expect(sys).toContain("Bei Speicher-Aufträgen bleibt die kurze Bestätigung kurz");
+      expect(sys).toContain("bei reinen Fragen bleibt reply inhaltlich VOLLSTÄNDIG");
+      expect(sys).toContain("BEI SPEICHER-AUFTRÄGEN");
+      expect(sys).toContain("BEI REINEN FRAGEN/Erklär-Bitten OHNE Speicherauftrag ist reply dagegen die VOLLSTÄNDIGE inhaltliche Antwort");
+    });
+
+    it("die Klausel steht in ANTWORTFORMAT VOR der reply-Detailregel (maximale Sichtbarkeit für alle Chat-Antworten)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      const antwortformatAt = sys.indexOf("ANTWORTFORMAT:");
+      const wiederholAt = sys.indexOf("WIEDERHOLUNGS-VERBOT");
+      const replyRegelAt = sys.indexOf("BEI SPEICHER-AUFTRÄGEN");
+      expect(antwortformatAt).toBeGreaterThan(-1);
+      expect(wiederholAt).toBeGreaterThan(antwortformatAt);
+      expect(wiederholAt).toBeLessThan(replyRegelAt);
+    });
   });
 
   it("erlaubt LaTeX-Formeln nach Ermessen, inline und abgesetzt, in Chat UND Dokument (v7.3)", () => {

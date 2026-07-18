@@ -1954,6 +1954,67 @@ aus `referenz-app.jsx` übernommen.
       Wortebene – dessen strukturelle Untauglichkeit für dieses Problem ist
       jetzt empirisch belegt (siehe Messwerte oben).
 
+    **Nachtrag v7.17 – dieselbe Fehlerfamilie, dritte Fundstelle, diesmal im
+    ALLGEMEINEN Chat-Pfad statt im Feedback-Pfad** (`src/lib/anthropic.js`,
+    E2E-Nachhol-Lauf zu v7.16). Live-Beleg: reine Frage im leeren Chat
+    („Welches Datumsformat bevorzuge ich?“, kein Speicherauftrag, keine
+    Websuche) – EINE Chat-Bubble mit zwei aufeinanderfolgenden, inhaltlich
+    identischen, aber unterschiedlich formulierten Absätzen zum selben
+    Datumsformat-Fakt. Anders als v7.10 (Vorab-Text vs. toolReply) und
+    v7.11 (Dopplung innerhalb des Feedback-reply) betraf es diesmal den
+    NORMALEN `update_notebook`-Antwortpfad (`App.jsx#send`) – weder
+    `buildFeedbackTrigger`/`dedupeFeedbackParagraphs` (bewusst NUR im
+    Feedback-Pfad, siehe oben) noch `buildChatReply`s Dublettenschutz
+    (vergleicht nur Vorab-Text gegen toolReply; hier gab es mangels
+    Websuche gar keinen Vorab-Text – die Dopplung steckte VOLLSTÄNDIG im
+    `reply`-Feld selbst) konnten hier greifen. Genau wie in Klammer der
+    v7.11-Nachtrag angekündigt: **Prompt-Nachschärfung statt Fuzzy-
+    Matching im allgemeinen Pfad** (dessen Untauglichkeit bleibt empirisch
+    belegt, s. o. – `dedupeFeedbackParagraphs` bleibt bewusst weiterhin NUR
+    im Feedback-Pfad, siehe Punkt 61+ und die "NICHT anfassen"-Vorgabe
+    dieses Auftrags).
+    - **Fix, rein promptseitig, zwei Bausteine** (`src/lib/anthropic.js`,
+      `buildSystem`): (1) Neue, ganz oben in `ANTWORTFORMAT:` stehende
+      Klausel „WIEDERHOLUNGS-VERBOT“ – gilt EXPLIZIT für JEDE Chat-Antwort
+      (Speicher-Auftrag UND reine Frage, nicht nur den Feedback-Pfad):
+      „Formuliere jede Aussage genau EINMAL – wiederhole denselben
+      Sachverhalt nicht in mehreren, leicht unterschiedlichen
+      Formulierungen oder Absätzen … Lieber EIN kompakter Absatz als zwei
+      ähnliche.“ Ein direkt angehängter Satz stellt klar, dass das die
+      bestehende Kürze-/Vollständigkeits-Regel NICHT verwässert (Speicher-
+      Aufträge bleiben kurz, reine Fragen bleiben inhaltlich vollständig –
+      aber in beiden Fällen wird jede Aussage nur EINMAL gesagt). Platziert
+      VOR der reply-Detailregel in `ANTWORTFORMAT`, damit sie für den
+      gesamten Block gilt, statt an einer Stelle zu stehen, die nur einen
+      der beiden Fälle (Speichern/reine Frage) beträfe. (2) Die bestehende
+      „OHNE Websuche gehört IMMER die komplette Antwort in dieses
+      reply-Feld“-Klausel wurde um den angeforderten Halbsatz verstärkt:
+      „Die GESAMTE Antwort gehört dabei in GENAU dieses eine Feld – nicht
+      aufgeteilt auf mehrere Absätze, die denselben Sachverhalt
+      wiederholen“ – verknüpft den bereits bestehenden Vertrag (v7.6,
+      Punkt 53) explizit mit der neuen WIEDERHOLUNGS-VERBOT-Klausel.
+    - **Bewusst NICHT angefasst:** `buildChatReply`/`dedupeFeedbackParagraphs`
+      (Auftragsvorgabe – die v7.11-Entscheidung gegen Fuzzy-/Jaccard-
+      Matching im Code bleibt bestehen, s. o.); `App.jsx` (außer dem
+      Versions-Bump); `src/lib/memory.js`/`SettingsDialog.jsx` (mit dieser
+      Fehlerfamilie nicht verwandt).
+    - **Tests:** `tests/anthropic.test.js` – ein bestehender Test
+      („verbietet Vorab-Text ohne Websuche…“) um eine Assertion für den
+      verstärkten Halbsatz ergänzt; neuer Block „WIEDERHOLUNGS-VERBOT:
+      keine paraphrasierten Absatz-Dopplungen im allgemeinen Chat-Pfad“ (3
+      Fälle: Klausel vorhanden, bestehende Kürze-/Vollständigkeits-Regel
+      bleibt wortgleich erhalten, Klausel steht nachweislich VOR der
+      reply-Detailregel in `ANTWORTFORMAT`). Gesamtstand danach 680/680
+      grün (vorher 676).
+    - **Restrisiko unverändert** (wie beim v7.11-Nachtrag oben): rein
+      promptseitige Gegenmaßnahme, kein Code-Sicherheitsnetz im
+      allgemeinen Pfad (bewusst, s. o.) – ein hinreichend unzuverlässiges
+      Modellverhalten könnte die Klausel trotzdem ignorieren. Tritt das
+      Muster ein VIERTES Mal auf, wäre der nächste Schritt eine weitere
+      Eskalation der Klausel (z. B. ein Few-Shot-Gegenbeispiel direkt im
+      Prompt), weiterhin OHNE Fuzzy-Matching im allgemeinen Pfad
+      (strukturell untauglich für dieses Problem, s. o.).
+
 58. **Azure-DevOps-302-Maskierung entlarvt + automatische Titel-Ermittlung
     „egal wo sie herkommt“, v7.12** (`src/lib/linkProviders.jsx`,
     `src/components/DocEditor.jsx`, `src/App.jsx`, Nutzer-Live-Befund +
