@@ -95,6 +95,22 @@ die Sofort-Persistenz von oben bewusst NICHT (kein owner/repo/pat/apiKey
 vorhanden, in das sich die Provider-Liste einfügen ließe), der
 Hinweistext macht das transparent statt es stillschweigend zu verlieren.
 
+**A5 [VERBUNDEN] Globales Gedächtnis anzeigen/editieren (v7.16).**
+Einstellungen-Dialog öffnen. Erwartet: Abschnitt „Globales Gedächtnis“
+unterhalb des Link-Provider-Abschnitts, mit Hinweistext
+(„notizbuchübergreifend … überlebt das Chat-Archivieren … keine
+Zugangsdaten hier ablegen“), einer Textarea mit dem aktuellen
+Gedächtnis-Inhalt (leer beim ersten Mal: Platzhalter „(noch leer)“) und
+einem Zeichenzähler „X / 8000“. In die Textarea „QA-Test: Gedächtnis
+manuell editiert“ eintragen, „Gedächtnis speichern“ klicken. Erwartet:
+Knopf zeigt kurz einen Ladezustand, danach kein Fehler-Banner. Dialog per
+X schließen und erneut öffnen: Erwartet, dass der eingetragene Text
+weiterhin in der Textarea steht (sofort persistiert, unabhängig vom
+„Speichern & Verbinden“-Formular – wie bei den Link-Providern in A4).
+Danach den QA-Testeintrag wieder aus der Textarea entfernen (oder auf den
+Vorzustand zurücksetzen) und erneut „Gedächtnis speichern“ klicken, damit
+kein Test-Rückstand bleibt.
+
 ## B. Notizbuch-Verwaltung
 
 **B1 [VERBUNDEN] Notizbuch anlegen.** Dropdown → „⚙ Notizbücher
@@ -313,6 +329,45 @@ Kapitels>‘ ein: QA-Kapitel-Test Theta.“ (1 API-Aufruf). Erwartet: Der
 neue Eintrag landet AUSSCHLIESSLICH im „Notizen“-Abschnitt des genannten
 zweiten Kapitels; der gleichnamige Abschnitt im ERSTEN Kapitel bleibt
 unverändert (kein Duplikat, keine Vermischung).
+
+**C16 [VERBUNDEN][API] Modell merkt sich proaktiv etwas (globales
+Gedächtnis, v7.16).** Im Chat, beiläufig zu einer sonstigen QA-Testnotiz,
+eine dauerhaft wirkende Präferenz nennen, die NICHT wie ein Notizbuch-
+Eintrag klingt, z. B.: „Notiere ins QA-Test-Notizbuch: Kaffee mit Sarah am
+Dienstag. Übrigens, antworte mir ab jetzt bitte immer auf Deutsch.“ (1
+API-Aufruf, KEINE ausdrückliche Merk-Aufforderung nötig/gewünscht – das
+Proaktiv-Verhalten ist der eigentliche Test). Erwartet: Die Assistent-
+Antwort trägt zusätzlich zum üblichen 💾-Commit-Badge ein Badge „🧠
+Gedächtnis aktualisiert“. Einstellungen öffnen → Abschnitt „Globales
+Gedächtnis“: ein neuer, sinngemäßer Stichpunkt (z. B. „Nutzer möchte
+Antworten auf Deutsch“) ist in der Textarea sichtbar.
+QA-Modus (Repo-Name endet auf „-qa“): Testeintrag nach dem Test aus der
+Gedächtnis-Textarea wieder entfernen (oder kompletten Vorzustand
+wiederherstellen) und erneut „Gedächtnis speichern“ klicken.
+⚠️ KONSERVATIV-MODUS (echtes Daten-Repo): Das Gedächtnis ist GLOBAL, nicht
+notizbuchgebunden – anders als bei „QA-Test“-Notizbüchern gibt es hier
+keine namensbasierte Absicherung. NACH dem Test zwingend in die
+Einstellungen wechseln und NUR die neu hinzugekommene Testzeile aus der
+Textarea wieder entfernen (den Rest des echten Gedächtnisses unangetastet
+lassen), dann „Gedächtnis speichern“ klicken. Ist nicht mit Sicherheit
+erkennbar, welche Zeile neu hinzukam (z. B. weil das Gedächtnis bereits
+umfangreich war), diesen Testfall NICHT ausführen und als übersprungen
+melden – lieber ein übersprungener Testfall als ein verändertes echtes
+Gedächtnis.
+
+**C17 [VERBUNDEN][API] Gedächtnis überlebt Archivieren (v7.16).** NUR im
+QA-Modus sinnvoll durchführbar (braucht den Archivieren-Erfolgspfad aus
+C7, der im Konservativ-Modus nie ausgelöst wird) – im Konservativ-Modus
+als übersprungen melden. Voraussetzung: C16 wurde durchgeführt (das
+Gedächtnis enthält einen erkennbaren Testeintrag) UND C7 wurde im
+QA-Modus mit dem Erfolgspfad ausgeführt (Chat archiviert und geleert).
+Danach im jetzt leeren Chat fragen: „Was weißt du noch über meine
+Präferenzen?“ (1 API-Aufruf). Erwartet: Die Antwort bezieht sich
+erkennbar auf den in C16 hinterlegten Gedächtnis-Inhalt, OBWOHL der
+Chat-Verlauf durch die Archivierung geleert wurde – Beleg dafür, dass
+`data/memory.md` das Archivieren des Chats übersteht (eigene Datei,
+siehe DECISIONS.md #61). Danach den Testeintrag wie in C16 beschrieben
+wieder aus dem Gedächtnis entfernen.
 
 ## D. Manuelles Bearbeiten (WYSIWYG)
 
@@ -574,3 +629,7 @@ Browser-Konsole am Ende auf Fehler prüfen und diese als Findings melden.
    er ist die Nachvollziehbarkeit des Laufs; im Abschlussbericht
    erwähnen. QA-Modus: Den Test-Chat am Ende per Archiv-Knopf
    archivieren (räumt auf UND testet den Erfolgs-Pfad erneut).
+5. Wurde C16/C17 (globales Gedächtnis) ausgeführt: in den Einstellungen
+   prüfen, dass KEIN QA-Testeintrag mehr im Abschnitt „Globales
+   Gedächtnis“ steht (siehe Cleanup-Hinweis dort) – das Gedächtnis ist
+   global und überlebt anders als QA-Notizbücher keinen Löschen-Knopf.

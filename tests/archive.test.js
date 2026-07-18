@@ -128,6 +128,29 @@ describe("chatToMarkdown", () => {
     expect(md).toContain("> 💾 Ins Notizbuch übernommen: „Zahnarzt-Termin ergänzt“");
   });
 
+  // v7.16 (globales Gedächtnis): eigene Badge-Zeile analog zur 💾-Zeile.
+  it("vermerkt ein aktualisiertes globales Gedächtnis als Zitatzeile", () => {
+    const md = chatToMarkdown([
+      { role: "assistant", ts: TS, text: "Notiert.", memory: true },
+    ]);
+    expect(md).toContain("> 🧠 Gedächtnis aktualisiert");
+  });
+
+  it("ohne memory-Flag erscheint KEINE Gedächtnis-Zeile", () => {
+    const md = chatToMarkdown([
+      { role: "assistant", ts: TS, text: "Notiert." },
+    ]);
+    expect(md).not.toContain("🧠");
+  });
+
+  it("ein Turn mit BEIDEM (Notizbuch-Commit UND Gedächtnis-Update) zeigt beide Zeilen", () => {
+    const md = chatToMarkdown([
+      { role: "assistant", ts: TS, text: "Notiert.", commit: "Zahnarzt-Termin ergänzt", memory: true },
+    ]);
+    expect(md).toContain("> 💾 Ins Notizbuch übernommen: „Zahnarzt-Termin ergänzt“");
+    expect(md).toContain("> 🧠 Gedächtnis aktualisiert");
+  });
+
   it("liefert bei leerem Verlauf nur den Kopf", () => {
     const md = chatToMarkdown([]);
     expect(md).toContain("0 Nachrichten");

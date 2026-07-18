@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 
 import { applyOps, dispHead } from "./lib/ops.js";
+import { applyMemoryOps } from "./lib/memory.js";
 import { diffLines, contextize } from "./lib/diff.js";
 import { DocView, IMG_REF_RE, TASK_RE, parseTree, renumberCitations } from "./lib/markdown.jsx";
 import {
@@ -77,6 +78,11 @@ const initialDocFor = (name) =>
 const DOC_PATH = "wissensbasis.md";
 const STATE_PATH = "data/state.json";
 const OLD_HISTORY_PATH = "data/alt-historie.json";
+// Globales, notizbuchübergreifendes Gedächtnis (v7.16, Nutzerwunsch): eigene
+// Datei, unabhängig von state.json – überlebt dadurch by design die
+// Chat-Archivierung (archiveChat leert nur state.json, siehe dort). Details
+// zur Anwendung der Ops in lib/memory.js.
+const MEMORY_PATH = "data/memory.md";
 
 const INITIAL_DOC = `# Wissensbasis
 
@@ -132,6 +138,23 @@ export const serializeState = (chat, model, collapsedAll, active, order, quickno
     },
     null, 2
   );
+
+// Ops aus der Modellantwort in zwei Gruppen aufteilen (v7.16, globales
+// Gedächtnis): memory_* wirken auf das notizbuchübergreifende Gedächtnis
+// (eigene Datei/eigener Commit, siehe commitMemory), alles andere bleibt
+// der bisherige Notizbuch-Pfad (applyOps). Reihenfolge INNERHALB jeder
+// Gruppe bleibt erhalten – nur die Gruppenzugehörigkeit ändert sich. Reine
+// Funktion, exportiert für tests/memory.test.js (bzw. wo sinnvoll), analog
+// zum serializeState-Exportmuster oben.
+export function splitOps(ops) {
+  const memoryOps = [];
+  const notebookOps = [];
+  for (const op of Array.isArray(ops) ? ops : []) {
+    if (op && typeof op.type === "string" && op.type.startsWith("memory_")) memoryOps.push(op);
+    else notebookOps.push(op);
+  }
+  return { memoryOps, notebookOps };
+}
 
 /* ------------------------------------------------------------------ */
 /* Notizbuch-Dropdown (v7.2, Nutzerwunsch)                             */
@@ -309,6 +332,11 @@ export default function NotizbuchApp() {
   const [activeNb, setActiveNb] = useState(ROOT_NB_ID);
   const [chat, setChat] = useState([]);
   const [model, setModel] = useState(MODELS[0].id);
+  // Globales, notizbuchübergreifendes Gedächtnis (v7.16) – eigene Datei
+  // MEMORY_PATH, unabhängig von state.json/dem aktiven Notizbuch. "memory"
+  // (State) speist die Einstellungen-Anzeige, memoryRef (unten) ist der
+  // aktuelle Stand für buildNbCtx/commitMemory außerhalb des Renderns.
+  const [memory, setMemory] = useState("");
   const [collapsedAll, setCollapsedAll] = useState({}); // nbId -> Klappzustände
   const [meta, setMeta] = useState({ count: 0, lastTs: null });
   const [showNewNb, setShowNewNb] = useState(false);
@@ -396,6 +424,8 @@ export default function NotizbuchApp() {
   const activeNbRef = useRef(ROOT_NB_ID);
   const docCache = useRef({}); // nbId -> Text
   const docShas = useRef({});  // nbId -> Content-SHA
+  const memoryRef = useRef(""); // aktueller Gedächtnis-Text, siehe MEMORY_PATH
+  const memorySha = useRef(null); // Content-SHA von data/memory.md, null = noch nicht angelegt
   const knowledgeIndex = useRef({}); // nbId -> [{ name, path, extractPath }]
   const knowledgeTexts = useRef({}); // extractPath -> extrahierter Text
   const knowledgeFileRef = useRef(null);
@@ -473,6 +503,15 @@ export default function NotizbuchApp() {
           }
         } catch (e) { /* defekter State → Defaults */ }
       }
+
+      // Globales Gedächtnis laden (v7.16, notizbuchübergreifend, eigene
+      // Datei – siehe MEMORY_PATH). Fehlt sie (frisches/altes Repo ohne
+      // Gedächtnis), bleibt sie leer und wird erst beim ersten Schreiben
+      // angelegt (siehe commitMemory).
+      const memFile = await ghGetFile(cfg, MEMORY_PATH);
+      memorySha.current = memFile ? memFile.sha : null;
+      memoryRef.current = memFile ? memFile.text : "";
+      setMemory(memoryRef.current);
 
       // Notizbücher entdecken: Root-Datei + notizbuecher/-Ordner.
       // Der Name kommt aus der H1-Titelzeile der Datei (selbstheilend).
@@ -649,6 +688,19 @@ export default function NotizbuchApp() {
     window.location.reload();
   };
 
+  // Gedächtnis-Speichern-Knopf im SettingsDialog (v7.16): eigener, vom
+  // "Speichern & Verbinden"-Formular UNABHÄNGIGER Schreibpfad (Muster
+  // v7.9/v7.13, siehe handleProvidersChange oben) – sofortiges Persistieren
+  // bei Klick, X-Schließen des Dialogs verwirft höchstens eine ungespeicherte
+  // Textarea-Eingabe (siehe Hinweistext am Knopf in SettingsDialog.jsx).
+  // Nutzt DENSELBEN Schreibpfad wie modellgetriebene memory-Ops (siehe
+  // commitMemory): eine einzelne memory_replace-Op ersetzt den kompletten
+  // Text, SHA-Konflikte werden dort einheitlich behandelt.
+  const handleMemorySave = async (text) => {
+    if (!connectedRef.current || !settingsRef.current) return;
+    await commitMemory(settingsRef.current, [{ type: "memory_replace", content: text }]);
+  };
+
   /* ---------- state.json speichern (debounced, Konflikt = Neuversuch) ---------- */
   const flushState = useCallback(async (cfg, payload) => {
     stateFlushing.current += 1;
@@ -735,6 +787,59 @@ export default function NotizbuchApp() {
       return false;
     }
   }, [refreshMeta]);
+
+  /* ---------- Globales Gedächtnis committen (v7.16) ---------- */
+  // ops-basiert statt Text-basiert (anders als commitDocNb): bei einem
+  // SHA-Konflikt (paralleles Gerät oder ein zeitgleicher Speichern-Klick im
+  // Einstellungen-Dialog) wird NICHT einfach der alte lokale Stand
+  // überschrieben (stiller Verlust der fremden Änderung) – stattdessen wird
+  // frisch gelesen und DIESELBEN ops erneut auf den frischen Stand
+  // angewendet, dann EINMAL retry-committet. memory_replace ist dabei
+  // bewusst basis-unabhängig (siehe lib/memory.js): der "Gedächtnis
+  // speichern"-Knopf im SettingsDialog ruft diese Funktion mit genau einem
+  // memory_replace-Op auf und nutzt so DENSELBEN Schreibpfad wie
+  // Modell-Ops – ein Konflikt dort führt zum selben deterministischen
+  // Ergebnis (die volle Retry-Anwendung überschreibt ohnehin alles).
+  // Restrisiko (LWW, siehe DECISIONS): gewinnt der Konflikt ein zweites Mal
+  // in Folge (zwei fast zeitgleiche Schreiber auf zwei Geräten), wird NICHT
+  // endlos weiterversucht – der zweite Schreiber verliert seine Änderung
+  // mit einem Banner-Hinweis. Rückgabewert: true nur bei einem TATSÄCHLICH
+  // ausgelösten Commit (für das 🧠-Badge im Chat) – false sowohl bei einem
+  // wirkungslosen No-op (ops ergaben keine inhaltliche Änderung) als auch
+  // bei einem Fehlschlag (dann steht bereits ein Banner).
+  const commitMemory = useCallback(async (cfg, ops) => {
+    const before = memoryRef.current;
+    const applied = applyMemoryOps(before, ops);
+    if (applied === before) return false;
+    try {
+      const put = await ghPutFile(cfg, MEMORY_PATH, utf8ToB64(applied), "Gedächtnis aktualisiert", memorySha.current || undefined);
+      memorySha.current = put.sha;
+      memoryRef.current = applied;
+      setMemory(applied);
+      return true;
+    } catch (e) {
+      if (e instanceof ShaConflictError) {
+        try {
+          const fresh = await ghGetFile(cfg, MEMORY_PATH);
+          const reapplied = applyMemoryOps(fresh ? fresh.text : "", ops);
+          const put2 = await ghPutFile(cfg, MEMORY_PATH, utf8ToB64(reapplied), "Gedächtnis aktualisiert", fresh ? fresh.sha : undefined);
+          memorySha.current = put2.sha;
+          memoryRef.current = reapplied;
+          setMemory(reapplied);
+          return true;
+        } catch (e2) {
+          setBanner({
+            kind: "warn",
+            text: "Gedächtnis konnte nicht gespeichert werden (zweimal in Folge ein Konflikt): " +
+              (e2 && e2.message ? e2.message : e2),
+          });
+          return false;
+        }
+      }
+      setBanner({ kind: "warn", text: "Gedächtnis konnte nicht gespeichert werden: " + (e && e.message ? e.message : e) });
+      return false;
+    }
+  }, []);
 
   /* ---------- Bilder nachladen (aus dem Daten-Repo) ---------- */
   useEffect(() => {
@@ -1035,8 +1140,19 @@ export default function NotizbuchApp() {
       }
 
       let commit = null;
+      let memoryUpdated = false;
 
-      if (res.ops.length) {
+      // Ops splitten (v7.16): memory_* wirken auf das globale, notizbuch-
+      // übergreifende Gedächtnis (eigene Datei/eigener Commit, siehe
+      // commitMemory) – UNABHÄNGIG von einem etwaigen SHA-Konflikt beim
+      // Notizbuch weiter unten (anderes Ziel, anderer Commit). Reihenfolge
+      // bleibt je Gruppe erhalten (siehe splitOps).
+      const { memoryOps, notebookOps } = splitOps(res.ops);
+      if (memoryOps.length) {
+        memoryUpdated = await commitMemory(cfg, memoryOps);
+      }
+
+      if (notebookOps.length) {
         // Auto-Titel-Auflösung (v7.12 Teil B, Auftrag "automatische
         // Titel-Ermittlung überall"): NUR das neue op.content-Fragment läuft
         // durch resolveProviderLinkTitles, NIE das Bestandsdokument – Chat-
@@ -1045,7 +1161,7 @@ export default function NotizbuchApp() {
         // wirft laut eigenem Vertrag nie; ein Fetch-Fehler lässt content
         // unverändert.
         const resolvedOps = await Promise.all(
-          res.ops.map(async (op) =>
+          notebookOps.map(async (op) =>
             op && typeof op.content === "string"
               ? { ...op, content: await resolveProviderLinkTitles(op.content) }
               : op
@@ -1092,6 +1208,10 @@ export default function NotizbuchApp() {
             role: "assistant",
             error: true,
             ts: Date.now(),
+            // Ein bereits erfolgreich geschriebenes Gedächtnis bleibt gültig,
+            // auch wenn der Notizbuch-Teil dieses Turns konfliktet – beide
+            // Ziele sind unabhängige Dateien/Commits (siehe oben).
+            memory: memoryUpdated || undefined,
             text: saved.length
               ? "Teilweise gespeichert (" + saved.join(", ") + "). Ein weiteres Notizbuch wurde " +
                 "parallel geändert und NICHT gespeichert – bitte nur den fehlenden Teil neu erfassen " +
@@ -1147,6 +1267,7 @@ export default function NotizbuchApp() {
         text: res.reply,
         ts: Date.now(),
         commit,
+        memory: memoryUpdated || undefined,
         sources: res.sources && res.sources.length ? res.sources : undefined,
       };
       const finalChat = [...chatWithUser, aMsg].slice(-80);
@@ -1276,6 +1397,7 @@ export default function NotizbuchApp() {
       notebooks: notebooksRef.current.map((n) => ({ name: n.name, doc: docCache.current[n.id] || "" })),
       activeName: activeNotebook().name,
       knowledge: { activeFiles, others },
+      memory: memoryRef.current, // globales Gedächtnis (v7.16), siehe lib/anthropic.js#buildSystem
     };
   };
 
@@ -1934,6 +2056,12 @@ export default function NotizbuchApp() {
   // Gleiche Behandlung wie Chat-Eingaben (Nutzerwunsch): Nach einer manuellen
   // Bearbeitung schaut das Modell einmal über die Änderung. Meldet es nichts
   // („OK“), bleibt der Chat unberührt – kein erzwungenes Feedback.
+  // v7.16: res.ops (inkl. etwaiger memory_*-Ops) wird hier bewusst NIE
+  // ausgewertet/angewendet – siehe den Kommentar unten ("ops werden hier
+  // bewusst NIE angewendet"). Das gilt explizit AUCH fürs globale
+  // Gedächtnis: der Feedback-Trigger verlangt laut feedback.js ohnehin
+  // "ops":[], das Modell kann sich in diesem Pfad also nichts merken –
+  // eine bewusste, dokumentierte Einschränkung, keine vergessene Ausnahme.
   const requestFeedback = async (oldDoc, newDoc) => {
     const cfg = settingsRef.current;
     if (!connectedRef.current || !cfg || !cfg.apiKey) return;
@@ -2328,7 +2456,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.15</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.16</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -2521,21 +2649,30 @@ export default function NotizbuchApp() {
                     );
                   })()}
                 </div>
-                {m.commit ? (
+                {m.commit && (
                   <div className="mt-1 inline-flex items-center gap-1 font-mono text-xs text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-2 py-1">
                     <GitCommit size={12} />
                     <span>{fmtTime(m.ts)} · {m.commit}</span>
                   </div>
-                ) : (
-                  // Dezenter Zeitstempel für alle übrigen Nachrichten (C4, v7.4).
-                  // WELCOME hat ts:0 (falsy) und bleibt bewusst ohne Zeit; bei
-                  // Commit-Badge keinen doppelten Stempel (die Badge zeigt die
-                  // Zeit schon). Ausrichtung folgt items-end/items-start des
-                  // umgebenden flex-col-Containers automatisch.
-                  m.ts ? (
-                    <div className="mt-0.5 px-1 text-[10px] text-slate-400">{fmtTime(m.ts)}</div>
-                  ) : null
                 )}
+                {/* Gedächtnis-Badge (v7.16), gleiche Optik-Familie wie die
+                    Commit-Badge oben – ein Turn kann beide gleichzeitig
+                    auslösen (Notizbuch-Commit UND Gedächtnis-Update). */}
+                {m.memory && (
+                  <div className="mt-1 inline-flex items-center gap-1 font-mono text-xs text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-2 py-1">
+                    <span aria-hidden="true">🧠</span>
+                    <span>Gedächtnis aktualisiert</span>
+                  </div>
+                )}
+                {/* Dezenter Zeitstempel für alle übrigen Nachrichten (C4, v7.4).
+                    WELCOME hat ts:0 (falsy) und bleibt bewusst ohne Zeit; bei
+                    einer Commit-/Gedächtnis-Badge keinen doppelten Stempel
+                    (die Commit-Badge zeigt die Zeit schon). Ausrichtung folgt
+                    items-end/items-start des umgebenden flex-col-Containers
+                    automatisch. */}
+                {!m.commit && !m.memory && m.ts ? (
+                  <div className="mt-0.5 px-1 text-[10px] text-slate-400">{fmtTime(m.ts)}</div>
+                ) : null}
               </div>
             ))}
             {busy && (
@@ -3299,6 +3436,8 @@ export default function NotizbuchApp() {
           connecting={connecting}
           error={connectError}
           hasSettings={!!settings}
+          memory={memory}
+          onMemorySave={handleMemorySave}
         />
       )}
     </div>

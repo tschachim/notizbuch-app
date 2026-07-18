@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Settings, X, Loader2, LogOut, Check, Link2, Plus, Pencil, Trash2 } from "lucide-react";
 import { MODELS } from "../lib/anthropic.js";
 import { PROVIDER_TYPE_INFO, ProviderIcon, hostOf } from "../lib/linkProviders.jsx";
+import { MEMORY_SOFT_LIMIT } from "../lib/memory.js";
 
 // Neuer, leerer Provider-Formularzustand für den gewählten Typ (v7.9,
 // Nutzerwunsch "Link-Provider konfigurierbar"). id bleibt null, solange kein
@@ -77,7 +78,7 @@ export function removeProvider(list, id) {
    nur im localStorage dieses Geräts, nie in einem Repo. */
 export default function SettingsDialog({
   initial, model, onModelChange, onSave, onProvidersChange = () => {}, onLogout, onClose,
-  connecting, error, hasSettings,
+  connecting, error, hasSettings, memory = "", onMemorySave = () => {},
 }) {
   const [owner, setOwner] = useState((initial && initial.owner) || "");
   const [repo, setRepo] = useState((initial && initial.repo) || "notizbuch-data");
@@ -91,6 +92,14 @@ export default function SettingsDialog({
   );
   // Formular für "Provider hinzufügen"/Bearbeiten; null = geschlossen.
   const [providerForm, setProviderForm] = useState(null);
+
+  // Globales Gedächtnis (v7.16): eigener, von owner/repo/pat/apiKey
+  // UNABHÄNGIGER Zustand (Muster wie linkProviders oben) – vorbefüllt mit
+  // dem aktuellen Stand beim Öffnen des Dialogs (memory-Prop). Der
+  // "Gedächtnis speichern"-Knopf persistiert SOFORT über onMemorySave,
+  // unabhängig vom "Speichern & Verbinden"-Formular.
+  const [memoryText, setMemoryText] = useState(memory);
+  const [memorySaving, setMemorySaving] = useState(false);
 
   const complete = owner.trim() && repo.trim() && pat.trim() && apiKey.trim();
 
@@ -153,6 +162,15 @@ export default function SettingsDialog({
     const next = removeProvider(linkProviders, id);
     setLinkProvidersState(next);
     onProvidersChange(next);
+  };
+
+  // Async, weil onMemorySave einen GitHub-Commit auslöst (App.jsx
+  // handleMemorySave/commitMemory) – memorySaving blendet den Knopf
+  // währenddessen aus, damit kein Doppel-Commit durch schnelles Doppelklicken
+  // entsteht.
+  const saveMemory = async () => {
+    setMemorySaving(true);
+    try { await onMemorySave(memoryText); } finally { setMemorySaving(false); }
   };
 
   const field = "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 font-mono";
@@ -346,6 +364,55 @@ export default function SettingsDialog({
               </div>
             )}
           </div>
+
+          {/* Globales Gedächtnis (v7.16, Nutzerwunsch): NUR sichtbar, wenn
+              bereits eine Verbindung besteht (memory.md liegt im Daten-Repo –
+              ohne owner/repo/pat gäbe es nichts zu laden/speichern). Eigener,
+              vom "Speichern & Verbinden"-Formular UNABHÄNGIGER Schreibpfad
+              (Muster wie Link-Provider oben): der Knopf persistiert sofort;
+              schließt der Nutzer stattdessen per X, geht höchstens eine NOCH
+              NICHT gespeicherte Textarea-Eingabe verloren – das ist hier
+              bewusst in Ordnung (kein stiller Datenverlust wie beim
+              Link-Provider-Finding v7.13, weil der Hinweistext am Knopf das
+              klarstellt und ein Klick auf "Gedächtnis speichern" sofort
+              wirkt, statt erst mit dem restlichen Formular verzögert zu
+              werden). */}
+          {hasSettings && (
+            <div className="mt-5 pt-3 border-t border-slate-200">
+              <div className="flex items-center gap-1.5 mb-1">
+                <span aria-hidden="true">🧠</span>
+                <span className="text-sm font-semibold text-slate-800">Globales Gedächtnis</span>
+              </div>
+              <p className="text-xs text-slate-400 mb-2">
+                Notizbuchübergreifend; wird dem Modell bei jeder Anfrage
+                mitgegeben; überlebt das Chat-Archivieren. Keine
+                Zugangsdaten hier ablegen.
+              </p>
+              <textarea
+                className={field + " resize-y"}
+                rows={8}
+                style={{ maxHeight: "16rem" }}
+                value={memoryText}
+                onChange={(e) => setMemoryText(e.target.value)}
+                placeholder="(noch leer)"
+              />
+              <div className="flex items-center gap-2 mt-1.5">
+                <span className={"text-xs " + (memoryText.length > MEMORY_SOFT_LIMIT ? "text-amber-600" : "text-slate-400")}>
+                  {memoryText.length} / {MEMORY_SOFT_LIMIT}
+                </span>
+                <div className="flex-1" />
+                <button
+                  onClick={saveMemory}
+                  disabled={memorySaving}
+                  className={"inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-indigo-700 text-white text-xs " +
+                    (memorySaving ? "opacity-60" : "hover:bg-indigo-800")}
+                >
+                  {memorySaving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+                  Gedächtnis speichern
+                </button>
+              </div>
+            </div>
+          )}
 
           {error && (
             <div className="mt-3 px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800">

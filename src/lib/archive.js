@@ -28,7 +28,12 @@ const fmtStamp = (ts) =>
 // voraus sein, der lokale Stand bis zu einem Debounce) zu einem
 // vollständigen Verlauf vereinen: Duplikate über (ts, Rolle, Text, …)
 // erkennen, Ergebnis chronologisch. Nachrichten ohne ts (Begrüßung)
-// bleiben außen vor.
+// bleiben außen vor. Der Dedup-Key bewusst OHNE "commit"/"memory" (v7.16):
+// ts wird bei jeder Nachricht per Date.now() vergeben (praktisch eindeutig)
+// und identifiziert damit dieselbe Nachricht bereits zuverlässig – zwei
+// unabhängig ENTSTANDENE Nachrichten mit exakt gleichem ts+role+text+imgId+
+// fileName, aber unterschiedlichem commit/memory, sind kein realistischer
+// Fall (dieselbe Antwort desselben Turns hat immer dieselben Metadaten).
 export function mergeChats(local, remote) {
   const key = (m) =>
     m.ts + "|" + (m.role || "") + "|" + (m.text || "") + "|" +
@@ -128,6 +133,13 @@ export function chatToMarkdown(chat, opts = {}) {
     if (m.commit) {
       parts.push("");
       parts.push("> 💾 Ins Notizbuch übernommen: „" + noNul(m.commit) + "“");
+    }
+    // Globales Gedächtnis (v7.16): eigene Badge-Zeile analog zur 💾-Zeile
+    // oben – ein Turn kann BEIDES auslösen (Notizbuch-Commit UND
+    // Gedächtnis-Update), dann erscheinen beide Zeilen untereinander.
+    if (m.memory) {
+      parts.push("");
+      parts.push("> 🧠 Gedächtnis aktualisiert");
     }
   }
 
