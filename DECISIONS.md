@@ -2102,6 +2102,90 @@ aus `referenz-app.jsx` übernommen.
       Risiko ohne weiteren Fix. Diese Entscheidung wurde hier NICHT
       vorweggenommen (Auftragsvorgabe: kein Code an `buildChatReply`).
 
+    **Abschluss-Nachtrag v7.19 – fünfte Fundstelle, Nutzer-Entscheidung für
+    ein Code-Netz** (`src/lib/anthropic.js`). Der v7.18-Retest zeigte eine
+    FÜNFTE Ausprägung derselben Fehlerfamilie: eine zweite Kontrollfrage im
+    selben Lauf doppelte erneut – zwei fast identische Absätze, der zweite
+    eine gekürzte Fassung mit wortgleichem Eröffnungssatz, diesmal OHNE
+    Selbstverweis und OHNE rohe Sternchen (die v7.18-Klauseln WIRKTEN also
+    für ihre jeweiligen Symptome, der zugrunde liegende Vorab-Text-Mechanismus
+    blieb aber unzuverlässig). Der Nutzer entschied danach: **jetzt ein
+    vertragsverankertes CODE-NETZ statt einer weiteren Prompt-Eskalation.**
+    - **Mechanik** (`callClaude`, unmittelbar vor dem bestehenden
+      `buildChatReply`-Aufruf, `buildChatReply` selbst NICHT umgebaut): Ohne
+      Websuche gehört laut Prompt-Vertrag (ANTWORTFORMAT/INTERNET-RECHERCHE)
+      die GESAMTE Antwort ins `reply`-Feld. Schreibt das Modell trotzdem
+      einen Vorab-Textblock UND eine SUBSTANZIELLE `reply` (siehe unten),
+      gilt der Vorab-Text nach fünf dokumentierten Live-Fällen als praktisch
+      immer eine – ggf. paraphrasierte/gekürzte/selbstverweisende – Dublette:
+      `if (!usedSearch && textBlocks.length && isSubstantialReply(toolReply)) textBlocks.length = 0;`
+      direkt vor dem bestehenden Aufruf. Das Gate hängt EXPLIZIT an
+      `usedSearch` (nicht an `hits`/`sources`) – eine Websuche ganz OHNE
+      Treffer darf recherchierte Prosa nie verwerfen (Test „Gegenprobe iii“).
+    - **`isSubstantialReply(toolReply)` + `SUBSTANTIAL_REPLY_MIN_LENGTH`**
+      (neu exportiert, direkt über `buildChatReply`): zwei unabhängige
+      Kriterien machen eine `reply` NICHT substanziell (⇒ Vorab-Text bleibt
+      erhalten): (1) **Längen-Schwelle, 80 getrimmte Zeichen** – die UNTERE
+      Grenze des vorgeschlagenen 80–120-Korridors, bewusst gewählt, weil der
+      REALE v7.17-Fund („Aktuell ist nur die Präferenz für das
+      24-Stunden-Format bei Uhrzeiten gespeichert – siehe Antwort.“) GETRIMMT
+      98 Zeichen maß – ein Schwellwert ≥ 100 hätte genau den Fall verfehlt,
+      der zur Eskalation führte; 80 bleibt trotzdem weit über jeder
+      realistischen Kurzbestätigung dieser App (typisch 8–40 Zeichen, siehe
+      die C9a-Fixture „Nur zur Erklärung – nichts gespeichert.“ mit 39
+      Zeichen). (2) **`POINTER_ONLY_RE`** – ein reply, der IM KERN nur ein
+      Verweis NAHE AM ANFANG ist (z. B. „Wie oben erklärt, …“, Muster
+      `/^(die|der|das|siehe|steht|wie)?\s*.{0,40}\b(siehe (antwort|oben)|
+      steht oben|oben beschrieben|oben erklärt)\b/i`), gilt UNABHÄNGIG von
+      der Länge nie als substanziell – Schutzschicht für den historischen
+      C9a-Fall auch bei einer zufällig längeren Verweis-Formulierung. Der
+      reale v7.17-Fund fällt NICHT unter dieses Muster, weil die
+      Verweis-Phrase erst NACH über 40 Zeichen Eigeninhalt steht (bewusste
+      Abgrenzung: dort trägt `reply` bereits einen eigenen Fakt, auch wenn
+      am Ende zusätzlich „– siehe Antwort“ hängt) – dort greift ausschließlich
+      die Längen-Schwelle, und das ist gewollt: `reply` wird kanonisch, der
+      Vorab-Text (die eigentliche Dublette) verworfen.
+    - **Bewusst NICHT behoben:** Der resultierende `reply`-Text kann in
+      Randfällen wie dem v7.17-Fund einen jetzt „hängenden“ Verweis wie
+      „– siehe Antwort“ behalten, der nach dem Verwerfen des Vorab-Texts auf
+      nichts mehr zeigt – das WIRKLICH Inhaltliche (die eigentliche Aussage)
+      bleibt aber vollständig erhalten (kein Datenverlust, nur ein
+      kosmetischer Restsatz). Ein Herausschneiden solcher Restsätze wäre
+      String-/NLU-Chirurgie an `buildChatReply`-Internas – laut Auftrag
+      explizit NICHT angefasst.
+    - **Tests** (`tests/anthropic.test.js`): neuer Block „isSubstantialReply /
+      SUBSTANTIAL_REPLY_MIN_LENGTH“ (Konstante, leer/kurz/Grenzfall exakt an
+      der Schwelle, Whitespace-Trimming, die drei Live-Fälle als substanziell,
+      POINTER_ONLY-Ausschluss kurz UND lang, Abgrenzung zum v7.17-Fund).
+      Neuer Block „Vorab-Text-Gate bei substanzieller reply ohne Websuche“
+      im `callClaude`-Describe: alle DREI dokumentierten Live-Fälle
+      (Datumsformat/„siehe Antwort“/Celsius – Celsius-Fixture mangels
+      wörtlichem Originalzitat als repräsentative Rekonstruktion des
+      gemeldeten Musters kommentiert) über den ECHTEN `callClaude`-Pfad ⇒
+      jeweils NUR `reply` bleibt übrig; vier Gegenproben: (i) historischer
+      C9a-Fall bleibt kombiniert, (ii) Websuche mit substanzieller
+      Bestätigung bleibt byte-gleich kombiniert, (iii) Websuche ohne Treffer
+      verwirft die recherchierte Prosa NICHT, (iv) reine Vorab-Text-Antwort
+      mit leerer `reply` bleibt erhalten (kein Verwerfen ohne Ersatz). Der
+      bestehende v7.6-Regressionstest bleibt UNVERÄNDERT grün (Kommentar
+      ergänzt, der erklärt, warum: seine Test-`reply` liegt mit 39 Zeichen
+      klar unter der neuen Schwelle). Gesamtstand danach 700/700 grün
+      (vorher 684).
+    - **Restrisiko, ehrlich benannt:** Ein SELTENER Fall bleibt bewusst
+      ungelöst: Schreibt das Modell ohne Websuche einen Vorab-Text UND eine
+      SUBSTANZIELLE `reply`, die tatsächlich ECHT VERSCHIEDENEN Inhalt tragen
+      (kein Duplikat, zwei eigenständige Aussagen) – laut Prompt-Vertrag darf
+      das ohne Websuche gar nicht vorkommen (die GESAMTE Antwort gehört ins
+      `reply`-Feld) –, geht der Vorab-Text-Anteil verloren. Das wird als
+      **akzeptiert** eingestuft: der Vertrag ist eindeutig, ein Verstoß
+      dagegen ist nicht das übliche Verhalten (fünf von fünf beobachteten
+      Live-Fällen waren Dubletten, keiner war ein echter Zweit-Inhalt), und
+      der bisherige Alternativzustand (Dubletten im Chat) war für den
+      Nutzer störender als dieser seltene, vertragswidrige Grenzfall.
+      Sollte ein solcher echter Doppel-Inhalt-Fall künftig beobachtet
+      werden, wäre die Schwelle/das Muster erneut zu kalibrieren oder das
+      Gate enger zu fassen – nicht Gegenstand dieses Auftrags.
+
 58. **Azure-DevOps-302-Maskierung entlarvt + automatische Titel-Ermittlung
     „egal wo sie herkommt“, v7.12** (`src/lib/linkProviders.jsx`,
     `src/components/DocEditor.jsx`, `src/App.jsx`, Nutzer-Live-Befund +

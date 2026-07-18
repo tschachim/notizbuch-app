@@ -466,6 +466,46 @@ export function parseLooseJson(raw) {
   return null;
 }
 
+// v7.19 (Nutzer-Entscheidung nach FÜNF dokumentierten Live-Fällen derselben
+// Fehlerfamilie, siehe DECISIONS #57 Abschluss-Nachtrag): Code-Netz für den
+// Vorab-Text-Gate in callClaude (siehe dort). Ab dieser (getrimmten)
+// Zeichenzahl gilt eine reply NICHT mehr automatisch als bloßer Kurzverweis/
+// Bestätigung. 80 ist die UNTERE Grenze des vorgeschlagenen Korridors
+// (~80–120): Der reale v7.17-Live-Fund ("Aktuell ist nur die Präferenz für
+// das 24-Stunden-Format bei Uhrzeiten gespeichert – siehe Antwort.") maß
+// GETRIMMT 98 Zeichen – ein höherer Schwellwert (z. B. 120) hätte genau den
+// Fall verfehlt, der zu dieser Eskalation geführt hat. 80 bleibt trotzdem
+// deutlich über typischen Kurzbestätigungen ("Notiert.", "Eingetragen.",
+// oder der C9a-Testfixture "Nur zur Erklärung – nichts gespeichert." mit 39
+// Zeichen) – kein realistischer Kurzverweis in dieser App liegt in der Nähe
+// von 80 Zeichen.
+export const SUBSTANTIAL_REPLY_MIN_LENGTH = 80;
+
+// Zusätzliche, von der Länge UNABHÄNGIGE Schutzschicht: eine reply, die IM
+// KERN nur ein Verweis auf einen anderen Teil DERSELBEN Antwort ist (z. B.
+// "Wie oben erklärt, …"), trägt inhaltlich nichts Eigenständiges bei – der
+// eigentliche Inhalt steht per Definition woanders (im verworfenen Vorab-
+// Text). Bewusst NUR ein grober, auf die beobachteten Live-Formulierungen
+// zugeschnittener Mustertreffer (kein NLU-Klassifikator): die Verweis-Phrase
+// muss nahe am ANFANG des Texts stehen (max. 40 Zeichen Vorlauf), damit eine
+// lange, inhaltlich substanzielle Antwort, die irgendwo beiläufig "oben"
+// erwähnt, NICHT fälschlich als reiner Verweis gilt (Abgrenzung zu den drei
+// Live-Fällen unten: deren reply trägt eigenen Inhalt, auch wenn ein Teil
+// davon zusätzlich auf "die Antwort" verweist – dort greift NUR die
+// Längen-Schwelle, absichtlich, siehe DECISIONS).
+const POINTER_ONLY_RE = /^(die|der|das|siehe|steht|wie)?\s*.{0,40}\b(siehe (antwort|oben)|steht oben|oben beschrieben|oben erklärt)\b/i;
+
+// Entscheidet, ob eine model-generierte reply inhaltlich genug ist, um im
+// Vorab-Text-Gate (siehe callClaude) einen zusätzlichen Vorab-Textblock ohne
+// Websuche sicher als Dublette zu verwerfen. Exportiert, damit Schwelle und
+// Mustertreffer unabhängig von callClaude testbar sind.
+export function isSubstantialReply(toolReply) {
+  const t = typeof toolReply === "string" ? toolReply.trim() : "";
+  if (!t) return false;
+  if (POINTER_ONLY_RE.test(t)) return false;
+  return t.length >= SUBSTANTIAL_REPLY_MIN_LENGTH;
+}
+
 // Bei Websuche steht die inhaltliche Antwort meist in den Textblöcken VOR
 // dem Tool-Aufruf (dort hängt die API echte Zitate mit URL+Titel an); das
 // reply-Feld enthält dann nur die Bestätigung. Beides zur Chat-Nachricht
@@ -880,6 +920,25 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
   // web_search_tool_result-Block), das hits-Argument wird zusätzlich explizit
   // damit gegated, damit ein versehentlicher <cite>-Tag ohne Suche nie eine
   // Quellenliste ohne recherchierte Belege erzeugt.
+  //
+  // v7.19 (Code-Netz, Nutzer-Entscheidung nach FÜNF dokumentierten Live-
+  // Fällen derselben Fehlerfamilie – siehe DECISIONS #57 Abschluss-Nachtrag):
+  // Ohne Websuche gehört laut Prompt-Vertrag (ANTWORTFORMAT/INTERNET-
+  // RECHERCHE) die GESAMTE Antwort ins reply-Feld. Schreibt das Modell
+  // TROTZDEM einen Vorab-Textblock UND eine SUBSTANZIELLE reply
+  // (isSubstantialReply), ist der Vorab-Text nach fünf Live-Fällen praktisch
+  // immer eine – ggf. paraphrasierte, gekürzte oder selbstverweisende –
+  // Dublette derselben Aussage: buildChatReply()s normalisierter
+  // Gleichheits-Check (v7.10) erkennt NUR formale Abweichungen, keine
+  // Paraphrasen (bewusste v7.11-Entscheidung, bleibt unverändert – siehe
+  // buildChatReply selbst, hier NICHT angefasst). Das Gate verwirft den
+  // Vorab-Text DAVOR, reply wird kanonisch. isSubstantialReply() schützt
+  // weiterhin GENAU den v7.6-Fall (C9a: reply war nur ein Kurzverweis ohne
+  // eigenen Inhalt) – dort bleibt der Vorab-Text erhalten, sonst
+  // Inhaltsverlust. WICHTIG: Das Gate hängt EXPLIZIT an usedSearch, NICHT an
+  // hits/sources – eine Websuche ganz OHNE Treffer (sources leer) darf die
+  // recherchierte Prosa NIEMALS verwerfen (siehe Tests).
+  if (!usedSearch && textBlocks.length && isSubstantialReply(toolReply)) textBlocks.length = 0;
   const chat = buildChatReply({ content: textBlocks }, usedSearch ? sources : [], toolReply);
   // Recherchiert, aber nichts inline zitiert: die konsultierten Quellen
   // trotzdem anzeigen (dedupliziert, gedeckelt), statt sie zu verschweigen.

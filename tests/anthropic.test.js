@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   MODELS, webSearchToolFor, buildSystem, buildChatReply, callClaude, NOTEBOOK_TOOL,
-  parseLooseJson,
+  parseLooseJson, isSubstantialReply, SUBSTANTIAL_REPLY_MIN_LENGTH,
 } from "../src/lib/anthropic.js";
 
 describe("parseLooseJson (Reparatur kaputter Modell-Antworten)", () => {
@@ -23,6 +23,82 @@ describe("parseLooseJson (Reparatur kaputter Modell-Antworten)", () => {
     expect(parseLooseJson("")).toBeNull();
     expect(parseLooseJson("nur Prosa ohne Klammern")).toBeNull();
     expect(parseLooseJson('{"reply": abgeschnitten')).toBeNull();
+  });
+});
+
+// v7.19 (Code-Netz nach fünf dokumentierten Live-Fällen derselben
+// Fehlerfamilie, siehe DECISIONS #57 Abschluss-Nachtrag): isSubstantialReply
+// entscheidet das Vorab-Text-Gate in callClaude (siehe dort). Pure Funktion,
+// unabhängig von callClaude/buildChatReply testbar.
+describe("isSubstantialReply / SUBSTANTIAL_REPLY_MIN_LENGTH", () => {
+  it("liegt bei 80 Zeichen (untere Grenze des vorgeschlagenen 80–120-Korridors)", () => {
+    expect(SUBSTANTIAL_REPLY_MIN_LENGTH).toBe(80);
+  });
+
+  it("leer/undefined/null/Nicht-String gilt nie als substanziell", () => {
+    expect(isSubstantialReply("")).toBe(false);
+    expect(isSubstantialReply("   ")).toBe(false);
+    expect(isSubstantialReply(undefined)).toBe(false);
+    expect(isSubstantialReply(null)).toBe(false);
+    expect(isSubstantialReply(42)).toBe(false);
+  });
+
+  it("kurze Bestätigungen/Kurzverweise bleiben NICHT substanziell (Längen-Schwelle)", () => {
+    expect(isSubstantialReply("Notiert.")).toBe(false);
+    expect(isSubstantialReply("Eingetragen.")).toBe(false);
+    // Die historische C9a-Testfixture (siehe callClaude-Block unten): 39
+    // getrimmte Zeichen, klar unter der Schwelle.
+    expect(isSubstantialReply("Nur zur Erklärung – nichts gespeichert.")).toBe(false);
+  });
+
+  it("Grenzfall: exakt an der Schwelle ist NOCH nicht substanziell, ein Zeichen mehr schon", () => {
+    expect(isSubstantialReply("a".repeat(SUBSTANTIAL_REPLY_MIN_LENGTH - 1))).toBe(false);
+    expect(isSubstantialReply("a".repeat(SUBSTANTIAL_REPLY_MIN_LENGTH))).toBe(true);
+  });
+
+  it("Rand-Whitespace zählt nicht mit (getrimmte Länge entscheidet)", () => {
+    const padded = "  " + "a".repeat(SUBSTANTIAL_REPLY_MIN_LENGTH) + "  ";
+    expect(isSubstantialReply(padded)).toBe(true);
+    const tooShortPadded = "   " + "a".repeat(SUBSTANTIAL_REPLY_MIN_LENGTH - 1) + "   ";
+    expect(isSubstantialReply(tooShortPadded)).toBe(false);
+  });
+
+  it("lange, inhaltlich eigenständige Antworten gelten als substanziell (die drei Live-Fälle, siehe callClaude-Block)", () => {
+    expect(isSubstantialReply(
+      "Du bevorzugst in der Chat-Kommunikation das Datumsformat TT.MM.JJJJ (z. B. 18.07.2026). " +
+      "In den Notizbuch-Dokumenten selbst gilt weiterhin die Konvention JJJJ-MM-TT."
+    )).toBe(true);
+    // Der reale v7.17-Fund: 98 getrimmte Zeichen, ENDET mit "siehe Antwort",
+    // aber die Verweis-Phrase steht NICHT nahe am Anfang – zählt trotzdem als
+    // substanziell (Längen-Schwelle greift, Muster-Ausschluss NICHT, siehe
+    // Test-Block direkt unten).
+    expect(isSubstantialReply(
+      "Aktuell ist nur die Präferenz für das 24-Stunden-Format bei Uhrzeiten gespeichert – siehe Antwort."
+    )).toBe(true);
+  });
+
+  describe("POINTER_ONLY-Ausschluss: reine Verweise NAHE AM ANFANG gelten NIE als substanziell", () => {
+    it("ein kurzer Verweis bleibt nicht-substanziell (bereits durch die Längen-Schwelle abgedeckt)", () => {
+      expect(isSubstantialReply("Wie oben erklärt.")).toBe(false);
+      expect(isSubstantialReply("Siehe Antwort.")).toBe(false);
+      expect(isSubstantialReply("Steht oben.")).toBe(false);
+    });
+
+    it("ein LANGER, aber im Kern reiner Verweis nahe am Anfang wird ZUSÄTZLICH per Muster ausgeschlossen " +
+       "(unabhängig von der Länge – Schutzschicht für den historischen C9a-Fall bei jeder Formulierungslänge)", () => {
+      const longPointer =
+        "Wie oben erklärt, ist das Verfahren geeignet für alle gängigen Anwendungsfälle und sollte in " +
+        "den allermeisten praktischen Szenarien zuverlässig funktionieren.";
+      expect(longPointer.length).toBeGreaterThan(SUBSTANTIAL_REPLY_MIN_LENGTH); // Längen-Schwelle allein würde greifen
+      expect(isSubstantialReply(longPointer)).toBe(false); // das Muster verhindert es trotzdem
+    });
+
+    it("eine Verweis-Phrase WEIT HINTEN (nach substanziellem eigenen Inhalt) wird NICHT ausgeschlossen " +
+       "(Abgrenzung zum v7.17-Live-Fund oben: der Verweis steht dort erst nach > 40 Zeichen Eigeninhalt)", () => {
+      const farPointer =
+        "Aktuell ist nur die Präferenz für das 24-Stunden-Format bei Uhrzeiten gespeichert – siehe Antwort.";
+      expect(isSubstantialReply(farPointer)).toBe(true);
+    });
   });
 });
 
@@ -643,6 +719,12 @@ describe("callClaude (fetch gemockt)", () => {
     // (inkl. Formel) als Textblock VOR dem Tool-Aufruf und verwies in reply
     // nur knapp auf "oben" – beim alten usedSearch-Gate ging der Textblock
     // komplett verloren. Jetzt wird er unabhängig von usedSearch kombiniert.
+    // v7.19-Hinweis (Code-Netz, siehe eigener Test-Block weiter unten): DIESER
+    // Test bleibt UNVERÄNDERT grün, weil "Nur zur Erklärung – nichts
+    // gespeichert." mit 39 getrimmten Zeichen klar UNTER der neuen
+    // SUBSTANTIAL_REPLY_MIN_LENGTH-Schwelle (80) liegt – das v7.19-Gate greift
+    // nur bei SUBSTANZIELLER reply (siehe isSubstantialReply), genau damit
+    // dieser historische C9a-Fall unverändert geschützt bleibt.
     respond({
       stop_reason: "end_turn",
       content: [
@@ -656,6 +738,158 @@ describe("callClaude (fetch gemockt)", () => {
       "Nur zur Erklärung – nichts gespeichert."
     );
     expect(res.sources).toEqual([]); // keine Quellen ohne echte Websuche
+  });
+
+  // v7.19 (Code-Netz nach FÜNF dokumentierten Live-Fällen derselben
+  // Fehlerfamilie, Nutzer-Entscheidung – siehe DECISIONS #57 Abschluss-
+  // Nachtrag): Ohne Websuche UND mit einer SUBSTANZIELLEN reply wird ein
+  // zusätzlicher Vorab-Textblock jetzt verworfen (reply ist kanonisch),
+  // statt (wie bis v7.18 rein promptseitig erhofft) kombiniert zu werden.
+  describe("Vorab-Text-Gate bei substanzieller reply ohne Websuche (Code-Netz, v7.19)", () => {
+    it("v7.16-Datumsformat-Fall: Vorab-Text + substanzielle, umformulierte reply → NUR reply bleibt", async () => {
+      respond({
+        stop_reason: "end_turn",
+        content: [
+          {
+            type: "text",
+            text: "Du bevorzugst in der Chat-Kommunikation das Format TT.MM.JJJJ (z. B. 18.07.2026). " +
+              "In den Notizbuch-Dokumenten selbst wird davon abweichend das Format JJJJ-MM-TT verwendet, " +
+              "gemäß der Notizbuch-Konvention.",
+          },
+          toolUse({
+            reply: "Du bevorzugst in der Chat-Kommunikation das Datumsformat TT.MM.JJJJ (z. B. 18.07.2026). " +
+              "In den Notizbuch-Dokumenten selbst gilt weiterhin die Konvention JJJJ-MM-TT.",
+            ops: [],
+          }),
+        ],
+      });
+      const res = await callClaude("key", "Welches Datumsformat bevorzuge ich?", NB_CTX, [], "claude-sonnet-5", null, null);
+      expect(res.reply).toBe(
+        "Du bevorzugst in der Chat-Kommunikation das Datumsformat TT.MM.JJJJ (z. B. 18.07.2026). " +
+        "In den Notizbuch-Dokumenten selbst gilt weiterhin die Konvention JJJJ-MM-TT."
+      );
+      expect(res.reply).not.toContain("davon abweichend"); // der Vorab-Text-Wortlaut fehlt
+    });
+
+    it("v7.17-'siehe Antwort'-Fall: Vorab-Text + gekürzte, selbstverweisende reply → NUR reply bleibt", async () => {
+      respond({
+        stop_reason: "end_turn",
+        content: [
+          { type: "text", text: "Du bevorzugst bei Uhrzeiten das 24-Stunden-Format statt 12-Stunden mit AM/PM." },
+          toolUse({
+            reply: "Aktuell ist nur die Präferenz für das 24-Stunden-Format bei Uhrzeiten gespeichert – siehe Antwort.",
+            ops: [],
+          }),
+        ],
+      });
+      const res = await callClaude("key", "Was weißt du insgesamt über meine Format-Vorlieben?", NB_CTX, [], "claude-sonnet-5", null, null);
+      expect(res.reply).toBe(
+        "Aktuell ist nur die Präferenz für das 24-Stunden-Format bei Uhrzeiten gespeichert – siehe Antwort."
+      );
+      expect(res.reply).not.toContain("statt 12-Stunden mit AM/PM"); // der Vorab-Text-Wortlaut fehlt
+    });
+
+    it("v7.18-Celsius-Fall: Vorab-Text + gekürzte reply mit wortgleichem Eröffnungssatz → NUR reply bleibt", async () => {
+      // Repräsentative Rekonstruktion des gemeldeten Musters ("zwei fast
+      // identische Absätze, zweiter = gekürzte Fassung, wortgleicher
+      // Eröffnungssatz, kein Selbstverweis, keine Sternchen").
+      respond({
+        stop_reason: "end_turn",
+        content: [
+          {
+            type: "text",
+            text: "Du bevorzugst Temperaturangaben in Grad Celsius statt Fahrenheit, wie du mir zuvor " +
+              "mitgeteilt hast. Ich werde das ab sofort in allen Antworten berücksichtigen.",
+          },
+          toolUse({
+            reply: "Du bevorzugst Temperaturangaben in Grad Celsius statt Fahrenheit, das habe ich mir " +
+              "für künftige Antworten so gemerkt.",
+            ops: [],
+          }),
+        ],
+      });
+      const res = await callClaude("key", "Was weißt du über meine Einheiten-Vorlieben?", NB_CTX, [], "claude-sonnet-5", null, null);
+      expect(res.reply).toBe(
+        "Du bevorzugst Temperaturangaben in Grad Celsius statt Fahrenheit, das habe ich mir " +
+        "für künftige Antworten so gemerkt."
+      );
+      expect(res.reply).not.toContain("wie du mir zuvor mitgeteilt hast"); // der Vorab-Text-Wortlaut fehlt
+    });
+
+    it("Gegenprobe (i): historischer C9a-Fall (Vorab-Erklärung + KURZER Verweis) bleibt kombiniert – kein Inhaltsverlust", async () => {
+      // Identisch zum Test oben ("Sicherheitsnetz C9a, v7.6"), hier bewusst
+      // ALS Gegenprobe zum Gate direkt neben den drei Live-Fällen platziert.
+      respond({
+        stop_reason: "end_turn",
+        content: [
+          { type: "text", text: "Der Satz des Pythagoras lautet $a^2+b^2=c^2$ für rechtwinklige Dreiecke." },
+          toolUse({ reply: "Nur zur Erklärung – nichts gespeichert.", ops: [] }),
+        ],
+      });
+      const res = await callClaude("key", "erkläre mir das", NB_CTX, [], "claude-sonnet-5", null, null);
+      expect(res.reply).toBe(
+        "Der Satz des Pythagoras lautet $a^2+b^2=c^2$ für rechtwinklige Dreiecke.\n\n" +
+        "Nur zur Erklärung – nichts gespeichert."
+      );
+    });
+
+    it("Gegenprobe (ii): Websuche mit substanzieller Bestätigungs-reply → unverändert kombiniert (Zitate-Pfad byte-gleich)", async () => {
+      // usedSearch=true muss das Gate UNABHÄNGIG von der reply-Länge
+      // deaktivieren – auch eine lange, substanzielle reply darf die
+      // recherchierte, zitierte Prosa nie verwerfen.
+      const substantialConfirmation =
+        "Danke für den Hinweis, ich habe das recherchiert und wie beschrieben mit Quellenangaben im " +
+        "Dokument ergänzt, bei Rückfragen einfach melden.";
+      expect(substantialConfirmation.trim().length).toBeGreaterThan(SUBSTANTIAL_REPLY_MIN_LENGTH);
+      respond({
+        stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [
+            { type: "web_search_result", url: "https://q.de", title: "Q" },
+          ]},
+          { type: "text", text: "Fakt X", citations: [{ url: "https://q.de", title: "Q" }] },
+          toolUse({
+            reply: substantialConfirmation,
+            ops: [{ type: "append_to_section", heading: "## A", content: '- <cite index="1">Fakt X</cite>' }],
+          }),
+        ],
+      });
+      const res = await callClaude("key", "recherchiere", NB_CTX, [], "claude-sonnet-5", null, null);
+      expect(res.reply).toBe('Fakt X<cite index="1"></cite>\n\n' + substantialConfirmation);
+      expect(res.sources).toEqual([{ url: "https://q.de", title: "Q" }]);
+    });
+
+    it("Gegenprobe (iii): Websuche OHNE Treffer (hits leer) → recherchierte Prosa bleibt trotz substanzieller reply erhalten", async () => {
+      const substantialConfirmation =
+        "Ich habe dazu recherchiert, aber leider keine verwertbaren Treffer gefunden, die Einschätzung " +
+        "oben bleibt daher unbelegt – bei Bedarf gerne mit anderen Suchbegriffen erneut versuchen.";
+      expect(substantialConfirmation.trim().length).toBeGreaterThan(SUBSTANTIAL_REPLY_MIN_LENGTH);
+      respond({
+        stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [] }, // Suche ohne Treffer, aber usedSearch=true
+          { type: "text", text: "Vorläufige Einschätzung ohne Beleg." },
+          toolUse({ reply: substantialConfirmation, ops: [] }),
+        ],
+      });
+      const res = await callClaude("key", "recherchiere ohne Treffer", NB_CTX, [], "claude-sonnet-5", null, null);
+      expect(res.reply).toBe("Vorläufige Einschätzung ohne Beleg.\n\n" + substantialConfirmation);
+      expect(res.sources).toEqual([]);
+    });
+
+    it("Gegenprobe (iv): ohne Websuche, NUR Vorab-Text, leere reply → Vorab-Text bleibt (nichts verwerfen ohne Ersatz)", async () => {
+      respond({
+        stop_reason: "end_turn",
+        content: [
+          { type: "text", text: "Vollständige Antwort ganz ohne begleitendes reply-Feld." },
+          toolUse({ reply: "", ops: [] }),
+        ],
+      });
+      const res = await callClaude("key", "frage", NB_CTX, [], "claude-sonnet-5", null, null);
+      expect(res.reply).toBe("Vollständige Antwort ganz ohne begleitendes reply-Feld.");
+    });
   });
 
   it("ohne Websuche: JSON-Payload-Textblock bleibt weiterhin verworfen (kein Leak ins reply)", async () => {
