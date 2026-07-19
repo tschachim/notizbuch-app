@@ -3,6 +3,10 @@
 /* 1:1 aus der Referenz-App (Artifact v3.1) übernommen.                */
 /* v7.14: Kapitel-Grenzen ("# ") berücksichtigt (Verschluck-Fix) +      */
 /* optionales "chapter"-Feld zur Kapitel-Eingrenzung.                  */
+/* v7.23 (Verschiebe-Auftrag, Live-Befund): append_to_section/          */
+/* replace_section legen ein referenziertes, aber fehlendes Kapitel     */
+/* jetzt selbst an, statt die Op zu überspringen - delete_section       */
+/* bleibt beim v7.14-Skip (siehe applyOne/explainSkip unten, DECISIONS).*/
 /* ------------------------------------------------------------------ */
 
 const HEAD_RE = /^##\s+/;
@@ -106,16 +110,40 @@ function applyOne(text, op) {
   // Optionales "chapter"-Feld (v7.14): grenzt die Suche auf den Zeilenbereich
   // EINES Kapitels ein – für mehrdeutige Abschnittsnamen (derselbe ##-Titel
   // kommt in mehreren Kapiteln vor) oder eine gezielte Kapitel-Zuordnung.
-  // Fehlt das Kapitel, wird die GESAMTE Op sicher übersprungen – KEIN
-  // Fallback auf die globale Suche (Ambiguitäts-Schutz, siehe DECISIONS):
-  // ein append_to_section mit unbekanntem "chapter" legt in diesem Fall
-  // auch NICHTS an, statt (mangels Kapitel) versehentlich global zu
-  // landen. Ohne "chapter"-Feld verhält sich applyOne exakt wie vor v7.14
-  // (globale Suche, erster Treffer gewinnt).
+  // Ohne "chapter"-Feld verhält sich applyOne exakt wie vor v7.14 (globale
+  // Suche, erster Treffer gewinnt).
+  //
+  // v7.23 (Verschiebe-Auftrag, Live-Befund – siehe DECISIONS): Fehlt das
+  // referenzierte Kapitel, wird es für append_to_section/replace_section
+  // jetzt selbst NEU ANGELEGT (Konsistenz zur bestehenden Praxis, fehlende
+  // ABSCHNITTE anzulegen – siehe die replace_section/append_to_section-
+  // Zweige unten) statt die Op stillschweigend zu überspringen. Grund:
+  // "Verschiebe Abschnitt X in Notizbuch Y als NEUES Kapitel Z" hatte bisher
+  // KEINEN gezielten Op-Weg – ein rewrite des kompletten Ziel-Notizbuchs nur
+  // für ein neues Kapitel ist unverhältnismäßig, und der v7.14-Skip führte
+  // dazu, dass die Quelle bereits gelöscht war, während das Ziel (mangels
+  // Kapitel) NICHTS bekam – der Inhalt hing zwischenzeitlich in keinem
+  // Notizbuch. delete_section bleibt bewusst beim alten Skip (Ambiguitäts-/
+  // Sicherheits-Schutz: nichts löschen, was man nicht sicher adressiert –
+  // dafür gibt es keinen "lösch das doch einfach an beliebiger Stelle"-
+  // Ersatz). Kapitel+Abschnitt landen an dieser Stelle IMMER am
+  // Dokumentende (tidy-konform mit Leerzeilen) – zwei aufeinanderfolgende
+  // Ops mit demselben NEUEN chapter landen dadurch im SELBEN Kapitel: die
+  // erste Op legt es an, die zweite findet es über findChapter bereits vor
+  // (Ops laufen sequenziell auf dem jeweiligen Zwischenstand, siehe
+  // applyOpsDetailed).
   let range = null;
   if (typeof op.chapter === "string" && op.chapter.trim()) {
     range = findChapter(lines, op.chapter);
-    if (!range) return text;
+    if (!range) {
+      if (op.type === "delete_section") return text; // v7.14-Skip bleibt NUR hier
+      const chapterDisp = dispHead(op.chapter);
+      if (!chapterDisp) return text; // Randfall: chapter nach Bereinigung leer (z. B. nur "#"/"##")
+      padEnd(lines);
+      const chapterLineIdx = lines.length;
+      lines.push("# " + chapterDisp, "");
+      range = [chapterLineIdx, lines.length]; // frisches Kapitel = letztes im Dokument, e === Dokumentende
+    }
   }
 
   const b = findSection(lines, disp, range);
@@ -211,7 +239,25 @@ function explainSkip(text, op) {
   let range = null;
   if (typeof op.chapter === "string" && op.chapter.trim()) {
     range = findChapter(lines, op.chapter);
-    if (!range) return "Kapitel „" + sanitizeForWarning(dispHead(op.chapter)) + "“ nicht gefunden – Op übersprungen";
+    if (!range) {
+      // v7.23: "Kapitel nicht gefunden" ist als SKIP-Grund nur noch für
+      // delete_section korrekt – append_to_section/replace_section legen
+      // ein fehlendes Kapitel inzwischen selbst an (siehe applyOne) und
+      // landen bei einem fehlenden Kapitel deshalb so gut wie NIE mehr hier
+      // (applied wird dabei true). Die zwei verbleibenden, seltenen
+      // Sonderfälle unten deckt applyOne ebenfalls als echten No-op ab.
+      if (op.type === "delete_section") {
+        return "Kapitel „" + sanitizeForWarning(dispHead(op.chapter)) + "“ nicht gefunden – Op übersprungen";
+      }
+      if (!dispHead(op.chapter)) return "fehlende Kapitel-Überschrift";
+      // Sonst (append_to_section, ggf. mit leerem content – replace_section
+      // erreicht diesen Zweig praktisch nie, weil es bei fehlendem Kapitel
+      // IMMER etwas anlegt): range bleibt bewusst null, die folgende
+      // Abschnitts-Suche läuft dadurch GLOBAL statt kapitel-eingegrenzt –
+      // für die reine Erklärung hier unschädlich, weil append_to_section
+      // den einzig verbleibenden Skip-Grund (leerer content) unten
+      // UNABHÄNGIG von b/range prüft.
+    }
   }
   const b = findSection(lines, disp, range);
   if (op.type === "delete_section" && !b) return "Abschnitt „" + sanitizeForWarning(disp) + "“ nicht gefunden";

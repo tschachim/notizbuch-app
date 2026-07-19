@@ -3595,3 +3595,113 @@ aus `referenz-app.jsx` übernommen.
         tatsächlich installierte `tiptap-markdown`-Version und würde eine
         SOLCHE künftige Änderung sofort als roten Test sichtbar machen,
         statt sie erst wieder live beim Nutzer auffallen zu lassen.
+
+65. **Kapitel-Auto-Anlage bei append_to_section/replace_section – Revision
+    der v7.14-Skip-Entscheidung** (v7.23, Live-Befund des Nutzers). Auftrag:
+    „verschiebe ‚Lokale Struktur‘ in das bison.box Notizbuch als Kapitel ‚AI
+    Codex development‘“. Das Modell sendete korrekt append_to_section-Ops mit
+    `chapter:"AI Codex development"` ins Ziel-Notizbuch – das Kapitel
+    existierte dort aber noch nicht, die v7.14-Skip-Semantik übersprang
+    daraufhin beide Ziel-Ops (die ⚠️-Pille aus v7.21 erschien korrekt und
+    zeigte das Problem sofort an). Der eigentliche Schaden: Die Lösch-Ops im
+    QUELL-Notizbuch griffen trotzdem (eigener, unabhängiger Commit) – der
+    Inhalt hing zwischenzeitlich in KEINEM Notizbuch, nur noch in der
+    Git-Historie auffindbar. Design-Lücke: Für „X als NEUES Kapitel nach Y
+    verschieben“ gab es keinen gezielten Op-Weg; ein `rewrite` des KOMPLETTEN
+    Ziel-Notizbuchs nur für ein neues Kapitel ist unverhältnismäßig (siehe
+    GLIEDERUNGS-VORSCHLAG-Konvention, Punkt 55/57: rewrite bleibt für
+    Umgliederungen reserviert, nicht für Einzel-Einfügungen).
+    - **A) Revidierte Semantik** (`src/lib/ops.js#applyOne`): Referenziert
+      ein `append_to_section`/`replace_section`-Op ein `chapter`, das noch
+      nicht existiert, wird es jetzt automatisch am Dokumentende NEU
+      ANGELEGT (`# <Kapitel>`-Zeile, tidy-konforme Leerzeilen), der
+      Abschnitt entsteht direkt darin – GENAU dieselbe Konsistenz-Logik, die
+      diese beiden Op-Typen für fehlende ABSCHNITTE (innerhalb eines
+      bestehenden Kapitels) schon immer hatten, jetzt eine Ebene höher auch
+      fürs Kapitel selbst. `delete_section` bleibt BEWUSST beim v7.14-Skip
+      (Ambiguitäts-/Sicherheits-Schutz: nichts löschen, was man nicht sicher
+      adressiert – dafür gibt es keinen „lösch es dann halt woanders“-
+      Ersatz). Sequenz-Korrektheit: Zwei aufeinanderfolgende Ops mit
+      demselben NEUEN `chapter` landen automatisch im SELBEN Kapitel, weil
+      `applyOpsDetailed` Ops sequenziell auf dem jeweiligen Zwischenstand
+      anwendet – die erste Op legt das Kapitel an, die zweite findet es über
+      `findChapter` bereits vor (kein Sonderfall nötig, ergibt sich aus der
+      bestehenden Architektur). Ein `append_to_section` mit LEEREM `content`
+      bleibt unverändert ein reiner No-op (auch bei fehlendem Kapitel: die
+      Kapitel-Anlage passiert zwar lokal auf der Kopie `lines`, der
+      bestehende `if (!content) return text;`-Ausstieg gibt aber weiterhin
+      den UNVERÄNDERTEN Original-`text` zurück, verwirft die lokale Mutation
+      also unbenutzt – kein Extra-Check nötig, ergibt sich strukturell aus
+      der bestehenden Rückgabe-Logik).
+      `explainSkip` entsprechend angepasst: der reason „Kapitel nicht
+      gefunden – Op übersprungen“ existiert für append_to_section/
+      replace_section nicht mehr (diese landen bei fehlendem Kapitel praktisch
+      nie mehr in explainSkip, weil `applied` dann true ist), bleibt aber für
+      delete_section unverändert. Zwei Randfälle sauber mitbehandelt: ein
+      nach `dispHead` leeres `chapter`-Feld (z. B. nur „#“/„##“) bleibt ein
+      No-op mit eigenem reason „fehlende Kapitel-Überschrift“; ein
+      `append_to_section` mit leerem `content` UND fehlendem Kapitel meldet
+      weiterhin „leerer content“ (nicht „Kapitel nicht gefunden“).
+      normHead-Toleranz für „chapter“ unverändert („# X“ und „X“ treffen
+      dasselbe Kapitel, auch beim neu angelegten).
+    - **B) Prompt** (`src/lib/anthropic.js`): Die `chapter`-Feld-Doku (im
+      System-Prompt-Text UND in `NOTEBOOK_TOOL`s JSON-Schema-Beschreibung)
+      ersetzt die alte „Existiert dieses Kapitel nicht, wird die GESAMTE Op
+      sicher übersprungen“-Aussage durch „wird es bei append_to_section/
+      replace_section automatisch am Dokumentende angelegt – du kannst also
+      gezielt in neue Kapitel schreiben, ohne rewrite“ (delete_section bleibt
+      explizit als Ausnahme benannt). Die `rewrite`-Beschreibung verliert die
+      Behauptung, sie sei nötig „INKLUSIVE dem Anlegen … von #-Kapiteln“ –
+      jetzt: rewrite ist für größere Umgliederungen (mehrere Kapitel
+      gleichzeitig neu ordnen), für ein einzelnes neues Kapitel reicht
+      append_to_section/replace_section mit `chapter`. Neue Regel im
+      OPS-ZUVERLÄSSIGKEIT-Block, direkt nach dem Überführen-Muster:
+      „Verschiebe-Regel: … ZUERST die Ziel-Ops (Einfügen), DANN die
+      Quell-Ops (Löschen) im selben ops-Array – niemals löschen, bevor das
+      Ziel geschrieben ist.“ Verifiziert (Code-Read, `App.jsx#send`):
+      `groups` ist eine `Map`, wird per `for (const op of resolvedOps)` in
+      EXAKTER Array-Reihenfolge befüllt (JS-`Map` erhält Erst-Einfügereihen-
+      folge der Keys) und in genau dieser Reihenfolge iteriert – committet
+      der Nutzer-Prompt also Ziel-Ops VOR Quell-Ops im `ops`-Array, wird das
+      Ziel-Notizbuch NACHWEISLICH VOR dem Quell-Notizbuch geschrieben
+      (sequenzielle `await commitDocNb`-Aufrufe je Notizbuch-Gruppe, keine
+      Parallelität). Kein Code-Change in App.jsx nötig – die bestehende
+      Gruppierung war bereits reihenfolge-treu, es fehlte nur die
+      Prompt-Regel, die das Modell zur richtigen Ops-Reihenfolge anhält.
+    - **C) Tests** (`tests/ops.test.js`, neuer Block „Kapitel-Auto-Anlage bei
+      append_to_section/replace_section (v7.23, Verschiebe-Auftrag)“ plus
+      angepasste Bestandstests, NICHT gelöscht sondern umgeschrieben mit
+      Kommentar zur Semantik-Änderung): fehlendes chapter + append ⇒ Kapitel
+      und Abschnitt korrekt getrennt am Dokumentende; zwei Ops mit demselben
+      neuen chapter ⇒ EIN Kapitel, zwei Abschnitte in Reihenfolge
+      (Sequenz-Korrektheit); replace_section mit fehlendem chapter ⇒ analog;
+      delete_section mit fehlendem chapter ⇒ weiterhin Skip+reason
+      (Regression); bestehendes chapter ⇒ Verhalten unverändert
+      (Regression); Duplikat-##-Titel in einem ANDEREN, bereits bestehenden
+      Kapitel bleibt beim Anlegen eines dritten, neuen Kapitels unangetastet
+      (chapter-Scoping intakt); tidy/Grenzen bei fehlender Leerzeile am
+      Dokumentende. `applyOpsDetailed`-results entsprechend
+      (`applied:true`/`false` je nach Op-Typ). Ein Integrationstest bildet
+      das EXAKTE Nutzer-Szenario sinngemäß nach (zwei append_to_section-Ops
+      mit neuem chapter „AI Codex development“ ins Ziel-Notizbuch + eine
+      unabhängige delete_section im Quell-Notizbuch). Die Wrapper-
+      Äquivalenz-Pins (`applyOps === applyOpsDetailed(...).text`) um die
+      neuen Kapitel-Anlage-Fälle erweitert – die bewusste Semantik-Änderung
+      darf den Pin nicht verletzen. `tests/anthropic.test.js`: chapter-Feld-
+      Doku-Test umgeschrieben (Auto-Anlage statt Skip), neuer Test für die
+      rewrite-Beschreibung (Umgliederung statt Kapitel-Anlage), zwei neue
+      Verträge für die Verschiebe-Regel (Inhalt + Position im
+      OPS-ZUVERLÄSSIGKEIT-Block, nach dem Überführen-Muster). Gesamtstand
+      danach 817/817 grün (vorher 800).
+    - **Bewusste Entscheidung/Restrisiko:** Die Verschiebe-Regel (Ziel VOR
+      Quelle) ist – wie jede andere OPS-ZUVERLÄSSIGKEIT-Regel – reiner
+      Prompt-Vertrag, keine erzwingbare Garantie; sendet das Modell die Ops
+      trotzdem in falscher Reihenfolge, bleibt das strukturelle Risiko
+      (kurzzeitig doppelter oder fehlender Inhalt) bestehen – die
+      Kapitel-Auto-Anlage selbst SCHLIESST aber die im Live-Befund
+      beobachtete Lücke vollständig (das Ziel kann jetzt gar nicht mehr
+      „mangels Kapitel“ scheitern), unabhängig von der Reihenfolge. Die
+      Kapitel-Anlage selbst ist rein additiv und landet IMMER am
+      Dokumentende – eine bewusst einfache, vorhersagbare Position (analog
+      zur bestehenden Abschnitts-Anlage), keine inhaltliche Einordnung
+      irgendwo „thematisch passend“ mitten im Dokument.

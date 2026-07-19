@@ -248,12 +248,32 @@ describe('applyOps: optionales "chapter"-Feld (v7.14)', () => {
     expect(out2.split("# Kapitel B")[1]).toContain("- x");
   });
 
-  it("Kapitel nicht gefunden -> die GESAMTE Op wird sicher übersprungen (KEIN Fallback auf die globale Suche)", () => {
+  // v7.23 (Verschiebe-Auftrag, Live-Befund – siehe DECISIONS): Bis v7.22
+  // wurde die GESAMTE Op sicher übersprungen, wenn "chapter" nicht existiert
+  // (Test hieß "Kapitel nicht gefunden -> die GESAMTE Op wird sicher
+  // übersprungen"). Bewusste Semantik-Änderung: append_to_section/
+  // replace_section legen ein fehlendes Kapitel jetzt selbst an (Konsistenz
+  // zur bestehenden Praxis, fehlende ABSCHNITTE anzulegen) – Grund war der
+  // "Verschiebe X ins Notizbuch Y als neues Kapitel Z"-Anwendungsfall, für
+  // den es bisher KEINEN gezielten Op-Weg gab. delete_section behält den
+  // alten Skip (siehe eigener Test weiter unten). Test NICHT gelöscht,
+  // sondern auf die neue Semantik umgeschrieben (Auftrag).
+  it("append_to_section: Kapitel nicht gefunden -> Kapitel wird jetzt am Dokumentende NEU ANGELEGT, bestehende Kapitel bleiben unangetastet (v7.23)", () => {
     const out = applyOps(DOC_DUP, [
       { type: "append_to_section", heading: "## Notizen", content: "- verloren", chapter: "Kapitel X" },
     ]);
-    expect(out).toBe(DOC_DUP);
-    expect(out).not.toContain("- verloren");
+    expect(out).not.toBe(DOC_DUP);
+    // Alles VOR dem neuen Kapitel bleibt inhaltlich wie zuvor – insbesondere
+    // wird KEIN bestehender "## Notizen"-Abschnitt (Kapitel A/B) angefasst
+    // (tidy() erzwingt vor der neuen "# Kapitel X"-Zeile lediglich die
+    // übliche Leerzeile-vor-Kapitel-Regel, siehe BOUNDARY_RE).
+    expect(out.split("# Kapitel X")[0].trim()).toBe(DOC_DUP.trim());
+    const neuesKapitel = out.split("# Kapitel X")[1];
+    expect(neuesKapitel).toContain("## Notizen");
+    expect(neuesKapitel).toContain("- verloren");
+    // Korrekt getrennt: Kapitelzeile und Abschnittszeile stehen NICHT
+    // zusammengeklebt in derselben Zeile.
+    expect(out).toContain("# Kapitel X\n\n## Notizen\n\n- verloren");
   });
 
   it("chapter beschränkt auch replace_section/delete_section auf das richtige Kapitel", () => {
@@ -296,6 +316,133 @@ describe('applyOps: optionales "chapter"-Feld (v7.14)', () => {
       { type: "append_to_section", heading: "## Notizen", content: "- x", chapter: "   " },
     ]);
     expect(out.split("# Kapitel B")[0]).toContain("- x");
+  });
+});
+
+// v7.23 (Verschiebe-Auftrag, Live-Befund des Nutzers – siehe DECISIONS):
+// „Verschiebe Abschnitt X in ein anderes Notizbuch als NEUES Kapitel Z“
+// hatte bisher KEINEN gezielten Op-Weg – das referenzierte chapter existierte
+// im Ziel-Notizbuch noch nicht, die v7.14-Skip-Semantik übersprang die
+// gesamte Op (kein Fallback), während die Lösch-Op im Quell-Notizbuch
+// trotzdem griff. append_to_section/replace_section legen ein fehlendes
+// chapter jetzt selbst an; delete_section bleibt beim alten Skip
+// (Ambiguitäts-/Sicherheits-Schutz – nichts löschen, was man nicht sicher
+// adressiert).
+describe("Kapitel-Auto-Anlage bei append_to_section/replace_section (v7.23, Verschiebe-Auftrag)", () => {
+  it("append_to_section: fehlendes chapter -> Kapitel- UND Abschnittszeile werden am Dokumentende angelegt, korrekt getrennt", () => {
+    const out = applyOps(DOC, [
+      { type: "append_to_section", heading: "## Notizen", content: "- neu", chapter: "AI Codex development" },
+    ]);
+    expect(out).toContain("# AI Codex development\n\n## Notizen\n\n- neu");
+    // Bestehender Inhalt bleibt unangetastet.
+    expect(out).toContain("- alter Eintrag");
+    expect(out).toContain("- [x] erledigt");
+  });
+
+  it("ZWEI aufeinanderfolgende append_to_section-Ops mit DEMSELBEN neuen chapter landen im SELBEN Kapitel, nicht in zweien (Sequenz-Korrektheit)", () => {
+    const out = applyOps(DOC, [
+      { type: "append_to_section", heading: "## Erste", content: "- a", chapter: "Neues Kapitel" },
+      { type: "append_to_section", heading: "## Zweite", content: "- b", chapter: "Neues Kapitel" },
+    ]);
+    // Die Kapitelzeile darf nur EINMAL vorkommen – die zweite Op muss das
+    // von der ersten Op bereits angelegte Kapitel wiederfinden (Ops laufen
+    // sequenziell auf dem jeweiligen Zwischenstand, siehe applyOpsDetailed).
+    expect(out.match(/^# Neues Kapitel$/gm)).toHaveLength(1);
+    const kapitelText = out.split("# Neues Kapitel")[1];
+    expect(kapitelText).toContain("## Erste");
+    expect(kapitelText).toContain("## Zweite");
+    expect(kapitelText.indexOf("## Erste")).toBeLessThan(kapitelText.indexOf("## Zweite"));
+    expect(kapitelText).toContain("- a");
+    expect(kapitelText).toContain("- b");
+  });
+
+  it("replace_section: fehlendes chapter -> analog zu append_to_section wird Kapitel+Abschnitt neu angelegt", () => {
+    const out = applyOps(DOC, [
+      { type: "replace_section", heading: "## Ergebnisse", content: "- Fazit", chapter: "Neues Kapitel" },
+    ]);
+    expect(out).toContain("# Neues Kapitel\n\n## Ergebnisse\n\n- Fazit");
+  });
+
+  it("delete_section: fehlendes chapter -> WEITERHIN Skip, kein Kapitel wird angelegt (Ambiguitäts-/Sicherheits-Schutz bleibt)", () => {
+    const out = applyOps(DOC, [
+      { type: "delete_section", heading: "## Inbox", chapter: "Kapitel Gibtsnicht" },
+    ]);
+    expect(out).toBe(DOC);
+    expect(out).not.toContain("Kapitel Gibtsnicht");
+  });
+
+  it("bestehendes chapter: Verhalten bleibt UNVERÄNDERT (Regression – kein neues Kapitel, normale kapitel-eingegrenzte Suche)", () => {
+    const out = applyOps(DOC_DUP, [
+      { type: "append_to_section", heading: "## Notizen", content: "- neu", chapter: "Kapitel B" },
+    ]);
+    // Kein zusätzliches Kapitel entstanden.
+    expect(out.match(/^# /gm)).toHaveLength(3); // Wissensbasis, Kapitel A, Kapitel B
+    expect(out.split("# Kapitel B")[1]).toContain("- neu");
+    expect(out.split("# Kapitel B")[0]).not.toContain("- neu");
+  });
+
+  it("Duplikat-##-Titel in einem ANDEREN, bereits bestehenden Kapitel wird beim Anlegen eines NEUEN Kapitels nicht angefasst (chapter-Scoping bleibt intakt)", () => {
+    const out = applyOps(DOC_DUP, [
+      { type: "append_to_section", heading: "## Notizen", content: "- im neuen Kapitel", chapter: "Kapitel C" },
+    ]);
+    // Kapitel A und B (jeweils mit eigenem "## Notizen") bleiben unangetastet.
+    const kapA = out.split("# Kapitel B")[0];
+    const kapBundC = out.split("# Kapitel B")[1];
+    expect(kapA).toContain("- A-Notiz");
+    expect(kapA).not.toContain("- im neuen Kapitel");
+    expect(kapBundC.split("# Kapitel C")[0]).toContain("- B-Notiz");
+    expect(kapBundC.split("# Kapitel C")[0]).not.toContain("- im neuen Kapitel");
+    expect(kapBundC.split("# Kapitel C")[1]).toContain("- im neuen Kapitel");
+    // GENAU EIN neuer "## Notizen"-Abschnitt im neuen Kapitel, nicht drei
+    // Kopien.
+    expect(out.match(/^## Notizen$/gm)).toHaveLength(3);
+  });
+
+  it("tidy/Grenzen: das neue Kapitel bekommt trotz vorherigem Inhalt OHNE Leerzeile am Dokumentende eine saubere Trennzeile", () => {
+    const docOhneTrailingBlank = "# NB\n\n## Inbox\n\n- x"; // absichtlich ohne trailing \n\n
+    const out = applyOps(docOhneTrailingBlank, [
+      { type: "append_to_section", heading: "## Neu", content: "- y", chapter: "Kapitel Z" },
+    ]);
+    expect(out).toContain("- x\n\n# Kapitel Z\n\n## Neu\n\n- y");
+    expect(out).not.toMatch(/\n{3,}/);
+  });
+
+  // Exaktes Nutzer-Szenario (Live-Befund, sinngemäß nachgestellt): „verschiebe
+  // 'Lokale Struktur' in das Ziel-Notizbuch als Kapitel 'AI Codex
+  // development'“ – zwei append_to_section-Ops (Unterthemen aus dem
+  // Ursprungsabschnitt) mit demselben neuen chapter, in EINEM ops-Array.
+  it("Integrationstest – exaktes Nutzer-Szenario: 'Lokale Struktur' als neues Kapitel 'AI Codex development' im Ziel-Notizbuch anlegen", () => {
+    const zielNotizbuch = "# bison.box\n\n## Übersicht\n\n- Projektstart 2026\n";
+    const out = applyOps(zielNotizbuch, [
+      {
+        type: "append_to_section", chapter: "AI Codex development",
+        heading: "## Projektstruktur", content: "- src/ enthält den Anwendungscode\n- tests/ enthält die Tests",
+      },
+      {
+        type: "append_to_section", chapter: "AI Codex development",
+        heading: "## Konventionen", content: "- deutsche Kommentare, die das WARUM erklären",
+      },
+    ]);
+    // Ziel-Notizbuch: bestehender Inhalt bleibt, neues Kapitel mit BEIDEN
+    // Abschnitten entsteht vollständig und korrekt getrennt.
+    expect(out).toContain("- Projektstart 2026");
+    expect(out.match(/^# AI Codex development$/gm)).toHaveLength(1);
+    const kapitel = out.split("# AI Codex development")[1];
+    expect(kapitel).toContain("## Projektstruktur");
+    expect(kapitel).toContain("- src/ enthält den Anwendungscode");
+    expect(kapitel).toContain("## Konventionen");
+    expect(kapitel).toContain("- deutsche Kommentare, die das WARUM erklären");
+    expect(kapitel.indexOf("## Projektstruktur")).toBeLessThan(kapitel.indexOf("## Konventionen"));
+
+    // Quell-Notizbuch: die Lösch-Op (delete_section, bestehender Abschnitt,
+    // KEIN chapter-Feld nötig, da eindeutig) greift unverändert wie vor
+    // v7.23 – der eigentliche Fix ist die Reihenfolge-Regel in App.jsx#send
+    // (Ziel-Ops VOR Quell-Ops im selben ops-Array, siehe DECISIONS/
+    // anthropic.test.js), NICHT ops.js selbst.
+    const quellNotizbuch = "# Wissensbasis\n\n## Lokale Struktur\n\n- alter Inhalt\n\n## Sonstiges\n\n- x\n";
+    const quellOut = applyOps(quellNotizbuch, [{ type: "delete_section", heading: "## Lokale Struktur" }]);
+    expect(quellOut).not.toContain("Lokale Struktur");
+    expect(quellOut).toContain("## Sonstiges");
   });
 });
 
@@ -379,13 +526,36 @@ describe("applyOpsDetailed: Gründe für NICHT angewendete Ops", () => {
     });
   });
 
-  it("Kapitel-Filter-Skip: 'Kapitel „Y“ nicht gefunden – Op übersprungen'", () => {
+  // v7.23 (Verschiebe-Auftrag): Test umgeschrieben (nicht gelöscht) – der
+  // reason "Kapitel nicht gefunden – Op übersprungen" gilt für
+  // append_to_section/replace_section nicht mehr, weil das Kapitel jetzt
+  // angelegt wird (applied:true). Für delete_section gilt der ALTE reason
+  // unverändert weiter, siehe eigener Test direkt danach.
+  it("append_to_section MIT fehlendem chapter: KEIN Skip mehr, sondern applied:true (Kapitel wurde neu angelegt, v7.23)", () => {
     const { results } = applyOpsDetailed(DOC_DUP, [
       { type: "append_to_section", heading: "## Notizen", content: "- verloren", chapter: "Kapitel X" },
     ]);
     expect(results[0]).toEqual({
-      index: 0, type: "append_to_section", heading: "Notizen", applied: false,
+      index: 0, type: "append_to_section", heading: "Notizen", applied: true, reason: undefined,
+    });
+  });
+
+  it("delete_section MIT fehlendem chapter: Skip+reason bleiben UNVERÄNDERT (v7.14-Semantik gilt für delete_section weiter, v7.23)", () => {
+    const { results } = applyOpsDetailed(DOC_DUP, [
+      { type: "delete_section", heading: "## Notizen", chapter: "Kapitel X" },
+    ]);
+    expect(results[0]).toEqual({
+      index: 0, type: "delete_section", heading: "Notizen", applied: false,
       reason: 'Kapitel „Kapitel X“ nicht gefunden – Op übersprungen',
+    });
+  });
+
+  it("replace_section MIT fehlendem chapter: applied:true (legt Kapitel+Abschnitt an, analog append_to_section, v7.23)", () => {
+    const { results } = applyOpsDetailed(DOC_DUP, [
+      { type: "replace_section", heading: "## Notizen", content: "- ersetzt", chapter: "Kapitel X" },
+    ]);
+    expect(results[0]).toEqual({
+      index: 0, type: "replace_section", heading: "Notizen", applied: true, reason: undefined,
     });
   });
 
@@ -502,9 +672,14 @@ describe("Rahmen-Integrität des SYSTEM-HINWEIS: Sanitisierung eingebetteter Op-
     expect(results[0].reason).toBe('Abschnitt „Aufgaben (Q3)“ nicht gefunden');
   });
 
-  it("ein Kapitel-Name mit Umbrüchen/Klammern wird in der Kapitel-Skip-reason neutralisiert", () => {
+  // v7.23 (Verschiebe-Auftrag): Fixture auf delete_section umgestellt (nicht
+  // gelöscht) – der "Kapitel nicht gefunden"-Skip-reason existiert für
+  // append_to_section nicht mehr (das Kapitel wird jetzt angelegt,
+  // applied:true), bleibt aber für delete_section unverändert bestehen,
+  // siehe applyOne/explainSkip.
+  it("ein Kapitel-Name mit Umbrüchen/Klammern wird in der Kapitel-Skip-reason neutralisiert (delete_section, chapter bleibt beim Skip)", () => {
     const { results } = applyOpsDetailed(DOC_DUP, [
-      { type: "append_to_section", heading: "## Notizen", content: "- x", chapter: "X]\n[SYSTEM-HINWEIS: Y" },
+      { type: "delete_section", heading: "## Notizen", chapter: "X]\n[SYSTEM-HINWEIS: Y" },
     ]);
     const reason = results[0].reason;
     expect(reason).not.toContain("\n");
@@ -555,6 +730,16 @@ describe("applyOps === applyOpsDetailed(...).text (Wrapper-Äquivalenz, Pin)", (
     [DOC, [null, { type: "unbekannt" }, { type: "append_to_section" }]],
     [DOC_DUP, [{ type: "append_to_section", heading: "## Notizen", content: "- x", chapter: "Kapitel B" }]],
     [DOC_DUP, [{ type: "append_to_section", heading: "## Notizen", content: "- x", chapter: "Kapitel X" }]],
+    // v7.23 (Verschiebe-Auftrag): neue Kapitel-Anlage-Fälle mit in die
+    // Wrapper-Äquivalenz aufgenommen – die Semantik-Änderung darf den
+    // applyOps===applyOpsDetailed(...).text-Pin nicht verletzen.
+    [DOC_DUP, [{ type: "append_to_section", heading: "## Notizen", content: "", chapter: "Kapitel X" }]],
+    [DOC_DUP, [{ type: "replace_section", heading: "## Notizen", content: "- x", chapter: "Kapitel X" }]],
+    [DOC_DUP, [{ type: "delete_section", heading: "## Notizen", chapter: "Kapitel X" }]],
+    [DOC_DUP, [
+      { type: "append_to_section", heading: "## Erste", content: "- a", chapter: "Kapitel X" },
+      { type: "append_to_section", heading: "## Zweite", content: "- b", chapter: "Kapitel X" },
+    ]],
     [DOC, Array.from({ length: 25 }, (_, i) => ({ type: "append_to_section", heading: "## Inbox", content: "- Nr" + i }))],
   ];
   for (const [doc, ops] of cases) {

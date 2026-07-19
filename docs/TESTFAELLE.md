@@ -339,6 +339,22 @@ neue Eintrag landet AUSSCHLIESSLICH im „Notizen“-Abschnitt des genannten
 zweiten Kapitels; der gleichnamige Abschnitt im ERSTEN Kapitel bleibt
 unverändert (kein Duplikat, keine Vermischung).
 
+**C15b [VERBUNDEN][API] Verschieben als NEUES Kapitel (v7.23,
+Live-Befund).** Voraussetzung: ein bestehender `##`-Abschnitt mit etwas
+QA-Test-Inhalt im aktiven Notizbuch (z. B. „QA-Test Warenkunde“ aus C16/
+C19 nachbauen, falls nicht mehr vorhanden) UND ein zweites Notizbuch, in
+dem noch KEIN Kapitel mit dem Zielnamen existiert. Im Chat: „Verschiebe
+den Abschnitt ‚QA-Test Warenkunde‘ in das Notizbuch ‚<Name des zweiten
+Notizbuchs>‘ als Kapitel ‚QA-Test Verschoben‘.“ (1 API-Aufruf). Erwartet:
+Im Ziel-Notizbuch entsteht ein NEUES `#`-Kapitel „QA-Test Verschoben“ mit
+dem vollständigen Inhalt des Abschnitts darin; im Ausgangs-Notizbuch ist
+der Abschnitt „QA-Test Warenkunde“ verschwunden; KEINE ⚠️-Warn-Pille
+erscheint (anders als vor v7.23, wo das Ziel mangels Kapitel übersprungen
+wurde, während die Quelle trotzdem gelöscht wurde). Beide Notizbücher auf
+den erwarteten Endzustand prüfen, bevor mit dem nächsten Testfall
+fortgefahren wird. Danach wie gewohnt aufräumen (Testinhalt wieder
+entfernen, falls Konservativ-Modus).
+
 **C16 [VERBUNDEN][API] Modell merkt sich proaktiv etwas (globales
 Gedächtnis, v7.16).** Im Chat, beiläufig zu einer sonstigen QA-Testnotiz,
 eine dauerhaft wirkende Präferenz nennen, die NICHT wie ein Notizbuch-

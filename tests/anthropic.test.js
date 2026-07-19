@@ -365,13 +365,18 @@ describe("buildSystem", () => {
       expect(sys).toContain("per \"rewrite\"-Op um");
     });
 
-    it("dokumentiert das optionale chapter-Feld inkl. Skip-Semantik bei fehlendem Kapitel", () => {
+    // v7.23 (Verschiebe-Auftrag, Live-Befund – siehe DECISIONS): Test
+    // umgeschrieben (nicht gelöscht) – append_to_section/replace_section
+    // legen ein fehlendes Kapitel jetzt automatisch an statt die Op zu
+    // überspringen; delete_section bleibt beim alten Skip.
+    it("dokumentiert das optionale chapter-Feld inkl. Auto-Anlage bei append/replace UND weiterhin Skip bei delete_section", () => {
       const sys = buildSystem(nbs, "Wissensbasis", null);
       expect(sys).toContain('"chapter"');
       expect(sys).toContain("# Projekte");
       expect(sys).toMatch(/mehrdeutigen Abschnittsnamen/);
-      expect(sys).toContain("wird die GESAMTE Op sicher übersprungen");
-      expect(sys).toContain("kein Fallback auf die globale Suche");
+      expect(sys).toContain("wird es bei append_to_section/replace_section automatisch am Dokumentende angelegt");
+      expect(sys).toContain("ohne rewrite");
+      expect(sys).toContain("Bei delete_section bleibt ein fehlendes Kapitel dagegen ein sicherer Skip OHNE Anlegen");
     });
 
     it("replace_section-content bleibt weiterhin OHNE ##- UND OHNE #-Zeilen dokumentiert", () => {
@@ -379,12 +384,44 @@ describe("buildSystem", () => {
       expect(sys).toContain("OHNE die ##-Überschriftszeile und OHNE #-Kapitelzeilen");
     });
 
-    it("NOTEBOOK_TOOL-Schema enthält die chapter-Property mit Beschreibung", () => {
+    it("rewrite bleibt für Umgliederungen dokumentiert, NICHT mehr als einziger Weg zur Kapitel-Anlage (v7.23)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("für größere Umgliederungen");
+      expect(sys).toContain("für ein EINZELNES neues Kapitel genügt stattdessen append_to_section/replace_section mit \"chapter\"");
+    });
+
+    it("NOTEBOOK_TOOL-Schema enthält die chapter-Property mit aktualisierter Auto-Anlage-Beschreibung (v7.23)", () => {
       const props = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties;
       expect(props.chapter).toBeDefined();
       expect(props.chapter.type).toBe("string");
       expect(props.chapter.description).toMatch(/Kapitel/);
-      expect(props.chapter.description).toMatch(/sicher übersprungen/);
+      expect(props.chapter.description).toMatch(/automatisch am Dokumentende NEU ANGELEGT/);
+      expect(props.chapter.description).toMatch(/delete_section.*sicherer Skip/);
+    });
+  });
+
+  // v7.23 (Verschiebe-Auftrag, Live-Befund des Nutzers): "Verschiebe X ins
+  // Notizbuch Y als neues Kapitel Z" führte bisher dazu, dass die Lösch-Op
+  // im Quell-Notizbuch griff, während die Ziel-Op (mangels Kapitel)
+  // übersprungen wurde – der Inhalt hing zwischenzeitlich in KEINEM
+  // Notizbuch. Zwei Vertragstests: die neue OPS-ZUVERLÄSSIGKEIT-Regel selbst
+  // UND ihre Platzierung (weiterhin im selben Block, nach dem
+  // Überführen-Muster).
+  describe("OPS-ZUVERLÄSSIGKEIT: Verschiebe-Regel (Ziel VOR Quelle, v7.23)", () => {
+    it("verlangt Ziel-Ops VOR Quell-Ops beim Verschieben zwischen Notizbüchern", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("Verschiebe-Regel");
+      expect(sys).toContain("ZUERST die Ziel-Ops");
+      expect(sys).toContain("DANN die Quell-Ops");
+      expect(sys).toContain("Niemals löschen, bevor das Ziel geschrieben ist");
+    });
+
+    it("steht im OPS-ZUVERLÄSSIGKEIT-Block, NACH dem Überführen-Muster", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      const block = sys.slice(sys.indexOf("OPS-ZUVERLÄSSIGKEIT"), sys.indexOf("REINE FRAGEN"));
+      expect(block).toContain("Überführen-Muster");
+      expect(block).toContain("Verschiebe-Regel");
+      expect(block.indexOf("Überführen-Muster")).toBeLessThan(block.indexOf("Verschiebe-Regel"));
     });
   });
 
