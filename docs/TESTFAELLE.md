@@ -116,7 +116,11 @@ kein Test-Rückstand bleibt.
 **B1 [VERBUNDEN] Notizbuch anlegen.** Dropdown → „⚙ Notizbücher
 verwalten …“ → Name „QA-Test Automatisch“ anlegen. Erwartet: erscheint in
 Liste und Dropdown, wird aktiv, Dokument zeigt „# QA-Test Automatisch“
-mit Inbox-Abschnitt.
+mit Inbox-Abschnitt. Beobachtungspunkt (v7.22): der Inbox-Abschnitt zeigt
+zunächst den Einladungstext „_Noch nichts erfasst. Die erste Notiz im
+Chat legt hier los._“ – das ist so gewollt (Erststart-Hinweis); relevant
+ist NUR, dass er nach der ersten echten Notiz wieder verschwindet (siehe
+C1).
 
 **B2 [VERBUNDEN] Umbenennen.** „QA-Test Automatisch“ im Admin-Dialog in
 „QA-Test Umbenannt“ umbenennen. Erwartet: Name überall aktualisiert
@@ -148,7 +152,12 @@ schließen die Liste ohne Auswahl.
 **C1 [VERBUNDEN][API] Notiz eintragen.** Im QA-Notizbuch per Chat:
 „Notiere: QA-Testeintrag Alpha am 2026-01-01“. Erwartet:
 Bestätigungsantwort im Chat, Commit-Zeile unter der Antwort, Eintrag
-erscheint rechts im Dokument (Datum im Format JJJJ-MM-TT).
+erscheint rechts im Dokument (Datum im Format JJJJ-MM-TT). Beobachtungspunkt
+(v7.22, nur relevant bei einem FRISCH angelegten Notizbuch, z. B. direkt im
+Anschluss an B1): der Einladungstext „_Noch nichts erfasst. Die erste Notiz
+im Chat legt hier los._“ ist nach diesem ersten Eintrag aus dem Inbox-
+Abschnitt verschwunden – bei einem bereits länger genutzten QA-Notizbuch
+ohne Platzhalter ist dieser Punkt gegenstandslos.
 
 **C2 [VERBUNDEN][API] Frage ohne Speicherung.** „Was steht in diesem
 Notizbuch?“ Erwartet: Antwort fasst Inhalt zusammen, KEIN neuer Commit,

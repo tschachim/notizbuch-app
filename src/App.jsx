@@ -6,7 +6,7 @@ import {
   ArrowUp, ArrowDown, Plus, ListTree, Archive, Maximize2, Minimize2,
 } from "lucide-react";
 
-import { applyOpsDetailed, dispHead } from "./lib/ops.js";
+import { applyOpsDetailed, dispHead, PLACEHOLDER_LINE, stripInboxPlaceholder } from "./lib/ops.js";
 import { applyMemoryOps, applyMemoryOpsDetailed } from "./lib/memory.js";
 import { diffLines, contextize } from "./lib/diff.js";
 import { DocView, IMG_REF_RE, TASK_RE, parseTree, renumberCitations } from "./lib/markdown.jsx";
@@ -68,8 +68,12 @@ const nameFromDoc = (text, fallbackSlug) => {
     .join(" ");
 };
 
-const initialDocFor = (name) =>
-  "# " + name + "\n\n## Inbox\n\n_Noch nichts erfasst. Die erste Notiz im Chat legt hier los._\n";
+// Exportiert (v7.22.1, Re-Review): tests/docEditorPlaceholder.test.jsx
+// braucht das ECHTE Anlage-Template, um den Editor-Roundtrip-Beleg gegen den
+// tatsächlichen Ausgangszustand statt gegen eine nachgebaute Zeichenkette zu
+// führen.
+export const initialDocFor = (name) =>
+  "# " + name + "\n\n## Inbox\n\n" + PLACEHOLDER_LINE + "\n";
 
 /* ------------------------------------------------------------------ */
 /* Konstanten (aus der Referenz-App übernommen)                        */
@@ -84,12 +88,7 @@ const OLD_HISTORY_PATH = "data/alt-historie.json";
 // zur Anwendung der Ops in lib/memory.js.
 const MEMORY_PATH = "data/memory.md";
 
-const INITIAL_DOC = `# Wissensbasis
-
-## Inbox
-
-_Noch nichts erfasst. Die erste Notiz im Chat legt hier los._
-`;
+const INITIAL_DOC = "# Wissensbasis\n\n## Inbox\n\n" + PLACEHOLDER_LINE + "\n";
 
 const WELCOME = {
   role: "assistant",
@@ -1263,7 +1262,14 @@ export default function NotizbuchApp() {
           // Fußnoten kommen als [0](url)-Platzhalter aus den ops.
           const applied = renumberCitations(detailed.text);
           if (applied === before) continue;
-          const ok = await commitDocNb(cfg, nbId, applied, res.commit || "Aktualisierung");
+          // v7.22 (Review-Fund 🟡): Anlage-Platzhalter erst NACH einer
+          // bereits feststehenden echten Änderung entfernen (siehe "applied
+          // === before"-Ausstieg oben) – ein reiner Platzhalter-Wegfall OHNE
+          // jede sonstige Änderung wird NIE für sich allein committet (kein
+          // ungefragter Commit). stripInboxPlaceholder ist idempotent, kostet
+          // bei fehlendem Platzhalter also nichts.
+          const toCommit = stripInboxPlaceholder(applied);
+          const ok = await commitDocNb(cfg, nbId, toCommit, res.commit || "Aktualisierung");
           if (!ok) { conflict = true; break; }
           changed.push({ id: nbId, name: nb ? nb.name : nbId, ops });
         }
@@ -2242,8 +2248,16 @@ export default function NotizbuchApp() {
       // Fehler-Banner) – der Fallback stellt sicher, dass mindestens der
       // unaufgelöste Text gespeichert wird.
       const resolvedMd = await resolveProviderLinkTitles(md).catch(() => md);
+      // v7.22 (Review-Fund 🟡): stripInboxPlaceholder läuft HIER
+      // bedingungslos (anders als in send(), siehe dort) – der Editor-Save
+      // schreibt ohnehin nur, wenn sich "cleaned" unten von oldDoc
+      // unterscheidet; ist der Platzhalter der EINZIGE Unterschied, ist das
+      // GENAU der gewünschte Effekt ("verschwindet bei Bestands-
+      // Notizbüchern beim nächsten Speichern automatisch"). Der leer-
+      // geräumte Editor (unten, INITIAL_DOC-Zweig) bleibt bewusst
+      // unangetastet – das frische Template darf den Platzhalter behalten.
       cleaned = resolvedMd.trim()
-        ? renumberCitations(resolvedMd.replace(/\n{3,}/g, "\n\n").trim() + "\n")
+        ? stripInboxPlaceholder(renumberCitations(resolvedMd.replace(/\n{3,}/g, "\n\n").trim() + "\n"))
         : INITIAL_DOC;
       if (cleaned !== oldDoc) {
         if (connected && settingsRef.current) {
@@ -2557,7 +2571,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.21</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.22</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"

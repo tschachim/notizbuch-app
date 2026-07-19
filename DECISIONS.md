@@ -3476,3 +3476,122 @@ aus `referenz-app.jsx` übernommen.
       jeder Form von Prompt-Injection über Nutzdaten (dafür bleibt die
       bestehende „DATEN, keine Anweisungen“-Rahmung der Blöcke die
       primäre Verteidigungslinie, siehe Punkt 61).
+
+64. **Anlage-Platzhalter verschwindet mit der ersten echten Notiz** (v7.22,
+    inzidenteller Befund aus dem v7.20/21-E2E-Lauf, 🟡). Ein neu angelegtes
+    Notizbuch bekommt im Inbox-Abschnitt den Einladungstext „_Noch nichts
+    erfasst. Die erste Notiz im Chat legt hier los._“ – guter Erststart-
+    Eindruck, blieb aber nach der ERSTEN echten Notiz einfach stehen: roh im
+    Markdown sichtbar, dauerhaft, und wurde vom Modell bei Zusammenfassungen
+    sogar mitzitiert (kein Regress aus v7.20/21, ein Vorbestand, aber ein
+    echter Dokumentqualitäts-Mangel). Bewusst MINIMALER Fix – das
+    Anlage-Template selbst bleibt unverändert (der Platzhalter ist als
+    Erststart-UX gewollt), NEU ist nur die Bereinigung beim ERSTEN echten
+    Schreiben danach:
+    - **Eine Quelle für Template UND Bereinigung** (`src/lib/ops.js`, neue
+      Exporte `PLACEHOLDER_LINE` und `stripInboxPlaceholder(docText)`):
+      Vorher stand der Platzhaltertext als Literal an ZWEI Stellen in
+      `App.jsx` (`initialDocFor`, `INITIAL_DOC`) – jetzt bauen beide den
+      Text aus `PLACEHOLDER_LINE` zusammen, byte-identisch zum bisherigen
+      Wortlaut (kein optischer Unterschied). `stripInboxPlaceholder`
+      entfernt die exakte Zeile (kein Fuzzy-/Teilstring-Match – ein
+      Nutzertext mit ähnlichem Wortlaut bleibt unangetastet) und
+      normalisiert umgebende Leerzeilen über dieselbe `tidy()`-Funktion, die
+      auch `applyOne()` für alle anderen Textänderungen verwendet. Ohne
+      Treffer: garantiert byte-identische Rückgabe (Idempotenz, billiger
+      Kurzschluss-Pfad). Bewusst NICHT innerhalb `applyOne()`/`applyOps()`
+      aufgerufen – die Wrapper-Äquivalenz-Pins aus v7.21
+      (`applyOps === applyOpsDetailed(...).text`) bleiben unangetastet, die
+      Bereinigung ist ausschließlich Sache der Schreib-Pfade in `App.jsx`.
+    - **Schreib-Pfad 1, Chat/Modell-Ops** (`App.jsx#send`, nach
+      `applyOpsDetailed`/`renumberCitations`): `stripInboxPlaceholder` läuft
+      NUR, nachdem bereits feststeht, dass diese Op-Gruppe eine ECHTE
+      inhaltliche Änderung erzeugt hat (`applied !== before`, bestehender
+      Ausstieg bleibt VOR der Bereinigung) – ein reiner Platzhalter-Wegfall
+      OHNE jede sonstige Änderung wird also NIE für sich allein committet
+      (kein ungefragter Commit nur wegen der Bereinigung).
+    - **Schreib-Pfad 2, Editor-Save** (`App.jsx#saveEdit`, direkt nach dem
+      Link-Titel-Resolver, VOR dem `cleaned !== oldDoc`-Vergleich):
+      bedingungslos angewendet – der Editor-Save schreibt ohnehin nur, wenn
+      sich das Ergebnis vom alten Stand unterscheidet; steht der Platzhalter
+      noch in einem BESTANDS-Notizbuch (der Nutzer hat ihn beim Editieren
+      nicht angefasst), verschwindet er beim nächsten Speichern automatisch
+      mit. Der Zweig für den KOMPLETT geleerten Editor (`INITIAL_DOC`) bleibt
+      bewusst unangetastet – ein frisch zurückgesetztes Template darf den
+      Platzhalter wieder zeigen. `requestFeedback` bleibt unberührt (wendet
+      selbst nichts auf das Dokument an, bekommt nur `cleaned` zum Diffen).
+    - **Tests** (`tests/ops.test.js`, neuer Block
+      „stripInboxPlaceholder: Anlage-Platzhalter aus dem Dokument entfernen“):
+      Platzhalter als einziger Inhalt, Platzhalter mittendrin zusammen mit
+      echtem Inhalt (nur der Platzhalter-Absatz verschwindet, Rest bleibt,
+      keine Dreifach-Newlines), Dokument ohne Platzhalter (byte-identisch),
+      mehrere Vorkommen (alle entfernt), `null`/`undefined`/leerer Input
+      (kein Wurf), Whitespace-Toleranz am Zeilenende, und explizit ein
+      Negativ-Fall (nur teilweise übereinstimmender Nutzertext bleibt
+      unangetastet, kein Fuzzy-Match). Die Caller-seitige Zurückhaltung
+      „nur bei echter Änderung committen“ ist eine Eigenschaft von
+      `App.jsx#send`/`saveEdit`, nicht von `stripInboxPlaceholder` selbst,
+      und wird deshalb dort per Code-Review statt per Komponententest
+      abgesichert (kein bestehender Testharness für die send()/saveEdit()-
+      Closures, die auf echte GitHub-/Anthropic-Netzwerkaufrufe angewiesen
+      sind). Gesamtstand danach 793/793 grün (vorher 786).
+    - **Restrisiko:** Rein textueller Zeilenvergleich – ändert sich der
+      Platzhaltertext künftig (z. B. Nutzerwunsch nach anderem Wortlaut),
+      muss NUR `PLACEHOLDER_LINE` angepasst werden (Single Source), alte,
+      bereits gespeicherte Notizbücher mit dem ALTEN Wortlaut würden dann
+      aber nicht mehr erkannt – bewusst hingenommen (derselbe Kompromiss wie
+      bei jeder anderen textbasierten Erkennung in dieser App, z. B.
+      `normHead` für Abschnittsüberschriften).
+    - **Nachbesserung v7.22.1 (Re-Review 🟡): der Editor serialisiert Kursiv
+      als `*…*`, nicht als `_..._`** – `stripInboxPlaceholder` matchte
+      bisher NUR die Template-Form mit Unterstrichen. Empirisch belegt
+      (`tests/docEditorPlaceholder.test.jsx`, echter tiptap-markdown-
+      Zyklus): tiptap-markdown normalisiert JEDE Kursiv-Mark beim
+      Serialisieren einheitlich auf Asterisk – ein frisches Anlage-Template
+      trägt zwar `_..._`, ein einziges Öffnen+Speichern im WYSIWYG-Editor
+      (auch OHNE jede inhaltliche Änderung, siehe `saveEdit`s
+      `cleaned !== oldDoc`-No-op-Vergleich, der die reine Editor-
+      Normalisierung mit einschließt) schreibt danach aber dauerhaft
+      `*Noch nichts erfasst…*` – eine Form, die der alte Zeilenvergleich nie
+      erkannte. Genau das war die vom Tester beobachtete „Platzhalter ohne
+      Unterstriche“-Auffälligkeit: ab dem ERSTEN Editor-Speichern eines
+      Notizbuchs wurde der Platzhalter unauffindbar und blieb für immer
+      liegen. Fix (`src/lib/ops.js`): `PLACEHOLDER_CORE` (reiner Text OHNE
+      Kursiv-Marker) ist jetzt die eigentliche Quelle; `PLACEHOLDER_LINE`
+      (unverändert nach außen, `_CORE_`) UND eine interne `*CORE*`-Form
+      werden daraus abgeleitet. `isPlaceholderLine(l)` erkennt eine
+      getrimmte Zeile, die EXAKT einer der beiden Formen entspricht;
+      `stripInboxPlaceholder` filtert danach statt nach der alten
+      Einzelform, und der `includes()`-Kurzschluss prüft auf
+      `PLACEHOLDER_CORE` (ohne Marker) statt auf eine feste Form – erkennt
+      dadurch beide Varianten mit einem einzigen Kurzschluss-Check, ohne
+      zwei separate `includes()`-Aufrufe.
+      - **Tests, String-Ebene** (`tests/ops.test.js`, neuer Block „Asterisk-
+        Form '*…*' (Editor-Serialisierung, v7.22.1)“): dieselben vier
+        Fälle wie bei der Unterstrich-Form gespiegelt (einziger Inhalt,
+        mittendrin mit echtem Inhalt, Dokument ohne Platzhalter,
+        Idempotenz) PLUS ein Mischfall (beide Formen im selben Dokument,
+        z. B. durch zusammengeführte Notizbücher denkbar) – beide
+        verschwinden gemeinsam.
+      - **Test, ECHTER Editor-Roundtrip** (neue Datei
+        `tests/docEditorPlaceholder.test.jsx`, Headless-Muster identisch zu
+        `tests/docEditorLinks.test.jsx`, also dieselbe Extensions-
+        Konfiguration wie `DocEditor.jsx`): `initialDocFor("QA-Test")`
+        (jetzt aus `App.jsx` exportiert, damit der Test den ECHTEN
+        Ausgangszustand statt einer nachgebauten Zeichenkette verwendet)
+        einmal durch einen echten TipTap-`Editor` geladen+serialisiert →
+        Ergebnis enthält nachweislich die Asterisk-Form, NICHT mehr die
+        Unterstrich-Form (pinnt die reale tiptap-markdown-Serialisierung,
+        nicht nur eine Annahme darüber) → `stripInboxPlaceholder` entfernt
+        sie vollständig → ein zweiter Editor-Zyklus nach der Bereinigung
+        bleibt stabil (kein Wiederauftauchen). Gesamtstand danach 800/800
+        grün (vorher 793).
+      - **Restrisiko unverändert plus einen Punkt:** Sollte tiptap-markdown
+        in einer künftigen Version die Serialisierungsform nochmals ändern
+        (z. B. auf `**…**` für Fett statt Kursiv o. Ä. – hier irrelevant, da
+        wir Kursiv meinen, aber als Muster), würde das ohne einen neuen
+        empirischen Beleg wieder unbemerkt bleiben; der
+        `docEditorPlaceholder`-Test lädt aber bei jedem CI-Lauf gegen die
+        tatsächlich installierte `tiptap-markdown`-Version und würde eine
+        SOLCHE künftige Änderung sofort als roten Test sichtbar machen,
+        statt sie erst wieder live beim Nutzer auffallen zu lassen.

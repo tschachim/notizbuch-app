@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { applyOps, applyOpsDetailed, normHead, dispHead } from "../src/lib/ops.js";
+import { applyOps, applyOpsDetailed, normHead, dispHead, PLACEHOLDER_LINE, stripInboxPlaceholder } from "../src/lib/ops.js";
 
 const DOC = `# Wissensbasis
 
@@ -562,4 +562,105 @@ describe("applyOps === applyOpsDetailed(...).text (Wrapper-Äquivalenz, Pin)", (
       expect(applyOps(doc, ops)).toBe(applyOpsDetailed(doc, ops).text);
     });
   }
+});
+
+// v7.22 (Review-Fund 🟡): der Anlage-Platzhalter im Inbox-Abschnitt blieb
+// bisher nach der ersten echten Notiz stehen – roh im Markdown sichtbar und
+// vom Modell bei Zusammenfassungen sogar mitzitiert. stripInboxPlaceholder
+// ist eine eigenständige, reine Funktion (NICHT Teil von applyOps selbst –
+// die Wrapper-Äquivalenz-Pins oben bleiben dadurch unberührt); WANN sie
+// aufgerufen wird (nur nach einer bereits echten Änderung in send(), immer
+// im Editor-Save-Pfad saveEdit()) ist Sache von App.jsx, siehe DECISIONS.
+describe("stripInboxPlaceholder: Anlage-Platzhalter aus dem Dokument entfernen (v7.22)", () => {
+  it("Platzhalter als EINZIGER Inhalt der Inbox wird entfernt (isoliert betrachtet – die Caller-seitige Zurückhaltung 'nur bei echter Änderung' ist Sache von App.jsx, nicht dieser Funktion)", () => {
+    const doc = "# NB\n\n## Inbox\n\n" + PLACEHOLDER_LINE + "\n";
+    const out = stripInboxPlaceholder(doc);
+    expect(out).not.toContain(PLACEHOLDER_LINE);
+    expect(out).toBe("# NB\n\n## Inbox\n");
+  });
+
+  it("Platzhalter MITTENDRIN, zusammen mit echtem Inhalt im selben Abschnitt: nur der Platzhalter-Absatz verschwindet, der Rest bleibt", () => {
+    const doc =
+      "# NB\n\n## Inbox\n\n" + PLACEHOLDER_LINE + "\n\nKaffee gekauft.\n\n## Andere Sektion\n\nText\n";
+    const out = stripInboxPlaceholder(doc);
+    expect(out).not.toContain(PLACEHOLDER_LINE);
+    expect(out).toContain("Kaffee gekauft.");
+    expect(out).toContain("## Andere Sektion");
+    expect(out).toContain("Text");
+    // Leerzeilen sauber normalisiert (kein Dreifach-Newline durch das
+    // Herausschneiden der Zeile) – tidy()-Muster wie überall in ops.js.
+    expect(out).not.toMatch(/\n{3,}/);
+    expect(out.endsWith("\n")).toBe(true);
+  });
+
+  it("Dokument OHNE Platzhalter: byte-identische Rückgabe (Idempotenz, Kurzschluss-Pfad)", () => {
+    const doc = "# NB\n\n## Inbox\n\nEchte Notiz.\n";
+    expect(stripInboxPlaceholder(doc)).toBe(doc);
+  });
+
+  it("mehrere Vorkommen des Platzhalters (z. B. versehentlich zweimal eingefügt) werden ALLE entfernt", () => {
+    const doc =
+      "# NB\n\n## Inbox\n\n" + PLACEHOLDER_LINE + "\n\n" + PLACEHOLDER_LINE + "\n\nEcht.\n";
+    const out = stripInboxPlaceholder(doc);
+    expect(out).not.toContain(PLACEHOLDER_LINE);
+    expect(out).toContain("Echt.");
+  });
+
+  it("null/undefined/leerer Input wirft nicht, liefert einen leeren, wohlgeformten String", () => {
+    expect(stripInboxPlaceholder(null)).toBe("");
+    expect(stripInboxPlaceholder(undefined)).toBe("");
+    expect(stripInboxPlaceholder("")).toBe("");
+  });
+
+  it("Platzhalter-Zeile mit umgebendem Whitespace (z. B. Trailing Space durch manuelles Editieren) wird über .trim()-Vergleich trotzdem erkannt", () => {
+    const doc = "# NB\n\n## Inbox\n\n" + PLACEHOLDER_LINE + "   \n\nEcht.\n";
+    const out = stripInboxPlaceholder(doc);
+    expect(out).not.toContain("Noch nichts erfasst");
+    expect(out).toContain("Echt.");
+  });
+
+  it("ein Nutzertext, der NUR TEILWEISE mit dem Platzhalter übereinstimmt, bleibt unangetastet (kein Fuzzy-Match, nur exakte Zeilen-Übereinstimmung)", () => {
+    const doc = "# NB\n\n## Inbox\n\n_Noch nichts erfasst, aber gleich._\n";
+    expect(stripInboxPlaceholder(doc)).toBe(doc);
+  });
+});
+
+// v7.22.1 (Re-Review 🟡, Nachbesserung): tiptap-markdown serialisiert Kursiv
+// beim Speichern im WYSIWYG-Editor als "*…*", NICHT als "_..._" (empirisch
+// belegt, siehe DECISIONS #64 Nachtrag) – jedes je durch den Editor
+// gespeicherte Notizbuch trägt danach dauerhaft die Asterisk-Form. Diese
+// Fälle spiegeln GENAU die Unterstrich-Fälle oben, diesmal mit "*…*".
+describe("stripInboxPlaceholder: Asterisk-Form '*…*' (Editor-Serialisierung, v7.22.1)", () => {
+  const STAR = "*Noch nichts erfasst. Die erste Notiz im Chat legt hier los.*";
+
+  it("Platzhalter in Asterisk-Form als EINZIGER Inhalt der Inbox wird entfernt", () => {
+    const doc = "# NB\n\n## Inbox\n\n" + STAR + "\n";
+    const out = stripInboxPlaceholder(doc);
+    expect(out).not.toContain(STAR);
+    expect(out).toBe("# NB\n\n## Inbox\n");
+  });
+
+  it("Platzhalter in Asterisk-Form MITTENDRIN, zusammen mit echtem Inhalt: nur der Platzhalter-Absatz verschwindet, der Rest bleibt", () => {
+    const doc = "# NB\n\n## Inbox\n\n" + STAR + "\n\nKaffee gekauft.\n\n## Andere Sektion\n\nText\n";
+    const out = stripInboxPlaceholder(doc);
+    expect(out).not.toContain(STAR);
+    expect(out).toContain("Kaffee gekauft.");
+    expect(out).toContain("## Andere Sektion");
+    expect(out).not.toMatch(/\n{3,}/);
+  });
+
+  it("BEIDE Formen gemischt im selben Dokument (z. B. zwei Notizbücher zusammengeführt) werden BEIDE entfernt", () => {
+    const doc =
+      "# NB\n\n## Inbox\n\n" + PLACEHOLDER_LINE + "\n\n" + STAR + "\n\nEcht.\n";
+    const out = stripInboxPlaceholder(doc);
+    expect(out).not.toContain(PLACEHOLDER_LINE);
+    expect(out).not.toContain(STAR);
+    expect(out).not.toContain("Noch nichts erfasst");
+    expect(out).toContain("Echt.");
+  });
+
+  it("Dokument OHNE jede Platzhalter-Form: byte-identische Rückgabe (Idempotenz)", () => {
+    const doc = "# NB\n\n## Inbox\n\nEchte Notiz.\n";
+    expect(stripInboxPlaceholder(doc)).toBe(doc);
+  });
 });

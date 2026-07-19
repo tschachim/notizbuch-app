@@ -260,3 +260,53 @@ export function applyOpsDetailed(docText, ops) {
 export function applyOps(docText, ops) {
   return applyOpsDetailed(docText, ops).text;
 }
+
+// Anlage-Platzhalter im Inbox-Abschnitt eines frisch angelegten Notizbuchs
+// (v7.22, Review-Fund 🟡): guter Erststart-Eindruck, aber blieb bisher nach
+// der ERSTEN echten Notiz weiter im Dokument stehen – roh im Markdown
+// sichtbar und wurde vom Modell bei Zusammenfassungen sogar mitzitiert.
+// EINE Quelle für BEIDES: App.jsx baut das Anlage-Template damit (statt
+// eines eigenen Literal-Strings), stripInboxPlaceholder() unten sucht
+// GENAU diesen Text – eine künftige Textänderung hält Template und
+// Bereinigung automatisch synchron, statt an zwei Stellen zu divergieren.
+//
+// v7.22.1 (Re-Review 🟡, Nachbesserung): PLACEHOLDER_LINE allein reichte
+// NICHT – der WYSIWYG-Editor (tiptap-markdown) serialisiert Kursiv-Marks
+// beim Speichern als "*…*", NICHT als "_..._" (empirisch belegt: ein
+// frisches Template einmal im Editor geöffnet+gespeichert trägt danach
+// dauerhaft die Asterisk-Form). PLACEHOLDER_CORE hält den reinen Text OHNE
+// Kursiv-Marker als eigentliche Quelle; PLACEHOLDER_LINE (Template-Form,
+// UNVERÄNDERT nach außen) und die Asterisk-Form werden daraus abgeleitet.
+const PLACEHOLDER_CORE = "Noch nichts erfasst. Die erste Notiz im Chat legt hier los.";
+export const PLACEHOLDER_LINE = "_" + PLACEHOLDER_CORE + "_";
+const PLACEHOLDER_LINE_STAR = "*" + PLACEHOLDER_CORE + "*";
+
+// true, wenn die (bereits getrimmte) Zeile EXAKT einer der beiden vom Editor
+// erzeugbaren Kursiv-Formen entspricht ("_…_" aus dem Anlage-Template ODER
+// "*…*" aus einem tiptap-markdown-Speichervorgang) – kein Teilstring-/
+// Fuzzy-Match, ein Nutzertext mit ähnlichem Wortlaut bleibt unangetastet.
+function isPlaceholderLine(l) {
+  const t = l.trim();
+  return t === PLACEHOLDER_LINE || t === PLACEHOLDER_LINE_STAR;
+}
+
+// Entfernt den Platzhalter-ABSATZ (in JEDER der beiden Kursiv-Formen,
+// umgebende Leerzeilen via tidy() normalisiert) aus docText, falls
+// vorhanden. Ohne Treffer: früher Ausstieg, GARANTIERT byte-identische
+// Rückgabe (Idempotenz – wichtig, weil die Aufrufer in App.jsx dies bei
+// JEDEM Schreib-Vorgang aufrufen, nicht nur beim ersten). Der includes()-
+// Kurzschluss prüft bewusst NUR auf PLACEHOLDER_CORE (ohne Marker) – so
+// greift er unabhängig davon, ob die konkrete Zeile gerade in Unterstrich-
+// oder Asterisk-Form vorliegt, ohne zwei separate includes()-Aufrufe.
+// Bewusst NICHT Teil von applyOne()/applyOps() selbst (kein Aufruf hier
+// drin) – die Wrapper-Äquivalenz-Pins aus v7.21
+// (applyOps === applyOpsDetailed(...).text) bleiben dadurch unangetastet;
+// die Bereinigung ist ausschließlich Sache der Schreib-Pfade in App.jsx
+// (send() nach applyOps, saveEdit() im Editor), NIE ein impliziter
+// Nebeneffekt der ops-Engine selbst.
+export function stripInboxPlaceholder(docText) {
+  const text = String(docText || "");
+  if (!text.includes(PLACEHOLDER_CORE)) return text; // Kurzschluss: Idempotenz
+  const lines = text.split("\n").filter((l) => !isPlaceholderLine(l));
+  return tidy(lines);
+}
