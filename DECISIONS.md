@@ -3705,3 +3705,115 @@ aus `referenz-app.jsx` übernommen.
       Dokumentende – eine bewusst einfache, vorhersagbare Position (analog
       zur bestehenden Abschnitts-Anlage), keine inhaltliche Einordnung
       irgendwo „thematisch passend“ mitten im Dokument.
+
+66. **HTML-Entity-Bug: getipptes "<"/">" erschien im Dokument-Viewer als
+    "&lt;"/"&gt;"** (v7.24, Nutzer-Befund). Auftrag inkl. Hypothese: Der
+    WYSIWYG-Editor (`DocEditor.jsx`, `tiptap-markdown` mit `html:true` –
+    nötig für `<span>`/`<mark>`/Formel-Tags) escaped getippten Text beim
+    Speichern, der zeilenbasierte Viewer (`markdown.jsx`) gibt Text aber 1:1
+    als JSX-Textknoten aus.
+    - **Empirische Verifikation ZUERST** (Headless-tiptap-Proben, ECHTES
+      `insertText()` auf der ProseMirror-Transaction statt
+      `editor.commands.insertContent(string)` – Letzteres ist laut
+      `tiptap-markdown/src/Markdown.js` gepatcht und parst JEDEN String
+      immer als Markdown-Quelle, echtes Tippen geht nie durch markdown-it):
+      Der Text-Node-Serializer (`tiptap-markdown/src/extensions/nodes/
+      text.js`, `escapeHTML`) ersetzt beim Speichern IMMER `"<"→"&lt;"` und
+      `">"→"&gt;"` – **"&" bleibt dagegen IMMER unangetastet** (weder
+      `escapeHTML` noch `prosemirror-markdown`s eigenes `esc()`, zuständig
+      für `` `*_~[]\`\\ ``, fassen ein "&" an). Ein vom Editor erzeugtes
+      "&amp;" gibt es folglich NICHT, auch kein Doppel-Escape "&amp;lt;" –
+      ein wörtlich getipptes "&lt;" (vier Zeichen, kein "<") ergibt beim
+      Speichern DIESELBE Zeichenfolge wie ein getipptes "<" (Test
+      `tests/docEditorEntities.test.jsx`, "wörtlich getipptes &lt;…").
+      Diese Ambiguität entsteht bereits IM EDITOR selbst (jedes Laden
+      interpretiert gespeichertes "&lt;" wieder als "<") – der ursprünglich
+      befürchtete Doppel-Escape-Fall tritt in DIESEM Codepfad also gar
+      nicht auf. Codespans/Codeblöcke serialisieren NACHWEISLICH OHNE
+      `escapeHTML`: `FencedCodeBlock`/`CodeBlockExtension` schreiben
+      `state.text(node.textContent, false)`, der `code`-Mark hat in
+      `prosemirror-markdown` `escape:false` (umgeht den Text-Node-
+      Serializer komplett) – ihr Inhalt bleibt deshalb unangetastet. Der
+      Chat (`renderMathText`/`renderWithCites`) läuft NIE durch den
+      tiptap-Editor (reines `<textarea>`/API-Text) – geprüft, keine
+      Entities dort, bewusst NICHT angefasst.
+    - **Fix** (`src/lib/markdown.jsx`, neue Funktion `decodeBasicEntities`,
+      exportiert): bewusst eine MINIMALE Whitelist – NUR `&lt;`/`&gt;` →
+      `<`/`>`, explizit KEIN `&amp;`/`&quot;`/`&#39;` und keine generische
+      Entity-Bibliothek. Begründung: Ein Nutzer, der selbst wörtlich
+      "&amp;" tippt oder einfügt (z. B. Copy&Paste von HTML-Quelltext),
+      soll seinen Text nicht stillschweigend zu "&" umgedeutet bekommen –
+      dieselbe Camouflage-Gefahr wie beim ursprünglich befürchteten
+      Doppel-Escape, nur dass sie empirisch nachweislich NICHT aus dem
+      Editor selbst entsteht (siehe oben).
+    - **Anwendungsort, präzise gewählt** (kein globales Vorab-Decoding vor
+      dem Tokenizing – genau die im Auftrag skizzierte Gefahr, dass ein
+      wörtlich escapetes "&lt;span&gt;" nach Dekodierung fälschlich als
+      ECHTES `<span>`-Formatierungs-Tag interpretiert würde):
+      - `renderInline` (markdown.jsx): Dekodierung NUR an den beiden
+        Stellen, die bereits als „kein Token“ feststehen (`parts.push(s)`
+        im No-Match-Fall und `parts.push(s.slice(0, m.index))` vor einem
+        gefundenen Token) – `INLINE_TOKEN_RE`/`MATH_TOKEN_RE` laufen VORHER
+        auf dem noch UNDEKODIERTEN String. Ein `<span ...>`-Tag matcht die
+        Tag-Alternative nur bei einem ECHTEN "<"-Zeichen; ein escapetes
+        "&lt;span&gt;" matcht nie und wird nach dem Dekodieren nie erneut
+        auf Tokens geprüft (der Text ist zu diesem Zeitpunkt bereits final
+        platziert). Codespans (`` `…` ``-Zweig) rufen die Funktion bewusst
+        NIE auf. Deckt Fließtext, Listen/Checklisten, Tabellenzellen und
+        rekursiv Fett/Kursiv/`<span>`/`<mark>`-Inhalt sowie Link-Titel ab
+        (alles läuft über `renderInline`).
+      - Überschriften (H1 „pre“-Titelzeile, H2-Abschnitt, H3-Unterthema,
+        H1-Kapitel) laufen NIE durch `renderInline` (unterstützen ohnehin
+        keine Inline-Formatierung) – dort direkt an der Ausgabe-Stelle
+        dekodiert (`renderBlocks`s H1-Zweig, `renderSection`s beide
+        `<span>`, der Kapitel-Kopf).
+      - **Bewusst NICHT in `parseTree` selbst** (d. h. `sec.title`/
+        `chap.title`/`sub.title` bleiben in der Datenstruktur ROH/
+        undekodiert): Diese Strings dienen in `markdown.jsx` UND `App.jsx`
+        (Navigations-Leiste, `gotoSection`/`gotoChapter`,
+        `collapsedAll`-Klapp-Keys `"s:"+Titel`/`"c:"+Titel`, persistiert
+        über `state.json`) als STABILER Schlüssel. Eine Dekodierung an der
+        Quelle hätte diese Keys unbemerkt verändert und old-persisted
+        Klappzustände für Titel mit "<"/">" beim Upgrade einmalig
+        invalidiert. Stattdessen wird NUR an den Anzeige-Stellen dekodiert
+        (`App.jsx`: `renderSecTab`s sichtbares Label + `title`-Tooltip, der
+        Kapitel-Button analog) – `gotoSection(si, sec.title)`/
+        `toggleNavChap(chap.title)`/`navChapKey(...)` bleiben unverändert
+        auf dem ROHEN Titel, exakt wie `markdown.jsx`s eigener Klapp-Key
+        (`"s:"+sec.title` in `renderSection`) – Konsistenz zwischen beiden
+        Dateien bleibt gewahrt, da beide dieselbe `sections`/`chapters`-
+        Struktur aus `parseTree` lesen.
+    - **Tests**: `tests/markdown.test.jsx`, neuer Block „DocView:
+      Editor-Entities (v7.24 Bugfix …)“ – Fließtext, Listen/Checklisten/
+      Tabellenzellen, alle vier Überschriftsebenen, explizit "&amp;" bleibt
+      unverändert (kein stilles Umdeuten), ein wörtlich escapetes
+      "&lt;span&gt;…&lt;/span&gt;" wird NICHT zur echten Formatierung, eine
+      ECHTE (unescapte) `<span>`-Farbmarkierung neben escapetem Text bleibt
+      funktionsfähig (Regression), Codespan/Codeblock bleiben byte-genau
+      unangetastet, Formeln unbeeinflusst, URLs (href, auch mit "&" im
+      Query-String) werden NIE dekodiert, generischer Link-Titel mit
+      escaptem "<" wird korrekt dekodiert bei unangetasteter URL. NEUE
+      Datei `tests/docEditorEntities.test.jsx` (Vorbild
+      `docEditorMath.test.jsx`): kompletter Zyklus ECHTES Tippen
+      (`insertText`, kein Markdown-Quelltext-Parsing) → Speichern
+      (`unescapeMd`) → Anzeige (`DocView`), inkl. der oben belegten
+      Serializer-Fakten als Assertions (Beweis bleibt reproduzierbar, nicht
+      nur im Bericht behauptet), zweiter Lade-/Speicherzyklus byte-stabil,
+      Ambiguitäts-Nachweis "&lt;" getippt vs. "<" getippt, Farbmarkierung
+      + Codespan/Codeblock-Regression. Gesamtstand danach 834/834 grün
+      (vorher 817).
+    - **Bewusste Entscheidungen/Restrisiken:** (1) Die dokumentierte
+      Ambiguität "&lt;" getippt vs. "<" getippt bleibt bestehen (Editor-
+      Eigenschaft, nicht vom Viewer auflösbar) – beide Eingaben liefern
+      dieselbe Anzeige, was für den weit überwiegenden Fall (Nutzer tippt
+      "<"/">" als Vergleichsoperator/spitze Klammer) das gewünschte
+      Verhalten ist. (2) Persistierte Klapp-Zustände (`collapsedAll` in
+      `state.json`) für ein Kapitel/einen Abschnitt, dessen Titel "<"/">"
+      enthält UND aktuell zugeklappt ist, bleiben auf dem ROHEN (nicht
+      dekodierten) Titel als Schlüssel – rein kosmetisch, kein
+      Daten-/Korrektheitsrisiko, selbstheilend beim nächsten Klick.
+      (3) `&amp;`/`&quot;`/`&#39;` werden bewusst NICHT dekodiert (siehe
+      Fix-Begründung oben) – taucht künftig doch ein Codepfad auf, der "&"
+      escaped (z. B. eine neue Editor-Extension), zeigt der Viewer dafür
+      wieder wörtlich "&amp;" an, bis die Whitelist erweitert wird; aktuell
+      empirisch nicht der Fall.

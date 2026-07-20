@@ -142,6 +142,47 @@ export function parseTree(text) {
   return { pre, sections, chapters };
 }
 
+/* ---------------- HTML-Entity-Dekodierung (v7.24 Bugfix) ---------------- */
+/* Nutzer-Befund: "<"/">" im Editor getippt erscheinen im Dokument-Viewer
+   als "&lt;"/"&gt;" statt als die Zeichen selbst.
+
+   Empirisch verifiziert (headless tiptap-Editor-Proben, siehe
+   tests/markdown.test.jsx "Editor-Entities (v7.24 Bugfix)" – KEIN reines
+   Markdown-Quelltext-Parsing, sondern echtes insertText() auf der
+   ProseMirror-Transaction, damit die Probe wirklich GETIPPTEN Text und
+   nicht das Parsen einer Markdown-Quelle misst): tiptap-markdown erzwingt
+   html:true (Kopfkommentar der Datei, für <span>/<mark>/Formel-Tags nötig)
+   und schützt sich dagegen, dass ein roher, getippter "<"/">" beim
+   nächsten Laden versehentlich als HTML interpretiert wird – der TEXT-
+   Node-Serializer (tiptap-markdown/src/extensions/nodes/text.js,
+   escapeHTML) ersetzt daher IMMER "<"→"&lt;" und ">"→"&gt;". "&" bleibt
+   dagegen IMMER unangetastet: weder escapeHTML noch prosemirror-markdowns
+   eigenes esc() (zuständig für `*_~[]\`\\`) fassen ein "&" an. Ein von
+   DIESEM Editor erzeugtes "&amp;" gibt es folglich NICHT – auch kein
+   Doppel-Escape "&amp;lt;": ein wörtlich getipptes "&lt;" (vier Zeichen,
+   kein "<") bleibt beim Speichern unverändert "&lt;", ununterscheidbar von
+   einem getippten "<". Diese Ambiguität entsteht bereits IM EDITOR selbst
+   (jedes Laden interpretiert gespeichertes "&lt;" wieder als "<") – der
+   Viewer hier übernimmt bewusst dieselbe Lesart, statt eine zweite,
+   abweichende Interpretation einzuführen.
+   Codeblöcke/Codespans serialisieren NACHWEISLICH OHNE escapeHTML
+   (CodeBlockExtension/FencedCodeBlock: `state.text(node.textContent,
+   false)`; der code-Mark: `escape:false` in prosemirror-markdown,
+   umgeht den Text-Node-Serializer komplett) – ihr Inhalt bleibt deshalb
+   unangetastet und ruft diese Funktion nie auf (siehe CodeBlockView,
+   code.jsx, und der `` `…` ``-Zweig unten in renderInline).
+
+   Deshalb bewusst eine MINIMALE Whitelist – NUR die zwei nachweislich vom
+   Editor erzeugten Entities, kein "&amp;"/"&quot;"/"&#39;" und keine
+   generische Entity-Bibliothek: Ein Nutzer, der selbst wörtlich "&amp;"
+   tippt oder einfügt (z. B. Copy&Paste von HTML-Quelltext), soll seinen
+   Text nicht stillschweigend zu "&" umgedeutet bekommen. */
+const HTML_ENTITY_RE = /&lt;|&gt;/g;
+const HTML_ENTITY_MAP = { "&lt;": "<", "&gt;": ">" };
+export function decodeBasicEntities(text) {
+  return typeof text === "string" ? text.replace(HTML_ENTITY_RE, (m) => HTML_ENTITY_MAP[m]) : text;
+}
+
 /* ---------------- Inline-Rendering (rekursiv) ---------------- */
 
 // Nur echte Farbwerte in Inline-Styles übernehmen (kein Weg für XSS).
@@ -376,8 +417,15 @@ function renderInline(text) {
     // Bei Gleichstand gewinnt die Formel (siehe Kommentar bei INLINE_TOKEN_RE).
     const isMath = mathM && (!otherM || mathM.index <= otherM.index);
     const m = isMath ? mathM : otherM;
-    if (!m) { parts.push(s); break; }
-    if (m.index > 0) parts.push(s.slice(0, m.index));
+    // decodeBasicEntities NUR auf bereits als "kein Token" feststehenden
+    // Text (v7.24 Bugfix, siehe Kommentar dort): INLINE_TOKEN_RE/MATH_TOKEN_RE
+    // laufen HIER VORHER auf dem NOCH UNDEKODIERTEN "s" – ein escapetes
+    // "&lt;span&gt;" (wörtlich getippter Text) matcht die Tag-Alternative
+    // nie (die verlangt ein echtes "<"), wird also nie fälschlich zum
+    // Formatierungs-Tag, selbst nachdem es hier zu sichtbarem "<span>"
+    // dekodiert wird.
+    if (!m) { parts.push(decodeBasicEntities(s)); break; }
+    if (m.index > 0) parts.push(decodeBasicEntities(s.slice(0, m.index)));
     const tok = m[0];
     const after = m.index + tok.length;
 
@@ -654,7 +702,7 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
       );
     } else if (/^#\s+/.test(line)) {
       flush();
-      blocks.push(<h1 key={kp + key++} className="text-xl font-bold text-slate-900 mb-2">{line.replace(/^#\s+/, "")}</h1>);
+      blocks.push(<h1 key={kp + key++} className="text-xl font-bold text-slate-900 mb-2">{decodeBasicEntities(line.replace(/^#\s+/, ""))}</h1>);
     } else if (taskM) {
       ensure("task");
       const checked = taskM[2].toLowerCase() === "x";
@@ -718,7 +766,10 @@ export function DocView({ text, collapsed, onToggle, imgMap, onImgClick, onToggl
           className="w-full flex items-center gap-1.5 text-left pb-1 border-b border-slate-200"
         >
           <ChevronDown size={16} className={"text-slate-400 " + (isC ? "-rotate-90" : "")} />
-          <span className="text-base font-semibold text-slate-900">{sec.title}</span>
+          {/* Klapp-Key oben bleibt bewusst UNDEKODIERT (roher sec.title,
+              stabil über state.json/collapsedAll hinweg persistiert) – nur
+              die sichtbare Beschriftung wird dekodiert (v7.24 Bugfix). */}
+          <span className="text-base font-semibold text-slate-900">{decodeBasicEntities(sec.title)}</span>
         </button>
         {!isC && (
           <div className="pt-2">
@@ -730,7 +781,7 @@ export function DocView({ text, collapsed, onToggle, imgMap, onImgClick, onToggl
                 <div key={sk + bi} className="mt-3 pl-3 border-l-2 border-slate-100">
                   <button onClick={() => onToggle(sk)} className="flex items-center gap-1.5 text-left">
                     <ChevronDown size={14} className={"text-slate-400 " + (sc ? "-rotate-90" : "")} />
-                    <span className="text-sm font-semibold text-slate-800">{sub.title}</span>
+                    <span className="text-sm font-semibold text-slate-800">{decodeBasicEntities(sub.title)}</span>
                   </button>
                   {!sc && <div className="pt-1">{renderBlocks(sub.lines, imgMap, onImgClick, "s" + si + "b" + bi, onToggleTask)}</div>}
                 </div>
@@ -766,7 +817,7 @@ export function DocView({ text, collapsed, onToggle, imgMap, onImgClick, onToggl
                 className="w-full flex items-center gap-1.5 text-left pb-1.5 border-b-2 border-slate-300"
               >
                 <ChevronDown size={17} className={"text-slate-500 shrink-0 " + (cIsC ? "-rotate-90" : "")} />
-                <span className="text-lg font-bold text-slate-900">{chap.title}</span>
+                <span className="text-lg font-bold text-slate-900">{decodeBasicEntities(chap.title)}</span>
               </button>
             </div>
             {/* Eingeklapptes Kapitel verbirgt ALLE seine Abschnitte (samt

@@ -625,6 +625,17 @@ speichern. Erwartet: KEIN Commit/keine neue Version (No-op-Roundtrip, wie
 bei D5–D7 für Formeln/Codeblöcke/Links) – die `#`-Kapitelzeile bleibt
 byte-stabil erhalten.
 
+**D11 [VERBUNDEN] Spitze Klammern und Et-Zeichen im Editor (v7.24
+Bugfix).** Editor öffnen (Stift-Knopf), in einen Stichpunkt tippen:
+„a < b und Tom & Jerry sowie c > d“. Speichern. Erwartet: Die
+Dokument-Ansicht zeigt GENAU diesen Text mit den echten Zeichen „<“,
+„&“, „>“ – NICHT als „&lt;“/„&amp;“/„&gt;“. Editor erneut öffnen: Der
+Text erscheint dort ebenfalls mit den echten Zeichen (Editor-interne
+Anzeige war nie betroffen). Zusätzlich, falls im Dokument bereits ein
+farbig markierter Textabschnitt existiert (z. B. aus einem früheren
+Test): Prüfen, dass die Farbe weiterhin korrekt angezeigt wird (keine
+Regression durch diesen Fix).
+
 ## E. Schnellnotizen
 
 **E1 [OFFEN] Post-it-Lebenszyklus.** „Schnellnotiz“-Knopf (Desktop:

@@ -404,6 +404,115 @@ describe("DocView: Farben nur mit validierten Werten (XSS-Schutz)", () => {
   });
 });
 
+// v7.24 Bugfix (Nutzer-Befund): Der WYSIWYG-Editor (tiptap-markdown,
+// html:true – siehe DocEditor.jsx) escaped GETIPPTES "<"/">" beim
+// Speichern zu "&lt;"/"&gt;" (Schutz gegen versehentliches HTML-Parsing
+// beim nächsten Laden). Der Viewer gab diese Zeichenfolgen bisher 1:1 als
+// Text aus – React escaped den (bereits als Entity vorliegenden) Text beim
+// Rendern ein zweites Mal, sichtbar wurde buchstäblich "&lt;" statt "<".
+// Die Fixtures unten sind bewusst EXAKT die vom echten tiptap-markdown-
+// Serializer erzeugten Zeichenfolgen (empirisch verifiziert per Headless-
+// Editor-Probe, siehe tests/docEditorEntities.test.jsx – dort läuft der
+// komplette Zyklus tippen→speichern→DocView UND belegt, dass genau diese
+// Strings entstehen). "&" wird vom Editor NIE escaped (weder escapeHTML
+// noch prosemirror-markdowns esc() fassen "&" an) – deshalb bleibt ein
+// bloßes "&" hier unverändert Text, kein "&amp;" im gespeicherten Markdown.
+describe("DocView: Editor-Entities (v7.24 Bugfix, &lt;/&gt; aus getipptem </>))", () => {
+  it('zeigt getipptes "<" wieder als "<" (einfaches HTML-Escape, KEIN Doppel-Escape "&amp;lt;")', () => {
+    const html = render("# T\n\n## A\n\na &lt; b");
+    expect(html).toContain("a &lt; b"); // korrekt: einfach codiertes "<"-Zeichen
+    expect(html).not.toContain("&amp;lt;"); // der eigentliche Bug: Doppel-Escape
+  });
+
+  it('zeigt getipptes ">" wieder als ">", "&" bleibt unangetastet ("Tom & Jerry")', () => {
+    const html = render("# T\n\n## A\n\na &gt; b und Tom & Jerry");
+    expect(html).toContain("a &gt; b und Tom &amp; Jerry"); // "&" einfach codiert (echtes Zeichen)
+    expect(html).not.toContain("&amp;gt;");
+  });
+
+  it("funktioniert in Listen, Checklisten und Tabellenzellen (alle über Inline/renderInline)", () => {
+    const html = render(
+      "# T\n\n## A\n\n- Punkt: a &lt; b\n- [ ] c &gt; d\n\n| X |\n| - |\n| e &lt; f |"
+    );
+    expect(html).toContain("a &lt; b");
+    expect(html).toContain("c &gt; d");
+    expect(html).toContain("e &lt; f");
+  });
+
+  it("H1/H2/H3-Überschriften (Notizbuchtitel, Abschnitt, Kapitel, Unterthema) dekodieren ebenfalls", () => {
+    const html = render(
+      "# Titel &lt;X&gt;\n\n# Kapitel &lt;C&gt;\n\n## Abschnitt &gt; hier\n\n### Unter &lt; Thema\n\n- x"
+    );
+    // Die dekodierten Zeichen "<"/">" landen als ECHTE Zeichen im JSX-
+    // Textknoten – renderToStaticMarkup (React) escaped Textinhalte beim
+    // Serialisieren zu HTML immer einfach (gültiges HTML kennt kein rohes
+    // "<" in Textknoten), das ist also die KORREKTE Anzeige, kein Bug.
+    expect(html).toContain("Titel &lt;X&gt;");
+    expect(html).toContain("Kapitel &lt;C&gt;");
+    expect(html).toContain("Abschnitt &gt; hier");
+    expect(html).toContain("Unter &lt; Thema");
+  });
+
+  it('literal getipptes "&amp;" (5 Zeichen, kein echter Entity-Ursprung im Editor) bleibt UNVERÄNDERT sichtbar – kein stilles Umdeuten zu "&"', () => {
+    // Bewusste Design-Entscheidung (siehe Kommentar bei decodeBasicEntities,
+    // markdown.jsx): "&amp;" steht NIE für ein escaptes "&" (der Editor
+    // escaped "&" nie), sondern ist entweder wörtlicher Nutzertext oder
+    // fremder Import – wird deshalb NICHT dekodiert.
+    const html = render("# T\n\n## A\n\nBitte &amp; nicht anfassen");
+    expect(html).toContain("&amp;amp; nicht anfassen");
+  });
+
+  it('ein wörtlich getippter (escapeter) "<span>"-Text wird NICHT zur echten Formatierung – bleibt sichtbarer Text', () => {
+    // Ein Nutzer, der über HTML schreibt ("Ich habe ein <span> benutzt"),
+    // bekommt sein getipptes "<"/">" vom Editor zu "&lt;span&gt;" escaped.
+    // Der Tokenizer (INLINE_TOKEN_RE) läuft VOR der Dekodierung – "&lt;span&gt;"
+    // matcht die Tag-Alternative nie (die verlangt ein ECHTES "<"), wird also
+    // nie fälschlich in ein echtes <span>-Element verwandelt.
+    const html = render("# T\n\n## A\n\nText mit &lt;span&gt;kaputt&lt;/span&gt; drin");
+    expect(html).toContain("&lt;span&gt;kaputt&lt;/span&gt;");
+    expect(html).not.toMatch(/<span>kaputt<\/span>/);
+  });
+
+  it("eine ECHTE (unescapte) <span>-Farbmarkierung neben escaptem Text funktioniert weiterhin (Regression)", () => {
+    const html = render(
+      '# T\n\n## A\n\n<span style="color:#dc2626">rot</span> und &lt;span&gt; ist kein Tag'
+    );
+    expect(html).toContain('style="color:#dc2626"');
+    expect(html).toMatch(/<span style="color:#dc2626">rot<\/span>/);
+    expect(html).toContain("&lt;span&gt; ist kein Tag");
+  });
+
+  it("Codespans und Codeblöcke bleiben byte-genau – KEINE Dekodierung (Serializer escaped dort nachweislich nicht)", () => {
+    const html = render(
+      "# T\n\n## A\n\nInline: `&lt;raw&gt;` Text.\n\n```text\n&lt;raw&gt;\n```"
+    );
+    // Codespan wie Codeblock: "&lt;raw&gt;" bleibt WÖRTLICHER Text (nicht zu
+    // "<raw>" dekodiert) – React escaped diesen unveränderten String beim
+    // Serialisieren zusätzlich einfach, sichtbar als "&amp;lt;raw&amp;gt;"
+    // in der rohen HTML-Ausgabe (entspricht literal "&lt;raw&gt;" im Browser).
+    expect(html).toMatch(/<code[^>]*>&amp;lt;raw&amp;gt;<\/code>/);
+    expect(html).toContain("<pre");
+    // Zweimal wörtlich: einmal im Codespan, einmal im Codeblock.
+    expect((html.match(/&amp;lt;raw&amp;gt;/g) || []).length).toBe(2);
+  });
+
+  it("Formeln ($…$) bleiben unangetastet – Entity-Dekodierung greift dort nicht ein (Regression)", () => {
+    const html = render("# T\n\n## A\n\nEs gilt $a^2+b^2=c^2$ hier.");
+    expect(html).toContain("application/x-tex");
+  });
+
+  it("URLs (href) werden NIE dekodiert – ein & im Query-String bleibt unverändert (Regression)", () => {
+    const html = render("# T\n\n## A\n\n[Titel](https://x.de/a?b=1&c=2)");
+    expect(html).toMatch(/href="https:\/\/x\.de\/a\?b=1&amp;c=2"/);
+  });
+
+  it("generischer Link-Titel mit escaptem < wird korrekt dekodiert angezeigt, URL bleibt unangetastet", () => {
+    const html = render("# T\n\n## A\n\n[Mehr &lt; Info](https://x.de/a)");
+    expect(html).toContain("Mehr &lt; Info"); // dekodiertes "<", von React einfach HTML-escaped
+    expect(html).toMatch(/href="https:\/\/x\.de\/a"/);
+  });
+});
+
 describe("DocView: Tabellen (GFM)", () => {
   const TABLE = "# T\n\n## A\n\n| Kopf1 | Kopf2 |\n|---|---|\n| a | b \\| c |\n| kurz |";
   it("rendert thead/tbody, escaped Pipe bleibt Literal, ragged rows werden aufgefüllt", () => {

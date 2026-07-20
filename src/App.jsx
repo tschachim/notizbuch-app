@@ -9,7 +9,7 @@ import {
 import { applyOpsDetailed, dispHead, PLACEHOLDER_LINE, stripInboxPlaceholder } from "./lib/ops.js";
 import { applyMemoryOps, applyMemoryOpsDetailed } from "./lib/memory.js";
 import { diffLines, contextize } from "./lib/diff.js";
-import { DocView, IMG_REF_RE, TASK_RE, parseTree, renumberCitations } from "./lib/markdown.jsx";
+import { DocView, IMG_REF_RE, TASK_RE, parseTree, renumberCitations, decodeBasicEntities } from "./lib/markdown.jsx";
 import {
   prepareImage, newImgId, extForMime, mimeForName, dataUrlParts, blobToDataURL,
   makeNotebookIcon,
@@ -2001,13 +2001,13 @@ export default function NotizbuchApp() {
     <button
       key={si + sec.title}
       onClick={() => { gotoSection(si, sec.title); setNavDrawer(false); }}
-      title={sec.title}
+      title={decodeBasicEntities(sec.title)}
       className={"w-full text-left text-xs pl-2.5 pr-2 py-1.5 mb-1.5 truncate rounded-r-xl border border-l-0 shadow-sm transition-colors " +
         (activeSec === si
           ? "bg-white border-indigo-300 text-indigo-900 font-medium shadow"
           : "bg-gradient-to-r from-slate-50 to-slate-100 border-slate-200 text-slate-600 hover:from-indigo-50 hover:to-indigo-100 hover:text-slate-900")}
     >
-      {sec.title}
+      {decodeBasicEntities(sec.title)}
     </button>
   );
 
@@ -2056,11 +2056,11 @@ export default function NotizbuchApp() {
                   </button>
                   <button
                     onClick={() => { gotoChapter(ci, chap.title); setNavDrawer(false); }}
-                    title={chap.title}
+                    title={decodeBasicEntities(chap.title)}
                     className={"flex-1 min-w-0 text-left text-xs font-semibold py-1.5 pr-2 truncate " +
                       (chapActive ? "text-indigo-900" : "text-slate-800")}
                   >
-                    {chap.title}
+                    {decodeBasicEntities(chap.title)}
                   </button>
                 </div>
                 {!navClosed && (
@@ -2571,7 +2571,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.23</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.24</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
