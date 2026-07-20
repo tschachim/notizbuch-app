@@ -98,15 +98,56 @@ describe("Sicherheit: Gedächtnis-Text ist NICHT Teil von serializeState()/state
     // Auch eine Chat-Nachricht MIT memory:true (siehe Badge, v7.16) landet
     // nur als Feld INNERHALB von chat[] (dort unschädlich, nur Anzeige-Flag)
     // – niemals als eigener Top-Level-Schlüssel des State-Objekts.
-    expect(Object.keys(parsed).sort()).toEqual(["active", "chat", "collapsed", "model", "order", "quicknotes", "v"]);
+    // "autocorrect" (v7.25) ist dagegen ABSICHTLICH ein Top-Level-Schlüssel
+    // (siehe Beschreibung unten) – anders als "memory", das strukturell
+    // ausgeschlossen bleibt.
+    expect(Object.keys(parsed).sort()).toEqual(["active", "autocorrect", "chat", "collapsed", "model", "order", "quicknotes", "v"]);
     expect(parsed).not.toHaveProperty("memory");
   });
 
-  it("serializeState nimmt strukturell gar keinen memory-Parameter entgegen (6 feste Parameter)", () => {
+  it("serializeState nimmt strukturell gar keinen memory-Parameter entgegen (7 feste Parameter, davon der 7. für autocorrect)", () => {
     // Analog zum bestehenden Kommentar/Test zu Link-Provider-PATs in
     // tests/linkProviders.test.jsx: die Funktion hat schlicht keinen Pfad,
-    // über den ein Gedächtnis-Text hineingelangen könnte.
-    expect(serializeState.length).toBe(6);
+    // über den ein Gedächtnis-Text hineingelangen könnte. v7.25 ergänzt
+    // EINEN weiteren festen Parameter (autocorrect, siehe unten) – die Zahl
+    // bleibt weiterhin strukturell fest (kein "settings"/PAT-Kanal).
+    expect(serializeState.length).toBe(7);
+  });
+});
+
+// v7.25 (Nutzerwunsch "AutoKorrektur natürlich global gespeichert"): die
+// Konfiguration wandert als Teil von state.json (siehe lib/autocorrect.js-
+// Kopfkommentar) – anders als das Gedächtnis oben ENTHÄLT der Payload sie
+// bewusst, weil sie KEINE Zugangsdaten trägt und geräteübergreifend gelten
+// soll. Roundtrip-Test der Serialisierung (Auftrag): serialisieren,
+// zurückparsen, Feld korrekt wiederfinden – inkl. Alt-state.json OHNE das
+// Feld (vor v7.25) ⇒ sanitizeAutocorrectConfig liefert dafür die Defaults.
+describe("serializeState: AutoKorrektur-Feld (v7.25, Roundtrip + Defensiv-Defaults)", () => {
+  it("eine übergebene Konfiguration landet sanitisiert im Payload und lässt sich unverändert zurückparsen", () => {
+    const cfg = { enabled: false, categories: { pfeile: false, anfuehrung_de: true }, custom: [{ trigger: "btw", replacement: "übrigens" }] };
+    const payload = serializeState([], "claude-sonnet-5", {}, "wissensbasis", ["wissensbasis"], {}, cfg);
+    const parsed = JSON.parse(payload);
+    expect(parsed.autocorrect).toEqual(cfg);
+  });
+
+  it("ganz ohne 7. Argument (Alt-state.json/Aufrufer vor v7.25) liefert das Feld trotzdem die Defaults, statt zu fehlen oder zu werfen", () => {
+    const payload = serializeState([], "claude-sonnet-5", {}, "wissensbasis", ["wissensbasis"], {});
+    const parsed = JSON.parse(payload);
+    expect(parsed.autocorrect).toEqual({ enabled: true, categories: {}, custom: [] });
+  });
+
+  it("ein kaputtes/fremdes autocorrect-Objekt wird defensiv bereinigt statt roh durchgereicht", () => {
+    const payload = serializeState([], "claude-sonnet-5", {}, "wissensbasis", ["wissensbasis"], {}, {
+      enabled: "ja", // kein Boolean -> Default true
+      categories: { pfeile: false, unbekannt: true },
+      custom: [{ trigger: "a", replacement: "x" }, { trigger: "ok", replacement: "gut" }],
+    });
+    const parsed = JSON.parse(payload);
+    expect(parsed.autocorrect).toEqual({
+      enabled: true,
+      categories: { pfeile: false },
+      custom: [{ trigger: "ok", replacement: "gut" }],
+    });
   });
 });
 

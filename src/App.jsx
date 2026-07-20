@@ -30,6 +30,7 @@ import { expandFencedCodeInNodes } from "./lib/code.jsx";
 import { chatToMarkdown, archiveBaseName, mergeChats } from "./lib/archive.js";
 import { loadSettings, saveSettings, clearSettings } from "./lib/settings.js";
 import { setLinkProviders, resolveProviderLinkTitles } from "./lib/linkProviders.jsx";
+import { sanitizeAutocorrectConfig } from "./lib/autocorrect.js";
 import SettingsDialog from "./components/SettingsDialog.jsx";
 import DocEditor from "./components/DocEditor.jsx";
 import QuickNotes from "./components/QuickNotes.jsx";
@@ -117,10 +118,18 @@ const fmtStamp = (ts) =>
 // collapsedAll: { notizbuchId: { sectionKey: true } }
 // order: Notizbuch-IDs in Dropdown-Reihenfolge (Admin-Seite)
 // quicknotes: { notizbuchId: [{ id, text, x, y, w, h }] } – wandert mit
+// autocorrect: { enabled, categories:{id:bool}, custom:[{trigger,replacement}] }
+// (v7.25, Nutzerwunsch "natürlich global gespeichert" – siehe lib/
+// autocorrect.js-Kopfkommentar) – geräteübergreifend über das Daten-Repo
+// synchronisiert, weil sie KEINE Zugangsdaten enthält (anders als
+// linkProviders, siehe unten). sanitizeAutocorrectConfig läuft HIER
+// nochmal defensiv (Defense-in-Depth wie bei linkProviders/
+// sanitizeLinkProviders), falls der Aufrufer einen ungeprüften Zustand
+// hereinreicht.
 //
 // SICHERHEIT (v7.9, Link-Provider): Diese Funktion nimmt bewusst NUR die
-// sechs Parameter unten entgegen – "settings" (owner/repo/pat/apiKey UND
-// die neuen Link-Provider samt PAT/E-Mail) wird ihr NIE übergeben. Das ist
+// sieben Parameter unten entgegen – "settings" (owner/repo/pat/apiKey UND
+// die Link-Provider samt PAT/E-Mail) wird ihr NIE übergeben. Das ist
 // keine zusätzliche Filterung, sondern strukturell: settings lebt
 // ausschließlich in settingsRef/localStorage (siehe lib/settings.js) und
 // hat schlicht keinen Pfad in dieses JSON. Exportiert, damit ein Test
@@ -129,11 +138,12 @@ const fmtStamp = (ts) =>
 // bei jeder künftigen Änderung an dieser Funktion soll ein Reviewer diesen
 // Kommentar UND den Test sehen, bevor er versehentlich ein settings-Objekt
 // hier mit hineinzieht.
-export const serializeState = (chat, model, collapsedAll, active, order, quicknotes) =>
+export const serializeState = (chat, model, collapsedAll, active, order, quicknotes, autocorrect) =>
   JSON.stringify(
     {
       v: 2, active: active || ROOT_NB_ID, chat, model,
       collapsed: collapsedAll || {}, order: order || [], quicknotes: quicknotes || {},
+      autocorrect: sanitizeAutocorrectConfig(autocorrect),
     },
     null, 2
   );
@@ -379,6 +389,12 @@ export default function NotizbuchApp() {
   // (State) speist die Einstellungen-Anzeige, memoryRef (unten) ist der
   // aktuelle Stand für buildNbCtx/commitMemory außerhalb des Renderns.
   const [memory, setMemory] = useState("");
+  // AutoKorrektur-Konfiguration (v7.25) – Teil von state.json (siehe
+  // serializeState oben), NICHT von localStorage/settings: enthält keine
+  // Zugangsdaten und soll geräteübergreifend gelten. sanitizeAutocorrectConfig
+  // liefert bei null/undefined bereits die Defaults (Master-Toggle an, alle
+  // defaultEnabled-Kategorien aktiv, keine eigenen Ersetzungen).
+  const [autocorrect, setAutocorrect] = useState(() => sanitizeAutocorrectConfig(null));
   const [collapsedAll, setCollapsedAll] = useState({}); // nbId -> Klappzustände
   const [meta, setMeta] = useState({ count: 0, lastTs: null });
   const [showNewNb, setShowNewNb] = useState(false);
@@ -477,7 +493,7 @@ export default function NotizbuchApp() {
   const busyRef = useRef(false);
   const editingRef = useRef(false);
   const viewRef = useRef("chat");
-  const stateRef = useRef({ chat: [], model: MODELS[0].id, collapsedAll: {}, quickNotesAll: {} });
+  const stateRef = useRef({ chat: [], model: MODELS[0].id, collapsedAll: {}, quickNotesAll: {}, autocorrect: sanitizeAutocorrectConfig(null) });
   const stateSha = useRef(null);
   const stateTimer = useRef(null);
   const stateFlushing = useRef(0); // Zähler: auch überlappende Flushes abdecken
@@ -493,7 +509,7 @@ export default function NotizbuchApp() {
   useEffect(() => { viewRef.current = view; }, [view]);
   useEffect(() => { notebooksRef.current = notebooks; }, [notebooks]);
   useEffect(() => { activeNbRef.current = activeNb; }, [activeNb]);
-  useEffect(() => { stateRef.current = { chat, model, collapsedAll, quickNotesAll }; }, [chat, model, collapsedAll, quickNotesAll]);
+  useEffect(() => { stateRef.current = { chat, model, collapsedAll, quickNotesAll, autocorrect }; }, [chat, model, collapsedAll, quickNotesAll, autocorrect]);
 
   /* ---------- Metadaten (Stand & Versionszahl des aktiven Notizbuchs) ---------- */
   const refreshMeta = useCallback(async (cfg, path) => {
@@ -521,6 +537,10 @@ export default function NotizbuchApp() {
       // (localStorage-)Notizen bleiben und werden beim nächsten Write
       // migriert; sonst gilt der Repo-Stand.
       let nQuick = null;
+      // Alt-state.json OHNE "autocorrect"-Feld (vor v7.25): sanitize
+      // liefert für data.autocorrect === undefined bereits die Defaults
+      // (Master-Toggle an, alle defaultEnabled-Kategorien aktiv).
+      let nAutocorrect = sanitizeAutocorrectConfig(null);
       const st = await ghGetFile(cfg, STATE_PATH);
       stateSha.current = st ? st.sha : null;
       if (st) {
@@ -543,6 +563,7 @@ export default function NotizbuchApp() {
               Object.entries(data.quicknotes).filter(([, v]) => Array.isArray(v))
             );
           }
+          nAutocorrect = sanitizeAutocorrectConfig(data.autocorrect);
         } catch (e) { /* defekter State → Defaults */ }
       }
 
@@ -640,7 +661,7 @@ export default function NotizbuchApp() {
       // Notizbücher ohne Remote-Eintrag behalten ihre Notizen (wichtig bei
       // der Migration mehrerer Geräte). lastSavedState spiegelt den
       // Remote-Stand – weicht der Merge ab, pusht der Save-Effect ihn.
-      lastSavedState.current = serializeState(nChat, nModel, nCollapsedAll, active, nbs.map((n) => n.id), nQuick || {});
+      lastSavedState.current = serializeState(nChat, nModel, nCollapsedAll, active, nbs.map((n) => n.id), nQuick || {}, nAutocorrect);
       if (nQuick) setQuickNotesAll((loc) => ({ ...loc, ...nQuick }));
       setNotebooks(nbs);
       notebooksRef.current = nbs;
@@ -650,6 +671,7 @@ export default function NotizbuchApp() {
       setChat(nChat);
       setModel(nModel);
       setCollapsedAll(nCollapsedAll);
+      setAutocorrect(nAutocorrect);
       setSettings(cfg);
       settingsRef.current = cfg;
       setConnected(true);
@@ -730,6 +752,19 @@ export default function NotizbuchApp() {
     window.location.reload();
   };
 
+  // AutoKorrektur-Änderungen aus dem SettingsDialog (v7.25) – anders als
+  // Link-Provider (v7.13, handleProvidersChange oben) KEIN eigener
+  // Sofort-Commit: die Konfiguration ist Teil von state.json, der
+  // bestehende debounced Save-Effect (siehe useEffect mit serializeState
+  // oben) greift bereits, sobald sich der State-Wert ändert. Der Abschnitt
+  // im SettingsDialog erscheint ohnehin NUR bei bestehender Verbindung
+  // (hasSettings, siehe dort) – der Erststart-Randfall von
+  // handleProvidersChange (Provider bleiben ohne Verbindung nur im
+  // Dialog-State) entfällt hier dadurch von vornherein.
+  const handleAutocorrectChange = (cfg) => {
+    setAutocorrect(sanitizeAutocorrectConfig(cfg));
+  };
+
   // Gedächtnis-Speichern-Knopf im SettingsDialog (v7.16): eigener, vom
   // "Speichern & Verbinden"-Formular UNABHÄNGIGER Schreibpfad (Muster
   // v7.9/v7.13, siehe handleProvidersChange oben) – sofortiges Persistieren
@@ -771,7 +806,7 @@ export default function NotizbuchApp() {
 
   useEffect(() => {
     if (!connected || !settingsRef.current) return;
-    const payload = serializeState(chat, model, collapsedAll, activeNb, notebooks.map((n) => n.id), quickNotesAll);
+    const payload = serializeState(chat, model, collapsedAll, activeNb, notebooks.map((n) => n.id), quickNotesAll, autocorrect);
     if (payload === lastSavedState.current) {
       // Zurück auf dem letzten gespeicherten Stand: geplanten Write verwerfen,
       // sonst schriebe der laufende Timer einen inzwischen veralteten Zustand.
@@ -786,7 +821,7 @@ export default function NotizbuchApp() {
       stateTimer.current = null;
       flushState(cfg, payload);
     }, 2500);
-  }, [chat, model, collapsedAll, activeNb, notebooks, quickNotesAll, connected, flushState]);
+  }, [chat, model, collapsedAll, activeNb, notebooks, quickNotesAll, autocorrect, connected, flushState]);
 
   /* ---------- Notizbuch committen (genau 1 Commit pro Änderung) ---------- */
   // Liefert true bei Erfolg. Bei SHA-Konflikt: Remote-Stand laden, Nutzer
@@ -1045,12 +1080,20 @@ export default function NotizbuchApp() {
                 data.quicknotes && typeof data.quicknotes === "object" && !Array.isArray(data.quicknotes)
                   ? Object.fromEntries(Object.entries(data.quicknotes).filter(([, v]) => Array.isArray(v)))
                   : null;
+              // AutoKorrektur (v7.25): fehlt das Feld im Remote-Stand (altes
+              // Gerät/state.json vor v7.25), lokalen Stand behalten – wie bei
+              // Schnellnotizen oben (kein Zurücksetzen auf die Defaults nur
+              // weil ein anderes Gerät noch nicht auf v7.25 aktualisiert ist).
+              const nAutocorrect = data.autocorrect !== undefined
+                ? sanitizeAutocorrectConfig(data.autocorrect)
+                : stateRef.current.autocorrect;
               lastSavedState.current = serializeState(nChat, nModel, nCollapsedAll, activeNbRef.current,
-                notebooksRef.current.map((n) => n.id), nQuick || stateRef.current.quickNotesAll);
+                notebooksRef.current.map((n) => n.id), nQuick || stateRef.current.quickNotesAll, nAutocorrect);
               setChat(nChat);
               setModel(nModel);
               setCollapsedAll(nCollapsedAll);
               if (nQuick) setQuickNotesAll((loc) => ({ ...loc, ...nQuick }));
+              setAutocorrect(nAutocorrect);
             } catch (e) { /* defekter State – ignorieren */ }
           }
         }
@@ -2490,11 +2533,12 @@ export default function NotizbuchApp() {
           cur ? cur.sha : undefined);
       }
 
-      // 4. Chat, Modell, Klappzustände nach state.json (Reihenfolge und
-      // Schnellnotizen des Geräts dabei nicht verwerfen)
+      // 4. Chat, Modell, Klappzustände nach state.json (Reihenfolge,
+      // Schnellnotizen UND AutoKorrektur-Konfiguration des Geräts dabei
+      // nicht verwerfen – ein Backup-Import betrifft nur Chat/Notizbücher).
       setImporting("Chat & Einstellungen werden übertragen …");
       const payload = serializeState(nc, nm, ncolAll, activeNbRef.current,
-        notebooksRef.current.map((n) => n.id), stateRef.current.quickNotesAll);
+        notebooksRef.current.map((n) => n.id), stateRef.current.quickNotesAll, stateRef.current.autocorrect);
       const curSt = await ghGetFile(cfg, STATE_PATH);
       const putSt = await ghPutFile(cfg, STATE_PATH, utf8ToB64(payload),
         "Import: Chat & Einstellungen", curSt ? curSt.sha : undefined);
@@ -2571,7 +2615,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.24</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.25</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -2985,6 +3029,7 @@ export default function NotizbuchApp() {
               onCancel={cancelEdit}
               saving={savingEdit || busy}
               navWidth={layout.navW}
+              autocorrect={autocorrect}
             />
           ) : (
             <div className="flex-1 min-h-0 flex">
@@ -3566,6 +3611,8 @@ export default function NotizbuchApp() {
           hasSettings={!!settings}
           memory={memory}
           onMemorySave={handleMemorySave}
+          autocorrect={autocorrect}
+          onAutocorrectChange={handleAutocorrectChange}
         />
       )}
     </div>

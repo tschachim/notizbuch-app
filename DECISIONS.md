@@ -3817,3 +3817,165 @@ aus `referenz-app.jsx` übernommen.
       escaped (z. B. eine neue Editor-Extension), zeigt der Viewer dafür
       wieder wörtlich "&amp;" an, bis die Whitelist erweitert wird; aktuell
       empirisch nicht der Fall.
+
+67. **AutoKorrektur im WYSIWYG-Editor – Word-artige Zeichenersetzung beim
+    Tippen** (v7.25, Nutzerwunsch; Bibliothek nach Word-/Typografie-
+    Konventionen recherchiert und als verbindliche Spezifikation
+    vorgegeben). Konfigurierte Zeichenketten (`->`, `--`, `(c)`, `\alpha`,
+    `1/2`, `:)`, …) werden beim Tippen im Editor durch Symbole ersetzt –
+    acht Kategorien (Pfeile, Typografie, Marken, Vergleiche, Brüche,
+    Smileys, Mathe-/Griechisch-Symbole, deutsche Anführungszeichen),
+    Master-Toggle, Kategorie-Toggles und eigene Ersetzungen, alles
+    konfigurierbar.
+    - **Neues Blatt-Modul `src/lib/autocorrect.js`** (reine Daten + Logik,
+      importiert NICHTS aus `markdown.jsx`/`math.jsx`/`DocEditor.jsx`/
+      TipTap – gleiches Muster wie `code.jsx`/`linkProviders.jsx`, siehe
+      deren Kopfkommentare): `AUTOCORRECT_CATEGORIES` (Bibliothek),
+      `buildActiveRules(config)` (mergt Kategorie-Toggles + eigene
+      Einträge zu fertigen `RegExp`-Regeln, DOM-/TipTap-frei testbar),
+      `sanitizeAutocorrectConfig`/`isCategoryEnabled`/
+      `validateCustomTrigger`/`validateCustomReplacement` für die
+      Settings-Persistenz.
+    - **Konflikt-Design (Kernstück des Auftrags, siehe Kopfkommentar in
+      `src/lib/autocorrect.js`):** ProseMirror/TipTap-InputRules feuern
+      beim Tippen des LETZTEN Zeichens eines Treffers – ein zu früh
+      feuernder KURZER Trigger (z. B. `--`→–, sofort beim zweiten
+      Bindestrich) würde einen LÄNGEREN, eigentlich gewollten Trigger
+      (`-->`→⟶, `---`→—) für immer unerreichbar machen, weil der rohe Text
+      bereits ersetzt ist, bevor die weiteren Zeichen überhaupt getippt
+      sind. Statt die `-->`-Ersetzung nachträglich rückabzuwickeln (im
+      Auftrag als Alternative skizziert), wurde die ROBUSTERE Variante
+      gewählt: jeder Trigger, der ein echter PRÄFIX eines anderen aktiven
+      Triggers ist, feuert nur noch mit einem TERMINATOR – einem direkt
+      danach getippten Zeichen, das NICHT zur Fortsetzung des längeren
+      Triggers gehört (Zeichenklasse `exclude` je Eintrag). Das
+      Abschlusszeichen selbst bleibt dabei im Dokument stehen (TipTaps
+      `textInputRule()` hängt es über die Capture-Gruppe automatisch
+      wieder an). Identifizierte Präfix-Paare: `--`→`-->`/`---`, `<-`→
+      `<--`/`<->`, `<=`→`<==`/`<=>` (die beiden letzteren waren im
+      Auftrag nicht explizit genannt, aber strukturell identisch –
+      selbst gefunden und mit demselben Mechanismus abgesichert, siehe
+      Tests). Suffix-Kollisionen ohne Präfix-Problem (z. B. endet `-->`
+      auf `->`, `==>` auf `=>`) löst `buildActiveRules` GENERISCH über
+      eine nach Trigger-Länge ABSTEIGEND sortierte Regel-Liste
+      (TipTap/ProseMirror prüft Regeln in Array-Reihenfolge, erste
+      passende gewinnt). Brüche (`1/2`→½) bekommen zusätzlich einen
+      NEGATIVEN LOOKBEHIND vor dem Trigger (kein Ziffern-/Buchstaben-
+      Zeichen direkt davor) – ohne ihn würde z. B. `11/2` die
+      Teilzeichenfolge `1/2` mitten in der Zahl fälschlich zu `1½`
+      machen. Backslash-Kommandos (`\alpha`, `\sum`, …) verlangen als
+      Terminator jeden Nicht-Buchstaben; das entschärft GENERISCH auch
+      interne Präfix-Paare wie `\in`/`\int`/`\infty`, ohne sie einzeln
+      benennen zu müssen. Multiplikation (`2x3`→2×3) und deutsche
+      Anführungszeichen (kontextabhängig öffnend/schließend) sind
+      strukturell kein festes trigger→replacement und bekommen eigene
+      Compile-Pfade (`compileMultiplyEntry`/`compileQuoteEntry`).
+    - **`(a)`→`@` (Kategorie "marken"):** ausdrücklicher Nutzerwunsch trotz
+      Kollisionsrisiko mit Aufzählungen wie „(a) erstens“ – bewusst nicht
+      abgeschwächt (kein Sonderfall „nur wenn nicht am Zeilenanfang“ o. Ä.,
+      das hätte die einfache, vorhersagbare Regel verkompliziert). Per
+      Kategorie ODER durch einen eigenen Eintrag mit demselben Trigger
+      (custom überschreibt eingebaut, siehe unten) abschaltbar.
+    - **`custom` überschreibt einen eingebauten Trigger mit identischem
+      Text** (bewusste Entscheidung laut Auftrag, getestet): eine eigene
+      Ersetzung läuft dabei immer im einfachen "instant"-Modus (kein
+      Terminator-/Wort-/Backslash-Feingefühl für frei getippten
+      Nutzertext) – ausreichend für den Hauptfall "eine eingebaute
+      Ersetzung gefällt mir nicht, ich will etwas anderes".
+    - **Persistenz: GLOBAL über `state.json`, NICHT localStorage**
+      (Auftragsänderung während der Umsetzung, Nutzerwunsch "natürlich
+      global gespeichert"): anders als Zugangsdaten/Link-Provider enthält
+      die Konfiguration KEINE Secrets, soll aber geräteübergreifend
+      gelten – sie wandert deshalb als neues Feld `autocorrect` in
+      `serializeState`/`connect()` (`src/App.jsx`, gleiches Muster wie
+      `collapsedAll`/`quicknotes`: beim Connect geladen, Änderungen über
+      den bestehenden debounced Write mit SHA-Konflikt-Handling
+      persistiert). `sanitizeAutocorrectConfig` läuft sowohl beim Laden
+      (Alt-`state.json` OHNE das Feld ⇒ Defaults) als auch beim
+      Schreiben (Defense-in-Depth, wie `sanitizeLinkProviders` in
+      `settings.js`). Der SettingsDialog-Abschnitt „AutoKorrektur
+      (Editor)“ erscheint NUR bei bestehender Verbindung (`hasSettings`,
+      Muster wie „Globales Gedächtnis“ v7.16) – anders als Link-Provider
+      (v7.13) OHNE eigenen Sofort-Commit-Pfad: `onAutocorrectChange`
+      schreibt nur in den App-State, der ohnehin bestehende debounced
+      state.json-Write übernimmt den Rest. Der v7.13-Erststart-Randfall
+      (Änderung geht beim X-Schließen ohne Verbindung verloren) entfällt
+      dadurch strukturell, weil der Abschnitt ohne Verbindung gar nicht
+      erst sichtbar ist.
+    - **Editor-Scope, bewusst NICHT Chat-Eingabe:** Die AutoKorrektur
+      wirkt ausschließlich im WYSIWYG-Editor (`DocEditor.jsx`) – die
+      Chat-Eingabe (Freitext an das Modell) bleibt unverändert
+      unkorrigiert, ein `->` in einer Chat-Nachricht soll das Modell
+      unverfälscht sehen (z. B. bei technischen Fragen/Code-Snippets im
+      Chat). Follow-up-Feature, falls gewünscht.
+    - **Mount-Zeitpunkt:** `DocEditor.jsx` baut die Regeln EINMAL beim
+      Mount aus der übergebenen `autocorrect`-Prop (`useMemo` mit leerem
+      deps-Array) – deckt sich mit `useEditor()`s eigenem Verhalten
+      (ohne explizites `deps`-Argument erstellt `@tiptap/react` den
+      Editor ohnehin nur einmal beim ersten Rendern neu, verifiziert im
+      `@tiptap/react`-Quelltext). Ändert der Nutzer die Einstellungen,
+      während der Editor bereits offen ist, zieht die laufende Sitzung
+      das NICHT live nach – erst ein Schließen+erneutes Öffnen liest den
+      neuen Stand. Bewusst so einfach gehalten (seltener Randfall,
+      identisches Verhalten wie `imgMap`/andere Mount-Props des Editors).
+    - **Codeblock-/Codespan-Guard: kein eigener Code nötig.** TipTaps
+      eingebauter InputRules-Handler (`run$1` in `@tiptap/core`) prüft
+      VOR jeder Regel bereits selbst `$from.parent.type.spec.code`
+      (Codeblock) bzw. eine aktive `code`-Mark am Cursor (Codespan) und
+      bricht dann ab – verifiziert im `@tiptap/core`-Quelltext und durch
+      eigene Tests abgesichert (kein blindes Vertrauen).
+    - **Undo:** TipTap-Standard `editor.commands.undoInputRule()` – jede
+      über `textInputRule()`/`InputRule` ausgelöste Transaktion trägt
+      automatisch die dafür nötigen Metadaten; kein eigener Code nötig,
+      nur ein Test, der das bestätigt.
+    - **Tests:** `tests/autocorrect.test.js` (39 Fälle) – Bibliothek
+      vollständig mit gepinnten Kategorie-Größen (Pfeile 9, Typografie 5,
+      Marken 6, Vergleiche 6, Brüche 15, Smileys 5, Symbole 68 = 24
+      griechische Kleinbuchstaben + 10 Großbuchstaben mit eigenem
+      Unicode-Zeichen + 34 Mathe-Kommandos, Anführung 2), jede Feuer-Art
+      einzeln an der Regex geprüft (inkl. `13/24`-Auftrags-Testfall,
+      `\in` vs. `\int`/`\infty`, Multiplikations-Wortgrenze), Kontext-
+      Anführungszeichen, `buildActiveRules`-Merge/-Override/-Sortierung,
+      `isCategoryEnabled`, `sanitizeAutocorrectConfig` (defensiv gegen
+      jeden Fremd-/Alt-Zustand, idempotent), Formular-Validatoren.
+      `tests/docEditorAutocorrect.test.jsx` (32 Fälle, `@vitest-environment
+      jsdom`, echter TipTap-Editor headless) – ECHTES Zeichen-für-
+      Zeichen-Tippen über `view.someProp("handleTextInput", …)` (NICHT
+      `insertContent()`, das würde die Ketten-Konflikte NICHT aufdecken,
+      siehe Kopfkommentar der Datei): repräsentative Ersetzungen je
+      Kategorie, alle identifizierten Ketten-Konflikte (`-->`, `a -- b`,
+      `---`, `<--`, `<->`, `<==`, `<=>`, `==>`), Codeblock-/Codespan-
+      Guard (inkl. `<<` als expliziter v7.24-Entity-Pfad-Kollisionscheck),
+      Undo, Markdown-Roundtrip-Stabilität, Anführungszeichen (default aus
+      + funktioniert wenn an), Master-/Kategorie-Toggle + custom-Eintrag
+      wirken im echten Editor. `tests/appOps.test.js` erweitert (3 neue
+      Fälle): `serializeState`-Roundtrip des `autocorrect`-Felds inkl.
+      Alt-`state.json` ohne das Feld ⇒ Defaults, defensives Bereinigen
+      eines kaputten Feldes; die bestehende Parameterzahl-/Top-Level-
+      Schlüssel-Sicherheitsprüfung (kein PAT/Gedächtnis in state.json)
+      wurde an die neue, 7. Parameterposition angepasst (7 statt 6 feste
+      Parameter, `autocorrect` bewusst ALS Top-Level-Schlüssel erwartet –
+      anders als `memory`, das strukturell ausgeschlossen bleibt).
+      Gesamtstand danach 908/908 grün (vorher 834), `autocorrect.js`
+      100 % Statements/100 % Lines/100 % Funktionen/100 % Branches nach
+      Ergänzung zweier Randfall-Assertions (`validateCustomTrigger`/
+      `validateCustomReplacement` mit `undefined`/`null`).
+    - **Bewusste Restrisiken:** (1) `(a)`→`@` kann in Aufzählungen
+      überraschen (siehe oben, dokumentiert statt technisch verhindert).
+      (2) Multiplikation (`2x3`→2×3): eine mehrstellige ZWEITE Zahl (z. B.
+      `2x34`) wird bereits bei der ersten Ziffer umgewandelt
+      (`2x3`→`2×3`, die `4` folgt danach normal) – ein Nachlauf-Terminator
+      wie bei Brüchen hätte `2x3` am Satzende (ohne folgendes Zeichen)
+      dagegen NIE feuern lassen, was schlechter wäre als das
+      dokumentierte Restrisiko (Auftrag nennt ohnehin nur einstellige
+      Beispiele). (3) Eigene Ersetzungen laufen ohne die feinjustierte
+      Terminator-/Wortgrenzen-Logik der eingebauten Sonderfälle – ein
+      selbst angelegter Trigger, der zufällig Präfix eines eingebauten
+      Terminator-Triggers wäre, könnte überraschen (in der Praxis selten,
+      da eingebaute Terminator-Trigger kurze Symbolketten sind, keine
+      Wörter). (4) Der Editor zieht Einstellungsänderungen erst nach
+      Neuöffnen nach (siehe Mount-Zeitpunkt oben) – dokumentiert, kein
+      versteckter Bug. (5) `state.json` bleibt Last-Writer-Wins wie der
+      restliche State-Payload (Entscheidung #3) – ändern zwei Geräte die
+      AutoKorrektur-Konfiguration nahezu gleichzeitig, gewinnt der zuletzt
+      geschriebene Stand, kein Feld-Merge.

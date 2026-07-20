@@ -636,6 +636,30 @@ farbig markierter Textabschnitt existiert (z. B. aus einem früheren
 Test): Prüfen, dass die Farbe weiterhin korrekt angezeigt wird (keine
 Regression durch diesen Fix).
 
+**D12 [VERBUNDEN] AutoKorrektur beim Tippen im Editor (v7.25).** Editor
+öffnen (Stift-Knopf), in einen neuen Stichpunkt tippen (Leerzeichen nach
+jedem Trigger nicht vergessen, einige feuern erst danach): „Pfeil ->
+Ziel, Gedanke -- weiter, Pfeil --> Ziel, (c) 2026, a <= b, 1/2 Becher,
+Hi :) \alpha.“. Erwartet: Nach dem Tippen stehen dort die ECHTEN Symbole
+„→“, „–“, „⟶“, „©“, „≤“, „½“, „😊“, „α“ (NICHT die roh getippten
+Zeichenketten) – insbesondere „-->“ muss als „⟶“ erscheinen, NICHT als
+„– >“ oder ein anderes kaputtes Zwischenergebnis (Ketten-Konflikt-Test).
+Direkt nach einer Ersetzung (z. B. dem Pfeil) EINMAL Backspace drücken:
+Erwartet, der getippte Originaltext („->“) erscheint wieder anstelle des
+Symbols (Undo der Ersetzung, Word-Verhalten). Codeblock-Knopf, hinein
+„->“ tippen: Erwartet bleibt buchstäblich „->“ stehen (keine Ersetzung
+in Code). Speichern, Editor erneut öffnen: alle Symbole bleiben
+unverändert stehen (Roundtrip). Danach in den Einstellungen (Zahnrad)
+zum Abschnitt „AutoKorrektur (Editor)“ scrollen: Kategorie „Pfeile“
+abwählen, Dialog schließen, Editor erneut öffnen, „->“ tippen – erwartet
+KEINE Ersetzung mehr (Kategorie greift). Kategorie „Pfeile“ wieder
+anhaken. Danach unter „Eigene Ersetzungen“ einen Trigger „qatest“ mit
+Ersetzung „✅“ hinzufügen, Dialog schließen, Editor erneut öffnen, „Test
+qatest Ende“ tippen – erwartet erscheint „✅“ anstelle von „qatest“
+(eigene Ersetzung wirkt nach dem Neuöffnen). Eigene Ersetzung „qatest“
+danach wieder löschen (Cleanup). Nicht speichern, Editor per „Abbrechen“
+schließen (keine Test-Zeile im Dokument hinterlassen).
+
 ## E. Schnellnotizen
 
 **E1 [OFFEN] Post-it-Lebenszyklus.** „Schnellnotiz“-Knopf (Desktop:

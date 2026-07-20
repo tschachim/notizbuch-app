@@ -1,8 +1,12 @@
 import { useState } from "react";
-import { Settings, X, Loader2, LogOut, Check, Link2, Plus, Pencil, Trash2 } from "lucide-react";
+import { Settings, X, Loader2, LogOut, Check, Link2, Plus, Pencil, Trash2, Sparkles } from "lucide-react";
 import { MODELS } from "../lib/anthropic.js";
 import { PROVIDER_TYPE_INFO, ProviderIcon, hostOf } from "../lib/linkProviders.jsx";
 import { MEMORY_SOFT_LIMIT } from "../lib/memory.js";
+import {
+  AUTOCORRECT_CATEGORIES, isCategoryEnabled, sanitizeAutocorrectConfig,
+  validateCustomTrigger, validateCustomReplacement,
+} from "../lib/autocorrect.js";
 
 // Neuer, leerer Provider-Formularzustand für den gewählten Typ (v7.9,
 // Nutzerwunsch "Link-Provider konfigurierbar"). id bleibt null, solange kein
@@ -79,6 +83,7 @@ export function removeProvider(list, id) {
 export default function SettingsDialog({
   initial, model, onModelChange, onSave, onProvidersChange = () => {}, onLogout, onClose,
   connecting, error, hasSettings, memory = "", onMemorySave = () => {},
+  autocorrect, onAutocorrectChange = () => {},
 }) {
   const [owner, setOwner] = useState((initial && initial.owner) || "");
   const [repo, setRepo] = useState((initial && initial.repo) || "notizbuch-data");
@@ -100,6 +105,38 @@ export default function SettingsDialog({
   // unabhängig vom "Speichern & Verbinden"-Formular.
   const [memoryText, setMemoryText] = useState(memory);
   const [memorySaving, setMemorySaving] = useState(false);
+
+  // AutoKorrektur (v7.25, Auftragsänderung: GLOBAL über state.json statt
+  // localStorage, siehe App.jsx/lib/autocorrect.js) – eigener, von
+  // owner/repo/pat/apiKey UNABHÄNGIGER Zustand (Muster wie linkProviders/
+  // memoryText oben), vorbefüllt mit dem aktuellen state.json-Stand
+  // (autocorrect-Prop). JEDE Änderung (Master-Toggle, Kategorie, eigene
+  // Ersetzung) ruft SOFORT onAutocorrectChange(next) auf – App.jsx
+  // übernimmt das nur noch in seinen State, der BESTEHENDE debounced
+  // state.json-Write erledigt den Rest (kein eigener Sofort-Commit wie
+  // bei Link-Providern/Gedächtnis nötig). Der Abschnitt unten erscheint
+  // nur bei hasSettings (siehe dort) – ohne bestehende Verbindung gäbe es
+  // noch kein state.json, in das sich eine Änderung einfügen ließe.
+  const [ac, setAc] = useState(() => sanitizeAutocorrectConfig(autocorrect));
+  const [customForm, setCustomForm] = useState({ trigger: "", replacement: "", error: null });
+
+  const applyAutocorrect = (next) => {
+    setAc(next);
+    onAutocorrectChange(next);
+  };
+  const toggleAutocorrectEnabled = () => applyAutocorrect({ ...ac, enabled: !ac.enabled });
+  const toggleAutocorrectCategory = (catId) =>
+    applyAutocorrect({ ...ac, categories: { ...ac.categories, [catId]: !isCategoryEnabled(ac, catId) } });
+  const addCustomAutocorrect = () => {
+    const t = validateCustomTrigger(customForm.trigger);
+    if (t.error) { setCustomForm((f) => ({ ...f, error: t.error })); return; }
+    const r = validateCustomReplacement(customForm.replacement);
+    if (r.error) { setCustomForm((f) => ({ ...f, error: r.error })); return; }
+    applyAutocorrect({ ...ac, custom: [...ac.custom, { trigger: t.value, replacement: r.value }] });
+    setCustomForm({ trigger: "", replacement: "", error: null });
+  };
+  const removeCustomAutocorrect = (idx) =>
+    applyAutocorrect({ ...ac, custom: ac.custom.filter((_, i) => i !== idx) });
 
   const complete = owner.trim() && repo.trim() && pat.trim() && apiKey.trim();
 
@@ -411,6 +448,94 @@ export default function SettingsDialog({
                   Gedächtnis speichern
                 </button>
               </div>
+            </div>
+          )}
+
+          {/* AutoKorrektur (v7.25, Nutzerwunsch "natürlich global
+              gespeichert"): NUR sichtbar mit bestehender Verbindung (Muster
+              wie Globales Gedächtnis oben – die Konfiguration lebt in
+              state.json, ohne owner/repo/pat gäbe es nichts zu laden/
+              speichern). Änderungen wirken SOFORT (siehe applyAutocorrect
+              oben) – kein eigener Speichern-Knopf nötig, der bestehende
+              debounced state.json-Write in App.jsx übernimmt sie. */}
+          {hasSettings && (
+            <div className="mt-5 pt-3 border-t border-slate-200">
+              <div className="flex items-center gap-1.5 mb-1">
+                <Sparkles size={14} className="text-indigo-700" />
+                <span className="text-sm font-semibold text-slate-800">AutoKorrektur (Editor)</span>
+              </div>
+              <p className="text-xs text-slate-400 mb-2">
+                Ersetzt beim Tippen im WYSIWYG-Editor konfigurierte
+                Zeichenketten durch Symbole (z. B. „-&gt;“ → „→“). Gilt auf
+                allen Geräten (wird über das Daten-Repo synchronisiert). Ein
+                bereits geöffneter Editor zieht Änderungen erst beim
+                nächsten Öffnen nach.
+              </p>
+
+              <label className="flex items-center gap-2 text-sm text-slate-700 mb-2">
+                <input type="checkbox" checked={ac.enabled} onChange={toggleAutocorrectEnabled} />
+                AutoKorrektur aktiv
+              </label>
+
+              {ac.enabled && (
+                <div className="space-y-1.5 mb-3">
+                  {AUTOCORRECT_CATEGORIES.map((c) => (
+                    <label key={c.id} className="flex items-start gap-2 text-sm text-slate-700">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={isCategoryEnabled(ac, c.id)}
+                        onChange={() => toggleAutocorrectCategory(c.id)}
+                      />
+                      <span>
+                        {c.label}
+                        <span className="block text-xs text-slate-400 font-mono">
+                          {c.entries.slice(0, 3).map((e) => e.trigger + "→" + (e.replacement ?? e.open)).join("  ")}
+                        </span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+
+              <div className="text-xs font-medium text-slate-600 mb-1">Eigene Ersetzungen</div>
+              {ac.custom.length > 0 && (
+                <ul className="mb-2 space-y-1">
+                  {ac.custom.map((c, i) => (
+                    <li key={c.trigger + i} className="flex items-center gap-2 px-2 py-1.5 rounded-lg border border-slate-200 bg-slate-50">
+                      <span className="text-sm font-mono text-slate-800 truncate">{c.trigger} → {c.replacement}</span>
+                      <div className="flex-1" />
+                      <button onClick={() => removeCustomAutocorrect(i)}
+                        className="p-1 rounded text-rose-600 hover:bg-rose-50" title="Löschen">
+                        <Trash2 size={13} />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="flex items-center gap-1.5">
+                <input
+                  className={field + " w-24"}
+                  placeholder="Trigger"
+                  value={customForm.trigger}
+                  maxLength={20}
+                  onChange={(e) => setCustomForm((f) => ({ ...f, trigger: e.target.value, error: null }))}
+                />
+                <input
+                  className={field + " w-24"}
+                  placeholder="Ersetzung"
+                  value={customForm.replacement}
+                  maxLength={20}
+                  onChange={(e) => setCustomForm((f) => ({ ...f, replacement: e.target.value, error: null }))}
+                />
+                <button
+                  onClick={addCustomAutocorrect}
+                  className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs hover:bg-slate-50"
+                >
+                  <Plus size={13} /> Hinzufügen
+                </button>
+              </div>
+              {customForm.error && <div className="mt-1 text-xs text-rose-700">{customForm.error}</div>}
             </div>
           )}
 

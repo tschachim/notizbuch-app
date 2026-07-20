@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
-import { getHTMLFromFragment, Node, Extension } from "@tiptap/core";
+import { getHTMLFromFragment, Node, Extension, InputRule, textInputRule } from "@tiptap/core";
 import { Fragment } from "@tiptap/pm/model";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
@@ -33,6 +33,7 @@ import {
   cleanupLinkTitle, providerFor, providerHasCredentials, fetchLinkTitle,
   getLinkProviders, buildProviderIconDom,
 } from "../lib/linkProviders.jsx";
+import { buildActiveRules } from "../lib/autocorrect.js";
 
 /* WYSIWYG-Editor für die manuelle Bearbeitung der Wissensbasis.
    TipTap mit Markdown-Round-Trip, beschränkt auf den Dialekt, den der
@@ -657,6 +658,52 @@ function computeLinkDecorations(doc) {
   return DecorationSet.create(doc, decos);
 }
 
+/* -------------------------------------------------------------------- */
+/* AutoKorrektur (v7.25, Nutzerwunsch: "Word-artige Zeichenersetzung     */
+/* beim Tippen, mit umfangreicher eingebauter Bibliothek, konfigurier-   */
+/* bar"). Die eigentliche Bibliothek + die gesamte Konflikt-Auflösung    */
+/* (welcher Trigger feuert wann, siehe "-->"-vs-"--" & Co.) lebt in      */
+/* lib/autocorrect.js (BLATT, DOM-/TipTap-frei, siehe Kopfkommentar      */
+/* dort) – diese Extension übersetzt die dort kompilierten Regeln NUR    */
+/* noch in TipTap-InputRules:                                           */
+/*  - kind:"text"  -> textInputRule({find, replace}) (Standard-Helfer,   */
+/*    hängt bei "terminator"/"word"/"backslash"-Regeln automatisch das   */
+/*    Abschlusszeichen wieder an, siehe match[1]-Mechanik dort).         */
+/*  - kind:"multiply" -> eigene InputRule: die Regex liefert VIER        */
+/*    Gruppen (Ziffer, Leerraum, Leerraum, Ziffer), der Handler baut den */
+/*    Ersatztext daraus zusammen (nur "x" wird zu "×", Ziffern/Leerraum  */
+/*    bleiben exakt erhalten).                                          */
+/*                                                                       */
+/* Codeblock/Codespan-Guard: BEWUSST NICHT hier implementiert – TipTaps  */
+/* eingebauter InputRules-Handler (run$1 in @tiptap/core) prüft VOR      */
+/* jeder Regel bereits selbst `$from.parent.type.spec.code` (Codeblock)  */
+/* bzw. eine aktive code-Mark am Cursor (Codespan) und bricht dann ab,   */
+/* BEVOR überhaupt eine Regel getestet wird – siehe Test "feuert NICHT   */
+/* in Codeblock/Codespan" in tests/docEditorAutocorrect.test.jsx, der    */
+/* nur dieses bestehende Verhalten absichert (kein eigener Code nötig).  */
+/* Undo: ebenfalls TipTap-Standard (editor.commands.undoInputRule()) –    */
+/* jede über textInputRule()/InputRule ausgelöste Transaktion trägt      */
+/* automatisch die dafür nötigen Metadaten, siehe Test "Undo".           */
+export const AutoCorrect = Extension.create({
+  name: "autoCorrect",
+  addOptions() {
+    return { rules: [] };
+  },
+  addInputRules() {
+    return this.options.rules.map((rule) =>
+      rule.kind === "multiply"
+        ? new InputRule({
+            find: rule.find,
+            handler: ({ state, range, match }) => {
+              const [, digit1, spaceBefore, spaceAfter, digit2] = match;
+              state.tr.insertText(digit1 + spaceBefore + "×" + spaceAfter + digit2, range.from, range.to);
+            },
+          })
+        : textInputRule({ find: rule.find, replace: rule.replacement })
+    );
+  },
+});
+
 const linkDecorationsPluginKey = new PluginKey("linkDecorations");
 
 export const LinkDecorations = Extension.create({
@@ -875,8 +922,19 @@ export function jumpToHeading(editor, pos) {
   return true;
 }
 
-export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving, navWidth }) {
+export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving, navWidth, autocorrect }) {
   const baseline = useRef(null);
+  // AutoKorrektur (v7.25): Regeln werden NUR EINMAL beim Mount aus der
+  // übergebenen Konfiguration gebaut (leeres deps-Array – dieselbe
+  // Mount-only-Konvention wie useEditor() selbst unten, siehe dessen
+  // Aufruf ohne deps-Argument: @tiptap/react erstellt den Editor nur
+  // beim ersten Rendern neu). Ändert der Nutzer die Einstellungen,
+  // während der Editor bereits offen ist, zieht die LAUFENDE Sitzung das
+  // NICHT live nach – erst ein Schließen+erneutes Öffnen des Editors
+  // liest den neuen Stand (bewusst so einfach gehalten, siehe DECISIONS;
+  // ein Nutzer, der mitten in einer Bearbeitung die AutoKorrektur
+  // umstellt, ist ein seltener Randfall).
+  const autocorrectRules = useMemo(() => buildActiveRules(autocorrect), []); // eslint-disable-line react-hooks/exhaustive-deps
   const [error, setError] = useState(null);
   const [picker, setPicker] = useState(null); // null | "color" | "highlight" | "table" | "link"
   const [tableHover, setTableHover] = useState({ r: 0, c: 0 });
@@ -963,6 +1021,9 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
       TableCell,
       MathInline,
       MathBlock,
+      // AutoKorrektur (v7.25, siehe AutoCorrect oben) – rules kommt aus der
+      // EINMALIGEN Mount-Berechnung oben (autocorrectRules).
+      AutoCorrect.configure({ rules: autocorrectRules }),
       // html:true ist nötig, damit Schriftfarbe/Textmarker (Marks ohne
       // Markdown-Entsprechung) als <span>/<mark> UND die Formel-Tags
       // (<math-inline>/<math-block>) serialisiert und beim Öffnen wieder
