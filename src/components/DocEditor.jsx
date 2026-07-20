@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import { getHTMLFromFragment, Node, Extension, InputRule, textInputRule } from "@tiptap/core";
 import { Fragment } from "@tiptap/pm/model";
-import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import StarterKit from "@tiptap/starter-kit";
 import CodeBlockExtension from "@tiptap/extension-code-block";
@@ -21,7 +21,7 @@ import { Markdown } from "tiptap-markdown";
 import {
   Bold, Italic, Code, Code2, List, ListOrdered, ListChecks, Heading1, Heading2, Heading3,
   Minus, Undo2, Redo2, Strikethrough, Palette, Highlighter, Table as TableIcon,
-  Sigma, SquareFunction, Link2 as LinkIcon, Sparkles, Loader2,
+  Sigma, SquareFunction, Link2 as LinkIcon, Sparkles, Loader2, GripVertical,
 } from "lucide-react";
 import {
   mathToPlaceholders, renderKatexHtml, MATH_SERIALIZED_RE, MATH_INLINE_TAG, MATH_BLOCK_TAG,
@@ -922,6 +922,138 @@ export function jumpToHeading(editor, pos) {
   return true;
 }
 
+/* ---------------------------------------------------------------------- */
+/* Gliederungs-Leiste: Drag&Drop-Umsortierung (v7.26, Nutzerwunsch: Kapitel */
+/* und Abschnitte in der EDITOR-Leiste per Ziehen umsortieren – NUR im     */
+/* Edit-Modus, mit dem Nutzer abgestimmt: ein Struktureingriff mit         */
+/* Abbrechen/Undo-Semantik gehört an denselben Ort wie andere Editor-      */
+/* Bearbeitungen; die Leseansicht-Leiste (App.jsx sectionNavContent) bleibt */
+/* reine Navigation und wird hier NICHT angefasst.                        */
+/*                                                                          */
+/* Bereichs-Modell (computeOutlineRanges) UND das eigentliche Verschieben   */
+/* (moveOutlineRange) sind bewusst reine, DOM-freie Funktionen (wie         */
+/* extractOutline/jumpToHeading oben) – testbar ohne echten Drag, die UI    */
+/* unten (Pointer-Events auf dem Grip-Handle) ruft sie nur noch auf.        */
+/* ---------------------------------------------------------------------- */
+
+// Erweitert extractOutline um den VOLLSTÄNDIGEN ProseMirror-Bereich
+// [from, to) je Leisten-Eintrag: "from" ist die Position des heading-Nodes
+// selbst (wie extractOutlines "pos"), "to" das Ende seines gesamten Inhalts:
+//  - H1 (Kapitel) zieht ALLES bis zum NÄCHSTEN H1 – ein dazwischenliegendes
+//    H2 ist KEINE Grenze für ein Kapitel, das nimmt seine Abschnitte immer
+//    mit (anders als bei H2 unten).
+//  - H2 (Abschnitt) endet an der nächsten Überschrift GLEICH WELCHEN Levels
+//    (H1 oder H2 – H3 zählt nicht, siehe extractOutline, das H3 gar nicht
+//    erst liefert).
+// Beide ohne einen passenden nachfolgenden Eintrag: Dokumentende
+// (doc.content.size). Reine Funktion AUF extractOutline aufgesetzt statt
+// einer zweiten eigenen Traversierung – ein zweiter, potenziell
+// abweichender Scan desselben Baums wäre eine unnötige Fehlerquelle. Die
+// Titelzeile (Position 0, siehe extractOutline-Kopfkommentar) ist darüber
+// bereits ausgenommen: sie taucht hier folglich weder als ziehbarer
+// Eintrag noch als Ziel auf (siehe DECISIONS).
+export function computeOutlineRanges(doc) {
+  const items = extractOutline(doc);
+  const docEnd = doc && doc.content ? doc.content.size : 0;
+  return items.map((item, i) => {
+    let to;
+    if (item.level === 1) {
+      const nextChapter = items.slice(i + 1).find((o) => o.level === 1);
+      to = nextChapter ? nextChapter.pos : docEnd;
+    } else {
+      to = i + 1 < items.length ? items[i + 1].pos : docEnd;
+    }
+    return { level: item.level, title: item.text, from: item.pos, to };
+  });
+}
+
+// Liefert die Indizes ALLER gültigen Ziel-"Grenzen" für einen Drag von
+// entries[draggedIndex] – ein Index i bedeutet "einfügen VOR entries[i]",
+// der Index entries.length bedeutet "ans Dokumentende einfügen" (nach dem
+// letzten Eintrag). Regeln (siehe Auftrag):
+//  - H1 (Kapitel) darf NUR vor ein anderes H1 oder ans Dokumentende – NIE
+//    mitten in ein Kapitel hinein (eine H2-Grenze ist für H1 kein gültiges
+//    Ziel).
+//  - H2 (Abschnitt) darf an JEDER Grenze landen: vor einen anderen
+//    Abschnitt, ODER vor ein H1 – Letzteres ist NICHT nur "vor das nächste
+//    Kapitel" gedacht, sondern GENAU DIESELBE Position wie "ans Ende des
+//    VORHERGEHENDEN Kapitels" (die Grenze zwischen zwei Kapiteln ist ein
+//    einziger Punkt im Dokument) – das deckt kapitelübergreifendes
+//    Verschieben UND das Einsortieren in ein bislang abschnittsloses
+//    Kapitel (dessen einzige Grenze zum nächsten Kapitel bzw. Dokumentende
+//    ist "direkt hinter seinen eigenen Kapitel-Zeilen") automatisch mit ab,
+//    ohne einen dritten Sonderfall zu brauchen.
+// No-op-Filter: Jedes Ziel, dessen Position mit dem eigenen "from" ODER
+// eigenen "to" übereinstimmt, wird ausgeschlossen (Drop auf sich selbst
+// bzw. direkt vor die eigene aktuelle Position – das Dokument bliebe
+// byte-identisch, siehe moveOutlineRange). Da die aus computeOutlineRanges
+// abgeleiteten Positionen (inklusive Dokumentende) im Dokument STRENG
+// aufsteigend sind, ist dieser reine Positionsvergleich ausreichend – zwei
+// unterschiedliche Zielindizes können nie dieselbe Position liefern.
+export function validDropTargets(entries, draggedIndex) {
+  if (!Array.isArray(entries) || entries.length === 0) return [];
+  const dragged = entries[draggedIndex];
+  if (!dragged) return [];
+  const n = entries.length;
+  const docEnd = entries[n - 1].to;
+  const result = [];
+  for (let i = 0; i <= n; i++) {
+    const level = i < n ? entries[i].level : null; // null = Dokumentende
+    if (dragged.level === 1 && level === 2) continue; // H1 nie mitten ins Kapitel
+    const pos = i < n ? entries[i].from : docEnd;
+    if (pos === dragged.from || pos === dragged.to) continue; // No-op-Drop
+    result.push(i);
+  }
+  return result;
+}
+
+// Verschiebt entries[draggedIndex] atomar (EINE Transaktion, siehe Auftrag
+// "ein Undo-Schritt") an die durch targetIndex bezeichnete Grenze (gleiche
+// Index-Bedeutung wie bei validDropTargets). Ablauf wie im Auftrag
+// vorgegeben: Slice kopieren, Quellbereich löschen, Zielposition durchs
+// Mapping der bereits erfolgten Löschung schieben, erst DANACH einfügen –
+// sonst würde eine Zielposition HINTER dem gelöschten Bereich auf die
+// Löschung selbst zeigen (um die Länge des gelöschten Bereichs verschoben).
+// "from"/"to" sind laut computeOutlineRanges immer exakte Node-Grenzen auf
+// oberster Ebene (Position direkt vor einem heading-Node bzw. vor dem
+// nächsten/Dokumentende) – der Slice ist dadurch garantiert "offen"-frei
+// (openStart/openEnd 0, vollständige Top-Level-Nodes), tr.insert(pos,
+// slice.content) funktioniert deshalb ohne jede Sonderbehandlung
+// angebrochener Nodes.
+// Validiert das Ziel SELBST nochmal über validDropTargets (Verteidigung in
+// der Tiefe: diese Funktion ist auch direkt aus Tests/potenziell künftigem
+// Code aufrufbar, nicht nur aus der bereits filternden UI) – ein
+// ungültiger Index (falsches Level, No-op, außerhalb des Bereichs) wird
+// OHNE jede Dokumentänderung abgelehnt. Gibt true zurück, wenn tatsächlich
+// verschoben wurde (analog jumpToHeading).
+export function moveOutlineRange(editor, entries, draggedIndex, targetIndex) {
+  if (!editor || !Array.isArray(entries)) return false;
+  const dragged = entries[draggedIndex];
+  if (!dragged || typeof targetIndex !== "number") return false;
+  if (!validDropTargets(entries, draggedIndex).includes(targetIndex)) return false;
+
+  const docEnd = entries[entries.length - 1].to;
+  const targetPos = targetIndex < entries.length ? entries[targetIndex].from : docEnd;
+
+  const { state } = editor;
+  const slice = state.doc.slice(dragged.from, dragged.to);
+  const tr = state.tr;
+  tr.delete(dragged.from, dragged.to);
+  const mapped = tr.mapping.map(targetPos);
+  tr.insert(mapped, slice.content);
+  // Cursor in die verschobene Überschrift setzen (wie jumpToHeading):
+  // "mapped" ist die neue Position DES verschobenen heading-Nodes selbst
+  // (slice.content beginnt immer mit ihm), "+1" der Anfang seines Inhalts.
+  // Math.min gegen das neue Dokumentende ist reine Vorsicht (kann hier
+  // eigentlich nie greifen, da mapped+1 stets innerhalb des gerade
+  // eingefügten Inhalts liegt) – konsistent mit dem Stale-Position-Guard
+  // in jumpToHeading.
+  const selPos = Math.min(mapped + 1, tr.doc.content.size);
+  tr.setSelection(TextSelection.near(tr.doc.resolve(selPos)));
+  editor.view.dispatch(tr);
+  return true;
+}
+
 export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving, navWidth, autocorrect }) {
   const baseline = useRef(null);
   // AutoKorrektur (v7.25): Regeln werden NUR EINMAL beim Mount aus der
@@ -1043,10 +1175,108 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
   // doc-Objekt (nur bei tr.docChanged ändert sich die Referenz), extractOutline
   // läuft also nur bei echten Bearbeitungen erneut, nicht bei jedem Tick aus
   // onTransaction (der u. a. auch für die Toolbar-Aktivzustände feuert).
+  // v7.26: computeOutlineRanges (statt extractOutline direkt) liefert
+  // zusätzlich die [from, to)-Bereiche, die die Drag&Drop-Umsortierung
+  // unten braucht – die Leiste selbst nutzt weiterhin nur level/title/from.
   const outline = useMemo(
-    () => extractOutline(editor ? editor.state.doc : null),
+    () => computeOutlineRanges(editor ? editor.state.doc : null),
     [editor && editor.state.doc] // eslint-disable-line react-hooks/exhaustive-deps
   );
+
+  // Drag&Drop-Umsortierung der Gliederungs-Leiste (v7.26): siehe
+  // computeOutlineRanges/validDropTargets/moveOutlineRange oben für die
+  // reine Logik. NUR Pointer-Events (kein natives HTML5-Drag&Drop) –
+  // Begründung siehe DECISIONS: (a) dieselbe Technik wie der bestehende
+  // Bild-Anfasser (BlockImage-NodeView oben, "img-resize-handle") statt
+  // eines zweiten, andersartigen Interaktionsmusters im selben Editor; (b)
+  // volle Kontrolle über den Drop-Indikator ohne die Eigenheiten der
+  // nativen DnD-API (dataTransfer/dragImage/effectAllowed, browser- und
+  // Eingabegerät-abhängige Startschwellen) – hier reicht ein simples
+  // "Grip gedrückt halten, über eine Zielzone bewegen, loslassen".
+  // "dragOutline" ist NUR für die Optik (gedrückter Eintrag halbtransparent,
+  // Zielzonen überhaupt gerendert) – die eigentliche Zielauswahl beim
+  // Loslassen liest ausschließlich "dropTargetRef" (siehe unten), damit der
+  // beim Drag-Start erzeugte window-Listener nie einen veralteten
+  // React-State-Snapshot sieht (klassisches Stale-Closure-Risiko bei
+  // Listenern, die nur einmal pro Drag registriert werden).
+  const [dragOutline, setDragOutline] = useState(null); // { index, level } | null
+  const [dropTargetIndex, setDropTargetIndex] = useState(null); // nur für die Anzeige
+  const dropTargetRef = useRef(null);
+  // Aufräum-Funktion des GERADE laufenden Drags (falls einer läuft) – wird
+  // beim Unmount aufgerufen (siehe useEffect unten), damit ein Editor, der
+  // MITTEN in einer Ziehbewegung geschlossen wird (z. B. "Abbrechen"),
+  // keine window-Listener zurücklässt, die danach auf eine unmountete
+  // Komponente einzuwirken versuchen (gleiches Muster wie cancelAutoFetch).
+  const dragCleanupRef = useRef(null);
+  useEffect(() => () => { if (dragCleanupRef.current) dragCleanupRef.current(); }, []);
+
+  const startOutlineDrag = (e, index) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!editor) return;
+    // Frischer Snapshot bei Drag-Beginn: entries/valid ändern sich während
+    // EINES Drags nie (das Dokument wird erst beim Loslassen verändert),
+    // als lokale const in den Closures unten also gefahrlos "eingefroren".
+    const entries = computeOutlineRanges(editor.state.doc);
+    const valid = validDropTargets(entries, index);
+    if (!valid.length) return; // nichts zu tun (z. B. einziger Eintrag)
+    setDragOutline({ index, level: entries[index].level });
+    setDropTargetIndex(null);
+    dropTargetRef.current = null;
+
+    // document.elementFromPoint statt pointer capture: mit gesetzter
+    // Pointer-Capture würden pointerenter/-move-Events auf den einzelnen
+    // Zielzonen NICHT mehr feuern (das gehaltene Element bliebe alleiniges
+    // Ziel) – die Hit-Tests unten funktionieren dadurch unabhängig davon,
+    // über welchem Element der Zeiger technisch "gefangen" ist.
+    const onMove = (ev) => {
+      const el = document.elementFromPoint(ev.clientX, ev.clientY);
+      const zone = el && el.closest ? el.closest("[data-outline-boundary]") : null;
+      const boundary = zone ? Number(zone.getAttribute("data-outline-boundary")) : null;
+      const isValid = boundary !== null && valid.includes(boundary);
+      dropTargetRef.current = isValid ? boundary : null;
+      setDropTargetIndex(isValid ? boundary : null);
+    };
+    const end = (apply) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      dragCleanupRef.current = null;
+      if (apply && dropTargetRef.current !== null) {
+        moveOutlineRange(editor, entries, index, dropTargetRef.current);
+      }
+      setDragOutline(null);
+      setDropTargetIndex(null);
+      dropTargetRef.current = null;
+    };
+    const onUp = () => end(true);
+    const onCancel = () => end(false);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+    dragCleanupRef.current = () => end(false); // beim Unmount: KEIN Verschieben mehr anwenden
+  };
+
+  // Eine Dropzone je Grenzindex (siehe validDropTargets – 0..outline.length),
+  // NUR während eines laufenden Drags überhaupt im DOM (kein zusätzliches
+  // Markup/keine Layoutverschiebung, solange nicht gezogen wird). Wird
+  // IMMER für jede Grenze gerendert, unabhängig davon, ob sie für DIESES
+  // Drag-Level gültig ist – die Hit-Tests in startOutlineDrag brauchen
+  // durchgehende Zielzonen, die Optik (Indikator-Linie) erscheint aber nur,
+  // wenn "dropTargetIndex" (bereits gegen "valid" gefiltert) genau hier
+  // steht: ein ungültiges Ziel zeigt dadurch NIE einen Indikator, obwohl
+  // die Zone selbst da ist (siehe Auftrag).
+  const renderDropZone = (index) => {
+    if (!dragOutline) return null;
+    const active = dropTargetIndex === index;
+    return (
+      <div
+        key={"dz" + index}
+        data-outline-boundary={index}
+        className={"rounded-full transition-colors " + (active ? "h-1 my-1 bg-indigo-500" : "h-2")}
+      />
+    );
+  };
 
   const save = () => {
     if (!editor || saving) return;
@@ -1504,32 +1734,59 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
             integriert statt eine Outline-API nach App.jsx zu exponieren
             (siehe DECISIONS – hält editor/view als Implementierungsdetail
             dieser Komponente, kein neues Interface zum Elternteil nötig
-            außer der reinen Breitenangabe). */}
+            außer der reinen Breitenangabe).
+            v7.26: jeder Eintrag bekommt links einen Grip-Anfasser
+            (GripVertical) für Drag&Drop-Umsortierung (startOutlineDrag
+            oben) – bewusst ein EIGENES Element statt draggable auf dem
+            Navigations-Knopf selbst, sonst würde jeder Ziehversuch
+            zusätzlich einen Klick/Sprung auslösen. Zwischen (und vor/nach)
+            den Einträgen liegt je eine unsichtbare Dropzone
+            (data-outline-boundary), die NUR während eines laufenden Drags
+            gerendert wird – siehe renderDropZone unten. */}
         <nav
           style={{ "--nav-w": (navWidth || 148) + "px" }}
           className="hidden md:block md:w-[var(--nav-w)] shrink-0 overflow-y-auto py-1 pr-1"
         >
+          {renderDropZone(0)}
           {outline.map((item, i) => (
             // Einrückung über einen Wrapper mit Innenabstand (pl-3) statt
             // ml-3 direkt am Knopf: "w-full" bezöge sich sonst weiter auf
             // die volle Leistenbreite und würde nach rechts überstehen.
-            <div key={i + item.pos} className={item.level === 2 ? "pl-3" : undefined}>
-              <button
-                // onMouseDown+preventDefault (v7.15-Fix): verhindert, dass
-                // der Browser den DOM-Fokus schon beim Mausdruck auf den
-                // Button verschiebt, BEVOR onClick überhaupt läuft – sonst
-                // driften DOM-Selection und ProseMirror-Selection auseinander
-                // (siehe jumpToHeading-Kommentar oben).
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => jumpToHeading(editor, item.pos)}
-                title={item.text || (item.level === 1 ? "Kapitel" : "Abschnitt")}
-                className={"block w-full text-left truncate rounded-r-xl border border-l-0 shadow-sm mb-1.5 " +
-                  (item.level === 1
-                    ? "text-xs font-bold py-1.5 pl-2 pr-2 border-slate-300 bg-gradient-to-r from-slate-100 to-slate-200 text-slate-900"
-                    : "text-xs py-1 pl-2 pr-2 border-slate-200 bg-gradient-to-r from-slate-50 to-slate-100 text-slate-600")}
+            <div key={i + item.from}>
+              <div
+                className={(item.level === 2 ? "pl-3 " : "") +
+                  "flex items-center gap-0.5 mb-1.5 " +
+                  (dragOutline && dragOutline.index === i ? "opacity-40" : "")}
               >
-                {item.text || "(ohne Titel)"}
-              </button>
+                <button
+                  type="button"
+                  onPointerDown={(e) => startOutlineDrag(e, i)}
+                  // Der Grip selbst navigiert NIE (siehe Kopfkommentar) –
+                  // ein reiner Klick ohne Ziehen darf keine Aktion auslösen.
+                  onClick={(e) => e.preventDefault()}
+                  title="Ziehen zum Verschieben"
+                  className="shrink-0 p-0.5 rounded text-slate-300 hover:text-slate-500 hover:bg-slate-100 cursor-grab active:cursor-grabbing touch-none"
+                >
+                  <GripVertical size={13} />
+                </button>
+                <button
+                  // onMouseDown+preventDefault (v7.15-Fix): verhindert, dass
+                  // der Browser den DOM-Fokus schon beim Mausdruck auf den
+                  // Button verschiebt, BEVOR onClick überhaupt läuft – sonst
+                  // driften DOM-Selection und ProseMirror-Selection auseinander
+                  // (siehe jumpToHeading-Kommentar oben).
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => jumpToHeading(editor, item.from)}
+                  title={item.title || (item.level === 1 ? "Kapitel" : "Abschnitt")}
+                  className={"flex-1 min-w-0 text-left truncate rounded-r-xl border border-l-0 shadow-sm " +
+                    (item.level === 1
+                      ? "text-xs font-bold py-1.5 pl-2 pr-2 border-slate-300 bg-gradient-to-r from-slate-100 to-slate-200 text-slate-900"
+                      : "text-xs py-1 pl-2 pr-2 border-slate-200 bg-gradient-to-r from-slate-50 to-slate-100 text-slate-600")}
+                >
+                  {item.title || "(ohne Titel)"}
+                </button>
+              </div>
+              {renderDropZone(i + 1)}
             </div>
           ))}
         </nav>

@@ -3979,3 +3979,128 @@ aus `referenz-app.jsx` übernommen.
       restliche State-Payload (Entscheidung #3) – ändern zwei Geräte die
       AutoKorrektur-Konfiguration nahezu gleichzeitig, gewinnt der zuletzt
       geschriebene Stand, kein Feld-Merge.
+
+68. **Drag&Drop-Umsortierung von Kapiteln/Abschnitten in der EDITOR-
+    Gliederungsleiste** (`src/components/DocEditor.jsx`, v7.26,
+    Nutzerwunsch). Die Leiste (v7.14, #60) war bisher reine Navigation;
+    jetzt lassen sich H1-Kapitel und H2-Abschnitte durch Ziehen ihrer
+    Leisten-Einträge umsortieren – auch kapitelübergreifend.
+    - **NUR im Edit-Modus** (mit dem Nutzer abgestimmt): Ein Struktur-
+      eingriff mit Abbrechen/Undo-Semantik gehört an denselben Ort wie
+      jede andere Bearbeitung. Die Leseansicht-Leiste (`App.jsx`,
+      `sectionNavContent`) bleibt UNVERÄNDERT reine Navigation – bewusst
+      NICHT angefasst, sonst bräuchte sie eine eigene Persistenz-/Undo-
+      Semantik außerhalb des Editor-Speicherns.
+    - **Bereichs-Modell `computeOutlineRanges(doc)`** (reine Funktion, AUF
+      `extractOutline` aufgesetzt statt einer zweiten Traversierung):
+      liefert je Eintrag `{level, title, from, to}` mit dem VOLLSTÄNDIGEN
+      ProseMirror-Bereich `[from, to)`. H1 zieht ALLES bis zum NÄCHSTEN H1
+      (ein dazwischenliegendes H2 ist für ein Kapitel KEINE Grenze – es
+      nimmt seine Abschnitte immer mit); H2 endet an der nächsten
+      Überschrift GLEICH WELCHEN Levels (H1 oder H2). Ohne Nachfolger:
+      Dokumentende (`doc.content.size`). Die Titelzeile (Position 0,
+      dieselbe Ausnahme wie in `extractOutline`/`parseTree`, #60) ist
+      dadurch weder ziehbar noch Ziel.
+    - **`validDropTargets(entries, draggedIndex)`** (reine Funktion,
+      OHNE Editor testbar): ein Rückgabe-Index `i` bedeutet "einfügen vor
+      `entries[i]`", der Index `entries.length` bedeutet Dokumentende.
+      Regeln: H1 darf NUR vor ein anderes H1 oder ans Dokumentende (eine
+      H2-Grenze wird für H1-Drags herausgefiltert – nie mitten in ein
+      Kapitel). H2 ist an JEDER Grenze erlaubt: vor einen anderen
+      Abschnitt ODER vor ein H1 – Letzteres ist bewusst NICHT nur "vor das
+      nächste Kapitel" gedacht, sondern zugleich GENAU dieselbe Position
+      wie "ans Ende des VORHERGEHENDEN Kapitels" (die Grenze zwischen zwei
+      Kapiteln ist EIN einziger Punkt im Dokument) – deckt kapitel-
+      übergreifendes Verschieben UND das Einsortieren in ein bislang
+      abschnittsloses Kapitel (dessen einzige erreichbare Grenze "direkt
+      hinter seinen eigenen Kapitel-Zeilen" ist) automatisch mit ab, ohne
+      einen dritten Sonderfall im Code zu brauchen. No-op-Filter: jedes
+      Ziel, dessen Position mit dem eigenen `from` ODER eigenen `to`
+      übereinstimmt (Drop auf sich selbst bzw. direkt vor die eigene
+      aktuelle Position), wird ausgeschlossen – reiner Positionsvergleich,
+      korrekt, weil die aus `computeOutlineRanges` abgeleiteten Positionen
+      (inklusive Dokumentende) im Dokument STRENG aufsteigend und damit
+      alle verschieden sind.
+    - **`moveOutlineRange(editor, entries, draggedIndex, targetIndex)`**:
+      Slice kopieren (`state.doc.slice(from, to)` – die Bereichsgrenzen
+      sind laut Bereichs-Modell immer exakte Top-Level-Node-Grenzen, der
+      Slice ist dadurch garantiert offen-frei), Quellbereich löschen,
+      Zielposition durchs `tr.mapping` DER BEREITS ERFOLGTEN Löschung
+      schieben, ERST DANACH einfügen (`tr.insert`) – eine Zielposition
+      hinter dem gelöschten Bereich zeigt sonst um dessen Länge verschoben
+      ins Leere. EINE Transaktion ⇒ EIN Undo-Schritt (ProseMirror-History-
+      Standard, kein eigener Code nötig). Selektion wird in die
+      verschobene Überschrift gesetzt (`TextSelection.near`, Analogie zu
+      `jumpToHeading`). Validiert das Ziel NOCHMAL selbst über
+      `validDropTargets` (Verteidigung in der Tiefe – die Funktion ist
+      auch direkt/aus Tests aufrufbar, nicht nur aus der bereits
+      filternden UI) – ein ungültiges Ziel (falsches Level, No-op, außer-
+      halb des Bereichs) wird ohne jede Dokumentänderung abgelehnt.
+    - **DnD-Technik: Pointer-Events, bewusst KEIN natives HTML5-
+      Drag&Drop.** Begründung: (a) Konsistenz – der Editor hat mit dem
+      Bild-Anfasser (`BlockImage`-NodeView, `img-resize-handle`, v6.2)
+      bereits ein etabliertes Pointer-Event-Muster für Zieh-Interaktionen;
+      ein zweites, andersartiges Interaktionsmuster (`dataTransfer`,
+      `dragImage`, `effectAllowed`/`dropEffect`, browser-/eingabegerät-
+      abhängige Startschwellen) hätte keinen Mehrwert. (b) Volle Kontrolle
+      über den Drop-Indikator ohne die Eigenheiten der nativen DnD-API.
+      Umsetzung: `pointerdown` auf einem EIGENEN Grip-Handle
+      (`GripVertical`, lucide-react) startet den Drag – bewusst NICHT auf
+      dem Navigations-Knopf selbst, sonst würde jeder Ziehversuch
+      zusätzlich einen Klick/Sprung auslösen (Handle und Klickfläche sind
+      zwei GESCHWISTER-Elemente, kein verschachteltes `<button>`).
+      `document.elementFromPoint(x, y)` bei jedem `pointermove` (statt
+      `setPointerCapture`, das die `pointerenter`/`-move`-Events auf den
+      einzelnen Zielzonen unterdrücken würde) findet die aktuell unter dem
+      Zeiger liegende Dropzone (`[data-outline-boundary]`) – EINE Zone je
+      Grenzindex, IMMER gerendert (unabhängig vom Level), sobald ein Drag
+      läuft, aber nur bei Gültigkeit (`valid.includes(boundary)`) farblich
+      hervorgehoben ("ungültige Ziele zeigen keinen Indikator", wie im
+      Auftrag verlangt). Der eigentliche Zielindex beim Loslassen kommt
+      NICHT aus React-State (Stale-Closure-Risiko: der beim Drag-Start
+      EINMALIG registrierte `window`-Listener würde sonst den React-State-
+      Snapshot vom Drag-BEGINN sehen, nicht den aktuellsten), sondern aus
+      einer `useRef`, synchron im `pointermove`-Handler mitgeführt;
+      `dropTargetIndex` (State) dient ausschließlich der Anzeige. Ein
+      Editor-Unmount MITTEN in einem laufenden Drag (z. B. "Abbrechen"
+      während gezogen wird) räumt die `window`-Listener über eine
+      `useEffect`-Cleanup-Funktion auf (gleiches Muster wie
+      `cancelAutoFetch`), OHNE die Verschiebung noch anzuwenden.
+    - **Roundtrip-Garantien:** Da `moveOutlineRange` ausschließlich ganze
+      Top-Level-Nodes per Slice verschiebt (nie deren Inhalt anfasst),
+      überstehen Formeln/Codeblöcke/Tabellen/Links im verschobenen Bereich
+      die Verschiebung unverändert (Node-Struktur bleibt exakt erhalten;
+      nur die Position im Dokument ändert sich) – mit echtem TipTap-
+      Roundtrip-Test abgesichert (Formel + Codeblock + Tabelle in einem
+      verschobenen Kapitel, byte-genauer Vergleich, plus ein zweiter,
+      unveränderter Lade-/Speicherzyklus danach zur Drift-Kontrolle).
+    - **Tests:** `tests/docEditorOutlineDnd.test.jsx` (24 Fälle, echter
+      TipTap/markdown-it-Zyklus wie `docEditorOutline.test.jsx`):
+      `computeOutlineRanges` (Kapitel mit Abschnitten, abschnittsloses
+      Kapitel, H2 vor dem ersten H1/implizites Kapitel, Titel-Ausnahme,
+      Dokumentende, Randfälle), `validDropTargets` (H1-Level-Filter, H2 an
+      jeder Grenze inkl. abschnittsloses Kapitel, No-op-Filter beidseitig,
+      Randfälle/kaputte Argumente), `moveOutlineRange` (H1 vor anderes H1,
+      H1 ans Dokumentende, H2 innerhalb eines Kapitels, H2 kapitel-
+      übergreifend in ein nicht-leeres UND ein leeres Kapitel, H2 aus dem
+      impliziten Vorspann in ein Kapitel, No-op-Drops inkl. Prüfung der
+      Undo-Tiefe/History-Sauberkeit, H1-Drag auf eine H2-Grenze wird auch
+      bei direktem Aufruf abgelehnt, Undo stellt exakt wieder her, Rand-
+      fälle/kaputte Argumente, Formel+Codeblock+Tabelle im verschobenen
+      Kapitel byte-genau, 2-Zyklen-Stabilität). Gesamtstand danach
+      932/932 grün (vorher 908).
+    - **Bewusste Restrisiken:** (1) Touch-Geräte: `pointerdown` auf dem
+      winzigen Grip-Handle ist auf einem Touchscreen schwerer präzise zu
+      treffen als mit der Maus – praktisch irrelevant, die Leiste ist
+      ohnehin Desktop-only (`md:`-Breakpoint, unverändert seit v7.14).
+      (2) Die Dropzonen-Hittests laufen über echtes DOM-Hit-Testing
+      (`elementFromPoint`) und sind dadurch NICHT sinnvoll in jsdom
+      pixel-genau unit-testbar (jsdom liefert für `getBoundingClientRect`
+      immer Nullen) – bewusst nur die REINE Logik (`computeOutlineRanges`/
+      `validDropTargets`/`moveOutlineRange`) unit-getestet, die visuelle
+      Zeigerführung selbst ist Sache des E2E-Testfalls D13
+      (`docs/TESTFAELLE.md`). (3) Wie die gesamte Gliederungs-Erkennung
+      bleibt auch dies FENCE-BLIND (#54/#60 geteilte, dokumentierte
+      Grenze) – eine `#`/`##`-Zeile innerhalb eines Codeblocks kann
+      fälschlich als Kapitel-/Abschnittsgrenze zählen und würde beim
+      Ziehen mitgerissen; unverändert gegenüber dem Bestand vor v7.26.

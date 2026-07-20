@@ -660,6 +660,37 @@ qatest Ende“ tippen – erwartet erscheint „✅“ anstelle von „qatest“
 danach wieder löschen (Cleanup). Nicht speichern, Editor per „Abbrechen“
 schließen (keine Test-Zeile im Dokument hinterlassen).
 
+**D13 [VERBUNDEN] Kapitel/Abschnitte in der Gliederungs-Leiste per
+Drag&Drop umsortieren (v7.26, NUR Editor/Desktop-Breite).** Editor öffnen
+(Stift-Knopf), falls nötig zunächst wie in D10 zwei `#`-Kapitel mit je
+mindestens einem `##`-Abschnitt anlegen (z. B. „QA-Kapitel Eins“ mit
+„QA-Abschnitt A“, „QA-Kapitel Zwei“ mit „QA-Abschnitt B“) und einmal
+speichern. Editor erneut öffnen. Erwartet: Jeder Eintrag in der
+Gliederungs-Leiste zeigt links einen kleinen Ziehgriff (drei senkrechte
+Punkte). Zuerst OHNE zu ziehen auf einen Eintrag klicken (neben dem
+Griff): Erwartet wie bisher (D10) springt der Cursor zur Überschrift – der
+Griff selbst löst KEINEN Sprung aus. Dann: Maustaste auf dem Griff von
+„QA-Kapitel Zwei“ gedrückt halten und den Eintrag über „QA-Kapitel Eins“
+ziehen. Erwartet: Der gezogene Eintrag wird während des Ziehens
+halbtransparent, an gültigen Zwischenpositionen erscheint eine kurze
+farbige Linie als Ablege-Anzeige; lässt man die Maustaste dort los, wo
+die Linie VOR „QA-Kapitel Eins“ steht, tauschen die beiden Kapitel im
+Dokument die Reihenfolge (Leiste zeigt sofort „QA-Kapitel Zwei“ oben).
+Danach: Griff von „QA-Abschnitt A“ (jetzt im unteren Kapitel) gedrückt
+halten und in das JEWEILS ANDERE Kapitel ziehen (kapitelübergreifend),
+dort loslassen. Erwartet: Der Abschnitt erscheint in der Leiste
+eingerückt unter dem NEUEN Kapitel. Speichern. Erwartet: neue Version in
+der Historie, die Dokument-Ansicht zeigt exakt die per Ziehen erzeugte
+Reihenfolge (Kapitel- und Abschnitts-Überschriften an der erwarteten
+Stelle, Inhalte darunter vollständig und unverändert). Editor erneut
+öffnen: Reihenfolge bleibt wie gespeichert. Danach eine WEITERE
+Verschiebung durchführen, aber NICHT speichern, sondern „Abbrechen“
+klicken: Editor erneut öffnen (oder Dokument-Ansicht ansehen) – erwartet
+KEINE Änderung gegenüber dem letzten Speicherstand (Abbrechen verwirft
+zuverlässig). Auf einem schmalen/mobilen Fenster: Gliederungs-Leiste
+bleibt wie bisher (D10) ausgeblendet – kein Drag&Drop dort zu erwarten
+(kein Bug).
+
 ## E. Schnellnotizen
 
 **E1 [OFFEN] Post-it-Lebenszyklus.** „Schnellnotiz“-Knopf (Desktop:
