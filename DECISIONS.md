@@ -4104,3 +4104,96 @@ aus `referenz-app.jsx` übernommen.
       Grenze) – eine `#`/`##`-Zeile innerhalb eines Codeblocks kann
       fälschlich als Kapitel-/Abschnittsgrenze zählen und würde beim
       Ziehen mitgerissen; unverändert gegenüber dem Bestand vor v7.26.
+
+69. **Anlage-Platzhalter erreicht den WYSIWYG-Editor nie mehr – Pre-Load-
+    Strip als dritte Schicht** (`src/components/DocEditor.jsx`, v7.27,
+    Nutzer-Befund/🟡 aus dem v7.24-26-E2E-Lauf, HEAD e0102c9). Ergänzt
+    #64 (Anlage-Platzhalter-Bereinigung) um eine dritte Schicht, nachdem
+    live ein konkreter Verschmelzungs-Fall auftrat: Der Platzhaltertext
+    war im Editor bis dahin ECHTER, editierbarer Absatztext – ein Klick
+    MITTEN in die Zeile gefolgt von Tippen verschmolz Nutzertext mit dem
+    Hinweissatz (Beleg: „Noch nichts erfasst. Die ersta<b>e Notiz im Chat
+    legt hier los.“). Der so entstandene Murks matchte danach den
+    exakten Zeilenvergleich in `stripInboxPlaceholder` (#64, bewusst kein
+    Fuzzy-Match) nicht mehr und blieb dauerhaft im Dokument stehen – ein
+    strukturelles Loch, das die beiden BESTEHENDEN Schichten (Schreib-Pfad
+    1 „Chat/Modell-Ops“, Schreib-Pfad 2 „Editor-Save, bedingungslos NACH
+    dem Speichern“) prinzipbedingt nicht schließen konnten, weil beide erst
+    NACH einer bereits erfolgten Bearbeitung greifen.
+    - **Dritte Schicht: Pre-Load-Strip VOR dem Öffnen im Editor.**
+      `DocEditor.jsx` wendet `stripInboxPlaceholder` (unverändert aus
+      `src/lib/ops.js`, #64/#64.1 – EINE Quelle, kein zweiter Reimport
+      nötig, `ops.js` hat selbst keine Imports, also kein Zirkelbezug-
+      Risiko) jetzt direkt in der `content:`-Zeile von `useEditor()` an,
+      NOCH VOR `mathToPlaceholders`/`resolveImgs`: `resolveImgs(
+      mathToPlaceholders(stripInboxPlaceholder(initialDoc)), imgMap)`. Der
+      Platzhalter existiert damit im ProseMirror-Dokument NIE – er kann
+      folglich auch nie angetippt, geteilt oder mit Nutzertext verschmolzen
+      werden. Der Viewer (`DocView`, unverändert) zeigt ihn für frische
+      Notizbücher weiterhin an (reine, nie editierbare Anzeige) – NUR der
+      Editor bekommt ihn nie zu Gesicht, die Erststart-UX bleibt dadurch
+      unangetastet.
+    - **No-op-Semantik bleibt erhalten (verifiziert, kein ungefragter
+      Commit):** Die Baseline (`onCreate`, `baseline.current = ed.storage.
+      markdown.getMarkdown()`) entsteht bereits NACH dem Pre-Load-Strip –
+      der bestehende Vergleich in `save()` (`md === baseline.current`)
+      bleibt UNVERÄNDERT der einzige Entscheider zwischen „nichts geändert,
+      `onCancel()`“ und „echte Änderung, `onSave()`“. Öffnen+Abbrechen bzw.
+      Öffnen+sofort-Speichern-ohne-Änderung ergeben weiterhin ein
+      byte-identisches `md`/`baseline`-Paar (jetzt beide OHNE Platzhalter
+      statt vorher beide MIT) – der No-op-Pfad greift also identisch wie
+      vorher, nur der konkrete Textinhalt hat sich geändert. Erst eine
+      ECHTE Bearbeitung erzeugt ein abweichendes `md` und committet – und
+      im Ergebnis fehlt der Platzhalter dann konsequent, konsistent zur
+      bestehenden v7.22-Semantik (Schicht 2 in `App.jsx#saveEdit` wendet
+      `stripInboxPlaceholder` zusätzlich weiterhin bedingungslos auf das
+      Speicher-Ergebnis an – für ALTE, VOR v7.27 bereits editierte Bestände
+      mit dorthin persistierter Asterisk-Form; hier rein defensiv/
+      idempotent, da der Editor den Platzhalter durch die neue Schicht 3
+      ohnehin nicht mehr enthält).
+    - **Randfall „Inbox enthält NUR den Platzhalter“** (im Auftrag
+      benannt): Der Editor zeigt danach eine leere Inbox-Überschrift ohne
+      Absatz darunter – bewusst so belassen (dokumentiertes Verhalten,
+      kein Bug; ein Nutzer, der die Inbox-Überschrift selbst löscht, landet
+      im ohnehin bestehenden, unveränderten Sonderfall unten). Geprüft und
+      KEINE Kollision mit dem `INITIAL_DOC`-Sonderzweig in
+      `App.jsx#saveEdit` (`resolvedMd.trim() ? … : INITIAL_DOC`): das
+      Ergebnis von `stripInboxPlaceholder` ist in diesem Fall
+      `"# NB\n\n## Inbox\n"` – nach `.trim()` weiterhin NICHT leer (die
+      Kapitel-/Inbox-Überschriften bleiben stehen, nur der Platzhalter-
+      Absatz verschwindet) – der Sonderzweig greift folglich ausschließlich
+      dann, wenn der Nutzer im Editor WIRKLICH alles (inklusive der
+      Überschriften) löscht, exakt wie vor v7.27.
+    - **Tests:** `tests/docEditorPlaceholder.test.jsx` erweitert (statt
+      gelöscht) um einen neuen Block „v7.27: Pre-Load-Strip verhindert,
+      dass der Platzhalter den Editor je erreicht“ (`buildEditorLikeApp`
+      bildet GENAU die reale `content:`-Komposition aus `DocEditor.jsx`
+      nach, `resolveImgs` bewusst weggelassen – privat, ohne
+      Bildreferenzen in diesen Testdokumenten ein No-op): frisches
+      Anlage-Template lädt ohne Platzhalter in JEDER Form, Öffnen+sofort-
+      Speichern-ohne-Änderung liefert byte-identisches `md`/Baseline-Paar
+      (pint den No-op-Pfad explizit), eine echte Änderung weicht von der
+      Baseline ab und bleibt platzhalterfrei, ein Dokument ohne Platzhalter
+      bleibt byte-identisch (Pre-Load-Strip ist für normale Dokumente ein
+      No-op), beide Kursiv-Formen (Unterstrich UND Asterisk, v7.22-Zwei-
+      Formen-Regel wiederverwendet) werden schon vor dem Laden entfernt,
+      der „nur Platzhalter“-Randfall zeigt eine leere Inbox-Überschrift.
+      Der BESTEHENDE Block (roher Editor-Pfad OHNE Pre-Load-Strip, der die
+      zugrunde liegende tiptap-markdown-Asterisk-Serialisierung dokumen-
+      tiert, die #64.1 überhaupt erst zur Zwei-Formen-Regel zwang) bleibt
+      UNVERÄNDERT erhalten und wurde nur um einen klarstellenden Kommentar
+      ergänzt, dass er bewusst den ROHEN Pfad testet, nicht den echten
+      App-Ladepfad. `tests/ops.test.js` erweitert um einen kleinen Block,
+      der den obigen Randfall auf reiner String-Ebene pint
+      (`stripInboxPlaceholder(...).trim()` bleibt für beide Kursiv-Formen
+      nicht-leer). Gesamtstand danach 940/940 grün (vorher 932).
+    - **Bewusste Restrisiken:** (1) Rein textueller Zeilenvergleich wie in
+      #64 – unverändert. (2) Ein Notizbuch, dessen Inbox VOR v7.27 bereits
+      im Editor mit dem Platzhalter verschmolzenen Murks-Text enthält (der
+      konkrete Live-Befund), wird durch den Pre-Load-Strip NICHT rückwirkend
+      bereinigt (der exakte Zeilenvergleich trifft den Murks-Text
+      naturgemäß nicht, dieselbe dokumentierte Grenze wie in #64) – ein
+      Nutzer mit einem bereits betroffenen Notizbuch muss den Murks-Text
+      einmalig manuell korrigieren; NEUE Notizbücher bzw. noch unberührte
+      Bestände können den Fehlerzustand ab v7.27 gar nicht mehr erst
+      erreichen.

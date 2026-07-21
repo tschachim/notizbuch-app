@@ -849,3 +849,33 @@ describe("stripInboxPlaceholder: Asterisk-Form '*…*' (Editor-Serialisierung, v
     expect(stripInboxPlaceholder(doc)).toBe(doc);
   });
 });
+
+// v7.27 (Nutzer-Befund/🟡 aus dem v7.24-26-E2E-Lauf, HEAD e0102c9): der
+// Platzhalter war im Editor bisher echter, editierbarer Text – ein Klick
+// mitten in die Zeile + Tippen verschmolz Nutzertext mit dem Hinweissatz,
+// und der so entstandene Murks matchte den exakten Zeilenvergleich oben
+// nicht mehr (blieb also für immer stehen). Fix: DocEditor.jsx wendet
+// stripInboxPlaceholder jetzt VOR dem Laden auf initialDoc an (siehe
+// tests/docEditorPlaceholder.test.jsx für den echten Editor-Roundtrip).
+// Dieser Test pint auf reiner String-Ebene den in der Aufgabenstellung
+// benannten Randfall: Enthält die Inbox NUR den Platzhalter, darf das
+// Ergebnis NICHT leer werden – sonst würde App.jsx#saveEdit es fälschlich
+// für den "Editor komplett geleert"-Sonderzweig halten
+// (`resolvedMd.trim() ? … : INITIAL_DOC`) und beim nächsten Speichern
+// unerwartet das GESAMTE Notizbuch auf das Anlage-Template zurücksetzen,
+// statt nur den Platzhalter-Absatz zu entfernen.
+describe("stripInboxPlaceholder: Randfall 'Inbox enthält NUR den Platzhalter' kollidiert nicht mit dem INITIAL_DOC-Sonderzweig (v7.27)", () => {
+  it("das Ergebnis bleibt nach .trim() NICHT leer – Kapitel-/Inbox-Überschrift bleiben erhalten", () => {
+    const doc = "# NB\n\n## Inbox\n\n" + PLACEHOLDER_LINE + "\n";
+    const out = stripInboxPlaceholder(doc);
+    expect(out.trim()).not.toBe("");
+    expect(out).toBe("# NB\n\n## Inbox\n"); // dieselbe Erwartung wie oben, hier explizit im v7.27-Kontext gepinnt
+  });
+
+  it("gilt genauso für die Asterisk-Form (bereits einmal per Editor gespeicherter Bestand)", () => {
+    const doc = "# NB\n\n## Inbox\n\n*Noch nichts erfasst. Die erste Notiz im Chat legt hier los.*\n";
+    const out = stripInboxPlaceholder(doc);
+    expect(out.trim()).not.toBe("");
+    expect(out).toBe("# NB\n\n## Inbox\n");
+  });
+});

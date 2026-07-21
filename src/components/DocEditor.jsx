@@ -34,6 +34,7 @@ import {
   getLinkProviders, buildProviderIconDom,
 } from "../lib/linkProviders.jsx";
 import { buildActiveRules } from "../lib/autocorrect.js";
+import { stripInboxPlaceholder } from "../lib/ops.js";
 
 /* WYSIWYG-Editor für die manuelle Bearbeitung der Wissensbasis.
    TipTap mit Markdown-Round-Trip, beschränkt auf den Dialekt, den der
@@ -1162,7 +1163,31 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
       // eingelesen werden.
       Markdown.configure({ html: true, bulletListMarker: "-", tightLists: true }),
     ],
-    content: resolveImgs(mathToPlaceholders(initialDoc), imgMap),
+    // Pre-Load-Strip des Anlage-Platzhalters (v7.27, Nutzer-Befund/🟡 vom
+    // v7.24-26-E2E-Lauf, HEAD e0102c9): stripInboxPlaceholder läuft HIER
+    // VOR mathToPlaceholders/resolveImgs, damit der Platzhaltertext den
+    // Editor NIE erreicht – vorher war er echter, editierbarer Absatztext:
+    // ein Klick MITTEN in die Zeile + Tippen verschmolz Nutzertext mit dem
+    // Hinweissatz ("Noch nichts erfasst. Die ersta<b>e Notiz im Chat legt
+    // hier los."), und der so entstandene Murks matchte den v7.22-Zeilen-
+    // vergleich (exakter String-Vergleich, siehe stripInboxPlaceholder)
+    // nicht mehr – blieb also für immer stehen. Der Viewer (DocView,
+    // App.jsx) bleibt UNVERÄNDERT: er zeigt den Platzhalter für frische
+    // Notizbücher weiterhin an (reine Anzeige, nie anklickbar/editierbar
+    // dort) – NUR der WYSIWYG-Editor bekommt ihn nie zu Gesicht. Die
+    // Baseline (onCreate unten) entsteht dadurch bereits NACH dem Strip:
+    // Öffnen+Abbrechen bzw. Öffnen+Speichern OHNE jede Änderung bleiben
+    // No-ops (der bestehende "md === baseline.current"-Vergleich in save()
+    // greift unverändert, nur dass baseline UND ein unverändertes md jetzt
+    // beide placeholder-frei sind statt beide placeholder-behaftet – das
+    // Ergebnis "kein Commit" ist in beiden Fällen identisch). Erst eine
+    // ECHTE Änderung committet – und im Ergebnis fehlt der Platzhalter
+    // dann konsequent (konsistent zur v7.22-Semantik in App.jsx#saveEdit,
+    // die stripInboxPlaceholder zusätzlich bedingungslos auf das
+    // Speicher-Ergebnis anwendet, für ALTE, bereits gespeicherte
+    // Bestände mit dem Platzhalter – hier rein defensiv/idempotent, siehe
+    // DECISIONS #64/#64-Erweiterung).
+    content: resolveImgs(mathToPlaceholders(stripInboxPlaceholder(initialDoc)), imgMap),
     autofocus: "start",
     editorProps: { attributes: { class: "tiptap-doc focus:outline-none" } },
     onCreate: ({ editor: ed }) => { baseline.current = ed.storage.markdown.getMarkdown(); },

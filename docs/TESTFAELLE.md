@@ -120,7 +120,14 @@ mit Inbox-Abschnitt. Beobachtungspunkt (v7.22): der Inbox-Abschnitt zeigt
 zunächst den Einladungstext „_Noch nichts erfasst. Die erste Notiz im
 Chat legt hier los._“ – das ist so gewollt (Erststart-Hinweis); relevant
 ist NUR, dass er nach der ersten echten Notiz wieder verschwindet (siehe
-C1).
+C1). Beobachtungspunkt (v7.27): Editor auf diesem frischen Notizbuch
+öffnen (Stift-Knopf) – erwartet erscheint der Einladungstext dort NICHT
+(weder als Text noch anklickbar/editierbar), die Inbox-Überschrift ist im
+Editor einfach leer; Editor ohne jede Änderung per „Abbrechen“ ODER
+„Speichern“ schließen – erwartet KEIN neuer Commit in der Historie
+(No-op) UND die Dokument-Ansicht zeigt den Einladungstext danach
+unverändert weiter (er wird nur im Editor nie sichtbar, in der
+Leseansicht bleibt er wie gehabt bis zur ersten echten Notiz).
 
 **B2 [VERBUNDEN] Umbenennen.** „QA-Test Automatisch“ im Admin-Dialog in
 „QA-Test Umbenannt“ umbenennen. Erwartet: Name überall aktualisiert
@@ -626,15 +633,24 @@ bei D5–D7 für Formeln/Codeblöcke/Links) – die `#`-Kapitelzeile bleibt
 byte-stabil erhalten.
 
 **D11 [VERBUNDEN] Spitze Klammern und Et-Zeichen im Editor (v7.24
-Bugfix).** Editor öffnen (Stift-Knopf), in einen Stichpunkt tippen:
-„a < b und Tom & Jerry sowie c > d“. Speichern. Erwartet: Die
-Dokument-Ansicht zeigt GENAU diesen Text mit den echten Zeichen „<“,
+Bugfix).** Editor öffnen (Stift-Knopf), in einen NEUEN, eigenen
+Stichpunkt tippen (Cursor zuerst ans Ende einer bestehenden Zeile setzen
+und Enter drücken, NICHT mitten in eine bestehende Zeile klicken und dort
+tippen – ein Klick mitten in fremden Text plus Tippen ist kein Testziel
+dieses Falls): „a < b und Tom & Jerry sowie c > d“. Speichern. Erwartet:
+Die Dokument-Ansicht zeigt GENAU diesen Text mit den echten Zeichen „<“,
 „&“, „>“ – NICHT als „&lt;“/„&amp;“/„&gt;“. Editor erneut öffnen: Der
 Text erscheint dort ebenfalls mit den echten Zeichen (Editor-interne
 Anzeige war nie betroffen). Zusätzlich, falls im Dokument bereits ein
 farbig markierter Textabschnitt existiert (z. B. aus einem früheren
 Test): Prüfen, dass die Farbe weiterhin korrekt angezeigt wird (keine
-Regression durch diesen Fix).
+Regression durch diesen Fix). Beobachtungspunkt (v7.27, Fix eines
+inzidentellen 🟡-Fundes aus einem früheren Lauf dieses Falls, HEAD
+e0102c9): Falls das bearbeitete Notizbuch frisch angelegt ist und seine
+Inbox noch den Einladungstext „_Noch nichts erfasst. …_“ trägt – im
+Editor erscheint dieser Platzhalter GAR NICHT mehr (weder les- noch
+antippbar); ein versehentliches Tippen mitten in ihn (der ursprüngliche
+Auslöser des Fundes) kann seitdem nicht mehr passieren.
 
 **D12 [VERBUNDEN] AutoKorrektur beim Tippen im Editor (v7.25).** Editor
 öffnen (Stift-Knopf), in einen neuen Stichpunkt tippen (Leerzeichen nach
