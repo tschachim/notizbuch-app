@@ -2037,22 +2037,52 @@ export default function NotizbuchApp() {
     return () => window.removeEventListener("keydown", onKey);
   }, [navDrawer]);
 
+  // Scroll-Spy kann activeSec auf eine TITELLOSE Sektion setzen (v7.28-Fix
+  // "Allgemein"-Phantom: ein verwaistes "###" ohne vorausgehendes "##" hat
+  // in der Leiste gar keinen Reiter, siehe renderSecTab unten, obwohl sein
+  // Anker "sec-"+si im DOM weiterhin existiert, siehe DocView). Ohne diese
+  // Auflösung würde beim Scrollen durch so eine Zone KEIN Reiter mehr
+  // hervorgehoben (activeSec träfe keinen sichtbaren Tab-Index). Sinnvollstes
+  // Verhalten (dokumentiert, Nutzerwunsch-Interpretation): der zuletzt
+  // PASSIERTE betitelte Abschnitt bleibt hervorgehoben (Sticky-Nav-artig) –
+  // gibt es noch keinen (Dokument beginnt bereits titellos), springt die
+  // Hervorhebung auf den nächsten sichtbaren danach; gibt es GAR KEINEN
+  // betitelten Abschnitt im Dokument, bleibt die Leiste ohne Hervorhebung
+  // (-1, trifft keinen Reiter). Die KAPITEL-Gruppe (chapActive unten) ist
+  // davon unberührt – die vergleicht direkt "sections[activeSec].chapter",
+  // was auch für eine titellose Sektion einen gültigen Kapitel-Index liefert.
+  const effectiveActiveSec = useMemo(() => {
+    if (sections[activeSec] && sections[activeSec].title !== null) return activeSec;
+    for (let i = activeSec; i >= 0; i--) if (sections[i] && sections[i].title !== null) return i;
+    for (let i = activeSec + 1; i < sections.length; i++) if (sections[i].title !== null) return i;
+    return -1;
+  }, [activeSec, sections]);
+
   // Ein einzelner H2-Reiter – unverändertes Aussehen, jetzt als Helfer, weil
   // er sowohl flach (kein Kapitel) als auch eingerückt unter einem
-  // Kapitel-Kopf gebraucht wird.
-  const renderSecTab = (sec, si) => (
-    <button
-      key={si + sec.title}
-      onClick={() => { gotoSection(si, sec.title); setNavDrawer(false); }}
-      title={decodeBasicEntities(sec.title)}
-      className={"w-full text-left text-xs pl-2.5 pr-2 py-1.5 mb-1.5 truncate rounded-r-xl border border-l-0 shadow-sm transition-colors " +
-        (activeSec === si
-          ? "bg-white border-indigo-300 text-indigo-900 font-medium shadow"
-          : "bg-gradient-to-r from-slate-50 to-slate-100 border-slate-200 text-slate-600 hover:from-indigo-50 hover:to-indigo-100 hover:text-slate-900")}
-    >
-      {decodeBasicEntities(sec.title)}
-    </button>
-  );
+  // Kapitel-Kopf gebraucht wird. Liefert bewusst NULL für eine titellose
+  // Sektion (v7.28-Fix "Allgemein"-Phantom, siehe markdown.jsx#parseTree):
+  // so ein Abschnitt hat im DOKUMENT selbst keinen Kopf – ein Reiter dafür
+  // wäre ein Navigationsziel ohne sichtbares Gegenstück. Der Filter
+  // passiert bewusst NUR HIER im Rendering, NICHT im Datenmodell: "sections"
+  // bleibt die vollständige flache Liste mit globalen Indizes, sodass
+  // Scroll-Spy/gotoSection/gotoChapter unverändert über "si" adressieren.
+  const renderSecTab = (sec, si) => {
+    if (sec.title === null) return null;
+    return (
+      <button
+        key={si + sec.title}
+        onClick={() => { gotoSection(si, sec.title); setNavDrawer(false); }}
+        title={decodeBasicEntities(sec.title)}
+        className={"w-full text-left text-xs pl-2.5 pr-2 py-1.5 mb-1.5 truncate rounded-r-xl border border-l-0 shadow-sm transition-colors " +
+          (effectiveActiveSec === si
+            ? "bg-white border-indigo-300 text-indigo-900 font-medium shadow"
+            : "bg-gradient-to-r from-slate-50 to-slate-100 border-slate-200 text-slate-600 hover:from-indigo-50 hover:to-indigo-100 hover:text-slate-900")}
+      >
+        {decodeBasicEntities(sec.title)}
+      </button>
+    );
+  };
 
   // Gemeinsamer Inhalt für die Desktop-Leiste und den mobilen Drawer;
   // das Schließen des Drawers ist am Desktop ein No-op.
@@ -2615,7 +2645,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.27</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.28</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"

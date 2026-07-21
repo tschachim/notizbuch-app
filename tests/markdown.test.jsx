@@ -29,11 +29,89 @@ describe("parseTree", () => {
     expect(sections[0].subs.map((s) => s.title)).toEqual(["Sub"]);
     expect(sections[0].subs[0].lines.find((l) => l.text.includes("zwei")).idx).toBe(8);
   });
-  it("Inhalt vor dem ersten ## landet im Vorspann, ### ohne ## erzeugt 'Allgemein'", () => {
+  // v7.28-Fix (Nutzer-Befund, Live): ein "###" ohne vorausgehendes "##"
+  // fabrizierte hier früher einen Abschnitt "Allgemein", der im Markdown
+  // selbst NICHT existierte (Anzeige != Datei, Chat-Ops konnten "Allgemein"
+  // nicht adressieren). Jetzt: title:null statt eines erfundenen Namens –
+  // umbenannter Test (bewusst umgeschrieben, siehe Kommentar unten bei
+  // "Phantom-Abschnitt entfernt").
+  it("Inhalt vor dem ersten ## landet im Vorspann, ### ohne ## erzeugt eine TITELLOSE Sektion (v7.28)", () => {
     const { pre, sections } = parseTree("# T\n\nfrei\n\n### Nur Sub\n\n- x");
     expect(pre.some((l) => l.text === "frei")).toBe(true);
-    expect(sections[0].title).toBe("Allgemein");
+    expect(sections[0].title).toBeNull();
     expect(sections[0].subs[0].title).toBe("Nur Sub");
+  });
+
+  describe("Phantom-Abschnitt 'Allgemein' entfernt (v7.28-Fix, Nutzer-Befund)", () => {
+    it("verwaistes ### direkt am Dokumentanfang (nach der Titelzeile, kein Freitext dazwischen)", () => {
+      const { sections } = parseTree("# T\n\n### Erstes Unterthema\n\n- x");
+      expect(sections).toHaveLength(1);
+      expect(sections[0].title).toBeNull();
+      expect(sections[0].subs.map((s) => s.title)).toEqual(["Erstes Unterthema"]);
+    });
+
+    // Der konkrete Nutzer-Fall als Fixture: "# Test" (Kapitel) → Freitext →
+    // "### DCF-Formel" OHNE ein dazwischenliegendes "## "-Hauptthema.
+    it("Nutzer-Fixture: # Test (Kapitel) -> Freitext -> ### DCF-Formel ohne ##-Hauptthema", () => {
+      const doc = "# Notizbuch\n\n# Test\n\nEinleitender Freitext zum Kapitel.\n\n### DCF-Formel\n\nWACC = ...";
+      const { sections, chapters } = parseTree(doc);
+      expect(chapters.map((c) => c.title)).toEqual(["Test"]);
+      // Der Freitext direkt unter der Kapitelzeile gehört zu chapters[0].lines
+      // (v7.15-Fix, unverändert) – NICHT zu einer Sektion.
+      expect(chapters[0].lines.some((l) => l.text === "Einleitender Freitext zum Kapitel.")).toBe(true);
+      expect(sections).toHaveLength(1);
+      expect(sections[0].title).toBeNull();
+      expect(sections[0].chapter).toBe(0);
+      expect(sections[0].subs.map((s) => s.title)).toEqual(["DCF-Formel"]);
+      expect(sections[0].subs[0].lines.some((l) => l.text === "WACC = ...")).toBe(true);
+    });
+
+    it("mehrere verwaiste ###-Gruppen in VERSCHIEDENEN Kapiteln bleiben getrennte, jeweils titellose Sektionen", () => {
+      const doc =
+        "# T\n\n# Kapitel A\n\n### SubA1\n\n### SubA2\n\n# Kapitel B\n\n### SubB1";
+      const { sections, chapters } = parseTree(doc);
+      expect(chapters.map((c) => c.title)).toEqual(["Kapitel A", "Kapitel B"]);
+      // Alle drei ###-Zeilen landen unter EINER titellosen Sektion PRO
+      // Kapitel (die erste ### im jeweiligen Kapitel eröffnet "cur", jede
+      // weitere ### im selben Kapitel hängt als weiteres Sub darunter,
+      // solange kein "##" dazwischenkommt – siehe parseTree).
+      expect(sections).toHaveLength(2);
+      expect(sections.map((s) => s.title)).toEqual([null, null]);
+      expect(sections[0].chapter).toBe(0);
+      expect(sections[0].subs.map((s) => s.title)).toEqual(["SubA1", "SubA2"]);
+      expect(sections[1].chapter).toBe(1);
+      expect(sections[1].subs.map((s) => s.title)).toEqual(["SubB1"]);
+    });
+
+    it("Misch-Dokument: echtes ## UND ein verwaistes ### DANACH bekommen unterschiedliche Sektionen (title vs. null)", () => {
+      const doc = "# T\n\n## Echt\n\n- Punkt\n\n### Hängt an Echt\n\n- y";
+      const { sections } = parseTree(doc);
+      // Ein "###" NACH einem offenen "##" hängt (wie schon vor v7.28) unter
+      // DIESEM Abschnitt, erzeugt also KEINE eigene Sektion.
+      expect(sections).toHaveLength(1);
+      expect(sections[0].title).toBe("Echt");
+      expect(sections[0].subs.map((s) => s.title)).toEqual(["Hängt an Echt"]);
+    });
+
+    it("ein verwaistes ### NACH einem bereits abgeschlossenen ##-Abschnitt (getrennt durch eine neue Kapitelzeile) bekommt seine EIGENE titellose Sektion", () => {
+      const doc = "# T\n\n## Echt\n\n- Punkt\n\n# Kapitel Zwei\n\n### Verwaist\n\n- z";
+      const { sections, chapters } = parseTree(doc);
+      expect(sections.map((s) => s.title)).toEqual(["Echt", null]);
+      expect(chapters.map((c) => c.title)).toEqual([null, "Kapitel Zwei"]);
+      expect(sections[1].chapter).toBe(1);
+      expect(sections[1].subs.map((s) => s.title)).toEqual(["Verwaist"]);
+    });
+
+    // Bestandsschutz: ein Dokument mit einem ECHTEN, literalen "## Allgemein"
+    // (ein Nutzer kann diesen Abschnittsnamen bewusst selbst vergeben) bleibt
+    // ein ganz normaler, BETITELTER Abschnitt – der Fix betrifft ausschließlich
+    // den FABRIZIERTEN Fall (kein "##" im Quelltext).
+    it("Bestand: ein literales '## Allgemein' im Markdown bleibt ein normaler betitelter Abschnitt", () => {
+      const { sections } = parseTree("# T\n\n## Allgemein\n\n- echter Inhalt");
+      expect(sections).toHaveLength(1);
+      expect(sections[0].title).toBe("Allgemein");
+      expect(sections[0].lines.some((l) => l.text === "- echter Inhalt")).toBe(true);
+    });
   });
 });
 
@@ -381,6 +459,85 @@ describe("DocView: Kapitel (#, v7.14)", () => {
     expect(closed).not.toContain("AlphaText");
     expect(closed).toContain("BetaText");
     expect(closed).toContain("Kapitel Eins");
+  });
+});
+
+// v7.28-Fix (Nutzer-Befund, Live): ein "###"-Unterthema ohne vorausgehendes
+// "##" bekam bisher einen fabrizierten Abschnittskopf "Allgemein", der im
+// Markdown selbst nicht existierte. Jetzt: title:null -> KEIN erfundener
+// Kopf/Klapp-Button, die Unterthemen erscheinen direkt, jedes mit eigenem,
+// klappbarem H3-Kopf.
+describe("DocView: Phantom-Abschnitt 'Allgemein' entfernt (v7.28)", () => {
+  // Exakt der Nutzer-Befund: "# Test" (Kapitel) -> Freitext -> "### DCF-Formel"
+  // OHNE ein dazwischenliegendes "## "-Hauptthema.
+  const USER_DOC =
+    "# Notizbuch\n\n# Test\n\nEinleitender Freitext zum Kapitel.\n\n### DCF-Formel\n\nWACC = ...";
+
+  it("kein 'Allgemein'-Text im Output, der ###-Kopf ist klappbar, der sec-Anker existiert", () => {
+    const html = render(USER_DOC);
+    expect(html).not.toContain("Allgemein");
+    expect(html).toContain("DCF-Formel");
+    expect(html).toContain("WACC = ...");
+    // Die titellose Sektion behält ihren globalen Anker (Scroll-Spy/
+    // gotoSection adressieren weiterhin über den Index).
+    expect(html).toContain('id="sec-0"');
+    // Das Kapitel "Test" bekommt ganz normal seinen eigenen Kopf (echter
+    // Titel, davon ist der Fix nicht betroffen).
+    expect(html).toContain('id="chap-0"');
+    expect(html).toContain("Test");
+    expect(html).toContain("Einleitender Freitext zum Kapitel.");
+  });
+
+  it("der ###-Kopf der titellosen Sektion bleibt einzeln klappbar (Klapp-Key \"s:/\"+Sub-Titel)", () => {
+    const closed = renderToStaticMarkup(
+      <DocView text={USER_DOC} collapsed={{ "s:/DCF-Formel": true }} onToggle={() => {}}
+        imgMap={{}} onImgClick={() => {}} onToggleTask={() => {}} />
+    );
+    // Der H3-Kopf selbst bleibt sichtbar (klickbar zum Wiederaufklappen) …
+    expect(closed).toContain("DCF-Formel");
+    // … aber sein Inhalt verschwindet.
+    expect(closed).not.toContain("WACC = ...");
+  });
+
+  it("Alt-Klappzustand mit dem frueheren \"s:Allgemein/…\"-Schlüssel verliert seine Wirkung (selbstheilend)", () => {
+    // Ein state.json aus VOR v7.28 kann noch diesen Schlüssel enthalten –
+    // da die Sektion nicht mehr "Allgemein" heißt (title:null), greift er
+    // nicht mehr: der Inhalt bleibt sichtbar, bis der Nutzer neu klappt.
+    const html = renderToStaticMarkup(
+      <DocView text={USER_DOC} collapsed={{ "s:Allgemein/DCF-Formel": true }} onToggle={() => {}}
+        imgMap={{}} onImgClick={() => {}} onToggleTask={() => {}} />
+    );
+    expect(html).toContain("WACC = ...");
+  });
+
+  it("mehrere verwaiste ###-Unterthemen ohne führendes ## erscheinen jeweils als eigener, unabhängig klappbarer Block", () => {
+    const doc = "# T\n\n### Erstes\n\n- einsInhalt\n\n### Zweites\n\n- zweiInhalt";
+    const html = render(doc);
+    expect(html).not.toContain("Allgemein");
+    expect(html).toContain("Erstes");
+    expect(html).toContain("Zweites");
+    expect(html).toContain("einsInhalt");
+    expect(html).toContain("zweiInhalt");
+    // Nur "Zweites" eingeklappt: "Erstes" bleibt komplett unberührt.
+    const partial = renderToStaticMarkup(
+      <DocView text={doc} collapsed={{ "s:/Zweites": true }} onToggle={() => {}}
+        imgMap={{}} onImgClick={() => {}} onToggleTask={() => {}} />
+    );
+    expect(partial).toContain("einsInhalt");
+    expect(partial).toContain("Zweites");
+    expect(partial).not.toContain("zweiInhalt");
+  });
+
+  it("Bestand: ein literales '## Allgemein' bleibt ein ganz normaler, betitelter (und klappbarer) Abschnitt", () => {
+    const html = render("# T\n\n## Allgemein\n\n- echter Inhalt");
+    expect(html).toContain("Allgemein");
+    expect(html).toContain("echter Inhalt");
+    const closed = renderToStaticMarkup(
+      <DocView text={"# T\n\n## Allgemein\n\n- echter Inhalt"} collapsed={{ "s:Allgemein": true }} onToggle={() => {}}
+        imgMap={{}} onImgClick={() => {}} onToggleTask={() => {}} />
+    );
+    expect(closed).toContain("Allgemein");
+    expect(closed).not.toContain("echter Inhalt");
   });
 });
 

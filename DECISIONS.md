@@ -4197,3 +4197,119 @@ aus `referenz-app.jsx` übernommen.
       einmalig manuell korrigieren; NEUE Notizbücher bzw. noch unberührte
       Bestände können den Fehlerzustand ab v7.27 gar nicht mehr erst
       erreichen.
+
+70. **Phantom-Abschnitt "Allgemein" entfernt – titellose Sektion statt
+    fabriziertem Namen** (`src/lib/markdown.jsx#parseTree`/`DocView`,
+    `src/App.jsx`, v7.28, Nutzer-Befund/Live-Beleg). `parseTree` fabrizierte
+    seit jeher (Altlast der Referenz-App) einen Abschnitt mit dem Titel
+    "Allgemein", sobald ein `###`-Unterthema OHNE vorausgehendes `##` im
+    Dokument stand (Repro: `# Test` (Kapitel) → Freitext → `### DCF-Formel`
+    ohne `## `-Hauptthema dazwischen). Der Name "Allgemein" stand dabei
+    NIRGENDS im Markdown selbst – Anzeige und Leiste zeigten einen Abschnitt,
+    den die Datei nicht kennt (Anzeige ≠ Datei); der Editor zeigte "Allgemein"
+    konsequenterweise nie (Inkonsistenz); ein Chat-Op wie `delete_section`
+    "Allgemein" fand nie ein `## Allgemein` und blieb ein wirkungsloser No-op
+    mit ⚠️-Warn-Pille.
+    - **Fix: title:null statt eines erfundenen Namens.** `parseTree` legt für
+      diesen Fall jetzt exakt das schon bestehende Muster des impliziten
+      titellosen KAPITELS (v7.14) eine Ebene tiefer an: `cur = { title: null,
+      lines: [], subs: [], chapter: chapterIdx }`. Zuordnung von subs/
+      Indizes/chapter bleibt unverändert – nur der fabrizierte String
+      verschwindet.
+    - **DocView rendert eine titellose Sektion FLACH:** kein Kopf/Klapp-
+      Button für die Sektion selbst (es gibt ja keinen echten Titel dafür),
+      `lines` (praktisch immer leer, defensiv trotzdem gerendert) und `subs`
+      erscheinen direkt – jedes `###`-Unterthema behält seinen eigenen,
+      individuell klappbaren H3-Kopf. Der Anker (`id="sec-"+si`) bleibt
+      STEHEN, obwohl kein Kopf gerendert wird: "sections" ist weiterhin die
+      flache Liste mit globalem Index, Scroll-Spy/`gotoSection`/`gotoChapter`
+      adressieren ausschließlich darüber – ein eingeklapptes Kapitel
+      verbirgt so eine Sektion trotzdem vollständig (unverändertes Verhalten,
+      da der Wrapper-Div weiter existiert, nur ohne eigenen Kopf).
+      `renderSub` wurde dafür aus dem bisherigen Inline-Code als Helfer
+      extrahiert (gemeinsam für betitelte UND titellose Sektionen), um die
+      Duplikation der Sub-Rendering-Logik zu vermeiden.
+    - **Klapp-Key-Migration (bewusst in Kauf genommen, selbstheilend):** der
+      Sub-Klapp-Key war bisher `"s:" + sec.title + "/" + sub.title` (also
+      `"s:Allgemein/…"`); für eine titellose Sektion gibt es jetzt keinen
+      Sektionstitel mehr, der Key wird zu `"s:/" + sub.title`. Ein VOR v7.28
+      in `state.json` persistierter `"s:Allgemein/…"`-Klappzustand verliert
+      dadurch seine Wirkung (kein Abschnitt heißt mehr so) – der betroffene
+      Unterabschnitt zeigt sich einmalig wieder aufgeklappt, bis der Nutzer
+      erneut klickt (dann wird der NEUE Key normal persistiert). Bewusst kein
+      Migrationscode dafür (Aufwand/Nutzen: ein rein kosmetischer,
+      einmaliger Reset eines Klapp-Zustands rechtfertigt keine zusätzliche
+      Lese-Kompatibilitätsschicht). Kollisionsrisiko unverändert wie vorher
+      bei "Allgemein/…": mehrere titellose Sektionen mit GLEICHNAMIGEN Subs
+      (z. B. in verschiedenen Kapiteln) teilen sich denselben Klapp-Zustand
+      – dieselbe dokumentierte, bereits vor v7.28 bestehende Grenze.
+    - **Reiter-Leiste + mobiler Drawer (`src/App.jsx`):** `renderSecTab`
+      liefert für `sec.title === null` bewusst `null` (React überspringt
+      `null`-Kinder beim Rendern) – der Filter passiert NUR im Rendering,
+      NICHT im Datenmodell: "sections" bleibt die vollständige flache Liste
+      mit globalen Indizes, `gotoSection`/Scroll-Spy/`gotoChapter`
+      adressieren unverändert per Index. Der mobile Drawer nutzt dieselbe
+      `sectionNavContent`-Konstante wie die Desktop-Leiste, braucht also
+      keine eigene Änderung.
+    - **Scroll-Spy-Entscheidung für eine aktive titellose Sektion
+      (dokumentiert, im Auftrag offen gelassen):** Landet der Scroll-Spy
+      (`onDocScroll`, unverändert) auf dem Index einer titellosen Sektion
+      (ihr Anker existiert ja weiterhin im DOM), gibt es dafür in der Leiste
+      keinen Reiter zum Hervorheben. Neuer Helfer `effectiveActiveSec`
+      (`useMemo`, abhängig von `activeSec`/`sections`): liefert `activeSec`
+      unverändert, wenn die aktive Sektion einen Titel hat; sonst den
+      NÄCHSTEN BETITELTEN Abschnitt DAVOR (Sticky-Nav-artig – der zuletzt
+      passierte Reiter bleibt hervorgehoben, während man durch die titellose
+      Zone scrollt); gibt es keinen davor (Dokument beginnt bereits
+      titellos), den nächsten betitelten DANACH; gibt es GAR KEINEN
+      betitelten Abschnitt im Dokument, `-1` (keine Hervorhebung, kein Reiter
+      vorhanden). `renderSecTab` vergleicht jetzt gegen `effectiveActiveSec`
+      statt `activeSec`. Die KAPITEL-Gruppen-Hervorhebung (`chapActive`)
+      bleibt bewusst bei rohem `activeSec` – die vergleicht nur
+      `sections[activeSec].chapter`, was auch für eine titellose Sektion
+      einen gültigen Kapitel-Index liefert, sodass die umschließende
+      Kapitel-Gruppe schon ohne diese Auflösung korrekt hervorgehoben wird
+      (deckt den vom Auftrag vorgeschlagenen "das Kapitel markieren"-
+      Fallback automatisch mit ab).
+    - **Editor/`ops.js` unverändert** (wie im Auftrag erwartet): Der
+      WYSIWYG-Editor zeigt ohnehin nur ECHTE Überschriften, kannte
+      "Allgemein" also nie. `ops.js` arbeitet rein zeilen-/regex-basiert auf
+      dem Rohtext (`HEAD_RE`/`CHAPTER_RE`/`BOUNDARY_RE`) und importiert
+      `parseTree`/die `sections`-Struktur überhaupt nicht – ein `###` war
+      dort nie adressierbar (Prompt-Regel v7.21 deckt das bereits ab, siehe
+      DECISIONS #63) und bleibt es. Kurzer Prompt-Check in `lib/anthropic.js`
+      durchgeführt: der System-Prompt erwähnt "Allgemein" an keiner Stelle
+      als Konvention – keine Änderung nötig.
+    - **Tests:** `tests/markdown.test.jsx` – der bisherige Pin-Test auf
+      `sections[0].title === "Allgemein"` bewusst umgeschrieben (jetzt
+      `toBeNull()`, mit Kommentar); neue `describe`-Blöcke für `parseTree`
+      UND `DocView` ("Phantom-Abschnitt 'Allgemein' entfernt"): verwaistes
+      `###` direkt am Dokumentanfang, der Nutzer-Fixture selbst (`# Test` →
+      Freitext → `### DCF-Formel`), mehrere verwaiste `###`-Gruppen in
+      VERSCHIEDENEN Kapiteln (bleiben getrennte titellose Sektionen), ein
+      Misch-Dokument (echtes `##` gefolgt von einem `###` HÄNGT weiterhin
+      unter diesem Abschnitt statt eine eigene Sektion zu bilden – vom Fix
+      unberührt), ein verwaistes `###` NACH einem bereits abgeschlossenen
+      `##`-Abschnitt (neue eigene titellose Sektion, korrekte Kapitel-
+      Zuordnung), Bestandsschutz für ein LITERALES `## Allgemein` (bleibt ein
+      normaler betitelter, klappbarer Abschnitt – der Fix betrifft
+      ausschließlich den fabrizierten Fall). DocView-Tests zusätzlich: kein
+      "Allgemein"-Text im Output, `###`-Kopf einzeln klappbar (neuer Key
+      `"s:/"+Titel`), Alt-Klappzustand mit dem alten `"s:Allgemein/…"`-Key
+      verliert nachweislich seine Wirkung (Inhalt bleibt sichtbar –
+      Selbstheilungs-Beleg), mehrere verwaiste `###` ohne führendes `##`
+      klappen unabhängig voneinander. Gesamtstand danach 951/951 grün
+      (vorher 940).
+    - **Bewusste Restrisiken:** (1) Kollisionsrisiko beim Klapp-Key
+      titelloser Subs (s. o.) – identisch zur alten Grenze, nur jetzt korrekt
+      dokumentiert statt an einen erfundenen Namen gekoppelt. (2) Die
+      Reiter-Leiste/`effectiveActiveSec`-Logik in `App.jsx` ist NICHT
+      separat unit-getestet (App.jsx exportiert dafür keine testbaren
+      Helfer, es gibt im Bestand auch sonst keine Komponententests für
+      App.jsx-UI) – abgesichert nur durch die `parseTree`/`DocView`-Tests in
+      `src/lib` (Coverage-Gate) und den nächsten E2E-Lauf. (3) Ein Dokument
+      mit ZWEI verwaisten `###`-Gruppen im SELBEN Kapitel/derselben Zone
+      (keine `##`/`#` dazwischen) verschmilzt weiterhin zu EINER titellosen
+      Sektion mit mehreren Subs (unverändertes, vor v7.28 bereits so
+      bestehendes `cur`-Wiederverwendungsverhalten) – kein neuer Regressions-
+      punkt, aber der Vollständigkeit halber hier benannt.

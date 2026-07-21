@@ -75,7 +75,15 @@ const TABLE_SEP_RE = /^\s*\|(\s*:?-+:?\s*\|)+\s*$/;
    DECISIONS #54): eine "# "-Zeile INNERHALB eines ```-Codeblocks wird hier
    nicht ausgenommen und kann fälschlich als Kapitelgrenze zählen – dieselbe
    dokumentierte, bewusst in Kauf genommene Grenze wie bei "##" gilt jetzt
-   auch für "#". */
+   auch für "#".
+
+   Dasselbe title:null-Muster gibt es seit v7.28 auch eine Ebene tiefer bei
+   ABSCHNITTEN: ein "###"-Unterthema OHNE vorausgehendes "##" bekommt eine
+   TITELLOSE Sektion (title:null) statt – wie vor v7.28 – einen fabrizierten
+   Abschnitt "Allgemein" (Altlast der Referenz-App, siehe unten). DocView/
+   App.jsx rendern auch das bewusst flach: kein Kopf/Klapp-Button für die
+   Sektion selbst, ihre "###"-Unterthemen bleiben aber jeweils eigene,
+   klappbare Blöcke. */
 export function parseTree(text) {
   const lines = text.split("\n");
   const pre = [];
@@ -94,7 +102,17 @@ export function parseTree(text) {
 
   lines.forEach((line, idx) => {
     if (/^###\s+/.test(line)) {
-      if (!cur) { cur = { title: "Allgemein", lines: [], subs: [], chapter: chapterIdx }; sections.push(cur); }
+      // v7.28-Fix (Nutzer-Befund, Live): ein "###"-Unterthema OHNE
+      // vorausgehendes "##" bekam hier früher einen FABRIZIERTEN Abschnitt
+      // "Allgemein" (Altlast der Referenz-App) – ein Titel, der im
+      // Markdown selbst NIRGENDS steht. Anzeige/Leiste wichen dadurch vom
+      // Dokument ab, und Chat-Ops konnten "Allgemein" nicht adressieren
+      // (delete_section "Allgemein" fand nie ein "## Allgemein" und blieb
+      // ein wirkungsloser No-op mit ⚠️). Jetzt exakt dasselbe Muster wie
+      // beim impliziten titellosen KAPITEL weiter unten: title:null statt
+      // eines erfundenen Namens – DocView/App.jsx rendern das bewusst
+      // flach (kein Kopf/Klapp-Button), siehe dort.
+      if (!cur) { cur = { title: null, lines: [], subs: [], chapter: chapterIdx }; sections.push(cur); }
       curSub = { title: line.replace(/^###\s+/, "").trim(), lines: [] };
       cur.subs.push(curSub);
     } else if (/^##\s+/.test(line)) {
@@ -751,12 +769,64 @@ export function DocView({ text, collapsed, onToggle, imgMap, onImgClick, onToggl
   const { pre, sections, chapters } = parseTree(text);
   const ap = anchorPrefix || "sec-";
 
+  // Ein einzelnes ###-Unterthema unter einem Abschnitt – als Helfer
+  // extrahiert (v7.28), weil er sowohl unter einer betitelten Sektion
+  // (Klapp-Key "s:"+sec.title+"/"+sub.title, unverändert) als auch unter
+  // einer TITELLOSEN Sektion gebraucht wird (verwaistes "###" ohne
+  // vorausgehendes "##", siehe parseTree) – dort übergibt renderSection den
+  // Key OHNE Sektionstitel ("s:/"+sub.title). Der aufrufende Renderer
+  // bestimmt sk komplett, dieser Helfer kennt nur noch Sub/si/bi.
+  const renderSub = (sk, sub, si, bi) => {
+    const sc = !!collapsed[sk];
+    return (
+      <div key={sk + bi} className="mt-3 pl-3 border-l-2 border-slate-100">
+        <button onClick={() => onToggle(sk)} className="flex items-center gap-1.5 text-left">
+          <ChevronDown size={14} className={"text-slate-400 " + (sc ? "-rotate-90" : "")} />
+          <span className="text-sm font-semibold text-slate-800">{decodeBasicEntities(sub.title)}</span>
+        </button>
+        {!sc && <div className="pt-1">{renderBlocks(sub.lines, imgMap, onImgClick, "s" + si + "b" + bi, onToggleTask)}</div>}
+      </div>
+    );
+  };
+
   // Ein einzelner ##-Abschnitt (Kapitel-Zugehörigkeit spielt für seine
   // eigene Darstellung keine Rolle, siehe parseTree-Kopfkommentar): dieselbe
   // Optik wie vor v7.14, jetzt als Helfer, damit sie sowohl flach (kein
   // Kapitel bzw. implizites titelloses Kapitel) als auch innerhalb eines
   // Kapitel-Rahmens identisch aussieht.
   const renderSection = (sec, si) => {
+    if (sec.title === null) {
+      // Titellose Sektion (v7.28-Fix, Nutzer-Befund): entsteht in
+      // parseTree, wenn ein "###"-Unterthema OHNE vorausgehendes "##" im
+      // Dokument steht (früher fabrizierte parseTree hier fälschlich einen
+      // Abschnitt "Allgemein", der im Markdown gar nicht existierte –
+      // Anzeige != Datei). KEIN erfundener Kopf/Klapp-Button – "lines"
+      // (praktisch immer leer, da vor dem ersten "###" hier nichts anderes
+      // hinlangen kann außer über curSub/cur-Zuordnung in parseTree, aber
+      // defensiv trotzdem gerendert) und "subs" erscheinen direkt, jedes
+      // "###"-Unterthema behält seinen eigenen klappbaren H3-Kopf. Der
+      // Anker (id=ap+si) bleibt trotzdem stehen: "sections" ist weiterhin
+      // die FLACHE Liste mit globalem Index, Scroll-Spy/gotoSection/
+      // gotoChapter in App.jsx adressieren ausschließlich darüber.
+      return (
+        <div key={"nullsec" + si} id={ap + si} className="mt-5">
+          {renderBlocks(sec.lines, imgMap, onImgClick, "s" + si, onToggleTask)}
+          {sec.subs.map((sub, bi) =>
+            // Klapp-Key OHNE Sektionstitel: "s:/"+Sub-Titel statt bisher
+            // "s:Allgemein/"+Sub-Titel. Alt-Klappzustände mit dem alten
+            // "s:Allgemein/…"-Schlüssel in state.json verlieren dadurch
+            // ihre Wirkung (kein Abschnitt heißt mehr so) – selbstheilend
+            // beim nächsten Klick (der neue Key wird dann normal
+            // persistiert), siehe DECISIONS. Kollisionsrisiko bewusst in
+            // Kauf genommen (identisch zur bisherigen Grenze bei
+            // "Allgemein/…"): gleichnamige verwaiste Subs in
+            // VERSCHIEDENEN Kapiteln/Sektionen teilen sich diesen
+            // Klapp-Zustand.
+            renderSub("s:/" + sub.title, sub, si, bi)
+          )}
+        </div>
+      );
+    }
     const key = "s:" + sec.title;
     const isC = !!collapsed[key];
     return (
@@ -774,19 +844,7 @@ export function DocView({ text, collapsed, onToggle, imgMap, onImgClick, onToggl
         {!isC && (
           <div className="pt-2">
             {renderBlocks(sec.lines, imgMap, onImgClick, "s" + si, onToggleTask)}
-            {sec.subs.map((sub, bi) => {
-              const sk = "s:" + sec.title + "/" + sub.title;
-              const sc = !!collapsed[sk];
-              return (
-                <div key={sk + bi} className="mt-3 pl-3 border-l-2 border-slate-100">
-                  <button onClick={() => onToggle(sk)} className="flex items-center gap-1.5 text-left">
-                    <ChevronDown size={14} className={"text-slate-400 " + (sc ? "-rotate-90" : "")} />
-                    <span className="text-sm font-semibold text-slate-800">{decodeBasicEntities(sub.title)}</span>
-                  </button>
-                  {!sc && <div className="pt-1">{renderBlocks(sub.lines, imgMap, onImgClick, "s" + si + "b" + bi, onToggleTask)}</div>}
-                </div>
-              );
-            })}
+            {sec.subs.map((sub, bi) => renderSub("s:" + sec.title + "/" + sub.title, sub, si, bi))}
           </div>
         )}
       </div>

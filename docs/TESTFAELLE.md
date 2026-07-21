@@ -320,6 +320,25 @@ am Dokumentende) – NICHT vor dem ersten regulären Abschnitt (z. B.
 erscheint in der Leiste rechts wie jedes andere Kapitel (siehe oben);
 Zuklappen des Kapitel-Kopfs verbirgt auch diesen Freitext.
 
+**C13b [VERBUNDEN] Kein Phantom-Abschnitt „Allgemein“ bei einem
+Unterthema ohne Hauptthema (v7.28-Fix, Nutzer-Befund).** Voraussetzung: ein
+QA-Test-Kapitel im Editor anlegen (siehe D10: Cursor in eine Zeile setzen,
+„Kapitel (#)“-Knopf klicken – z. B. „QA-Test Phantom“), DIREKT darunter
+einen kurzen Freitext-Absatz eintippen (z. B. „Kurzer Einleitungstext.“).
+In einer NEUEN Zeile darunter, OHNE vorher einen Abschnitt (##) anzulegen,
+den Knopf „Unterthema (###)“ klicken und einen Titel eintippen (z. B. „QA
+Unterthema Ohne Hauptthema“), darunter einen Stichpunkt. Speichern.
+Erwartet in der Dokument-Ansicht: Der Freitext-Absatz erscheint direkt
+unter dem Kapitel-Kopf „QA-Test Phantom“ (wie in C13 beschrieben); DIREKT
+darunter erscheint der Kopf „QA Unterthema Ohne Hauptthema“ – OHNE
+irgendeine zusätzliche, dazwischenliegende Überschrift „Allgemein“ (weder
+im Dokument noch in der Abschnitts-Leiste rechts bzw. im mobilen Drawer).
+Der Unterthema-Kopf ist einzeln klappbar (Klick blendet nur seinen eigenen
+Stichpunkt aus, Kopf bleibt sichtbar). Editor erneut öffnen: „Allgemein“
+erscheint an KEINER Stelle (weder als eigene Überschrift noch im
+Fließtext). Danach wie gewohnt aufräumen (Testinhalt wieder entfernen,
+falls Konservativ-Modus).
+
 **C14 [VERBUNDEN][API] Struktur-Vorschlag anfordern (zweistufige
 Gliederung, v7.14).** Voraussetzung: Das QA-Notizbuch hat mehrere
 `##`-Abschnitte (bei Bedarf vorher 2–3 kurze QA-Testeinträge in
