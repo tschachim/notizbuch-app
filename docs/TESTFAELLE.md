@@ -42,6 +42,22 @@ Felder für GitHub-Owner, Repo, PAT, Anthropic-API-Key; Verbinden-Knopf;
 Dialog lässt sich schließen, ohne dass etwas kaputtgeht. KEINE Werte
 eintragen.
 
+**A2b [OFFEN] URL-Vorbelegung Owner/Repo (v7.30).** NUR relevant, solange
+die App noch UNVERBUNDEN ist (kein bestehendes `localStorage` – bei Bedarf
+vorher in den Entwicklertools `localStorage.clear()` oder ein privates
+Fenster nutzen). App-URL mit angehängtem `?owner=<Test-Owner>&repo=<Test-Repo>`
+öffnen (beliebige Platzhalter-Werte reichen, es wird nichts wirklich
+verbunden). Erwartet: Der Einstellungs-Dialog öffnet sich automatisch
+(wie bei A1) UND die Felder „GitHub-Owner“/„Repo“ sind bereits mit den
+Werten aus der URL vorausgefüllt; die Felder „PAT“ und „Anthropic-API-Key“
+bleiben LEER. Die Felder lassen sich normal überschreiben. KEINE Werte
+eintragen/verbinden – Dialog wieder schließen. Negativ-Probe: dieselbe URL
+zusätzlich mit einem offensichtlich sensiblen Parameter öffnen, z. B.
+`&pat=irgendwas` – Erwartet: In der Browser-Konsole erscheint eine Warnung
+„Zugangsdaten gehören nie in URLs …“, das PAT-Feld im Dialog bleibt LEER
+(der Parameter wird nie gelesen), und die Adresszeile zeigt den
+`pat`-Parameter nach dem Laden nicht mehr an.
+
 **A3 [OFFEN] Responsive-Umschaltung.** Fenster schmal machen (< 768 px).
 Erwartet: Umschalter Chat/Wissensbasis erscheint; Abschnitts-Leiste rechts
 verschwindet; im Dokument-Modus öffnet der Gliederungs-Knopf den Drawer

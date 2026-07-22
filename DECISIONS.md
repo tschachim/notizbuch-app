@@ -4498,3 +4498,100 @@ aus `referenz-app.jsx` übernommen.
         wäre als der seltene Fall, dass die Degradation einmal zu spät
         greift (dann bleibt es beim bisherigen Verhalten: ein einzelner
         Chat-Request scheitert mit einer Fehlermeldung, kein Dauerzustand).
+
+72. **URL-Vorbelegung für Owner/Repo im Einstellungs-Dialog** (v7.30,
+    Nutzer-Schmerzpunkt: Das Browser-Pane verliert regelmäßig `localStorage`,
+    der Nutzer musste danach alle vier Verbindungsfelder (Owner, Repo, PAT,
+    API-Key) von Hand neu eintippen). Fix: Owner und Repo lassen sich jetzt
+    per Query-Parameter (`?owner=…&repo=…`) vorbelegen – PAT und API-Key
+    NIEMALS, das ist der sicherheitsrelevante Kern dieser Entscheidung.
+    - **Warum Owner/Repo unkritisch sind, PAT/API-Key aber nicht:** Owner und
+      Repo-Name stehen ohnehin OFFEN in jeder öffentlichen GitHub-URL
+      (`github.com/<owner>/<repo>`) – ihre Vorbelegung verrät nichts, was
+      nicht schon durch das bloße Teilen eines App-Links preisgegeben wäre.
+      PAT/API-Key sind dagegen echte Zugangsdaten: URLs landen in
+      Browser-Verlauf, Server-Logs, Referrer-Headern und werden beim Teilen
+      eines Links versehentlich mitkopiert – eine Zugangsdaten-Vorbelegung
+      per URL wäre ein strukturelles Leck, das diese App an keiner anderen
+      Stelle zulässt (siehe die bestehende `settings`-Trennung in
+      `serializeState`, Punkt 9 sinngemäß). Deshalb: NUR nicht-sensible
+      Identifikatoren sind als Parameter zulässig.
+    - **A) Prefill** (`src/App.jsx`, neue Exporte `parseConnectPrefill(search)`,
+      `resolveConnectDialogInitial(settings, connectPrefill)`): Beim ersten
+      Render liest ein `useState`-Initializer EINMALIG
+      `window.location.search` (nicht bei jedem Re-Render – eine spätere
+      Bereinigung der sichtbaren URL, siehe C, darf den bereits gelesenen
+      Wert nicht wieder verlieren). `parseConnectPrefill` sanitisiert
+      defensiv: `trim`, Länge ≤ 100, GitHub-Namensmuster `[A-Za-z0-9._-]+`
+      – unpassende Werte werden STILL ignoriert (kein Fehler-Banner für
+      einen kaputten/manipulierten Query-Parameter). Alles-oder-nichts: nur
+      wenn BEIDE Felder gültig sind, wird überhaupt vorbelegt (ein
+      Teil-Prefill wäre eher verwirrend). `resolveConnectDialogInitial`
+      trifft die eigentliche Sicherheits-Entscheidung: `settings` (aus
+      `loadSettings()`, liefert laut eigenem Vertrag NUR ein VOLLSTÄNDIGES
+      `{owner,repo,pat,apiKey}`-Objekt oder `null`) gewinnt IMMER, sobald
+      eine Verbindung besteht – die URL-Parameter kommen NUR zum Zug,
+      solange `settings === null` (unverbunden). `SettingsDialog` selbst war
+      dafür KEINE Änderung nötig: es akzeptiert bereits ein `initial`-Prop
+      und übernimmt daraus nur `owner`/`repo` (PAT/API-Key bleiben mangels
+      `initial.pat`/`initial.apiKey` auf ihrem eigenen Leer-Default).
+    - **B) Sicherheits-Härtung** (`findSensitiveUrlParams(search)`, exportiert):
+      Eine Liste gängiger Zugangsdaten-Parameter-NAMEN
+      (`pat, apikey, api_key, token, access_token, key, secret, password`) –
+      exakter, case-insensitiver Schlüsselvergleich (KEIN Teilstring-Match,
+      damit ein harmloser künftiger Parameter wie `keyword` nicht
+      fälschlich als sensibel gilt). `parseConnectPrefill` liest diese
+      Parameter ohnehin NIE (kennt strukturell nur `owner`/`repo` – selbst
+      wenn `pat=...` in der URL steht, kann es unmöglich ins
+      Prefill-Ergebnis durchsickern, siehe Test „strukturell unmöglich“).
+      Zusätzlich, als AKTIVE zweite Verteidigungslinie: ein `useEffect` beim
+      Mount prüft `findSensitiveUrlParams` unabhängig vom
+      Verbindungsstatus – findet sich ein Treffer, wird er per
+      `stripUrlParams`/`history.replaceState` aus der SICHTBAREN Adresse
+      entfernt (kein Reload, kein neuer Verlaufseintrag) und
+      `console.warn("Zugangsdaten gehören nie in URLs – Parameter entfernt: …")`
+      informiert. Ein versehentlich geteilter Link mit eingebettetem Token
+      hinterlässt also weder eine dauerhaft sichtbare URL noch wird der Wert
+      je von der App verwendet.
+    - **C) Aufräumen nach dem Verbinden** (klein, `connect()`-Erfolgspfad):
+      `stripUrlParams(["owner", "repo"])` direkt vor dem `return true;` –
+      läuft bei JEDEM erfolgreichen Connect (auch ohne Prefill-Herkunft),
+      ist aber ein reines No-op, falls die Parameter gar nicht in der URL
+      standen. Saubere Adresse danach, keine Verwirrung, falls der Nutzer
+      die URL später teilt oder als Lesezeichen speichert.
+    - **Tests** (`tests/appOps.test.js`, Node-Umgebung reicht – reine
+      Funktionen ohne DOM-Abhängigkeit): `parseConnectPrefill` – gültig,
+      führendes „?“ optional, fehlend, NUR eines der beiden Felder (alles-
+      oder-nichts), überlang (Grenze exakt bei 100/101 Zeichen), Sonder-
+      zeichen (`<script>`, Leerzeichen, Schrägstrich, `javascript:`-Payload),
+      erlaubte Zeichen (Punkt/Unterstrich/Bindestrich), Whitespace-Trim,
+      reiner Whitespace-Wert, UND explizit: `pat`/`apiKey`/`token`/`key`
+      gleichzeitig in der URL landen NIEMALS im Ergebnis, selbst wenn
+      owner/repo gültig sind. `findSensitiveUrlParams` – alle genannten
+      Namen case-insensitiv, mehrere gleichzeitig in Auftrittsreihenfolge,
+      harmlose Parameter lösen nichts aus, kein Teilstring-false-positive
+      (`keyword`, `patient`). `resolveConnectDialogInitial` – die zentrale
+      „verbunden ⇒ Parameter ignoriert“-Entscheidung als eigener Logik-
+      Helfer (App.jsx hat keinen Komponententest-Harness, siehe Punkt 70):
+      settings gesetzt ⇒ IMMER settings (per Referenzgleichheit geprüft,
+      NIE der Prefill), settings `null` + gültiger Prefill ⇒ Prefill,
+      settings `null` ohne Prefill ⇒ `null`, settings gesetzt ohne Prefill
+      ⇒ unverändertes Bestandsverhalten. Gesamtstand danach 995/995 grün
+      (vorher 976).
+    - **Bewusste Restrisiken:** (1) Wie bei jeder App.jsx-UI-Logik gibt es
+      keinen Komponententest, der den TATSÄCHLICHEN `useEffect`/
+      `useState`-Verdrahtungspfad in einem echten Browser-DOM nachstellt
+      (kein Harness im Bestand) – abgesichert nur durch die reinen
+      Helferfunktionen (die die eigentliche Entscheidungslogik tragen) plus
+      den nächsten E2E-Lauf. (2) `stripUrlParams` schluckt JEDEN Fehler
+      (Try/Catch, siehe Kommentar) – bewusst, weil eine kosmetische
+      URL-Bereinigung niemals die App zum Absturz bringen darf, auch nicht
+      in exotischen Embed-Kontexten ohne vollständige `window.location`/
+      `history`-API. (3) Die Sensible-Parameter-Liste ist eine Momentaufnahme
+      gängiger Namen, keine erschöpfende Aufzählung – ein Zugangsdaten-
+      Parameter mit unüblichem Namen (z. B. `gh_secret_thing`) würde weder
+      erkannt noch entfernt UND (wichtiger) auch nicht versehentlich
+      GELESEN, da `parseConnectPrefill` strukturell nur `owner`/`repo`
+      kennt – das eigentliche Lese-Verbot ist also unabhängig von der
+      Erkennungsliste vollständig, nur die AKTIVE Entfernung/Warnung bleibt
+      auf bekannte Namen beschränkt.

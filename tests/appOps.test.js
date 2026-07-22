@@ -4,7 +4,10 @@
 // analog zum bestehenden serializeState-Exportmuster (siehe
 // tests/linkProviders.test.jsx).
 import { describe, it, expect } from "vitest";
-import { splitOps, serializeState, buildOpsWarning } from "../src/App.jsx";
+import {
+  splitOps, serializeState, buildOpsWarning, parseConnectPrefill, findSensitiveUrlParams,
+  resolveConnectDialogInitial,
+} from "../src/App.jsx";
 
 describe("splitOps: memory_*-Ops vs. Notizbuch-Ops trennen", () => {
   it("trennt memory_append/memory_replace von allen anderen op-Typen", () => {
@@ -253,5 +256,148 @@ describe("buildOpsWarning: Warn-Pillen-Text aus NICHT angewendeten Ops bauen", (
     // 100 Zeichen + Ellipse, NICHT die vollen 150 Zeichen im Label.
     expect(out).toContain("X".repeat(100) + "…");
     expect(out).not.toContain("X".repeat(101));
+  });
+});
+
+// v7.30 (URL-Vorbelegung, Nutzer-Schmerzpunkt: das Browser-Pane verliert
+// regelmäßig localStorage, alle vier Verbindungsfelder müssen dann neu
+// eingetippt werden). owner/repo sind NICHT sensibel (stehen ohnehin offen
+// in jeder öffentlichen GitHub-URL) und dürfen deshalb per Query-Parameter
+// vorbelegt werden – parseConnectPrefill ist die reine Sanitizing-Funktion
+// dahinter, App.jsx#connectPrefill nutzt sie nur, solange die App
+// unverbunden ist (siehe initial={settings || connectPrefill} dort).
+describe("parseConnectPrefill: owner/repo aus der URL sanitisieren (v7.30)", () => {
+  it("gültiges owner+repo -> { owner, repo }", () => {
+    expect(parseConnectPrefill("?owner=tschachim&repo=notizbuch-data"))
+      .toEqual({ owner: "tschachim", repo: "notizbuch-data" });
+  });
+
+  it("führendes '?' ist optional (URLSearchParams-Verhalten)", () => {
+    expect(parseConnectPrefill("owner=a&repo=b")).toEqual({ owner: "a", repo: "b" });
+  });
+
+  it("fehlende Parameter -> null", () => {
+    expect(parseConnectPrefill("")).toBeNull();
+    expect(parseConnectPrefill(undefined)).toBeNull();
+    expect(parseConnectPrefill(null)).toBeNull();
+    expect(parseConnectPrefill("?foo=bar")).toBeNull();
+  });
+
+  it("NUR owner ODER NUR repo gesetzt -> null (alles-oder-nichts, kein Teil-Prefill)", () => {
+    expect(parseConnectPrefill("?owner=tschachim")).toBeNull();
+    expect(parseConnectPrefill("?repo=notizbuch-data")).toBeNull();
+  });
+
+  it("überlanger Wert (> 100 Zeichen) wird still ignoriert -> null", () => {
+    const long = "a".repeat(101);
+    expect(parseConnectPrefill("?owner=" + long + "&repo=x")).toBeNull();
+    // genau 100 Zeichen ist noch ok
+    expect(parseConnectPrefill("?owner=" + "a".repeat(100) + "&repo=x")).toEqual({ owner: "a".repeat(100), repo: "x" });
+  });
+
+  it("Sonderzeichen außerhalb des GitHub-Namensmusters werden still ignoriert -> null", () => {
+    expect(parseConnectPrefill("?owner=<script>&repo=x")).toBeNull();
+    expect(parseConnectPrefill("?owner=a b&repo=x")).toBeNull(); // Leerzeichen unzulässig
+    expect(parseConnectPrefill("?owner=a/b&repo=x")).toBeNull(); // Schrägstrich unzulässig
+    expect(parseConnectPrefill("?owner=a&repo=" + encodeURIComponent("javascript:alert(1)"))).toBeNull();
+  });
+
+  it("Punkt/Unterstrich/Bindestrich sind erlaubt (reguläre GitHub-Namen)", () => {
+    expect(parseConnectPrefill("?owner=my-org_2&repo=my.repo-name")).toEqual({ owner: "my-org_2", repo: "my.repo-name" });
+  });
+
+  it("umgebender Whitespace wird getrimmt", () => {
+    expect(parseConnectPrefill("?owner=" + encodeURIComponent("  tschachim  ") + "&repo=x")).toEqual({ owner: "tschachim", repo: "x" });
+  });
+
+  it("reine Whitespace-Werte gelten nach dem Trim als leer -> null", () => {
+    expect(parseConnectPrefill("?owner=" + encodeURIComponent("   ") + "&repo=x")).toBeNull();
+  });
+
+  it("pat/apiKey/token/key-Parameter werden NIEMALS gelesen, auch wenn owner/repo gültig sind (nur owner/repo landen im Ergebnis)", () => {
+    const out = parseConnectPrefill("?owner=a&repo=b&pat=geheim&apiKey=sk-123&token=xyz&key=abc");
+    expect(out).toEqual({ owner: "a", repo: "b" });
+    expect(Object.keys(out)).toEqual(["owner", "repo"]); // strukturell unmöglich, dass ein weiteres Feld durchsickert
+  });
+});
+
+// Sicherheits-Härtung (v7.30, siehe DECISIONS): Zugangsdaten gehören NIE in
+// URLs. findSensitiveUrlParams erkennt gängige Namen für Zugangsdaten-
+// Parameter, damit App.jsx sie aus der sichtbaren Adresse entfernen und
+// warnen kann – parseConnectPrefill oben liest sie ohnehin nie aus
+// (kennt ausschließlich "owner"/"repo"), diese Funktion ist die zweite,
+// unabhängige Verteidigungslinie (aktive Entfernung + Warnung statt nur
+// passivem Ignorieren).
+describe("findSensitiveUrlParams: Zugangsdaten-artige Parameter erkennen, damit sie NIE gelesen und aus der URL entfernt werden (v7.30)", () => {
+  it("erkennt pat/apiKey/token/key case-insensitiv", () => {
+    expect(findSensitiveUrlParams("?pat=x")).toEqual(["pat"]);
+    expect(findSensitiveUrlParams("?PAT=x")).toEqual(["PAT"]);
+    expect(findSensitiveUrlParams("?apiKey=x")).toEqual(["apiKey"]);
+    expect(findSensitiveUrlParams("?APIKEY=x")).toEqual(["APIKEY"]);
+    expect(findSensitiveUrlParams("?token=x")).toEqual(["token"]);
+    expect(findSensitiveUrlParams("?key=x")).toEqual(["key"]);
+  });
+
+  // Re-Review-Ergänzung (🔵, v7.30): erweiterte Blockliste — auch diese
+  // gängigen Zugangsdaten-Namen werden erkannt (und damit aus der sichtbaren
+  // URL entfernt + gewarnt). Exakter Vergleich bleibt (kein Teilstring).
+  it("erkennt auch auth/bearer/client_secret & Co. aus der erweiterten Blockliste", () => {
+    for (const k of ["auth", "authorization", "bearer", "credentials", "client_secret",
+      "refresh_token", "id_token", "passwd", "pwd", "sig", "signature"]) {
+      expect(findSensitiveUrlParams("?" + k + "=x")).toEqual([k]);
+    }
+    // Teilstring-Schutz bleibt: harmlose ähnliche Namen werden NICHT erfasst.
+    expect(findSensitiveUrlParams("?author=x")).toEqual([]);
+    expect(findSensitiveUrlParams("?design=x")).toEqual([]);
+  });
+
+  it("erkennt gängige Varianten (api_key, access_token, secret, password)", () => {
+    expect(findSensitiveUrlParams("?api_key=x")).toEqual(["api_key"]);
+    expect(findSensitiveUrlParams("?access_token=x")).toEqual(["access_token"]);
+    expect(findSensitiveUrlParams("?secret=x")).toEqual(["secret"]);
+    expect(findSensitiveUrlParams("?password=x")).toEqual(["password"]);
+  });
+
+  it("mehrere sensible Parameter gleichzeitig werden ALLE gemeldet, in Auftrittsreihenfolge", () => {
+    expect(findSensitiveUrlParams("?owner=a&pat=x&repo=b&token=y")).toEqual(["pat", "token"]);
+  });
+
+  it("owner/repo und andere harmlose Parameter lösen NICHTS aus", () => {
+    expect(findSensitiveUrlParams("?owner=a&repo=b")).toEqual([]);
+    expect(findSensitiveUrlParams("?foo=bar&model=sonnet")).toEqual([]);
+    expect(findSensitiveUrlParams("")).toEqual([]);
+    expect(findSensitiveUrlParams(undefined)).toEqual([]);
+  });
+
+  it("ein Teilstring-Treffer OHNE exakten Schlüssel-Match löst NICHTS aus (kein false positive, z. B. 'keyword')", () => {
+    expect(findSensitiveUrlParams("?keyword=x")).toEqual([]);
+    expect(findSensitiveUrlParams("?patient=x")).toEqual([]);
+  });
+});
+
+// "Bereits verbundene Sitzungen ignorieren die Parameter" (v7.30) – die
+// zentrale Sicherheits-/Korrektheits-Entscheidung dieses Features als
+// eigener, testbarer Logik-Helfer (App.jsx hat keinen Komponententest-
+// Harness, siehe DECISIONS – dieser Helfer wird aber tatsächlich in der
+// SettingsDialog-initial-Prop verwendet, kein Test-Doppelgänger).
+describe("resolveConnectDialogInitial: verbunden ⇒ Parameter werden ignoriert (v7.30)", () => {
+  it("settings gesetzt (verbunden) ⇒ IMMER settings, der URL-Prefill wird ignoriert", () => {
+    const settings = { owner: "echt", repo: "echt-repo", pat: "x", apiKey: "y" };
+    const prefill = { owner: "aus-url", repo: "aus-url-repo" };
+    expect(resolveConnectDialogInitial(settings, prefill)).toBe(settings);
+  });
+
+  it("settings null (unverbunden) UND gültiger Prefill ⇒ der Prefill wird verwendet", () => {
+    const prefill = { owner: "aus-url", repo: "aus-url-repo" };
+    expect(resolveConnectDialogInitial(null, prefill)).toBe(prefill);
+  });
+
+  it("settings null UND kein Prefill (keine/ungültige URL-Parameter) ⇒ null (Dialog bleibt leer)", () => {
+    expect(resolveConnectDialogInitial(null, null)).toBeNull();
+  });
+
+  it("settings gesetzt UND kein Prefill ⇒ settings (unverändertes Bestandsverhalten ohne v7.30)", () => {
+    const settings = { owner: "echt", repo: "echt-repo", pat: "x", apiKey: "y" };
+    expect(resolveConnectDialogInitial(settings, null)).toBe(settings);
   });
 });

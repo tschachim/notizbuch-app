@@ -77,6 +77,114 @@ export const initialDocFor = (name) =>
   "# " + name + "\n\n## Inbox\n\n" + PLACEHOLDER_LINE + "\n";
 
 /* ------------------------------------------------------------------ */
+/* URL-Vorbelegung Owner/Repo + Sicherheits-Härtung (v7.30)             */
+/* Nutzer-Schmerzpunkt: Das Browser-Pane verliert regelmäßig localStorage, */
+/* alle vier Verbindungsfelder müssen dann neu eingetippt werden. Owner/  */
+/* Repo sind NICHT sensibel – beide stehen ohnehin offen in jeder         */
+/* öffentlichen GitHub-URL (github.com/<owner>/<repo>) – deshalb als      */
+/* Bequemlichkeits-Vorbelegung per Query-Parameter erlaubt (Nutzer kann   */
+/* sie jederzeit überschreiben). PAT/API-Key dagegen NIEMALS aus der URL  */
+/* – siehe findSensitiveUrlParams unten und DECISIONS.                   */
+/* ------------------------------------------------------------------ */
+
+const GH_NAME_RE = /^[A-Za-z0-9._-]+$/;
+const CONNECT_PREFILL_MAX_LEN = 100;
+
+// Defensive Säuberung EINES Feldwerts: trim, Länge <= 100, nur GitHub-
+// namenssichere Zeichen (Buchstaben/Ziffern/Punkt/Unterstrich/Bindestrich –
+// deckt reguläre Owner-/Repo-Namen ab). Unpassende Werte liefern null
+// (still ignorieren, KEIN Fehler-Banner für einen kaputten/manipulierten
+// Query-Parameter).
+function sanitizeGhName(raw) {
+  const v = String(raw || "").trim();
+  if (!v || v.length > CONNECT_PREFILL_MAX_LEN || !GH_NAME_RE.test(v)) return null;
+  return v;
+}
+
+// Liest ?owner=…&repo=… aus einem Such-String (window.location.search) und
+// liefert { owner, repo } NUR wenn BEIDE Felder gültig sind – ein
+// Teil-Prefill mit nur einem gesetzten Feld wäre eher verwirrend als
+// hilfreich (der Nutzer müsste trotzdem nachdenken, was fehlt), deshalb
+// bewusst alles-oder-nichts. Reine Funktion, exportiert für Tests und für
+// den App.jsx-Prefill-State (siehe dort: initial={settings || connectPrefill}
+// am SettingsDialog – "settings" gewinnt IMMER, sobald eine Verbindung
+// besteht, die URL-Parameter werden dann schlicht nie ausgewertet).
+export function parseConnectPrefill(search) {
+  const params = new URLSearchParams(search || "");
+  const owner = sanitizeGhName(params.get("owner"));
+  const repo = sanitizeGhName(params.get("repo"));
+  if (!owner || !repo) return null;
+  return { owner, repo };
+}
+
+// Sicherheits-Härtung (v7.30, siehe DECISIONS): Zugangsdaten gehören NIE in
+// URLs (landen in Browser-Verlauf, Server-Logs, Referrer-Headern, versehentlich
+// geteilten Links). Diese Liste erkennt gängige Namen für Zugangsdaten-
+// Parameter – werden sie in der URL gefunden, liest die App sie NIE aus
+// (parseConnectPrefill oben kennt ausschließlich "owner"/"repo"), sondern
+// entfernt sie aus der SICHTBAREN Adresse (siehe stripUrlParams/App-Mount-
+// Effekt weiter unten) und warnt in der Konsole. Exakter, case-insensitiver
+// Schlüsselvergleich (kein Teilstring-Match) – vermeidet false positives bei
+// zufällig ähnlich benannten, aber harmlosen künftigen Parametern (z. B.
+// "keyword").
+// Re-Review-Ergänzung (🔵, v7.30): weitere gängige Zugangsdaten-Parameter-
+// Namen, damit auch sie aus der sichtbaren Adresse entfernt/gemeldet werden
+// (reine Defense-in-Depth der kosmetischen Säuberung – der Sicherheitskern
+// ist die strukturelle owner/repo-Beschränkung in parseConnectPrefill).
+const SENSITIVE_URL_PARAM_KEYS = [
+  "pat", "apikey", "api_key", "token", "access_token", "key", "secret", "password",
+  "auth", "authorization", "bearer", "credentials", "client_secret",
+  "refresh_token", "id_token", "passwd", "pwd", "sig", "signature",
+];
+
+// Reine Funktion, exportiert für Tests: liefert die Liste der TATSÄCHLICH in
+// search vorhandenen sensiblen Parameter-Schlüssel (Original-Schreibweise,
+// nicht lowercased – wird 1:1 zum Entfernen aus der URL UND für die
+// Warnmeldung verwendet).
+export function findSensitiveUrlParams(search) {
+  const params = new URLSearchParams(search || "");
+  const found = [];
+  for (const k of params.keys()) {
+    if (SENSITIVE_URL_PARAM_KEYS.includes(k.toLowerCase()) && !found.includes(k)) found.push(k);
+  }
+  return found;
+}
+
+// "Bereits verbundene Sitzungen ignorieren die Parameter" als eigene,
+// testbare Entscheidung (v7.30): settings gewinnt IMMER, sobald eine
+// Verbindung besteht (settings !== null – lib/settings.js#loadSettings
+// liefert ausschließlich ein VOLLSTÄNDIGES {owner,repo,pat,apiKey}-Objekt
+// oder null, nie einen Zwischenzustand) – der URL-Prefill kommt NUR zum
+// Zug, solange settings null ist (unverbunden), und auch dann nur, wenn er
+// selbst gültig ist (sonst null, siehe parseConnectPrefill). Reine
+// Funktion, exportiert für Tests UND tatsächlich von der SettingsDialog-
+// initial-Prop verwendet (siehe unten) – kein Test-Doppelgänger neben der
+// echten Verdrahtung.
+export function resolveConnectDialogInitial(settings, connectPrefill) {
+  return settings || connectPrefill || null;
+}
+
+// Entfernt die genannten Query-Parameter aus der SICHTBAREN Browser-Adresse
+// (history.replaceState – kein Reload, kein neuer Verlaufseintrag). Reine
+// DOM-Nebenwirkung (deshalb nicht exportiert/nicht "rein") – WELCHE
+// Parameter betroffen sind, entscheiden die reinen Funktionen oben. Try/
+// catch: URL-API-Eigenheiten (z. B. exotische Embed-Kontexte ohne
+// window.location) dürfen die App nie stören, das ist reine Kosmetik.
+function stripUrlParams(keys) {
+  if (!keys || !keys.length || typeof window === "undefined" || !window.location) return;
+  try {
+    const url = new URL(window.location.href);
+    let changed = false;
+    for (const k of keys) {
+      if (url.searchParams.has(k)) { url.searchParams.delete(k); changed = true; }
+    }
+    if (changed) {
+      window.history.replaceState({}, "", url.pathname + (url.search || "") + url.hash);
+    }
+  } catch (e) { /* rein kosmetisch – niemals die App stören */ }
+}
+
+/* ------------------------------------------------------------------ */
 /* Konstanten (aus der Referenz-App übernommen)                        */
 /* ------------------------------------------------------------------ */
 
@@ -378,6 +486,15 @@ export default function NotizbuchApp() {
   const [showSettings, setShowSettings] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState(null);
+  // URL-Vorbelegung (v7.30, siehe DECISIONS): EINMALIG beim ersten Render
+  // aus der aktuellen Adresse gelesen (useState-Initializer läuft nur beim
+  // Mount) – eine spätere Bereinigung der sichtbaren URL (Sicherheits-
+  // Härtung unten, oder nach erfolgreichem Verbinden in connect()) darf den
+  // bereits gelesenen Prefill-Wert NICHT wieder verlieren. null, wenn kein
+  // gültiges owner/repo-Paar in der URL stand.
+  const [connectPrefill] = useState(() =>
+    typeof window !== "undefined" && window.location ? parseConnectPrefill(window.location.search) : null
+  );
 
   const [doc, setDoc] = useState(INITIAL_DOC); // Text des AKTIVEN Notizbuchs
   const [notebooks, setNotebooks] = useState([]); // [{ id, path, name }]
@@ -680,6 +797,12 @@ export default function NotizbuchApp() {
       setStorageError(null);
       setBanner(null);
       refreshMeta(cfg, activePath);
+      // Nach erfolgreichem Verbinden (v7.30): owner/repo aus der sichtbaren
+      // URL nehmen – saubere Adresse, keine Verwirrung beim Teilen. Läuft
+      // bei JEDEM erfolgreichen connect() (auch ohne Prefill-Herkunft), ist
+      // aber ein reines No-op, falls die Parameter gar nicht in der URL
+      // standen (stripUrlParams prüft das selbst).
+      stripUrlParams(["owner", "repo"]);
       return true;
     } catch (e) {
       setConnectError(e && e.message ? e.message : String(e));
@@ -690,6 +813,21 @@ export default function NotizbuchApp() {
       setLoaded(true);
     }
   }, [refreshMeta]);
+
+  // Sicherheits-Härtung (v7.30, siehe DECISIONS): Zugangsdaten-artige
+  // Parameter werden NIE gelesen (findSensitiveUrlParams/parseConnectPrefill
+  // oben kennen ausschließlich "owner"/"repo") – stehen sie trotzdem in der
+  // URL (z. B. ein versehentlich geteilter Link mit eingebettetem Token),
+  // werden sie aus der sichtbaren Adresse entfernt und die Konsole warnt.
+  // Läuft UNABHÄNGIG vom Verbindungsstatus (Härtung greift immer, nicht nur
+  // im unverbundenen Fall).
+  useEffect(() => {
+    const sensitive = findSensitiveUrlParams(window.location.search);
+    if (sensitive.length) {
+      stripUrlParams(sensitive);
+      console.warn("Zugangsdaten gehören nie in URLs – Parameter entfernt: " + sensitive.join(", "));
+    }
+  }, []);
 
   useEffect(() => {
     const s = loadSettings();
@@ -2645,7 +2783,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.29</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.30</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -3629,7 +3767,13 @@ export default function NotizbuchApp() {
       {/* ---------------- Einstellungen ---------------- */}
       {showSettings && (
         <SettingsDialog
-          initial={settings}
+          // URL-Vorbelegung (v7.30, siehe DECISIONS und
+          // resolveConnectDialogInitial oben): "settings" gewinnt IMMER,
+          // sobald eine Verbindung besteht – die URL-Parameter kommen nur
+          // zum Zug, solange die App unverbunden ist, und liefern dann
+          // höchstens { owner, repo } (PAT/API-Key bleiben leer, siehe
+          // parseConnectPrefill).
+          initial={resolveConnectDialogInitial(settings, connectPrefill)}
           model={model}
           onModelChange={changeModel}
           onSave={handleSaveSettings}
