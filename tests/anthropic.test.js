@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   MODELS, webSearchToolFor, buildSystem, buildSystemBlocks, buildChatReply, callClaude, NOTEBOOK_TOOL,
   LOOKUP_TOOL, parseLooseJson, isSubstantialReply, SUBSTANTIAL_REPLY_MIN_LENGTH,
+  formatCacheDebug, resetCacheDiagnosticsForTests,
 } from "../src/lib/anthropic.js";
 import { MEMORY_SOFT_LIMIT, MEMORY_HARD_LIMIT } from "../src/lib/memory.js";
 import { applyOpsDetailed } from "../src/lib/ops.js";
@@ -1506,11 +1507,13 @@ describe("callClaude (fetch gemockt)", () => {
         expect(typeof block.text).toBe("string");
         expect(block.cache_control).toEqual({ type: "ephemeral" });
       }
-      // KEIN Beta-Header nötig (Caching ist GA) – die bestehenden Header
-      // bleiben unverändert (Regressionsschutz gegen versehentlich
-      // ergänzte veraltete Beta-Header).
+      // Prompt-Caching selbst ist GA und braucht KEINEN eigenen Beta-Header
+      // (Test umgeschrieben, nicht gelöscht – v7.29, Cache-Diagnostics-
+      // Auftrag): der jetzt vorhandene "anthropic-beta"-Header gehört zur
+      // NEUEN Cache-Diagnostics-Beta (siehe eigener Test-Block unten), nicht
+      // zum Caching selbst.
       const headers = fetch.mock.calls[0][1].headers;
-      expect(Object.keys(headers).some((h) => /anthropic-beta/i.test(h))).toBe(false);
+      expect(headers["anthropic-beta"]).toBe("cache-diagnosis-2026-04-07");
     });
 
     it("cache_control steht NUR am LETZTEN Tool-Eintrag (Such-Modus, ohne lookup_wissen)", async () => {
@@ -1612,5 +1615,308 @@ describe("callClaude (fetch gemockt)", () => {
         debugSpy.mockRestore();
       }
     });
+  });
+
+  // v7.29 (Cache-Diagnostics, Beta): Anthropic-Doku
+  // https://platform.claude.com/docs/en/build-with-claude/cache-diagnostics.
+  // resetCacheDiagnosticsForTests() vor JEDEM Test: lastMessageId ist Modul-
+  // Zustand (Session-Lebensdauer, siehe lib/anthropic.js) und bliebe sonst
+  // über die gesamte Testdatei hinweg bestehen, unabhängig von der
+  // Ausführungsreihenfolge anderer Tests.
+  describe("Cache-Diagnostics (Beta, v7.29)", () => {
+    beforeEach(() => resetCacheDiagnosticsForTests());
+
+    it("anthropic-beta-Header steht auf JEDEM Request – auch über mehrere Runden hinweg (lookup_wissen)", async () => {
+      const ctxWithKnow = {
+        ...NB_CTX,
+        knowledge: { activeFiles: [{ name: "handbuch.pdf", text: "## Seite 1\n\n" + "x".repeat(90000) }], others: [] },
+      };
+      respond({
+        stop_reason: "tool_use",
+        content: [{ type: "tool_use", id: "lk1", name: "lookup_wissen", input: { datei: "handbuch.pdf", suchbegriffe: "abc" } }],
+      });
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] });
+      await callClaude("key", "frage", ctxWithKnow, [], "claude-sonnet-5", null, null);
+      expect(fetch.mock.calls.length).toBe(2);
+      for (const call of fetch.mock.calls) {
+        expect(call[1].headers["anthropic-beta"]).toBe("cache-diagnosis-2026-04-07");
+      }
+    });
+
+    it("erster Request der Session: diagnostics.previous_message_id ist null (Opt-in ohne Vergleichsbasis)", async () => {
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })], id: "msg_1" });
+      await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+      const body = JSON.parse(fetch.mock.calls[0][1].body);
+      expect(body.diagnostics).toEqual({ previous_message_id: null });
+    });
+
+    it("Folge-Turn: diagnostics.previous_message_id trägt die id der VORIGEN Antwort", async () => {
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })], id: "msg_1" });
+      await callClaude("key", "erste Nachricht", NB_CTX, [], "claude-sonnet-5", null, null);
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok2", ops: [] })], id: "msg_2" });
+      await callClaude("key", "zweite Nachricht", NB_CTX, [], "claude-sonnet-5", null, null);
+      const secondBody = JSON.parse(fetch.mock.calls[1][1].body);
+      expect(secondBody.diagnostics).toEqual({ previous_message_id: "msg_1" });
+    });
+
+    it("intra-Turn-Durchfädelung (Mehrrunden-Mock): Runde 2 (lookup_wissen-Fortsetzung) trägt die id aus Runde 1", async () => {
+      const ctxWithKnow = {
+        ...NB_CTX,
+        knowledge: { activeFiles: [{ name: "handbuch.pdf", text: "## Seite 1\n\n" + "x".repeat(90000) }], others: [] },
+      };
+      respond({
+        stop_reason: "tool_use",
+        content: [{ type: "tool_use", id: "lk1", name: "lookup_wissen", input: { datei: "handbuch.pdf", suchbegriffe: "abc" } }],
+        id: "msg_round1",
+      });
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })], id: "msg_round2" });
+      await callClaude("key", "frage", ctxWithKnow, [], "claude-sonnet-5", null, null);
+      const round1Body = JSON.parse(fetch.mock.calls[0][1].body);
+      expect(round1Body.diagnostics).toEqual({ previous_message_id: null }); // allererste Runde der Session
+      const round2Body = JSON.parse(fetch.mock.calls[1][1].body);
+      expect(round2Body.diagnostics).toEqual({ previous_message_id: "msg_round1" });
+    });
+
+    it("intra-Turn-Durchfädelung: pause_turn-Fortsetzung (Websuche) trägt ebenfalls die id der vorigen Runde", async () => {
+      respond({
+        stop_reason: "pause_turn",
+        content: [{ type: "server_tool_use", name: "web_search" }],
+        id: "msg_pause1",
+      });
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "Fertig.", ops: [] })], id: "msg_pause2" });
+      await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+      const second = JSON.parse(fetch.mock.calls[1][1].body);
+      expect(second.diagnostics).toEqual({ previous_message_id: "msg_pause1" });
+    });
+
+    it("ein Antwort ohne 'id' (z. B. Fehlerfall) lässt den Ref UNVERÄNDERT – der nächste Request nennt weiterhin die letzte ECHTE Antwort-id", async () => {
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })], id: "msg_ok" });
+      await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+      // Zweiter Turn: Websuche schlägt fehl (kein 'id' in der Fehlerantwort) -> Forced-Retry.
+      respond({ error: { type: "invalid_request_error", message: "web_search tool is not available" } });
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok2", ops: [] })], id: "msg_after_retry" });
+      await callClaude("key", "y", NB_CTX, [], "claude-sonnet-5", null, null);
+      // Der fehlgeschlagene ERSTE Request des zweiten Turns trägt noch "msg_ok".
+      const failedAttemptBody = JSON.parse(fetch.mock.calls[1][1].body);
+      expect(failedAttemptBody.diagnostics).toEqual({ previous_message_id: "msg_ok" });
+      // Der Forced-Retry sieht denselben, unveränderten Wert (kein Update durch den Fehler).
+      const retryBody = JSON.parse(fetch.mock.calls[2][1].body);
+      expect(retryBody.diagnostics).toEqual({ previous_message_id: "msg_ok" });
+    });
+
+    it("Warn-Politik: tools_changed löst console.warn aus (unsere Tools sind konstruktionsbedingt konstant)", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        respond({
+          stop_reason: "end_turn",
+          content: [toolUse({ reply: "ok", ops: [] })],
+          usage: { cache_read_input_tokens: 100, cache_creation_input_tokens: 0 },
+          diagnostics: { cache_miss_reason: { type: "tools_changed" } },
+        });
+        await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+        expect(warnSpy).toHaveBeenCalled();
+        expect(warnSpy.mock.calls[0][0]).toContain("tools_changed");
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("Warn-Politik: system_changed löst KEIN console.warn aus (nach Notizbuch-/Gedächtnis-Writes normal)", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        respond({
+          stop_reason: "end_turn",
+          content: [toolUse({ reply: "ok", ops: [] })],
+          usage: { cache_read_input_tokens: 100, cache_creation_input_tokens: 0 },
+          diagnostics: { cache_miss_reason: { type: "system_changed" } },
+        });
+        await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+        expect(warnSpy).not.toHaveBeenCalled();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("Warn-Politik: messages_changed/model_changed/previous_message_not_found/unavailable lösen ebenfalls KEIN warn aus", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        for (const type of ["messages_changed", "model_changed", "previous_message_not_found", "unavailable"]) {
+          respond({
+            stop_reason: "end_turn",
+            content: [toolUse({ reply: "ok", ops: [] })],
+            usage: { cache_read_input_tokens: 100, cache_creation_input_tokens: 0 },
+            diagnostics: { cache_miss_reason: { type } },
+          });
+          await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+        }
+        expect(warnSpy).not.toHaveBeenCalled();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("die [cache]-Debugzeile enthält den miss-Grund (formatCacheDebug wird tatsächlich in postOnce verwendet)", async () => {
+      const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+      try {
+        respond({
+          stop_reason: "end_turn",
+          content: [toolUse({ reply: "ok", ops: [] })],
+          usage: { cache_read_input_tokens: 17215, cache_creation_input_tokens: 0 },
+          diagnostics: { cache_miss_reason: { type: "system_changed", cache_missed_input_tokens: 41850 } },
+        });
+        await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+        expect(debugSpy).toHaveBeenCalledWith("[cache] read=17215 write=0 miss=system_changed(~41850tok)");
+      } finally {
+        debugSpy.mockRestore();
+      }
+    });
+
+    // v7.29-Nachtrag (Re-Review 🔵): Cache-Diagnostics ist eine Beta – wird
+    // der Header/das diagnostics-Feld serverseitig deprecatet, könnte JEDER
+    // Request mit HTTP 400 abgelehnt werden. Ohne Degradation bräche dann
+    // JEDER künftige Chat-Request der Session, obwohl das Feature rein
+    // diagnostisch ist. Diese Tests belegen: die Degradation greift NUR bei
+    // einem erkennbar diagnostics-/Beta-bezogenen 400, ein unrelated 400
+    // sowie Nicht-400-Fehler bleiben BYTE-IDENTISCH zum Bestandsverhalten.
+    describe("Graceful Degradation: Beta-Ablehnung deaktiviert Diagnostics für den Rest der Sitzung (v7.29-Nachtrag)", () => {
+      it("400 mit diagnostics-bezogener Meldung: GENAU EIN Retry ohne Feld/Header, Erfolg wird durchgereicht, Folge-Requests der Sitzung bleiben ohne diagnostics", async () => {
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+        try {
+          respond({ error: { type: "invalid_request_error", message: "Extra inputs are not permitted: diagnostics" } }, false, 400);
+          respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })], id: "msg_after_degrade" });
+          const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+          expect(res.reply).toBe("ok");
+          expect(fetch.mock.calls.length).toBe(2); // GENAU ein Retry, kein Endlos-Loop
+
+          // Erster Versuch: MIT diagnostics-Feld UND Beta-Header.
+          const first = JSON.parse(fetch.mock.calls[0][1].body);
+          expect(first.diagnostics).toEqual({ previous_message_id: null });
+          expect(fetch.mock.calls[0][1].headers["anthropic-beta"]).toBe("cache-diagnosis-2026-04-07");
+
+          // Retry: OHNE Feld UND OHNE Header, gleiche messages/mode.
+          const retry = JSON.parse(fetch.mock.calls[1][1].body);
+          expect(retry.diagnostics).toBeUndefined();
+          expect(fetch.mock.calls[1][1].headers["anthropic-beta"]).toBeUndefined();
+          expect(retry.messages).toEqual(first.messages);
+
+          expect(warnSpy).toHaveBeenCalledWith("[cache] Diagnostics-Beta abgelehnt — für diese Sitzung deaktiviert");
+
+          // Folge-Turn DERSELBEN Sitzung: von Anfang an OHNE diagnostics/Header.
+          respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok2", ops: [] })], id: "msg_next" });
+          await callClaude("key", "y", NB_CTX, [], "claude-sonnet-5", null, null);
+          const nextTurnBody = JSON.parse(fetch.mock.calls[2][1].body);
+          expect(nextTurnBody.diagnostics).toBeUndefined();
+          expect(fetch.mock.calls[2][1].headers["anthropic-beta"]).toBeUndefined();
+        } finally {
+          warnSpy.mockRestore();
+        }
+      });
+
+      it("400 mit ANDERER (nicht diagnostics-bezogener) Meldung: KEIN Retry, Fehler exakt wie bisher durchgereicht", async () => {
+        respond({ error: { type: "invalid_request_error", message: "model not found" } }, false, 400);
+        await expect(callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null))
+          .rejects.toThrow("model not found");
+        expect(fetch.mock.calls.length).toBe(1); // kein zusätzlicher Degradations-Retry
+
+        // Diagnostics bleibt danach AKTIV (nur ein diagnostics-bezogener 400
+        // schaltet ab) – der nächste Versuch sendet weiterhin mit Header/Feld.
+        respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })], id: "msg_1" });
+        await callClaude("key", "y", NB_CTX, [], "claude-sonnet-5", null, null);
+        const body = JSON.parse(fetch.mock.calls[1][1].body);
+        expect(body.diagnostics).toEqual({ previous_message_id: null });
+        expect(fetch.mock.calls[1][1].headers["anthropic-beta"]).toBe("cache-diagnosis-2026-04-07");
+      });
+
+      it("ein Nicht-400-Fehler (z. B. 500) verhält sich unverändert, SELBST wenn der Text 'diagnostics' erwähnt (Status-Gate hat Vorrang)", async () => {
+        respond({ error: { type: "api_error", message: "diagnostics service unavailable" } }, false, 500);
+        await expect(callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null))
+          .rejects.toThrow("diagnostics service unavailable");
+        expect(fetch.mock.calls.length).toBe(1); // kein Retry, keine Degradation
+      });
+
+      it("ein echter Netzwerkfehler (fetch wirft) bleibt unverändert (Degradation greift nur bei einer tatsächlichen 400-Antwort)", async () => {
+        fetch.mockRejectedValueOnce(new Error("network down"));
+        await expect(callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null))
+          .rejects.toThrow("Keine Verbindung zur Anthropic-API");
+        expect(fetch.mock.calls.length).toBe(1);
+      });
+
+      it("resetCacheDiagnosticsForTests() setzt AUCH diagnosticsDisabled zurück (nicht nur lastMessageId)", async () => {
+        // Erst degradieren:
+        respond({ error: { type: "invalid_request_error", message: "unknown field: diagnostics" } }, false, 400);
+        respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })], id: "msg_x" });
+        await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+        // Zurücksetzen und erneut prüfen: der nächste Request sendet wieder MIT diagnostics/Header.
+        resetCacheDiagnosticsForTests();
+        respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok2", ops: [] })], id: "msg_y" });
+        await callClaude("key", "y", NB_CTX, [], "claude-sonnet-5", null, null);
+        const body = JSON.parse(fetch.mock.calls[2][1].body);
+        expect(body.diagnostics).toEqual({ previous_message_id: null }); // zurückgesetzt, nicht mehr "msg_x"
+        expect(fetch.mock.calls[2][1].headers["anthropic-beta"]).toBe("cache-diagnosis-2026-04-07");
+      });
+    });
+  });
+});
+
+// v7.29 (Cache-Diagnostics, Beta): formatCacheDebug ist bewusst als reine,
+// exportierte Funktion angelegt (unabhängig von callClaude/fetch testbar) –
+// deckt hier gezielt alle vier dokumentierten Zustände plus Fehlertoleranz-
+// Randfälle ab (Beta-Doku: "Feldnamen können sich ändern").
+describe("formatCacheDebug (Cache-Diagnostics-Auswertung, v7.29)", () => {
+  const USAGE = { cache_read_input_tokens: 17215, cache_creation_input_tokens: 556 };
+
+  it("Zustand 1: diagnostics fehlt (undefined) -> nur die Basis-Zeile, kein Zusatz", () => {
+    expect(formatCacheDebug(USAGE, undefined)).toBe("read=17215 write=556");
+  });
+
+  it("Zustand 2: diagnostics === null (Erst-Turn/kein Divergenz-Befund) -> ebenfalls kein Zusatz", () => {
+    expect(formatCacheDebug(USAGE, null)).toBe("read=17215 write=556");
+  });
+
+  it("Zustand 3: {cache_miss_reason: null} (Vergleich lief noch, inconclusive) -> ' diag=inconclusive'", () => {
+    expect(formatCacheDebug(USAGE, { cache_miss_reason: null })).toBe("read=17215 write=556 diag=inconclusive");
+  });
+
+  it("Zustand 4: {cache_miss_reason: {type, cache_missed_input_tokens}} -> ' miss=<type>(~<tokens>tok)'", () => {
+    expect(formatCacheDebug(USAGE, { cache_miss_reason: { type: "system_changed", cache_missed_input_tokens: 41850 } }))
+      .toBe("read=17215 write=556 miss=system_changed(~41850tok)");
+  });
+
+  it("Zustand 4 ohne cache_missed_input_tokens: nur ' miss=<type>', kein '(~tok)'-Anhang", () => {
+    expect(formatCacheDebug(USAGE, { cache_miss_reason: { type: "model_changed" } }))
+      .toBe("read=17215 write=556 miss=model_changed");
+  });
+
+  it("cache_missed_input_tokens===0 wird wie 'nicht vorhanden' behandelt (kein '(~0tok)')", () => {
+    expect(formatCacheDebug(USAGE, { cache_miss_reason: { type: "model_changed", cache_missed_input_tokens: 0 } }))
+      .toBe("read=17215 write=556 miss=model_changed");
+  });
+
+  it("ein der App unbekannter, künftiger type wird ROH durchgereicht (keine Whitelist/Filterung)", () => {
+    expect(formatCacheDebug(USAGE, { cache_miss_reason: { type: "irgendein_neuer_typ_2027" } }))
+      .toBe("read=17215 write=556 miss=irgendein_neuer_typ_2027");
+  });
+
+  it("alle sechs dokumentierten Typen landen unverändert im String", () => {
+    for (const type of [
+      "model_changed", "system_changed", "tools_changed", "messages_changed",
+      "previous_message_not_found", "unavailable",
+    ]) {
+      expect(formatCacheDebug(USAGE, { cache_miss_reason: { type } })).toContain("miss=" + type);
+    }
+  });
+
+  it("fehlende usage-Felder werfen nie – 0/0 als Basiswert", () => {
+    expect(formatCacheDebug(null, null)).toBe("read=0 write=0");
+    expect(formatCacheDebug(undefined, undefined)).toBe("read=0 write=0");
+    expect(formatCacheDebug({}, {})).toBe("read=0 write=0");
+  });
+
+  it("ein völlig unerwartetes diagnostics-Objekt (Beta-Feldnamen geändert) wirft nie, liefert nur die Basis-Zeile", () => {
+    expect(formatCacheDebug(USAGE, { irgendeinAnderesFeld: 42 })).toBe("read=17215 write=556");
+    expect(formatCacheDebug(USAGE, { cache_miss_reason: {} })).toBe("read=17215 write=556"); // type fehlt
+    expect(formatCacheDebug(USAGE, { cache_miss_reason: "kaputt" })).toBe("read=17215 write=556"); // falscher Typ
+    expect(formatCacheDebug(USAGE, "auch kaputt")).toBe("read=17215 write=556");
+    expect(formatCacheDebug(USAGE, 42)).toBe("read=17215 write=556");
   });
 });

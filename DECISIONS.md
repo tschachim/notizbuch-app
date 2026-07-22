@@ -4313,3 +4313,188 @@ aus `referenz-app.jsx` übernommen.
       Sektion mit mehreren Subs (unverändertes, vor v7.28 bereits so
       bestehendes `cur`-Wiederverwendungsverhalten) – kein neuer Regressions-
       punkt, aber der Vollständigkeit halber hier benannt.
+
+71. **Cache-Diagnostics (Beta) in die bestehende Caching-Diagnose eingebaut**
+    (v7.29). Baut direkt auf dem v7.20-Caching-Umbau auf (`postOnce`,
+    2-Block-`system`, die `[cache]`-Debugzeile) – kein neuer Umbau, nur eine
+    Erweiterung derselben Stelle. Quelle: Anthropic-Doku
+    `https://platform.claude.com/docs/en/build-with-claude/cache-diagnostics`
+    (**Beta-Status**: eigener `anthropic-beta`-Header nötig, Feldnamen der
+    Antwort können sich laut Doku noch ändern – die gesamte Auswertung ist
+    deshalb bewusst defensiv, siehe unten).
+    - **A) Request-Seite** (`src/lib/anthropic.js#postOnce`): Header
+      `anthropic-beta: cache-diagnosis-2026-04-07` auf JEDEM Request (geprüft:
+      der EINZIGE `anthropic-beta`-Header dieser App bisher – ein künftiger
+      zweiter Beta-Header MUSS kommagetrennt im selben Header-Wert ergänzt
+      werden, nicht als zweiter `anthropic-beta`-Schlüssel). Body bekommt
+      `"diagnostics": {"previous_message_id": lastMessageId}` – `lastMessageId`
+      ist ein neuer, MODUL-INTERNER Ref (Session-Lebensdauer, KEIN Persist in
+      `state.json`/`localStorage`: ein Reload setzt ihn harmlos auf `null`
+      zurück, der nächste Request wird dann wieder zu einem Opt-in-Vergleich
+      ohne Referenz). Aktualisiert wird er NUR bei einer erfolgreichen Antwort
+      mit `id`-Feld – Fehlerfälle (kein `data`, `data.error`, fehlendes `id`)
+      lassen ihn bewusst UNVERÄNDERT, statt auf eine nie erfolgte Antwort zu
+      verweisen (ein dadurch "veralteter" Wert ist harmlos: bestenfalls meldet
+      die API `cache_miss_reason.type === "previous_message_not_found"`,
+      selbst einer der vier dokumentierten, unkritischen Zustände).
+    - **id-Durchfädelung INNERHALB eines Turns:** `postOnce` wird für
+      lookup_wissen-Runden, pause_turn-Fortsetzungen UND Forced-Retries
+      IMMER wieder aufgerufen (bestehende Architektur seit v7.20, ein
+      einziger Aufrufpfad) – jede dieser Zwischenrunden liest/schreibt
+      denselben `lastMessageId`-Ref, reicht die id der UNMITTELBAR
+      vorangegangenen Runde also automatisch weiter, ohne eigene
+      Durchreichlogik. Diese intra-Turn-Requests sind unsere PERFEKTESTEN
+      Präfix-Matches (identische `system`-Blöcke, nur `messages` wächst an) –
+      eine gemeldete Divergenz dort wäre ein echter Bug, kein erwartbares
+      Rauschen (siehe Warn-Politik unten).
+    - **B) Auswertung** (`formatCacheDebug(usage, diagnostics)`, exportierte
+      REINE Funktion, ersetzt die bisherige Inline-String-Verkettung in der
+      `[cache]`-Debugzeile): deckt alle vier von der Doku genannten Zustände
+      ab – Feld fehlt/`null` (kein Zusatz zur Zeile, funktional identisch:
+      Erst-Turn bzw. kein Divergenz-Befund), `{cache_miss_reason: null}`
+      (Vergleich lief serverseitig noch – `" diag=inconclusive"`),
+      `{cache_miss_reason: {type, cache_missed_input_tokens?}}` (
+      `" miss=<type>"` bzw. `" miss=<type>(~<tokens>tok)"` bei einer echten
+      Zahl > 0). `type` wird ROH durchgereicht, KEINE Whitelist/Filterung –
+      ein der App unbekannter künftiger Wert landet unverändert im String
+      (Konsequenz aus dem Beta-Status: die Funktion darf nicht auf eine
+      feste Typenliste angewiesen sein). Ausschließlich optional
+      chaining/`typeof`-Prüfungen, wirft NIEMALS – auch nicht bei fehlendem
+      `usage` oder einem strukturell unerwarteten `diagnostics`-Objekt
+      (String/Zahl/leeres Objekt).
+    - **C) Warn-Politik (bewusst KONSERVATIV):** `console.warn` NUR bei
+      `cache_miss_reason.type === "tools_changed"` – unsere Tools
+      (`NOTEBOOK_TOOL`/`LOOKUP_TOOL`/Websuche) sind konstruktionsbedingt
+      konstant innerhalb einer Session (siehe die Klon-statt-Mutation-Regel
+      aus v7.20/Punkt 62 – genau DAS soll diese Warnung zusätzlich absichern:
+      eine künftig versehentlich doch mutierte Tool-Konstante würde sich
+      genau so zeigen), eine Divergenz dort kann durch normale App-Nutzung
+      NICHT entstehen und ist daher IMMER verdächtig. Bewusst NICHT gewarnt
+      wird bei den vier übrigen Typen – zwei davon sind für diese App
+      DAUERHAFT ERWARTBAR, kein Rauschen zum Ignorieren, sondern strukturell
+      eingebaut:
+      - `system_changed`: nach JEDEM Notizbuch-/Gedächtnis-Write erwartbar –
+        der `dynamicBlock` (AKTIVES NOTIZBUCH/ALLE NOTIZBÜCHER/Wissen/
+        Gedächtnis) ändert sich ABSICHTLICH bei jeder inhaltlichen Änderung
+        (siehe `buildSystemBlocks`, Punkt 62).
+      - `messages_changed`: unser gleitendes 12-Nachrichten-Fenster
+        verschiebt den `messages`-Anfang bei JEDEM vollen Fenster (ältester
+        Eintrag fällt raus, neuer kommt hinzu) – GENAU der Grund, warum
+        `messages` bewusst KEIN `cache_control` bekommt (Punkt 62); dieser
+        Miss ist also nicht nur erwartbar, sondern strukturell unvermeidbar.
+      - `model_changed`: legitime Nutzeraktion (Modell-Dropdown).
+      - `previous_message_not_found`/`unavailable`: harmlos bzw. schlicht
+        noch kein Ergebnis (Vergleichsbasis fehlt oder Diagnose noch nicht
+        abgeschlossen).
+      ALLE Zustände landen trotzdem unverändert in der `[cache]`-Debugzeile
+      (`formatCacheDebug` filtert nichts weg) – nur `tools_changed`
+      eskaliert zusätzlich zu `console.warn`.
+    - **Tests** (`tests/anthropic.test.js`): neuer Block
+      „Cache-Diagnostics (Beta, v7.29)“ – Header auf JEDEM Request auch über
+      mehrere Runden (lookup_wissen-Mock mit zwei `fetch`-Aufrufen);
+      `previous_message_id: null` beim allerersten Request der Session;
+      Folge-Turn trägt die `id` des Vorgängers; zwei separate
+      Mehrrunden-Mocks (lookup_wissen UND pause_turn) belegen die
+      intra-Turn-Durchfädelung – Runde 2 trägt jeweils die `id` aus Runde 1;
+      ein Fehlerfall (keine `id` in der Antwort) lässt den Ref nachweislich
+      unverändert, geprüft über ZWEI aufeinanderfolgende Requests danach;
+      Warn-Politik einzeln für `tools_changed` (warnt) und `system_changed`
+      (warnt NICHT) sowie gebündelt für die übrigen drei harmlosen Typen
+      (console-Spy); die `[cache]`-Zeile enthält den `miss`-Grund, wenn
+      `postOnce` `formatCacheDebug` tatsächlich verwendet (kein
+      Test-Doppelgänger, der die echte Verdrahtung umgeht). Eigener Block
+      „formatCacheDebug (Cache-Diagnostics-Auswertung, v7.29)“ – alle vier
+      Zustände einzeln, `cache_missed_input_tokens` fehlend/`0`/positiv, ein
+      unbekannter künftiger `type` (roh durchgereicht), alle sechs
+      dokumentierten Typen im String, fehlende `usage` (`0`/`0`,
+      `null`/`undefined`/`{}`), ein strukturell kaputtes `diagnostics`-Objekt
+      (String/Zahl/leeres `cache_miss_reason`) – wirft in keinem Fall. Ein
+      Bestandstest musste umgeschrieben werden (NICHT gelöscht, mit
+      Kommentar): "system ist ein Array aus GENAU zwei Text-Blöcken…" prüfte
+      bisher explizit das FEHLEN jedes `anthropic-beta`-Headers (galt vor
+      v7.29, weil Prompt-Caching selbst GA ist und keinen braucht) – jetzt
+      wird stattdessen der konkrete neue Header-Wert erwartet. Gesamtstand
+      danach 971/971 grün (vorher 951).
+    - **Bewusste Restrisiken:** (1) Reine Best-Effort-Diagnose ohne
+      funktionale Auswirkung – ein API-seitiger Ausfall/eine Umbenennung der
+      Beta-Felder kann höchstens dazu führen, dass `formatCacheDebug` nichts
+      Zusätzliches anzeigt (durch die defensiven Prüfungen ausgeschlossen:
+      dass sie wirft oder den Request-Flow stört). (2) `lastMessageId` ist
+      echter Modul-Zustand – bei parallel laufenden `callClaude`-Aufrufen
+      (aktuell nicht der Fall: die App sendet eine Chat-Nachricht erst nach
+      Abschluss der vorigen) könnte die Zuordnung "welche id gehört zu
+      welchem Turn" verrutschen; für den bestehenden sequenziellen
+      Sende-Fluss der App ist das nicht relevant, aber im Kommentar an der
+      Deklaration festgehalten, falls sich das je ändert. (3) Die
+      Warn-Politik ist eine Momentaufnahme der aktuell dokumentierten
+      Miss-Typen – ein KÜNFTIGER, der App unbekannter Typ landet in der
+      Debug-Zeile, löst aber bewusst KEIN `console.warn` aus (nur
+      `tools_changed` ist explizit gelistet) – vertretbar, weil unbekannte
+      Typen laut Doku eher neue, noch nicht klassifizierte Fälle sind als
+      garantierte Bugs; eine Positivliste ("nur bei explizit bekannten
+      harmlosen Typen NICHT warnen, alles andere warnt") hätte das
+      Restrisiko umgekehrt (mehr falsche Alarme bei jeder künftigen
+      Doku-Erweiterung) und wurde bewusst verworfen.
+    - **Nachtrag (Re-Review 🔵, noch vor dem ersten Commit umgesetzt):
+      Graceful Degradation gegen eine deprecatete Beta.** Erkanntes Risiko:
+      Der `anthropic-beta`-Header UND das `diagnostics`-Body-Feld gehen auf
+      JEDEN Chat-Request – wird `cache-diagnosis-2026-04-07` serverseitig
+      irgendwann deprecatet/entfernt, könnte die API das dann unbekannte
+      Feld/den unbekannten Header-Wert mit HTTP 400 ablehnen. Ohne
+      Gegenmaßnahme würde `postOnce` dann werfen und JEDER künftige
+      Chat-Request der Sitzung bräche – ein "App irgendwann komplett tot"-
+      Zeitzünder für ein Feature, das rein diagnostisch ist und niemand zum
+      Funktionieren braucht. Fix: `postOnce` baut Request-Body/-Header jetzt
+      über einen gemeinsamen `buildRequest(messages, mode,
+      includeDiagnostics)`-Baustein, sodass ein Retry OHNE `diagnostics`-
+      Feld UND OHNE Beta-Header mit EINEM Flag steuerbar ist (beides muss
+      gemeinsam wegfallen, sonst würde die API denselben 400 nur aus dem
+      jeweils anderen Grund erneut liefern). Scheitert ein Request mit HTTP
+      400 UND deutet der Fehlertext ERKENNBAR auf diagnostics/den Beta-Namen
+      hin (`isDiagnosticsRelatedError`: `/diagnostics|cache-diagnosis/i` auf
+      `error.message`/`error.type` – bewusst DEFENSIV, im Zweifel KEIN
+      Trigger), wird ein neues Modul-Flag `diagnosticsDisabled` gesetzt, der
+      GENAU DIESE Anfrage EINMAL ohne Feld/Header wiederholt (derselbe
+      Chat-Turn scheitert dadurch nicht unnötig), eine `console.warn`-Zeile
+      informiert, und die Sitzung bleibt AB DIESEM ZEITPUNKT dauerhaft ohne
+      Diagnostics – Prompt-Caching selbst (GA) ist davon komplett unberührt,
+      nur die diagnostische Zusatzinfo entfällt. Andere 400er (Text passt
+      nicht auf das Muster, z. B. ein kaputtes Tool-Schema) und
+      Nicht-400-Fehler (401/500/Netzwerkfehler) verhalten sich exakt wie vor
+      diesem Nachtrag – KEIN Verhaltens-Delta, durch eigene Tests belegt.
+      `resetCacheDiagnosticsForTests()` setzt jetzt BEIDE Modul-Refs zurück
+      (`lastMessageId` UND `diagnosticsDisabled`).
+      - **Removal-Trigger (für eine künftige Aufräum-Aufgabe festgehalten):**
+        Wird `cache-diagnosis-2026-04-07` von Anthropic zu GA befördert oder
+        durch eine neuere Beta-Version abgelöst, muss NUR die
+        Header-String-Konstante in `buildRequest` aktualisiert werden (bzw.
+        bei GA-Beförderung ganz entfernt werden – dann braucht es auch
+        `includeDiagnostics`/`diagnosticsDisabled`/die Degradations-Logik
+        nicht mehr, analog dazu, dass Prompt-Caching selbst schon länger
+        ohne Beta-Header auskommt, siehe Punkt 62). Bis dahin bleibt die
+        Degradation als Sicherheitsnetz aktiv.
+      - **Tests** (`tests/anthropic.test.js`, neuer Block „Graceful
+        Degradation: Beta-Ablehnung deaktiviert Diagnostics für den Rest der
+        Sitzung“): 400 mit diagnostics-bezogener Meldung ⇒ GENAU EIN Retry
+        ohne Feld/Header (gleiche `messages`), Erfolg wird durchgereicht,
+        `console.warn` mit dem exakten Text, UND ein Folge-Turn DERSELBEN
+        Sitzung sendet von Anfang an ohne Feld/Header; 400 mit ANDERER
+        Meldung ⇒ kein Retry, Fehler unverändert durchgereicht, Diagnostics
+        bleibt AKTIV für den nächsten Versuch; ein 500 MIT dem Wort
+        "diagnostics" im Fehlertext ⇒ trotzdem kein Retry (Status-Gate hat
+        Vorrang vor dem Text-Muster); ein echter Netzwerkfehler (fetch
+        wirft) ⇒ unverändert; `resetCacheDiagnosticsForTests()` setzt
+        `diagnosticsDisabled` nachweislich mit zurück (nicht nur
+        `lastMessageId`). Gesamtstand danach 976/976 grün (vorher 971).
+      - **Restrisiko:** Die Degradation ist – wie `isDiagnosticsRelatedError`
+        selbst – eine Textmuster-Heuristik auf der Fehlermeldung, keine
+        offizielle Fehlercode-Prüfung (Anthropic dokumentiert keinen
+        eigenen Fehlercode für diesen Fall). Träfe die API einen 400 mit
+        einem Text, der weder "diagnostics" noch "cache-diagnosis" enthält,
+        obwohl die Ursache trotzdem die Beta ist, bliebe die Degradation
+        aus – bewusst in Kauf genommen (siehe „im Zweifel NICHT auslösen“):
+        ein zu aggressives Muster hätte das Risiko eines UNNÖTIGEN Retries
+        bei einem harmlosen 400 aus anderem Grund erzeugt, was schlimmer
+        wäre als der seltene Fall, dass die Degradation einmal zu spät
+        greift (dann bleibt es beim bisherigen Verhalten: ein einzelner
+        Chat-Request scheitert mit einer Fehlermeldung, kein Dauerzustand).

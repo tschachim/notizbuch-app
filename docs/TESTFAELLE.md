@@ -441,6 +441,14 @@ prüfen – die App loggt bei JEDEM Modell-Aufruf eine Zeile
 „read“ deutlich über 0 liegen. Kein Fehlschlag, falls der erste Aufruf
 „write“ statt „read“ zeigt (das ist der erwartete Cache-Aufbau) – nur
 melden, wenn AUCH beim zweiten/weiteren Aufruf `read` dauerhaft 0 bleibt.
+Weicher Beobachtungspunkt (v7.29, Cache-Diagnostics-Beta – KEIN
+Fehlschlag, nur zur Kenntnis nehmen): Die Debugzeile darf zusätzlich
+einen Anhang wie „ miss=system_changed(~…tok)“ oder „ diag=inconclusive“
+zeigen (Beta-Feld `diagnostics` der Anthropic-API). Nach einem
+Notizbuch- oder Gedächtnis-Commit zwischen den beiden Nachrichten ist
+„miss=system_changed“ NORMAL und kein Fehler (der System-Prompt ändert
+sich dabei absichtlich). Nur melden, falls in der Konsole eine Warnung
+„[cache] tools_changed …“ erscheint – das wäre ein echter Befund.
 
 **C19 [VERBUNDEN][API] Ops-Zuverlässigkeit: Überführen-Muster + ⚠️-Warnung
 bei wirkungslosen Ops (v7.21, exaktes Nutzer-Szenario).** Im QA-Notizbuch

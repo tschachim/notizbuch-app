@@ -660,6 +660,87 @@ const sanitizeWarningForHistory = (w) =>
     .replace(/\[/g, "(")
     .replace(/\]/g, ")");
 
+// Cache-Diagnostics (Beta, v7.29, siehe DECISIONS – Anthropic-Doku:
+// https://platform.claude.com/docs/en/build-with-claude/cache-diagnostics).
+// Modul-interner Ref auf die "id" der zuletzt empfangenen Antwort – bewusst
+// AUF MODUL-EBENE (Session-Lebensdauer, KEIN Persist in state.json/
+// localStorage): der Wert soll über EINEN kompletten Chat-Verlauf hinweg
+// bestehen bleiben (jeder neue callClaude()-Aufruf eines Turns baut auf der
+// id des vorigen Turns auf), aber NICHT über einen Reload/Session-Ende
+// hinaus (die diagnostics-Beta ist reine Kosten-/Cache-Diagnose, kein
+// funktionales Feature – ein Zurücksetzen bei Reload ist harmlos, macht den
+// allerersten Request danach nur wieder zu einem Opt-in-Vergleich ohne
+// Referenz, siehe previous_message_not_found unten).
+let lastMessageId = null;
+
+// Graceful-Degradation-Flag (Beta, v7.29-Nachtrag/Re-Review 🔵, siehe
+// DECISIONS): Cache-Diagnostics ist eine Beta – wird der Header/das
+// diagnostics-Feld serverseitig irgendwann deprecatet/entfernt, könnte JEDER
+// Request mit HTTP 400 abgelehnt werden. Ohne Degradation würde dann JEDER
+// künftige Chat-Request dieser Session brechen, obwohl das Feature rein
+// diagnostisch ist ("App irgendwann komplett tot"-Risiko für ein Feature,
+// das niemand zum Funktionieren braucht). Einmal auf true gesetzt (siehe
+// postOnce), bleibt die Sitzung für den Rest ihrer Lebensdauer OHNE
+// diagnostics/Beta-Header – Caching selbst (GA) ist davon unberührt.
+let diagnosticsDisabled = false;
+
+// Test-Hilfsfunktion (siehe tests/anthropic.test.js), analog zu
+// lib/linkProviders.jsx#setLinkProviders: setzt die Modul-Refs zurück, damit
+// einzelne Tests unabhängig von der Ausführungsreihenfolge anderer Tests
+// in derselben Datei einen sauberen Ausgangszustand haben (die Refs bleiben
+// sonst über die GESAMTE Testdatei hinweg bestehen, genau wie im echten
+// Betrieb über die gesamte Session, siehe Kommentare oben). KEIN
+// Produktions-Aufrufpfad nutzt diese Funktion.
+export function resetCacheDiagnosticsForTests() {
+  lastMessageId = null;
+  diagnosticsDisabled = false;
+}
+
+// Defensive Erkennung eines diagnostics-/Beta-bezogenen 400-Fehlers (Beta,
+// v7.29-Nachtrag): Nur wenn der Fehlertext ERKENNBAR auf das diagnostics-
+// Feld oder den Beta-Header-Namen selbst verweist, gilt ein 400 als
+// "durch die Degradation behebbar". Im Zweifel (Text passt nicht eindeutig)
+// liefert diese Funktion false – ein 400 aus einem völlig anderen Grund
+// (z. B. ein kaputtes Tool-Schema) soll sich exakt wie bisher verhalten,
+// KEIN zusätzlicher Retry, kein Verhaltens-Delta.
+function isDiagnosticsRelatedError(error) {
+  const text = String((error && (error.message || error.type)) || "");
+  return /diagnostics|cache-diagnosis/i.test(text);
+}
+
+// Reine, exportierte Auswertungsfunktion für die bestehende [cache]-
+// Debugzeile (v7.20): baut aus usage (Bestand) und dem NEUEN, optionalen
+// diagnostics-Feld der Antwort einen String. Bewusst FEHLERTOLERANT (Beta-
+// Status laut Anthropic-Doku: "Feldnamen können sich ändern") – ausschließlich
+// optional chaining/typeof-Prüfungen, wirft NIEMALS, auch nicht bei
+// fehlendem usage oder einem völlig unerwarteten diagnostics-Objekt. Vier
+// Zustände laut Doku:
+//  1) diagnostics fehlt (undefined)          -> kein Zusatz zur Zeile
+//  2) diagnostics === null                    -> kein Zusatz (Erst-Turn/kein
+//     Divergenz-Befund – für die Debug-Ausgabe funktional identisch zu 1)
+//  3) diagnostics.cache_miss_reason === null  -> " diag=inconclusive"
+//     (serverseitiger Vergleich lief noch, noch kein Ergebnis)
+//  4) diagnostics.cache_miss_reason = {type, cache_missed_input_tokens?}
+//     -> " miss=<type>" bzw. " miss=<type>(~<tokens>tok)" bei einer echten
+//     Zahl > 0. "type" wird ROH durchgereicht (auch ein der App unbekannter
+//     künftiger Wert landet unverändert im String) – siehe Warn-Politik
+//     unten in postOnce, die NUR bei "tools_changed" aktiv warnt.
+export function formatCacheDebug(usage, diagnostics) {
+  const read = (usage && usage.cache_read_input_tokens) || 0;
+  const write = (usage && usage.cache_creation_input_tokens) || 0;
+  let out = "read=" + read + " write=" + write;
+  if (diagnostics && typeof diagnostics === "object") {
+    const reason = diagnostics.cache_miss_reason;
+    if (reason === null) {
+      out += " diag=inconclusive";
+    } else if (reason && typeof reason === "object" && reason.type) {
+      const tokens = reason.cache_missed_input_tokens;
+      out += " miss=" + reason.type + (typeof tokens === "number" && tokens > 0 ? "(~" + tokens + "tok)" : "");
+    }
+  }
+  return out;
+}
+
 // nbContext: { notebooks: [{ name, doc }], activeName }
 // fileInfo (optional): { name, text|null } – Dateianhang dieses Turns;
 // der Inhalt geht nur in DIESEN Aufruf, im Verlauf bleibt nur der Name.
@@ -789,13 +870,31 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
   //       "none"    = ganz ohne Tools (JSON aus Text, letzte Rettung)
   // Erzwungenes tool_choice verhindert Server-Tool-Aufrufe – deshalb "auto"
   // im Suchmodus, abgesichert über den Prompt und die Fallback-Kette.
-  const postOnce = async (messages, mode) => {
+  // Baut body+headers für EINEN Request; includeDiagnostics steuert sowohl
+  // das diagnostics-Body-Feld als auch den Beta-Header ZUSAMMEN (Graceful
+  // Degradation, v7.29-Nachtrag – siehe diagnosticsDisabled/postOnce unten):
+  // ein Retry OHNE Diagnostics muss BEIDES gleichzeitig weglassen, sonst
+  // würde die API denselben 400 nur aus dem jeweils anderen Grund erneut
+  // liefern. Reiner Baustein, kein eigener Netzwerk-Aufruf.
+  const buildRequest = (messages, mode, includeDiagnostics) => {
     const body = {
       model: modelId,
       max_tokens: MAX_TOKENS,
       system: systemBlocks,
       messages,
     };
+    if (includeDiagnostics) {
+      // Cache-Diagnostics (Beta, v7.29): previous_message_id ist die id der
+      // UNMITTELBAR vorangegangenen Antwort – auch INNERHALB dieses Turns
+      // (lookup_wissen-Runden/pause_turn-Fortsetzungen/Forced-Retries laufen
+      // alle über DIESE postOnce()-Funktion, siehe lastMessageId oben). Diese
+      // intra-Turn-Requests sind unsere PERFEKTESTEN Präfix-Matches (exakt
+      // dieselben system-Blöcke, nur messages wächst an) – eine Divergenz
+      // dort wäre ein echter Bug, kein erwartbares Rauschen. null beim
+      // allerersten Request der Session (Opt-in ohne Vergleichsbasis, siehe
+      // lastMessageId-Deklaration).
+      body.diagnostics = { previous_message_id: lastMessageId };
+    }
     if (mode === "search") {
       const toolsList = [
         webSearchToolFor(modelId),
@@ -823,16 +922,37 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     // neue kommt hinten dazu), ein Cache-Treffer auf messages wäre also so gut
     // wie garantiert ein Miss. Ein Breakpoint dort würde nur zusätzliche
     // Cache-Write-Kosten (1,25× Input-Preis) ohne Treffer-Chance verursachen.
+    const headers = {
+      "content-type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    };
+    if (includeDiagnostics) {
+      // Cache-Diagnostics (Beta, v7.29): Opt-in-Header, MUSS auf jedem
+      // Request stehen (nicht nur dem ersten), sonst liefert die API kein
+      // diagnostics-Feld. Aktuell der EINZIGE anthropic-beta-Header
+      // dieser App (geprüft: kein anderer Aufrufpfad setzt bereits einen)
+      // – käme künftig ein zweiter Beta-Header dazu, MUSS er hier
+      // kommagetrennt ergänzt werden (ein Header-Schlüssel darf laut
+      // Anthropic-API nicht doppelt gesendet werden), nicht als
+      // zusätzlicher eigener "anthropic-beta"-Eintrag im selben Objekt.
+      headers["anthropic-beta"] = "cache-diagnosis-2026-04-07";
+    }
+    return { body, headers };
+  };
+
+  // Ein einzelner Netzwerk-Versuch (ohne Degradations-Logik – die sitzt in
+  // postOnce() darum herum). Wirft bei einem echten Netzwerkfehler weiterhin
+  // wie bisher; liefert sonst IMMER { response, data } zurück (data ggf.
+  // null bei kaputtem JSON-Body).
+  const doFetch = async (messages, mode, includeDiagnostics) => {
+    const { body, headers } = buildRequest(messages, mode, includeDiagnostics);
     let response;
     try {
       response = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-          "anthropic-dangerous-direct-browser-access": "true",
-        },
+        headers,
         body: JSON.stringify(body),
       });
     } catch (e) {
@@ -840,20 +960,75 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     }
     let data = null;
     try { data = await response.json(); } catch (e) { /* keine JSON-Antwort */ }
+    return { response, data };
+  };
+
+  const postOnce = async (messages, mode) => {
+    let { response, data } = await doFetch(messages, mode, !diagnosticsDisabled);
+    // Graceful Degradation (Beta, v7.29-Nachtrag/Re-Review 🔵, siehe
+    // DECISIONS): NUR bei einem HTTP 400 MIT erkennbar diagnostics-/Beta-
+    // bezogener Fehlermeldung (isDiagnosticsRelatedError, siehe oben) – NIE
+    // bei anderen 400ern (z. B. ein kaputtes Tool-Schema verhält sich exakt
+    // wie bisher, KEIN zusätzlicher Retry). Ausgelöst höchstens EINMAL pro
+    // Session: diagnosticsDisabled bleibt danach für alle weiteren
+    // postOnce()-Aufrufe (auch künftiger Turns) gesetzt – die aktuelle
+    // Anfrage wird SOFORT einmal ohne diagnostics/Beta-Header wiederholt,
+    // damit dieser Chat-Turn nicht mit einem vermeidbaren Fehler scheitert.
+    if (!diagnosticsDisabled && response.status === 400 && data && data.error && isDiagnosticsRelatedError(data.error)) {
+      diagnosticsDisabled = true;
+      console.warn("[cache] Diagnostics-Beta abgelehnt — für diese Sitzung deaktiviert");
+      ({ response, data } = await doFetch(messages, mode, false));
+    }
     if (!response.ok && (!data || !data.error)) {
       // z. B. HTML-Fehlerseite eines Proxys – nicht als Formatfehler tarnen
       throw new Error("Anthropic-API-Fehler " + response.status);
     }
-    // Verifikations-Hook (v7.20): kein UI, rein für E2E-Nachweis/Kosten-
-    // diagnose über die Browser-Konsole – cache_read_input_tokens > 0 zeigt
-    // einen Cache-Treffer, cache_creation_input_tokens > 0 einen (teureren)
-    // Cache-Write. Läuft für JEDEN Request dieser Funktion (siehe Kommentar
-    // oben zu den Aufrufpfaden).
+    // Cache-Diagnostics (Beta, v7.29): lastMessageId für den NÄCHSTEN
+    // postOnce()-Aufruf aktualisieren (egal ob intra-Turn-Fortsetzung oder
+    // erst der nächste Chat-Turn, siehe Deklaration oben) – NUR bei einer
+    // erfolgreichen Antwort mit "id". Fehlerfälle (kein data, data.error,
+    // fehlendes id-Feld) lassen den Ref bewusst UNVERÄNDERT: der nächste
+    // Request nennt dann weiterhin die letzte ECHTE Antwort-id, statt auf
+    // eine nie erfolgte Antwort zu verweisen. Ein dadurch "veralteter"
+    // previous_message_id (z. B. nach einem zwischenzeitlichen Retry mit
+    // frischer History) ist harmlos – die API antwortet dafür bestenfalls
+    // mit cache_miss_reason "previous_message_not_found", explizit einer der
+    // vier dokumentierten, unkritischen Zustände (siehe formatCacheDebug).
+    if (data && typeof data.id === "string" && data.id) lastMessageId = data.id;
+    // Verifikations-Hook (v7.20, erweitert v7.29 um Cache-Diagnostics): kein
+    // UI, rein für E2E-Nachweis/Kosten-Diagnose über die Browser-Konsole –
+    // cache_read_input_tokens > 0 zeigt einen Cache-Treffer,
+    // cache_creation_input_tokens > 0 einen (teureren) Cache-Write; das neue
+    // diagnostics-Feld (falls von der Beta geliefert) erklärt WARUM ein
+    // Treffer ausblieb. Läuft für JEDEN Request dieser Funktion (siehe
+    // Kommentar oben zu den Aufrufpfaden).
     if (data && data.usage) {
-      console.debug(
-        "[cache] read=" + (data.usage.cache_read_input_tokens || 0) +
-        " write=" + (data.usage.cache_creation_input_tokens || 0)
-      );
+      console.debug("[cache] " + formatCacheDebug(data.usage, data.diagnostics));
+      // Warn-Politik (bewusst KONSERVATIV, siehe DECISIONS): NUR bei
+      // "tools_changed" wird gewarnt. Unsere Tools (NOTEBOOK_TOOL/LOOKUP_TOOL/
+      // Websuche) sind konstruktionsbedingt konstant innerhalb einer Session
+      // – eine Divergenz dort kann NICHT durch normale App-Nutzung entstehen,
+      // wäre also IMMER ein echter Bug (z. B. ein versehentlich mutierter
+      // Tool-Klon, siehe die cache_control-Klon-Warnung weiter oben).
+      // Bewusst NICHT gewarnt wird bei: "system_changed" (nach JEDEM
+      // Notizbuch-/Gedächtnis-Write erwartbar – der dynamicBlock ändert sich
+      // absichtlich, siehe buildSystemBlocks), "messages_changed" (unser
+      // gleitendes 12-Nachrichten-Fenster verschiebt den messages-Anfang bei
+      // jedem vollen Fenster – GENAU der Grund, warum messages bewusst KEIN
+      // cache_control bekommt, siehe Kommentar oben), "model_changed"
+      // (Nutzer-Dropdown, legitime Nutzeraktion) und
+      // "previous_message_not_found"/"unavailable" (harmlos bzw. schlicht
+      // noch kein Ergebnis, siehe formatCacheDebug). Alle Zustände landen
+      // trotzdem in der debug-Zeile oben – nur tools_changed eskaliert
+      // zusätzlich zu console.warn.
+      const missType = data.diagnostics && data.diagnostics.cache_miss_reason &&
+        data.diagnostics.cache_miss_reason.type;
+      if (missType === "tools_changed") {
+        console.warn(
+          "[cache] tools_changed gemeldet – unsere Tools sollten konstant sein, das deutet auf einen echten Bug hin " +
+          "(z. B. eine versehentlich mutierte Tool-Konstante)."
+        );
+      }
     }
     return data;
   };
