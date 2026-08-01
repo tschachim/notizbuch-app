@@ -7,6 +7,14 @@
 /* replace_section legen ein referenziertes, aber fehlendes Kapitel     */
 /* jetzt selbst an, statt die Op zu überspringen - delete_section       */
 /* bleibt beim v7.14-Skip (siehe applyOne/explainSkip unten, DECISIONS).*/
+/* v7.32 (delete_chapter-Op, Live-Befund): neuer Op-Typ, der ein GANZES */
+/* #-Kapitel (Kopfzeile + ALLE ##-Abschnitte + Freitext) in einem       */
+/* Schritt entfernt - vorher blieb nach mehreren delete_section-Ops     */
+/* eine verwaiste "# "-Kapitelzeile stehen, die kein delete_section     */
+/* traf (kein ##-Abschnitt dieses Namens). Siehe DECISIONS #74.         */
+/* v7.32.1 (Review-Fix): findDeletableChapter() setzt die Suche NACH    */
+/* einer zuerst getroffenen Notizbuch-Titelzeile fort, statt ein GLEICH-*/
+/* NAMIGES echtes Kapitel darunter für dauerhaft unlöschbar zu erklären.*/
 /* ------------------------------------------------------------------ */
 
 const HEAD_RE = /^##\s+/;
@@ -34,12 +42,17 @@ export const dispHead = (h) => String(h || "").replace(/^#+\s*/, "").trim();
 // Sucht den Zeilenbereich [s, e) einer "# "-Kapitelzeile (normHead-tolerant,
 // wie bei Abschnitten – "# Projekte" und "Projekte" treffen dieselbe
 // Kapitelzeile). e ist die nächste "# "-Zeile oder das Dokumentende. null,
-// wenn kein Kapitel mit diesem Titel existiert.
-function findChapter(lines, chapterHeading) {
+// wenn kein Kapitel mit diesem Titel existiert. "fromIdx" (optional, v7.32.1
+// Review-Fix 🟡): Startindex der Suche nach der ERSTEN passenden Zeile –
+// Default 0 (bisheriges Verhalten, unverändert für alle Aufrufer ohne
+// dritten Parameter). Wird von findDeletableChapter() unten genutzt, um NACH
+// einer bereits gefundenen Notizbuch-Titelzeile weiterzusuchen.
+function findChapter(lines, chapterHeading, fromIdx) {
   const t = normHead(chapterHeading);
   if (!t) return null;
+  const from = typeof fromIdx === "number" ? fromIdx : 0;
   let s = -1;
-  for (let i = 0; i < lines.length; i++) {
+  for (let i = from; i < lines.length; i++) {
     if (CHAPTER_RE.test(lines[i]) && normHead(lines[i]) === t) { s = i; break; }
   }
   if (s === -1) return null;
@@ -48,6 +61,67 @@ function findChapter(lines, chapterHeading) {
     if (CHAPTER_RE.test(lines[j])) { e = j; break; }
   }
   return [s, e];
+}
+
+// Position der Notizbuch-TITELZEILE (v7.32, delete_chapter-Titelschutz) –
+// IDENTISCHE Logik/Konvention wie markdown.jsx#parseTree#titleLineIdx (dort
+// die maßgebliche Referenz, siehe deren Kopfkommentar): Ist die erste
+// NICHT-LEERE Zeile des Dokuments eine "# "-Zeile, gilt GENAU diese eine
+// Zeile (per Original-Index) als Titel – unabhängig vom Namen. Beginnt das
+// Dokument NICHT mit einer "# "-Zeile (z. B. Test-Fixture ohne Titel oder
+// eine Zeile, die mit "##"/Fließtext beginnt), gibt es KEINE Titel-Ausnahme:
+// -1, jede "# "-Zeile ist dann ein normales, löschbares Kapitel. ops.js
+// kannte diese Ausnahme bisher NICHT (findChapter/findSection behandeln JEDE
+// "# "-Zeile gleich) – für delete_chapter ist sie aber sicherheitskritisch,
+// siehe applyOne/explainSkip unten und DECISIONS #74.
+function titleLineIdx(lines) {
+  const firstContentIdx = lines.findIndex((l) => l.trim() !== "");
+  return firstContentIdx !== -1 && CHAPTER_RE.test(lines[firstContentIdx]) ? firstContentIdx : -1;
+}
+
+// Liefert das für delete_chapter adressierte Kapitel-Feld (v7.32): bevorzugt
+// "chapter" (konsistent zum bestehenden chapter-Feld bei den anderen Ops),
+// fällt bei fehlendem/leerem "chapter" auf "heading" zurück – Robustheits-
+// Fallback gegen Modell-Varianz (manche Antworten könnten das allgemeinere
+// heading-Feld statt des korrekten chapter-Felds benutzen). Von applyOne UND
+// explainSkip genutzt (nicht dupliziert), damit beide GARANTIERT denselben
+// Kapitel-String sehen – Grundprinzip dieser Datei, siehe explainSkip-
+// Kopfkommentar weiter unten.
+function chapterFieldFor(op) {
+  if (typeof op.chapter === "string" && op.chapter.trim()) return op.chapter;
+  if (typeof op.heading === "string" && op.heading.trim()) return op.heading;
+  return "";
+}
+
+// Sucht das für delete_chapter zu löschende Kapitel UNTER Berücksichtigung
+// der Titelzeilen-Ausnahme (v7.32.1, Review-Fix 🟡, Live-Befund-Nachbesserung):
+// Ein Kapitel mit dem GLEICHEN Namen wie die Notizbuch-Titelzeile (z. B.
+// Titel "# Projekte" UND weiter unten ein reguläres "# Projekte"-Kapitel –
+// laut parseTree/titleLineIdx ist JEDE "# "-Zeile außer der einen Titelzeile
+// ein normales Kapitel) wäre sonst per delete_chapter DAUERHAFT unlöschbar:
+// findChapter() liefert bei der globalen Suche IMMER zuerst die Titelzeile
+// (erster Treffer im Dokument), der reine Positionsvergleich in applyOne
+// hätte das als Titelzeilen-Skip gemeldet, obwohl weiter unten ein echtes,
+// löschbares Kapitel mit demselben Namen existiert. Trifft der erste Treffer
+// die Titelzeile, wird die Suche deshalb AB der Zeile DANACH fortgesetzt
+// (findChapter-"fromIdx"); nur wenn dort ebenfalls nichts gefunden wird,
+// bleibt es beim Titelzeilen-Skip. Ein bereits GEFUNDENES echtes Kapitel
+// unterhalb der Titelzeile ist niemals selbst wieder die Titelzeile (die
+// Suche startet ja erst NACH deren Index) – ein erneuter Titel-Vergleich
+// danach ist daher nicht nötig. Von applyOne UND explainSkip genutzt (kein
+// zweiter Schreibpfad), damit beide GARANTIERT dieselbe Entscheidung
+// treffen. Rückgabe: { range: [s,e]|null, titleBlocked: bool } –
+// titleBlocked ist nur bei range===null gesetzt und unterscheidet "gar kein
+// Kapitel dieses Namens" (false) von "nur als Titelzeile getroffen, sonst
+// nirgends" (true) – die beiden Fälle brauchen unterschiedliche
+// explainSkip-Meldungen.
+function findDeletableChapter(lines, chapterField) {
+  const first = findChapter(lines, chapterField);
+  if (!first) return { range: null, titleBlocked: false };
+  const tIdx = titleLineIdx(lines);
+  if (first[0] !== tIdx) return { range: first, titleBlocked: false };
+  const again = findChapter(lines, chapterField, tIdx + 1);
+  return again ? { range: again, titleBlocked: false } : { range: null, titleBlocked: true };
 }
 
 // range (optional): [from, to) grenzt die Suche auf ein einzelnes Kapitel
@@ -101,6 +175,38 @@ function applyOne(text, op) {
     return typeof op.content === "string" && op.content.trim()
       ? op.content.trim() + "\n"
       : text;
+  }
+
+  // v7.32 (delete_chapter-Op, Live-Befund): eigener, VOR der Abschnitts-
+  // Adressierung unten liegender Zweig – delete_chapter adressiert über
+  // "chapter" (mit "heading"-Fallback, siehe chapterFieldFor), NICHT über
+  // "heading" wie die drei ##-Abschnitts-Ops. Müsste dieser Zweig NACH der
+  // "const disp = dispHead(op.heading)"-Zeile unten stehen, würde ein
+  // delete_chapter OHNE heading-Feld (der Normalfall) dort bereits als
+  // No-op abgefangen, bevor "chapter" überhaupt geprüft wird.
+  if (op.type === "delete_chapter") {
+    const chapterField = chapterFieldFor(op);
+    const chapterDisp = dispHead(chapterField);
+    if (!chapterDisp) return text; // weder chapter noch heading gesetzt
+    const chLines = text.split("\n");
+    // TITELZEILEN-SCHUTZ (Pflicht, siehe DECISIONS #74 und
+    // markdown.jsx#parseTree): die Notizbuch-Titelzeile ("# " + Name, per
+    // Konvention IMMER die erste Zeile) ist NIE ein Kapitel – ein
+    // delete_chapter auf den Notizbuchnamen darf sie nicht treffen, sonst
+    // reißt es Titel + kompletten Vorspann bis zum ersten ECHTEN Kapitel
+    // mit. findDeletableChapter() setzt die Suche NACH einer zuerst
+    // getroffenen Titelzeile fort (Review-Fix 🟡, v7.32.1) – ein REGULÄRES
+    // Kapitel mit demselben Namen wie der Notizbuch-Titel (z. B. Titel
+    // "# Projekte" UND ein echtes "# Projekte"-Kapitel weiter unten) bleibt
+    // dadurch löschbar, statt wegen des ERSTEN Treffers (der Titelzeile)
+    // dauerhaft blockiert zu sein. Erkennung über POSITION, NICHT über
+    // Namensvergleich – ein Dokument OHNE führende "# "-Zeile hat keine
+    // Titel-Ausnahme, dort ist auch die erste "# "-Zeile ein normales,
+    // löschbares Kapitel.
+    const { range } = findDeletableChapter(chLines, chapterField);
+    if (!range) return text; // nicht gefunden ODER nur als Titelzeile getroffen
+    chLines.splice(range[0], range[1] - range[0]);
+    return tidy(chLines);
   }
 
   const disp = dispHead(op.heading);
@@ -187,10 +293,11 @@ function applyOne(text, op) {
 // v7.21 (Ops-Zuverlässigkeit, Live-Befund): applyOps() selbst überspringt
 // wirkungslose Ops bisher KOMMENTARLOS – weder der Nutzer noch das Modell
 // erfahren, WARUM eine angekündigte Änderung ausblieb (siehe DECISIONS #63).
-// Die vier Op-Typen, die applyOne() tatsächlich versteht – alles andere ist
+// Die Op-Typen, die applyOne() tatsächlich versteht – alles andere ist
 // aus Sicht DIESES Moduls ein unbekannter Typ (memory_*-Ops werden vorher in
 // App.jsx#splitOps herausgefiltert und laufen nie hier durch, siehe dort).
-const OP_TYPES = ["append_to_section", "replace_section", "delete_section", "rewrite"];
+// v7.32: delete_chapter ergänzt (siehe applyOne/explainSkip, DECISIONS #74).
+const OP_TYPES = ["append_to_section", "replace_section", "delete_section", "delete_chapter", "rewrite"];
 
 // Rahmen-Integrität des SYSTEM-HINWEIS (Review-Fix 🟡, Defense-in-Depth
 // Schicht 1/"Quelle"): heading/chapter/type in einer Op stammen vom MODELL
@@ -232,6 +339,28 @@ function explainSkip(text, op) {
     // Fall, sondern derselbe generische Fallback wie bei replace_section.
     const content = typeof op.content === "string" ? op.content.trim() : "";
     return content ? "keine inhaltliche Änderung" : "leerer content";
+  }
+  // v7.32 (delete_chapter-Op): eigener Zweig, spiegelt applyOne exakt (siehe
+  // dort, inkl. findDeletableChapter/Review-Fix 🟡 v7.32.1) – Prüfreihenfolge:
+  // chapterField leer -> Kapitel gar nicht gefunden -> nur als Titelzeile
+  // getroffen (kein weiteres gleichnamiges Kapitel) -> (sonst: applied wäre
+  // true, landet nie hier).
+  if (op.type === "delete_chapter") {
+    const chapterField = chapterFieldFor(op);
+    const chapterDisp = dispHead(chapterField);
+    if (!chapterDisp) return "fehlende Kapitel-Überschrift";
+    const lines = text.split("\n");
+    const { range, titleBlocked } = findDeletableChapter(lines, chapterField);
+    if (!range) {
+      if (titleBlocked) {
+        return "„" + sanitizeForWarning(chapterDisp) + "“ ist die Notizbuch-Titelzeile, kein Kapitel";
+      }
+      return "Kapitel „" + sanitizeForWarning(chapterDisp) + "“ nicht gefunden – Op übersprungen";
+    }
+    // Gefunden (ggf. NACH der Titelzeile, siehe findDeletableChapter) ->
+    // applyOne hätte gelöscht (applied wäre true) - dieser Zweig wird unter
+    // normalen Umständen nie erreicht.
+    return "keine inhaltliche Änderung";
   }
   const disp = dispHead(op.heading);
   if (!disp) return "fehlende Abschnitts-Überschrift";
@@ -282,8 +411,25 @@ export function applyOpsDetailed(docText, ops) {
   for (let index = 0; index < list.length; index++) {
     const op = list[index];
     const type = op && typeof op === "object" ? op.type : undefined;
-    const heading = op && typeof op === "object" && typeof op.heading === "string"
-      ? dispHead(op.heading) || undefined
+    // v7.32 (delete_chapter-Op): "heading" hier ist NUR ein Anzeige-Feld für
+    // App.jsx#buildOpsWarning (⚠️-Warn-Pille) – delete_chapter adressiert
+    // aber über "chapter" (mit heading-Fallback, siehe chapterFieldFor), hat
+    // also i. d. R. KEIN eigenes op.heading. Ohne diese Sonderbehandlung
+    // bliebe die Warn-Pille ohne erkennbaren Kapitelnamen ("delete_chapter
+    // in „X“ (…)" statt "delete_chapter „Kapitelname“ in „X“ (…)").
+    // Dieselbe Prioritäts-Logik wie applyOne/explainSkip (DRY, kein
+    // Risiko einer abweichenden Anzeige). Review-Fix 🔵 (v7.32.1): für ALLE
+    // ANDEREN Op-Typen bleibt der ursprüngliche Vertrag exakt erhalten – NUR
+    // ein echter String in op.heading wird angezeigt (dispHead(42) läge
+    // sonst z. B. bei "42" statt beim vorherigen/erwarteten undefined,
+    // chapterFieldFor prüft diesen typeof zwar bereits FÜR delete_chapter
+    // selbst, aber eben nicht für die drei ##-Abschnitts-Ops).
+    const heading = op && typeof op === "object"
+      ? dispHead(
+          op.type === "delete_chapter"
+            ? chapterFieldFor(op)
+            : (typeof op.heading === "string" ? op.heading : "")
+        ) || undefined
       : undefined;
     const before = text;
     let applied = false;

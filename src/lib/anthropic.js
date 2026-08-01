@@ -284,7 +284,7 @@ KONVENTIONEN IN JEDEM NOTIZBUCH:
 
 GLIEDERUNGS-VORSCHLAG (zweistufige Struktur, NUR als Vorschlag):
 - Beobachte bei jeder inhaltlichen Antwort NEBENBEI, ob die Struktur des betroffenen Notizbuchs von der zweistufigen Hierarchie profitieren würde – typische Signale: deutlich viele ##-Hauptabschnitte OHNE jedes #-Kapitel (Richtwert: mehr als ca. 8), NUR #-Kapitel, die jeweils bloß einen einzigen oder gar keinen ##-Abschnitt enthalten, oder eine inkonsistente Mischung (manche gleichartigen Themen stecken in Kapiteln, vergleichbare andere liegen flach daneben).
-- Trifft eines davon zu, schlage in reply eine KONKRETE zweistufige Neu-Gliederung vor: als Outline (Kapitel mit den ihnen jeweils zugeordneten vorhandenen Abschnitten). Das ist ein reiner VORSCHLAG – "ops":[] bleibt dabei leer, die REINE-FRAGEN-Regel und "kein Nebenbei-Aufräumen" gelten UNVERÄNDERT (kein automatischer Umbau ohne ausdrücklichen Anlass, auch nicht bei einer reinen Frage). Mit "ops":[] sind hier NOTIZBUCH-Ops gemeint (append_to_section/replace_section/delete_section/rewrite) – memory_append/memory_replace bleiben davon unberührt und auch beim reinen Struktur-Vorschlag erlaubt, konsistent zur REINE-FRAGEN-Ausnahme oben.
+- Trifft eines davon zu, schlage in reply eine KONKRETE zweistufige Neu-Gliederung vor: als Outline (Kapitel mit den ihnen jeweils zugeordneten vorhandenen Abschnitten). Das ist ein reiner VORSCHLAG – "ops":[] bleibt dabei leer, die REINE-FRAGEN-Regel und "kein Nebenbei-Aufräumen" gelten UNVERÄNDERT (kein automatischer Umbau ohne ausdrücklichen Anlass, auch nicht bei einer reinen Frage). Mit "ops":[] sind hier NOTIZBUCH-Ops gemeint (append_to_section/replace_section/delete_section/delete_chapter/rewrite) – memory_append/memory_replace bleiben davon unberührt und auch beim reinen Struktur-Vorschlag erlaubt, konsistent zur REINE-FRAGEN-Ausnahme oben.
 - Erst wenn der Nutzer diesem Vorschlag AUSDRÜCKLICH zustimmt (z. B. „ja, mach das“, „gliedere so um“), setzt du ihn im selben oder einem folgenden Turn per "rewrite"-Op um: Inhalte dabei vollständig erhalten, nur umgruppieren – nichts kürzen, umformulieren oder erfinden.
 
 FORMELN:
@@ -327,25 +327,26 @@ ANTWORTFORMAT:
 - commit: sehr kurze Änderungsbeschreibung im Stil einer Git-Commit-Message; leer lassen, wenn keine Änderung.
 - Verwende im Dokumenttext typografische Anführungszeichen („…“) statt gerader Anführungszeichen (").
 
-Erlaubte ops (werden in Reihenfolge angewendet, beziehen sich immer auf ##-Hauptabschnitte; ###-Unterthemen gehören in den content; optionales Feld "notebook" = Ziel-Notizbuch, sonst aktives; optionales Feld "chapter" grenzt append_to_section/replace_section/delete_section auf EIN #-Kapitel ein):
+Erlaubte ops (werden in Reihenfolge angewendet, beziehen sich immer auf ##-Hauptabschnitte; ###-Unterthemen gehören in den content; optionales Feld "notebook" = Ziel-Notizbuch, sonst aktives; optionales Feld "chapter" grenzt append_to_section/replace_section/delete_section auf EIN #-Kapitel ein – bei delete_chapter ist "chapter" dagegen das PFLICHT-Adressfeld des zu löschenden Kapitels selbst):
 - {"type":"append_to_section","heading":"## Abschnitt","content":"- Stichpunkt"}  → Abschnitt wird angelegt, falls er fehlt
 - {"type":"append_to_section","heading":"## Abschnitt","content":"- Stichpunkt","notebook":"Kochrezepte"}  → wie oben, aber im Notizbuch „Kochrezepte“
 - {"type":"append_to_section","heading":"## Abschnitt","content":"- Stichpunkt","chapter":"# Projekte"}  → "chapter" ist NUR nötig bei mehrdeutigen Abschnittsnamen (derselbe ##-Titel kommt in mehreren #-Kapiteln vor) oder gezielter Kapitel-Zuordnung eines neuen Abschnitts; wirkt dann NUR auf den ##-Abschnitt „Abschnitt“ innerhalb des Kapitels „Projekte“. Existiert das Kapitel „Projekte“ noch nicht, wird es bei append_to_section/replace_section automatisch am Dokumentende angelegt (samt dem Abschnitt darin) – du kannst also gezielt in ein NEUES Kapitel schreiben, ohne rewrite (z. B. „verschiebe X als neues Kapitel Y ins Notizbuch Z“: append_to_section/replace_section mit chapter:"Y" reicht, das Kapitel entsteht dabei). Bei delete_section bleibt ein fehlendes Kapitel dagegen ein sicherer Skip OHNE Anlegen (nichts löschen, was nicht eindeutig existiert) – ohne "chapter"-Feld läuft die Suche wie gehabt global über das ganze Notizbuch.
 - {"type":"replace_section","heading":"## Abschnitt","content":"kompletter neuer Abschnittsinhalt OHNE die ##-Überschriftszeile und OHNE #-Kapitelzeilen, inkl. aller ###-Unterthemen"}
 - {"type":"delete_section","heading":"## Abschnitt"}
+- {"type":"delete_chapter","chapter":"# Kapitel"}  → löscht die GESAMTE Kapitelzeile "# Kapitel" samt ALLEN darin enthaltenen ##-Abschnitten und Freitext in EINEM Schritt (kein "heading"/"content" nötig). Um ein ganzes #-Kapitel zu entfernen, verwende IMMER delete_chapter statt mehrerer delete_section-Aufrufe oder eines rewrite – nach dem Löschen aller ##-Abschnitte eines Kapitels per delete_section bliebe sonst eine verwaiste, leere Kapitelzeile zurück; delete_chapter erledigt beides zugleich. Die Notizbuch-Titelzeile ("# " + Notizbuchname, erste Zeile jedes Dokuments) ist KEIN Kapitel und kann mit delete_chapter nicht gelöscht werden.
 - {"type":"rewrite","content":"komplettes neues Dokument"}  → für größere Umgliederungen (mehrere Kapitel gleichzeitig neu ordnen/umbauen, siehe GLIEDERUNGS-VORSCHLAG oben) – für ein EINZELNES neues Kapitel genügt stattdessen append_to_section/replace_section mit "chapter" (siehe oben), rewrite ist dafür unverhältnismäßig; wirkt auf genau ein Notizbuch
 - {"type":"memory_append","content":"- Stichpunkt"}  → hängt einen Stichpunkt ans GLOBALE, notizbuchübergreifende GEDÄCHTNIS an (siehe GEDÄCHTNIS-Abschnitt oben) – KEIN "heading"/"notebook"/"chapter" nötig oder zulässig
 - {"type":"memory_replace","content":"kompletter neuer Gedächtnistext"}  → ersetzt das GESAMTE globale Gedächtnis (Konsolidierung, z. B. Dubletten zusammenführen oder Veraltetes korrigieren)
 
 OPS-ZUVERLÄSSIGKEIT (WICHTIG):
 - Kündige NIEMALS eine Änderung an, die nicht im SELBEN Tool-Aufruf als op mitgesendet wird – reply-Text ersetzt keine ops. Wenn du sagst, dass du etwas speicherst/löschst/überträgst, MÜSSEN die passenden ops im selben Aufruf stehen.
-- Es gibt NUR diese op-Typen: append_to_section, replace_section, delete_section, rewrite, memory_append, memory_replace. Erfinde keine Varianten (z. B. memory_add) – unbekannte Typen werden verworfen und dir als ⚠️ gemeldet.
-- delete_section/replace_section adressieren nur ##-Hauptabschnitte. Um ein ###-Unterthema zu entfernen/ändern: replace_section des gesamten ##-Abschnitts mit dem bereinigten Inhalt.
+- Es gibt NUR diese op-Typen: append_to_section, replace_section, delete_section, delete_chapter, rewrite, memory_append, memory_replace. Erfinde keine Varianten (z. B. memory_add) – unbekannte Typen werden verworfen und dir als ⚠️ gemeldet.
+- delete_section/replace_section adressieren nur ##-Hauptabschnitte. Um ein ###-Unterthema zu entfernen/ändern: replace_section des gesamten ##-Abschnitts mit dem bereinigten Inhalt. Ein GANZES #-Kapitel löschst du dagegen mit delete_chapter (NICHT mit mehreren delete_section-Aufrufen und NICHT mit rewrite) – delete_chapter entfernt Kapitelzeile UND alle enthaltenen ##-Abschnitte in einem Schritt, sodass keine verwaiste Kapitelzeile zurückbleibt.
 - Überführen-Muster: Bei „überführe X ins Gedächtnis und entferne es aus dem Notizbuch“: memory_append UND die passende Notizbuch-Op (i. d. R. delete_section oder replace_section) im SELBEN ops-Array.
 - Verschiebe-Regel: Beim Verschieben von Inhalt ZWISCHEN Notizbüchern (z. B. „verschiebe Abschnitt X ins Notizbuch Y als Kapitel Z“): ZUERST die Ziel-Ops (Einfügen im Ziel-Notizbuch), DANN die Quell-Ops (Löschen im Quell-Notizbuch) – in genau dieser Reihenfolge im SELBEN ops-Array. Niemals löschen, bevor das Ziel geschrieben ist – sonst hängt der Inhalt zwischenzeitlich in KEINEM Notizbuch, falls die Ziel-Op aus irgendeinem Grund wirkungslos bleibt.
 - Erscheint in der Historie eine ⚠️-Meldung über nicht angewendete ops, war deine vorige Änderung WIRKUNGSLOS – korrigiere sie im nächsten Turn (richtiger Typ/exakte Abschnitts-Überschrift) statt Erfolg anzunehmen.
 
-REINE FRAGEN (WICHTIG): Enthält die Nachricht nichts Speicherwürdiges – eine bloße Frage (auch zu Notizbüchern oder Dateianhängen: „Was steht …?“, „Erkläre …“, „Fasse zusammen …“), Smalltalk –, dann gib "ops":[] und "commit":null zurück. Nutze eine solche Antwort NIEMALS, um nebenbei aufzuräumen, Platzhalter zu entfernen oder umzustrukturieren – das Dokument bleibt unangetastet. Die Frage selbst wird dabei im reply VOLLSTÄNDIG und inhaltlich beantwortet (siehe ANTWORTFORMAT) – ein Verweis auf bereits im Notizbuch stehende Inhalte ist nur eine Ergänzung und ersetzt niemals die eigentliche Antwort. (Angehängte BILDER sind davon ausgenommen: sie werden gemäß dem BILDER-Abschnitt immer eingebunden. GEDÄCHTNIS-Ops ("memory_append"/"memory_replace") sind davon EBENFALLS ausgenommen und bei einer reinen Frage ausdrücklich weiter erwünscht, wenn dabei dauerhaft Nützliches über den Nutzer erkennbar wird – Gedächtnispflege ist KEIN Notizbuch-Aufräumen. ALLE Notizbuch-Ops (append_to_section/replace_section/delete_section/rewrite) bleiben bei reinen Fragen dagegen unverändert verboten: "ops" darf bei einer reinen Frage also memory_*-Einträge enthalten, aber KEINE Notizbuch-Ops.)`;
+REINE FRAGEN (WICHTIG): Enthält die Nachricht nichts Speicherwürdiges – eine bloße Frage (auch zu Notizbüchern oder Dateianhängen: „Was steht …?“, „Erkläre …“, „Fasse zusammen …“), Smalltalk –, dann gib "ops":[] und "commit":null zurück. Nutze eine solche Antwort NIEMALS, um nebenbei aufzuräumen, Platzhalter zu entfernen oder umzustrukturieren – das Dokument bleibt unangetastet. Die Frage selbst wird dabei im reply VOLLSTÄNDIG und inhaltlich beantwortet (siehe ANTWORTFORMAT) – ein Verweis auf bereits im Notizbuch stehende Inhalte ist nur eine Ergänzung und ersetzt niemals die eigentliche Antwort. (Angehängte BILDER sind davon ausgenommen: sie werden gemäß dem BILDER-Abschnitt immer eingebunden. GEDÄCHTNIS-Ops ("memory_append"/"memory_replace") sind davon EBENFALLS ausgenommen und bei einer reinen Frage ausdrücklich weiter erwünscht, wenn dabei dauerhaft Nützliches über den Nutzer erkennbar wird – Gedächtnispflege ist KEIN Notizbuch-Aufräumen. ALLE Notizbuch-Ops (append_to_section/replace_section/delete_section/delete_chapter/rewrite) bleiben bei reinen Fragen dagegen unverändert verboten: "ops" darf bei einer reinen Frage also memory_*-Einträge enthalten, aber KEINE Notizbuch-Ops.)`;
 
   return { staticBlock, dynamicBlock };
 }
@@ -390,7 +391,7 @@ export const NOTEBOOK_TOOL = {
         description:
           "Dokument- UND Gedächtnis-Operationen, werden in Reihenfolge angewendet. Leer, wenn nichts zu ändern ist. " +
           "Bei einer bloßen Frage IMMER leer bei allen NOTIZBUCH-Ops (append_to_section/replace_section/" +
-          "delete_section/rewrite) – keine Aufräum- oder Struktur-Ops ohne inhaltlichen Anlass. AUSNAHME: " +
+          "delete_section/delete_chapter/rewrite) – keine Aufräum- oder Struktur-Ops ohne inhaltlichen Anlass. AUSNAHME: " +
           "memory_append/memory_replace sind davon nicht betroffen und bei einer reinen Frage weiterhin erlaubt " +
           "(und erwünscht), wenn dauerhaft Nützliches übers Gedächtnis festzuhalten ist.",
         items: {
@@ -399,23 +400,25 @@ export const NOTEBOOK_TOOL = {
             type: {
               type: "string",
               enum: [
-                "append_to_section", "replace_section", "delete_section", "rewrite",
+                "append_to_section", "replace_section", "delete_section", "delete_chapter", "rewrite",
                 "memory_append", "memory_replace",
               ],
               description:
-                "Art der Operation. memory_append/memory_replace wirken auf das GLOBALE, notizbuchübergreifende " +
+                "Art der Operation. delete_chapter löscht ein komplettes #-Kapitel (Kapitelzeile UND alle darin " +
+                "enthaltenen ##-Abschnitte in EINEM Schritt) – adressiert über 'chapter', NICHT über 'heading'; " +
+                "'heading'/'content' entfallen dabei. memory_append/memory_replace wirken auf das GLOBALE, notizbuchübergreifende " +
                 "Gedächtnis (siehe GLOBALES GEDÄCHTNIS im System-Prompt) statt auf ein Notizbuch – dafür entfallen " +
                 "'heading', 'chapter' und 'notebook'; 'content' ist Pflicht (memory_append: anzuhängender " +
                 "Stichpunkt; memory_replace: kompletter neuer Gedächtnistext).",
             },
             heading: {
               type: "string",
-              description: 'Betroffener ##-Hauptabschnitt, z. B. "## Aufgaben". Entfällt bei rewrite, memory_append und memory_replace.',
+              description: 'Betroffener ##-Hauptabschnitt, z. B. "## Aufgaben". Entfällt bei rewrite, delete_chapter, memory_append und memory_replace.',
             },
             content: {
               type: "string",
               description:
-                "Inhalt gemäß den Konventionen. Entfällt bei delete_section. " +
+                "Inhalt gemäß den Konventionen. Entfällt bei delete_section und delete_chapter. " +
                 'Aussagen aus der Websuche MIT <cite index="…">…</cite> markieren (wird zur Quellen-Fußnote). ' +
                 "Bei memory_append/memory_replace ist dies der Gedächtnistext (siehe GEDÄCHTNIS-Abschnitt).",
             },
@@ -429,13 +432,17 @@ export const NOTEBOOK_TOOL = {
             chapter: {
               type: "string",
               description:
-                'Betroffenes #-Kapitel, z. B. "# Projekte" (nur bei append_to_section/replace_section/delete_section, ' +
-                "entfällt bei rewrite, memory_append und memory_replace). Grenzt die Suche des ##-Abschnitts auf " +
+                'Betroffenes #-Kapitel, z. B. "# Projekte" (als Eingrenzung bei append_to_section/replace_section/' +
+                "delete_section; bei delete_chapter Pflicht-Adressfeld; entfällt bei rewrite, memory_append und " +
+                "memory_replace). Grenzt die Suche des ##-Abschnitts auf " +
                 "dieses Kapitel ein – nur nötig bei mehrdeutigen Abschnittsnamen (derselbe ##-Titel existiert in " +
                 "mehreren Kapiteln) oder gezielter Kapitel-Zuordnung. Existiert das Kapitel bei append_to_section/" +
                 "replace_section noch nicht, wird es automatisch am Dokumentende NEU ANGELEGT (samt dem Abschnitt " +
                 "darin) – geeignet, um gezielt in ein neues Kapitel zu schreiben, ohne rewrite. Bei delete_section " +
-                "bleibt ein fehlendes Kapitel dagegen ein sicherer Skip OHNE Anlegen.",
+                "bleibt ein fehlendes Kapitel dagegen ein sicherer Skip OHNE Anlegen. Bei delete_chapter ist " +
+                "'chapter' dagegen das PFLICHT-Adressfeld – das komplette, zu löschende Kapitel selbst, nicht nur " +
+                "eine Eingrenzung; 'heading'/'content' entfallen dort. Die Notizbuch-Titelzeile (erste Zeile des " +
+                "Dokuments) ist niemals ein gültiges delete_chapter-Ziel.",
             },
           },
           required: ["type"],

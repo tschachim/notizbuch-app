@@ -8,6 +8,7 @@ import {
   splitOps, serializeState, buildOpsWarning, parseConnectPrefill, findSensitiveUrlParams,
   resolveConnectDialogInitial,
 } from "../src/App.jsx";
+import { applyOpsDetailed } from "../src/lib/ops.js";
 
 describe("splitOps: memory_*-Ops vs. Notizbuch-Ops trennen", () => {
   it("trennt memory_append/memory_replace von allen anderen op-Typen", () => {
@@ -173,6 +174,40 @@ describe("buildOpsWarning: Warn-Pillen-Text aus NICHT angewendeten Ops bauen", (
       { type: "delete_section", heading: "Warenkunde", notebook: "QA-Test", reason: 'Abschnitt „Warenkunde“ nicht gefunden' },
     ]);
     expect(out).toBe('⚠️ Nicht angewendet: delete_section „Warenkunde“ in „QA-Test“ (Abschnitt „Warenkunde“ nicht gefunden)');
+  });
+
+  // v7.32 (delete_chapter-Op, Live-Befund – siehe DECISIONS #74): delete_chapter
+  // hat KEIN eigenes op.heading (adressiert über "chapter") – die Warn-Pille
+  // muss trotzdem den Kapitelnamen zeigen, NICHT "delete_chapter in „X“ (…)"
+  // ohne erkennbaren Bezug. ops.js#applyOpsDetailed spiegelt für
+  // delete_chapter deshalb das chapter-Feld ins heading-Anzeigefeld – dieser
+  // Test prüft den KOMPLETTEN Weg von applyOpsDetailed bis zur fertigen Pille
+  // (genau der Pfad, den App.jsx#send für notApplied nutzt).
+  it("delete_chapter-Skip zeigt den Kapitelnamen in der Warn-Pille (End-zu-Ende über applyOpsDetailed)", () => {
+    const doc = "# Wissensbasis\n\n## Inbox\n\n- x\n";
+    const { results } = applyOpsDetailed(doc, [
+      { type: "delete_chapter", chapter: "AI Codex development" },
+    ]);
+    const out = buildOpsWarning(
+      results.filter((r) => !r.applied).map((r) => ({ ...r, notebook: "QA-Test" }))
+    );
+    expect(out).toBe(
+      '⚠️ Nicht angewendet: delete_chapter „AI Codex development“ in „QA-Test“ ' +
+      '(Kapitel „AI Codex development“ nicht gefunden – Op übersprungen)'
+    );
+  });
+
+  it("delete_chapter-Titelzeilen-Schutz zeigt den eigenen Grund in der Warn-Pille", () => {
+    const out = buildOpsWarning([
+      {
+        type: "delete_chapter", heading: "Wissensbasis", notebook: "QA-Test",
+        reason: "„Wissensbasis“ ist die Notizbuch-Titelzeile, kein Kapitel",
+      },
+    ]);
+    expect(out).toBe(
+      '⚠️ Nicht angewendet: delete_chapter „Wissensbasis“ in „QA-Test“ ' +
+      "(„Wissensbasis“ ist die Notizbuch-Titelzeile, kein Kapitel)"
+    );
   });
 
   it("MEHRERE nicht angewendete Ops werden in EINER Pille gebündelt (mehrzeilig, ein Eintrag pro Zeile)", () => {

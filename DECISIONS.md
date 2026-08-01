@@ -4856,3 +4856,167 @@ aus `referenz-app.jsx` übernommen.
       (5) List-/Zitat-Präfixe vor einem
       Pfad mit Leerzeichen werden nie erkannt (Finding 5, siehe oben) –
       dokumentierte, nicht behobene Grenze.
+
+74. **delete_chapter-Op (v7.32, Live-Befund).** Der Nutzer bat den Chat:
+    „Lösche das AI Codex Kapitel“. Ablauf des Fehlschlags: (1) Das Modell
+    löschte per `delete_section` die zwei `##`-Abschnitte des Kapitels –
+    die verwaiste `# AI Codex development`-Kapitelzeile blieb stehen (kein
+    `delete_section` trifft eine `#`-Zeile, das Op-Repertoire kannte keine
+    Kapitel-Lösch-Op). (2) Auf „Die Überschrift auch“ versuchte das Modell
+    `delete_section` MIT dem Kapiteltitel – wirkungslos (kein
+    `##`-Abschnitt dieses Namens), die App zeigte korrekt die
+    ⚠️-Warnung „Abschnitt nicht gefunden“, das Modell behauptete trotzdem
+    Erfolg (Live-Beleg für den in DECISIONS #63 beschriebenen Ops-
+    Zuverlässigkeits-Fehler – dort fehlte VORHER schlicht der passende
+    Op-Typ). (3) Erst ein `rewrite` des GESAMTEN Notizbuchs entfernte die
+    Kapitelzeile – unverhältnismäßig und riskant für ein einzelnes
+    Kapitel.
+    - **Neuer Op-Typ `delete_chapter`** in `src/lib/ops.js`: löscht den
+      Zeilenbereich `[s, e)` einer `#`-Kapitelzeile (Kopfzeile SAMT
+      gesamtem Inhalt – Freitext, `##`-Abschnitte, `###`-Unterthemen –
+      bis zur nächsten `#`-Kapitelzeile bzw. Dokumentende, per
+      bestehendem `findChapter`), danach `tidy()`. Eigener Zweig in
+      `applyOne`/`explainSkip`, bewusst VOR der `##`-Abschnitts-
+      Adressierung platziert (nicht danach) – sonst würde ein
+      `delete_chapter` ohne `heading`-Feld (der Normalfall) dort
+      fälschlich schon als No-op abgefangen, bevor `chapter` überhaupt
+      geprüft wird.
+    - **Adressierung über `chapter`, NICHT `heading`** (Design-
+      Entscheidung, Konsistenz zum bestehenden `chapter`-Feld bei den
+      anderen Ops – dort grenzt es NUR ein, bei `delete_chapter` ist es
+      dagegen das eigentliche Adressfeld). Robustheits-Fallback: fehlt
+      `chapter`, aber `heading` ist gesetzt, wird `heading` als
+      Kapiteltitel akzeptiert (Modell-Varianz) – neuer Helfer
+      `chapterFieldFor(op)`, von `applyOne`, `explainSkip` UND
+      `applyOpsDetailed` (Anzeige-Heading für die ⚠️-Warn-Pille)
+      gemeinsam genutzt, damit alle drei GARANTIERT denselben
+      Kapitel-String sehen (Grundprinzip der Datei: kein zweiter,
+      potenziell abweichender Lesepfad).
+    - **TITELZEILEN-SCHUTZ (Pflicht, sicherheitskritisch).** ops.js
+      kannte die Titelzeilen-Ausnahme aus `markdown.jsx#parseTree` bisher
+      NICHT – `findChapter`/`findSection` behandeln JEDE `# `-Zeile
+      gleich, auch die erste Zeile des Dokuments (per Konvention immer
+      `"# " + Notizbuchname`). Ein `delete_chapter` auf den
+      Notizbuchnamen hätte damit Titel + kompletten Vorspann bis zum
+      ersten ECHTEN Kapitel mitgerissen. Neuer Helfer `titleLineIdx(lines)`
+      in `ops.js`, Logik 1:1 aus `parseTree` übernommen (dort die
+      maßgebliche Referenz): Ist die erste NICHT-LEERE Zeile des
+      Dokuments eine `# `-Zeile, ist GENAU ihre Position (nicht ihr Name)
+      von der Kapitel-Löschung ausgenommen. Erkennung bewusst über
+      POSITION, nicht Namensvergleich – ein `delete_chapter` mit dem
+      exakten Notizbuchnamen als `chapter`-Wert wird dadurch sicher
+      abgefangen, unabhängig vom konkreten Text. Dokumente OHNE
+      führende `# `-Zeile (z. B. Test-Fixtures) haben KEINE
+      Titel-Ausnahme – dort ist auch die erste `# `-Zeile ein normales,
+      löschbares Kapitel (Konsistenz zu `parseTree`). Skip-Grund:
+      „„X“ ist die Notizbuch-Titelzeile, kein Kapitel“.
+    - **Kapitel nicht gefunden:** Skip mit Grund „Kapitel „X“ nicht
+      gefunden – Op übersprungen“ (`sanitizeForWarning`, gleiches Muster
+      wie beim bestehenden `delete_section`-Kapitel-Skip). Bewusst KEIN
+      Auto-Anlage-Verhalten wie bei `append_to_section`/`replace_section`
+      (v7.23) – dieselbe Ambiguitäts-/Sicherheits-Logik wie bei
+      `delete_section`: nichts löschen, was nicht sicher existiert, aber
+      hier gibt es ohnehin nichts anzulegen (eine Löschung eines nicht
+      existierenden Ziels ist nie sinnvoll auto-korrigierbar).
+    - **OP_TYPES/explainSkip:** `delete_chapter` in `OP_TYPES` ergänzt;
+      `explainSkip` spiegelt exakt dieselbe Prüfreihenfolge wie
+      `applyOne` (chapterField leer → Kapitel nicht gefunden →
+      Titelzeilen-Schutz → generischer „keine inhaltliche Änderung“-
+      Fallback, praktisch nie erreicht, da eine gefundene, nicht
+      geschützte Kapitelzeile immer etwas löscht).
+    - **App.jsx:** kein Sonderpfad nötig – `splitOps` filtert nur
+      `memory_*`-Präfixe heraus, `delete_chapter` läuft dadurch
+      automatisch über den normalen Notizbuch-Ops-Pfad
+      (`applyOpsDetailed`/Commit/`notebook`-Feld-Routing identisch zu
+      allen anderen Notizbuch-Ops). Version auf v7.32 gebumpt.
+    - **System-Prompt/Tool-Schema (`src/lib/anthropic.js`):** neue
+      Ops-Zeile `{"type":"delete_chapter","chapter":"# Kapitel"}` mit
+      Hinweis, IMMER `delete_chapter` statt mehrerer `delete_section`
+      oder eines `rewrite` zu verwenden, um ein ganzes `#`-Kapitel zu
+      entfernen (direkte Prompt-Antwort auf den Live-Befund oben) –
+      Ops-Typen-Aufzählungen an allen Fundstellen ergänzt
+      (OPS-ZUVERLÄSSIGKEIT, GLIEDERUNGS-VORSCHLAG, REINE FRAGEN,
+      `ops.description`), `NOTEBOOK_TOOL`-Schema-Enum + `type`/`heading`/
+      `content`/`chapter`-Beschreibungen entsprechend angepasst
+      (`chapter` ist bei `delete_chapter` das PFLICHT-Adressfeld,
+      `heading`/`content` entfallen dort, Titelzeile ausdrücklich als
+      kein gültiges Ziel benannt).
+    - **Bewusste Restrisiken:** (1) Dieselbe, bereits dokumentierte
+      FENCE-BLIND-Grenze wie bei allen `#`/`##`-Grenzen in dieser Datei
+      (siehe `BOUNDARY_RE`-Kommentar, DECISIONS #54): eine `# `-Zeile
+      INNERHALB eines ```-Codeblocks im Kapitelinhalt zählt fälschlich
+      als Kapitelende – `delete_chapter` löscht dann nur bis dorthin,
+      der Rest des (jetzt kaputten) Codeblocks bleibt als Textleiche
+      stehen. Bewusst nicht behoben (Pin-Test in `tests/ops.test.js`,
+      kein neu eingeführtes Verhalten, dieselbe Grenze gilt bereits für
+      `delete_section`/`replace_section`/`append_to_section`). (2) Bewusst
+      KEIN Auto-Anlage-Gegenstück zur v7.23-Auto-Anlage bei
+      `append_to_section`/`replace_section` (siehe oben) – eine Löschung
+      eines nicht existierenden Ziels lässt sich nie sinnvoll automatisch
+      nachbessern (anders als ein fehlender Ziel-Abschnitt/-Kapitel beim
+      Schreiben), kein Risiko, sondern bewusstes Design. (3) Der
+      `heading`-Fallback für `chapter` ist eine Robustheits-Maßnahme gegen
+      Modell-Varianz, kein dokumentiertes Prompt-Verhalten (der Prompt
+      verlangt ausdrücklich `chapter`) – sollte das Modell versehentlich
+      BEIDE Felder mit unterschiedlichen Kapitelnamen setzen, gewinnt
+      `chapter` (Vorrang), das ist aber nicht offensichtlich, ohne den
+      Code zu lesen. (4) Existieren ZWEI oder mehr ECHTE (Nicht-Titel-)
+      Kapitel mit demselben Namen, gewinnt bei `delete_chapter` wie bei
+      allen anderen Ops in dieser Datei der ERSTE Treffer im Dokument
+      (`findChapter` sucht linear, kein Mehrdeutigkeits-Fehler) –
+      konsistent zur bestehenden `##`-Abschnitts-Semantik, aber ein
+      Nutzer, der das ZWEITE gleichnamige Kapitel meint, muss das
+      Notizbuch vorher eindeutig benennen. Pin-Test in `tests/ops.test.js`.
+    - **Nachbesserung nach Code-Review (fünf Findings, VOR dem Commit
+      behoben, Original-Version noch nie live/committet):**
+      - **🟡 Finding 1 (Pflicht) – Namensgleichheit mit der Titelzeile
+        machte ein gleichnamiges ECHTES Kapitel dauerhaft unlöschbar:**
+        Bei z. B. `# Projekte\n\n# Kapitel A\n…\n# Projekte\n## Alt\n…`
+        (Titel UND ein reguläres, gleichnamiges Kapitel weiter unten,
+        laut `parseTree` beides gültig) fand `findChapter` bei der
+        globalen Suche IMMER zuerst die Titelzeile (erster Treffer im
+        Dokument) – der reine `range[0] === titleLineIdx`-Vergleich
+        meldete dann fälschlich IMMER den Titelzeilen-Skip, selbst wenn
+        weiter unten ein löschbares Kapitel mit demselben Namen existierte.
+        Fix: neuer Helfer `findDeletableChapter(lines, chapterField)` –
+        setzt die Suche bei einem Titelzeilen-Treffer NACH deren Index
+        fort (`findChapter` bekam dafür einen optionalen `fromIdx`-
+        Parameter, Default 0, rückwärtskompatibel für alle anderen
+        Aufrufer). Nur wenn AUCH die Fortsetzungssuche nichts findet,
+        bleibt es beim Titelzeilen-Skip. Von `applyOne` UND `explainSkip`
+        gemeinsam genutzt (kein zweiter Schreibpfad). Testfälle in
+        `tests/ops.test.js`: gleichnamiges Kapitel unten wird gelöscht,
+        Titelzeile bleibt exakt einmal erhalten; ohne weiteres Kapitel
+        bleibt es beim Titelzeilen-Skip (bereits bestehender Test deckt
+        das ab).
+      - **🟡 Finding 2 (Pflicht) – `docs/TESTFAELLE.md` C20 verletzte die
+        Konservativ-Modus-Konvention der Datei:** C20 arbeitete „im
+        aktiven Notizbuch“ statt im dedizierten QA-Notizbuch und richtete
+        die Negativ-Probe auf dessen Titelzeile – ein versehentlicher Lauf
+        gegen ein Notizbuch mit echten Nutzerdaten wäre möglich gewesen.
+        Fix: C20 arbeitet jetzt durchgängig „im QA-Notizbuch“ (wie C19),
+        die Negativ-Probe adressiert ausdrücklich dessen EIGENE Titelzeile.
+      - **🔵 Finding 3 (klein) – `chapter`-Property-Beschreibung im
+        Tool-Schema war seit `delete_chapter` irreführend:** die
+        einleitende Klammer nannte weiterhin nur
+        „nur bei append_to_section/replace_section/delete_section“, obwohl
+        `chapter` bei `delete_chapter` das Pflicht-Adressfeld ist. Fix:
+        Klammer umformuliert zu „als Eingrenzung bei .../delete_section;
+        bei delete_chapter Pflicht-Adressfeld; entfällt bei rewrite,
+        memory_*“. Prompt-Vertragstest in `tests/anthropic.test.js` ergänzt.
+      - **🔵 Finding 4 (klein) – Anzeige-`heading` in `applyOpsDetailed`
+        verlor für Bestands-Op-Typen den `typeof`-String-Check:** die
+        Sonderbehandlung für `delete_chapter` (Anzeige des Kapitelnamens
+        in der ⚠️-Warn-Pille) ersetzte versehentlich den Ausdruck für ALLE
+        Op-Typen, nicht nur `delete_chapter` – ein `heading: 42` (Zahl
+        statt String) hätte dadurch als `"42"` angezeigt werden können,
+        statt wie vor v7.32 als `undefined`. Fix: expliziter
+        `typeof op.heading === "string"`-Zweig für alle Nicht-
+        `delete_chapter`-Ops wiederhergestellt.
+      - **🔵 Finding 5 (klein, Doku) – zirkuläre Restrisiko-Formulierung:**
+        „Kein Auto-Anlage-Gegenstück zu (2)“ verwies auf sich selbst;
+        korrigiert (siehe Restrisiko (2) oben) mit Verweis auf die
+        v7.23-Auto-Anlage-Entscheidung. Bei der Umsetzung von Finding 1
+        außerdem die Namensgleichheits-Behandlung als neues Restrisiko (4)
+        ergänzt, plus Pin-Test „zwei gleichnamige ECHTE Kapitel → erster
+        Treffer gewinnt“ (konsistent zur Abschnitts-Semantik).

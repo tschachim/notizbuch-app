@@ -446,6 +446,256 @@ describe("Kapitel-Auto-Anlage bei append_to_section/replace_section (v7.23, Vers
   });
 });
 
+// v7.32 (delete_chapter-Op, Live-Befund – siehe DECISIONS #74): "Lösche das
+// AI Codex Kapitel" löschte per delete_section bisher nur die ##-Abschnitte,
+// die verwaiste "# "-Kapitelzeile blieb stehen; ein zweiter delete_section-
+// Versuch auf den Kapiteltitel war wirkungslos (kein ##-Abschnitt dieses
+// Namens). delete_chapter löscht Kapitelzeile + kompletten Inhalt in einem
+// Schritt.
+describe("applyOps: delete_chapter (v7.32, Live-Befund 'AI Codex Kapitel löschen')", () => {
+  const DOC_CH_MULTI = [
+    "# Wissensbasis",
+    "",
+    "# AI Codex development",
+    "",
+    "## Eins",
+    "",
+    "- a",
+    "",
+    "### Unter",
+    "",
+    "- unter-info",
+    "",
+    "## Zwei",
+    "",
+    "- b",
+    "",
+    "# Kapitel B",
+    "",
+    "## Drei",
+    "",
+    "- c",
+    "",
+  ].join("\n");
+
+  it("löscht ein Kapitel mit MEHREREN ##-Abschnitten UND ###-Unterthemen komplett, Folge-Kapitel bleibt byte-genau erhalten", () => {
+    const out = applyOps(DOC_CH_MULTI, [{ type: "delete_chapter", chapter: "# AI Codex development" }]);
+    expect(out).not.toContain("AI Codex development");
+    expect(out).not.toContain("## Eins");
+    expect(out).not.toContain("### Unter");
+    expect(out).not.toContain("- unter-info");
+    expect(out).not.toContain("## Zwei");
+    expect(out).not.toContain("- a");
+    expect(out).not.toContain("- b");
+    expect(out).toBe("# Wissensbasis\n\n# Kapitel B\n\n## Drei\n\n- c\n");
+  });
+
+  it("löscht ein LEERES Kapitel (nur die Kopfzeile, kein Inhalt)", () => {
+    const doc = "# NB\n\n# Leeres Kapitel\n\n# Kapitel B\n\n## X\n\n- y\n";
+    const out = applyOps(doc, [{ type: "delete_chapter", chapter: "Leeres Kapitel" }]);
+    expect(out).not.toContain("Leeres Kapitel");
+    expect(out).toBe("# NB\n\n# Kapitel B\n\n## X\n\n- y\n");
+  });
+
+  it("löscht ein Kapitel mit reinem Freitext (kein ##-Abschnitt)", () => {
+    const doc = "# Wissensbasis\n\n# QA-Test Neu\n\nFreitext ohne Abschnitt.\n\n# Kapitel B\n\n## Zwei\n\n- b\n";
+    const out = applyOps(doc, [{ type: "delete_chapter", chapter: "QA-Test Neu" }]);
+    expect(out).not.toContain("QA-Test Neu");
+    expect(out).not.toContain("Freitext ohne Abschnitt");
+    expect(out).toContain("# Kapitel B");
+    expect(out).toContain("## Zwei");
+    expect(out).toContain("- b");
+  });
+
+  it("löscht das LETZTE Kapitel im Dokument (kein nachfolgendes '# ' mehr, e === Dokumentende)", () => {
+    const out = applyOps(DOC_CH, [{ type: "delete_chapter", chapter: "Kapitel B" }]);
+    expect(out).not.toContain("Kapitel B");
+    expect(out).not.toContain("## Zwei");
+    expect(out).not.toContain("- b");
+    expect(out).toBe("# Wissensbasis\n\n# Kapitel A\n\n## Eins\n\n- alt\n");
+  });
+
+  it("löscht das ERSTE Kapitel direkt nach der Titelzeile, das Folge-Kapitel bleibt vollständig erhalten", () => {
+    const out = applyOps(DOC_CH, [{ type: "delete_chapter", chapter: "Kapitel A" }]);
+    expect(out).not.toContain("Kapitel A");
+    expect(out).not.toContain("## Eins");
+    expect(out).not.toContain("- alt");
+    expect(out).toBe("# Wissensbasis\n\n# Kapitel B\n\n## Zwei\n\n- b\n");
+  });
+
+  it("Kapitel nicht gefunden -> No-op (applyOps) mit explizitem Grund (applyOpsDetailed)", () => {
+    expect(applyOps(DOC_CH, [{ type: "delete_chapter", chapter: "Kapitel X" }])).toBe(DOC_CH);
+    const { results } = applyOpsDetailed(DOC_CH, [{ type: "delete_chapter", chapter: "Kapitel X" }]);
+    expect(results[0]).toEqual({
+      index: 0, type: "delete_chapter", heading: "Kapitel X", applied: false,
+      reason: 'Kapitel „Kapitel X“ nicht gefunden – Op übersprungen',
+    });
+  });
+
+  it("weder 'chapter' noch 'heading' gesetzt -> No-op mit Grund 'fehlende Kapitel-Überschrift'", () => {
+    const { text, results } = applyOpsDetailed(DOC_CH, [{ type: "delete_chapter" }]);
+    expect(text).toBe(DOC_CH);
+    expect(results[0]).toEqual({
+      index: 0, type: "delete_chapter", heading: undefined, applied: false,
+      reason: "fehlende Kapitel-Überschrift",
+    });
+  });
+
+  it("ist normHead-tolerant: mit/ohne '#'-Präfix und Groß-/Kleinschreibung treffen dasselbe Kapitel", () => {
+    for (const chapter of ["# Kapitel A", "Kapitel A", "kapitel a", "KAPITEL A"]) {
+      const out = applyOps(DOC_CH, [{ type: "delete_chapter", chapter }]);
+      expect(out).not.toContain("Kapitel A");
+      expect(out).toContain("# Kapitel B");
+      expect(out).toContain("## Zwei");
+    }
+  });
+
+  it("heading-Fallback: fehlt 'chapter', wird 'heading' als Kapiteltitel akzeptiert (Modell-Varianz)", () => {
+    const out = applyOps(DOC_CH, [{ type: "delete_chapter", heading: "Kapitel A" }]);
+    expect(out).not.toContain("Kapitel A");
+    expect(out).not.toContain("## Eins");
+    expect(out).toContain("# Kapitel B");
+  });
+
+  it("'chapter' hat Vorrang vor 'heading', wenn BEIDE gesetzt sind", () => {
+    const out = applyOps(DOC_CH, [{ type: "delete_chapter", chapter: "Kapitel B", heading: "Kapitel A" }]);
+    // chapter gewinnt: Kapitel B verschwindet, Kapitel A bleibt UNANGETASTET.
+    expect(out).not.toContain("Kapitel B");
+    expect(out).toContain("# Kapitel A");
+    expect(out).toContain("## Eins");
+    expect(out).toContain("- alt");
+  });
+
+  // Review-Fix 🔵 (v7.32.1, DECISIONS #74 Nachtrag): PIN dokumentiert die
+  // bereits vorher (unverändert) geltende Semantik bei zwei ECHTEN
+  // (Nicht-Titel-)Kapiteln mit demselben Namen – konsistent zur
+  // ##-Abschnitts-Semantik ("ohne chapter-Feld bleibt die globale Suche
+  // unverändert (erster Treffer gewinnt)", siehe Tests oben zu findSection).
+  it("PIN: zwei gleichnamige ECHTE (Nicht-Titel-)Kapitel -> der ERSTE Treffer gewinnt", () => {
+    const doc = [
+      "# Wissensbasis", "",
+      "# Duplikat", "", "## Eins", "", "- erstes", "",
+      "# Duplikat", "", "## Zwei", "", "- zweites", "",
+    ].join("\n");
+    const out = applyOps(doc, [{ type: "delete_chapter", chapter: "Duplikat" }]);
+    expect(out).toBe("# Wissensbasis\n\n# Duplikat\n\n## Zwei\n\n- zweites\n");
+    expect(out).not.toContain("## Eins");
+    expect(out).not.toContain("- erstes");
+  });
+
+  describe("Titelzeilen-Schutz (Pflicht, DECISIONS #74)", () => {
+    it("delete_chapter auf die Notizbuch-Titelzeile selbst bleibt ein No-op mit eigenem Grund", () => {
+      const { text, results } = applyOpsDetailed(DOC_CH, [{ type: "delete_chapter", chapter: "Wissensbasis" }]);
+      expect(text).toBe(DOC_CH);
+      expect(results[0]).toEqual({
+        index: 0, type: "delete_chapter", heading: "Wissensbasis", applied: false,
+        reason: '„Wissensbasis“ ist die Notizbuch-Titelzeile, kein Kapitel',
+      });
+    });
+
+    it("gilt auch mit '#'-Präfix/normHead-Toleranz und wirft NICHT (applyOps bleibt No-op)", () => {
+      expect(applyOps(DOC_CH, [{ type: "delete_chapter", chapter: "# Wissensbasis" }])).toBe(DOC_CH);
+      expect(applyOps(DOC_CH, [{ type: "delete_chapter", chapter: "wissensbasis" }])).toBe(DOC_CH);
+    });
+
+    it("Dokument OHNE Titelzeile: die erste '# '-Zeile ist ein normales Kapitel und DARF gelöscht werden", () => {
+      // Beginnt NICHT mit einer "# "-Zeile (erste Zeile ist "##") - laut
+      // markdown.jsx#parseTree/ops.js#titleLineIdx gibt es dann KEINE
+      // Titel-Ausnahme, jede "# "-Zeile ist ein normales Kapitel.
+      const docOhneTitel =
+        "## Vorspann\n\n- x\n\n# Erstes Kapitel\n\n## Y\n\n- y\n\n# Zweites Kapitel\n\n## Z\n\n- z\n";
+      const out = applyOps(docOhneTitel, [{ type: "delete_chapter", chapter: "Erstes Kapitel" }]);
+      expect(out).not.toContain("Erstes Kapitel");
+      expect(out).not.toContain("## Y");
+      expect(out).not.toContain("- y");
+      expect(out).toContain("## Vorspann");
+      expect(out).toContain("- x");
+      expect(out).toContain("# Zweites Kapitel");
+      expect(out).toContain("## Z");
+      expect(out).toContain("- z");
+    });
+
+    // Review-Fix 🟡 (v7.32.1, DECISIONS #74): Ein Kapitel mit dem GLEICHEN
+    // Namen wie die Notizbuch-Titelzeile war zuvor DAUERHAFT unlöschbar –
+    // findChapter() liefert bei der globalen Suche immer zuerst die
+    // Titelzeile (erster Treffer im Dokument), der reine Positionsvergleich
+    // hätte das fälschlich IMMER als Titelzeilen-Skip gemeldet, selbst wenn
+    // weiter unten ein ECHTES, gleichnamiges Kapitel existiert (laut
+    // parseTree/titleLineIdx ist JEDE "# "-Zeile außer der einen Titelzeile
+    // ein normales Kapitel – auch bei Namensgleichheit). findDeletableChapter
+    // setzt die Suche jetzt NACH der Titelzeile fort.
+    it("Namensgleichheit mit der Titelzeile: ein ECHTES, gleichnamiges Kapitel WEITER UNTEN bleibt löschbar, die Titelzeile selbst überlebt (Review-Fix)", () => {
+      const doc = [
+        "# Projekte", "",
+        "# Kapitel A", "", "## Eins", "", "- a", "",
+        "# Projekte", "", "## Alt", "", "- alt", "",
+      ].join("\n");
+      const out = applyOps(doc, [{ type: "delete_chapter", chapter: "Projekte" }]);
+      expect(out).toBe("# Projekte\n\n# Kapitel A\n\n## Eins\n\n- a\n");
+      // Die Titelzeile bleibt GENAU EINMAL erhalten (erste Zeile); das
+      // untere, gleichnamige ECHTE Kapitel samt Inhalt ist komplett weg.
+      expect(out.match(/^# Projekte$/gm)).toHaveLength(1);
+      expect(out).not.toContain("## Alt");
+      expect(out).not.toContain("- alt");
+      // Der reguläre reason-Pfad bestätigt dieselbe Entscheidung
+      // (applyOpsDetailed) - kein Titelzeilen-Skip mehr, obwohl der Name
+      // exakt der Titelzeile entspricht.
+      const { results } = applyOpsDetailed(doc, [{ type: "delete_chapter", chapter: "Projekte" }]);
+      expect(results[0].applied).toBe(true);
+      expect(results[0].reason).toBeUndefined();
+    });
+    // Gegenprobe (Namensgleichheit MIT der Titelzeile, aber OHNE ein
+    // weiteres gleichnamiges Kapitel danach): bleibt korrekt beim
+    // Titelzeilen-Skip - bereits durch den ERSTEN Test dieses Blocks
+    // ("delete_chapter auf die Notizbuch-Titelzeile selbst...") oben
+    // abgedeckt (DOC_CH hat kein zweites "# Wissensbasis"-Kapitel).
+  });
+
+  // BEKANNTE, bewusst NICHT behobene Grenze (siehe BOUNDARY_RE-Kopfkommentar/
+  // DECISIONS #54): CHAPTER_RE ist FENCE-BLIND - eine "# "-Zeile INNERHALB
+  // eines ```-Codeblocks zählt fälschlich als Kapitelgrenze. Pin-Test
+  // dokumentiert das bestehende (nicht neu eingeführte) Verhalten für
+  // delete_chapter, kein Fix-Auftrag.
+  describe("FENCE-BLIND-Grenze (bestehend, dokumentiert, NICHT behoben) gilt auch für delete_chapter", () => {
+    const DOC_FENCE = [
+      "# Wissensbasis",
+      "",
+      "# Kapitel A",
+      "",
+      "## Eins",
+      "",
+      "```",
+      "# not a real chapter",
+      "```",
+      "",
+      "- nach dem Codeblock",
+      "",
+      "# Kapitel B",
+      "",
+      "## Zwei",
+      "",
+      "- b",
+      "",
+    ].join("\n");
+
+    it("eine '# '-Zeile INNERHALB eines ```-Codeblocks wird fälschlich als Kapitelende gewertet", () => {
+      const out = applyOps(DOC_FENCE, [{ type: "delete_chapter", chapter: "Kapitel A" }]);
+      // Gewollt gelöscht: Kapitelzeile + "## Eins".
+      expect(out).not.toContain("# Kapitel A");
+      expect(out).not.toContain("## Eins");
+      // NICHT gewollt, aber dokumentiertes Bestandsverhalten: Die Löschung
+      // endet VOR der fingierten "#"-Zeile im Codeblock statt am echten
+      // Kapitelende - der Rest des (jetzt kaputten) Codeblocks bleibt als
+      // Textleiche stehen.
+      expect(out).toContain("# not a real chapter");
+      expect(out).toContain("- nach dem Codeblock");
+      expect(out).toContain("# Kapitel B");
+      expect(out).toContain("## Zwei");
+      expect(out).toContain("- b");
+    });
+  });
+});
+
 // v7.15-Regressionstest (E2E-Finding 🟡, Auftrag Punkt "ops.js-Konsistenz
 // gegenprüfen"): parseTree bekam eigene "lines" für Kapitel-Freitext ohne
 // ##-Abschnitt (markdown.jsx-Fix). ops.js selbst arbeitet weiterhin direkt
@@ -741,6 +991,14 @@ describe("applyOps === applyOpsDetailed(...).text (Wrapper-Äquivalenz, Pin)", (
       { type: "append_to_section", heading: "## Zweite", content: "- b", chapter: "Kapitel X" },
     ]],
     [DOC, Array.from({ length: 25 }, (_, i) => ({ type: "append_to_section", heading: "## Inbox", content: "- Nr" + i }))],
+    // v7.32 (delete_chapter-Op): angewendete UND übersprungene Fälle
+    // (Kapitel gefunden, nicht gefunden, Titelzeilen-Schutz, weder chapter
+    // noch heading gesetzt) mit in den Pin aufgenommen.
+    [DOC_CH, [{ type: "delete_chapter", chapter: "Kapitel A" }]],
+    [DOC_CH, [{ type: "delete_chapter", chapter: "Kapitel X" }]],
+    [DOC_CH, [{ type: "delete_chapter", chapter: "Wissensbasis" }]],
+    [DOC_CH, [{ type: "delete_chapter" }]],
+    [DOC_CH, [{ type: "delete_chapter", heading: "Kapitel A" }]],
   ];
   for (const [doc, ops] of cases) {
     it("Fall: " + JSON.stringify(ops).slice(0, 60), () => {

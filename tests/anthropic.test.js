@@ -408,6 +408,63 @@ describe("buildSystem", () => {
     });
   });
 
+  // v7.32 (delete_chapter-Op, Live-Befund – siehe DECISIONS #74): Prompt-
+  // Vertragstests für den neuen Op-Typ, analog zu den bestehenden chapter-
+  // Feld-Tests oben.
+  describe("delete_chapter-Op (v7.32, Live-Befund: verwaiste Kapitelzeile nach delete_section)", () => {
+    it("dokumentiert delete_chapter in der Ops-Liste inkl. Titelzeilen-Ausnahme", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain('{"type":"delete_chapter","chapter":"# Kapitel"}');
+      expect(sys).toContain("löscht die GESAMTE Kapitelzeile");
+      expect(sys).toContain("samt ALLEN darin enthaltenen ##-Abschnitten und Freitext in EINEM Schritt");
+      expect(sys).toContain("KEIN Kapitel und kann mit delete_chapter nicht gelöscht werden");
+    });
+
+    it("nennt delete_chapter in der abschließenden op-Typen-Liste (OPS-ZUVERLÄSSIGKEIT)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain(
+        "Es gibt NUR diese op-Typen: append_to_section, replace_section, delete_section, delete_chapter, rewrite, memory_append, memory_replace."
+      );
+    });
+
+    it("Ops-Listen-Intro nennt delete_chapter als Ausnahme zur optionalen chapter-Eingrenzung", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain(
+        'optionales Feld "chapter" grenzt append_to_section/replace_section/delete_section auf EIN #-Kapitel ein – bei delete_chapter ist "chapter" dagegen das PFLICHT-Adressfeld des zu löschenden Kapitels selbst'
+      );
+    });
+
+    it("NOTEBOOK_TOOL-Schema: type-enum enthält delete_chapter mit erklärender Beschreibung", () => {
+      const typeProp = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties.type;
+      expect(typeProp.enum).toContain("delete_chapter");
+      expect(typeProp.description).toMatch(/delete_chapter löscht ein komplettes #-Kapitel/);
+      expect(typeProp.description).toMatch(/adressiert über 'chapter', NICHT über 'heading'/);
+    });
+
+    it("NOTEBOOK_TOOL-Schema: heading/content-Beschreibungen nennen delete_chapter als Ausnahme", () => {
+      const props = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties;
+      expect(props.heading.description).toMatch(/delete_chapter/);
+      expect(props.content.description).toContain("Entfällt bei delete_section und delete_chapter");
+    });
+
+    it("NOTEBOOK_TOOL-Schema: chapter-Beschreibung erklärt delete_chapter als Pflicht-Adressfeld und die Titelzeilen-Ausnahme", () => {
+      const props = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties;
+      expect(props.chapter.description).toMatch(/Bei delete_chapter ist 'chapter' dagegen das PFLICHT-Adressfeld/);
+      expect(props.chapter.description).toMatch(/Notizbuch-Titelzeile.*niemals ein gültiges delete_chapter-Ziel/);
+    });
+
+    // Review-Fix 🔵 (v7.32.1): die einleitende Klammer nannte delete_chapter
+    // ursprünglich NICHT als gültigen Anwendungsfall von "chapter" – seit
+    // delete_chapter existiert, ist "chapter" dort aber kein "nur bei..."-
+    // Sonderfall mehr, sondern das eigentliche Pflicht-Adressfeld.
+    it("NOTEBOOK_TOOL-Schema: chapter-Beschreibung nennt delete_chapter bereits in der einleitenden Klammer (Review-Fix)", () => {
+      const props = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties;
+      expect(props.chapter.description).toMatch(
+        /\(als Eingrenzung bei append_to_section\/replace_section\/delete_section; bei delete_chapter Pflicht-Adressfeld; entfällt bei rewrite, memory_append und memory_replace\)/
+      );
+    });
+  });
+
   // v7.23 (Verschiebe-Auftrag, Live-Befund des Nutzers): "Verschiebe X ins
   // Notizbuch Y als neues Kapitel Z" führte bisher dazu, dass die Lösch-Op
   // im Quell-Notizbuch griff, während die Ziel-Op (mangels Kapitel)
@@ -492,7 +549,7 @@ describe("buildSystem", () => {
       // Ausnahme prüfen, nicht den Vertrag duplizieren.
       expect(sys).toMatch(/GEDÄCHTNIS-Ops \("memory_append"\/"memory_replace"\) sind davon EBENFALLS ausgenommen/);
       expect(sys).toContain("Gedächtnispflege ist KEIN Notizbuch-Aufräumen");
-      expect(sys).toContain("ALLE Notizbuch-Ops (append_to_section/replace_section/delete_section/rewrite) bleiben bei reinen Fragen dagegen unverändert verboten");
+      expect(sys).toContain("ALLE Notizbuch-Ops (append_to_section/replace_section/delete_section/delete_chapter/rewrite) bleiben bei reinen Fragen dagegen unverändert verboten");
     });
 
     it("NOTEBOOK_TOOL-Schema: type-enum enthält memory_append/memory_replace mit erklärender Beschreibung", () => {
@@ -627,7 +684,7 @@ describe("buildSystem", () => {
   it("GLIEDERUNGS-VORSCHLAG: 'ops':[] meint NOTIZBUCH-Ops, memory_append/memory_replace bleiben davon unberührt (Review-Fix)", () => {
     const sys = buildSystem(nbs, "Wissensbasis", null);
     expect(sys).toContain('"ops":[] bleibt dabei leer'); // bestehender Vertrag bleibt als Substring erhalten
-    expect(sys).toContain('Mit "ops":[] sind hier NOTIZBUCH-Ops gemeint (append_to_section/replace_section/delete_section/rewrite)');
+    expect(sys).toContain('Mit "ops":[] sind hier NOTIZBUCH-Ops gemeint (append_to_section/replace_section/delete_section/delete_chapter/rewrite)');
     expect(sys).toContain("memory_append/memory_replace bleiben davon unberührt und auch beim reinen Struktur-Vorschlag erlaubt");
   });
 
@@ -649,7 +706,7 @@ describe("buildSystem", () => {
     it("nennt die exakte, abschließende Liste der op-Typen und verbietet erfundene Varianten", () => {
       const sys = buildSystem(nbs, "Wissensbasis", null);
       expect(sys).toContain(
-        "Es gibt NUR diese op-Typen: append_to_section, replace_section, delete_section, rewrite, memory_append, memory_replace."
+        "Es gibt NUR diese op-Typen: append_to_section, replace_section, delete_section, delete_chapter, rewrite, memory_append, memory_replace."
       );
       expect(sys).toContain("Erfinde keine Varianten (z. B. memory_add)");
       expect(sys).toContain("unbekannte Typen werden verworfen und dir als ⚠️ gemeldet");
@@ -659,6 +716,18 @@ describe("buildSystem", () => {
       const sys = buildSystem(nbs, "Wissensbasis", null);
       expect(sys).toContain("delete_section/replace_section adressieren nur ##-Hauptabschnitte");
       expect(sys).toContain("replace_section des gesamten ##-Abschnitts mit dem bereinigten Inhalt");
+    });
+
+    // v7.32 (delete_chapter-Op, Live-Befund – siehe DECISIONS #74): das
+    // Modell löschte per delete_section nur die ##-Abschnitte eines Kapitels
+    // und ließ die verwaiste "# "-Kapitelzeile stehen; ein zweiter
+    // delete_section-Versuch auf den Kapiteltitel blieb wirkungslos (kein
+    // ##-Abschnitt dieses Namens), das Modell meldete trotzdem Erfolg.
+    it("weist an, ein ganzes #-Kapitel mit delete_chapter statt mehreren delete_section-Aufrufen oder rewrite zu löschen (v7.32)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("Ein GANZES #-Kapitel löschst du dagegen mit delete_chapter");
+      expect(sys).toContain("NICHT mit mehreren delete_section-Aufrufen und NICHT mit rewrite");
+      expect(sys).toContain("sodass keine verwaiste Kapitelzeile zurückbleibt");
     });
 
     it("dokumentiert das Überführen-Muster (memory_append UND Notizbuch-Op im selben ops-Array)", () => {

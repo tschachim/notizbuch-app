@@ -489,6 +489,34 @@ Löschauftrag von eben?“ (1 API-Aufruf). Erwartet: Das Modell erkennt aus
 der ⚠️-Warnung in der Historie, dass die vorige Änderung wirkungslos war
 (keine Behauptung, es sei „bereits erledigt“).
 
+**C20 [VERBUNDEN][API] Kapitel per Chat löschen (delete_chapter, v7.32,
+Live-Befund).** Voraussetzung: Im QA-Notizbuch existiert ein
+`#`-Kapitel „QA-Test Kapitel“ mit MINDESTENS ZWEI `##`-Abschnitten – bei
+Bedarf zuvor per Chat anlegen: „Lege im neuen Kapitel ‚QA-Test Kapitel‘
+die Abschnitte ‚Eins‘ und ‚Zwei‘ mit je einem Stichpunkt an.“ (1
+API-Aufruf). Danach, weiterhin im QA-Notizbuch, im Chat: „Lösche das
+Kapitel QA-Test Kapitel.“ (1 API-Aufruf). Erwartet: Im SELBEN Turn verschwinden BEIDE
+`##`-Abschnitte UND die `#`-Kapitelzeile selbst vollständig aus dem
+Dokument (kein verwaister Kapitel-Titel bleibt sichtbar) – anders als vor
+v7.32, wo dafür mehrere Turns nötig waren (delete_section je Abschnitt,
+danach ein wirkungsloser zweiter delete_section-Versuch auf die
+Kapitelzeile selbst, siehe DECISIONS.md #74). KEINE ⚠️-Warn-Pille, ein
+💾-Commit-Badge erscheint.
+Negativ-Probe (Titelzeilen-Schutz): Weiterhin im QA-Notizbuch, im Chat:
+„Lösche das Kapitel <exakter Name DIESES QA-Notizbuchs>.“ (1 API-Aufruf)
+– adressiert bewusst die Titelzeile des QA-Notizbuchs selbst statt eines
+echten Kapitels (NIEMALS ein anderes, insbesondere kein Notizbuch mit
+echten Nutzerdaten, adressieren). Erwartet: Eine ⚠️-Warn-Pille erscheint
+mit einem Text wie „⚠️ Nicht angewendet: delete_chapter
+„<Name des QA-Notizbuchs>“ (… ist die Notizbuch-Titelzeile, kein
+Kapitel)“ – KEIN 💾-Badge, das QA-Notizbuch (Titel, alle verbliebenen
+Kapitel/Abschnitte) bleibt VOLLSTÄNDIG unverändert. Vor dem
+nächsten Testfall verifizieren, dass wirklich nichts gelöscht wurde
+(falls die Negativ-Probe fälschlich doch etwas entfernt hätte, das als
+🔴 melden und den Vorzustand wiederherstellen). „QA-Test Kapitel“ ist
+durch die erste Löschung bereits weg – keine weitere Aufräumaktion
+nötig.
+
 ## D. Manuelles Bearbeiten (WYSIWYG)
 
 **D1 [VERBUNDEN] Editor-Roundtrip.** Stift-Knopf → im QA-Notizbuch einen
