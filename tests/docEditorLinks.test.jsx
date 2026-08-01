@@ -21,22 +21,30 @@ import TableHeader from "@tiptap/extension-table-header";
 import TableCell from "@tiptap/extension-table-cell";
 import { Markdown } from "tiptap-markdown";
 import {
-  FencedCodeBlock, MdTable, MathInline, MathBlock, LinkDecorations,
+  FencedCodeBlock, MdTable, MathInline, MathBlock, LinkDecorations, FileLinkMarkdownIt,
   unescapeMd, validateLinkTitle, normalizeLinkUrl,
   autoFetchProviderFor, applyAutoFetchResult,
 } from "../src/components/DocEditor.jsx";
 import { mathToPlaceholders } from "../src/lib/math.jsx";
 import { setLinkProviders } from "../src/lib/linkProviders.jsx";
+import { FILE_URL_RE } from "../src/lib/filelinks.js";
+
+// Wie FILE_URL_FULL_RE in DocEditor.jsx (dort per "^" + FILE_URL_RE.source +
+// "$" lokal gebaut, NICHT exportiert – siehe Kommentar dort) – hier NUR die
+// Anker-Hülle um FILE_URL_RE dupliziert, NICHT die Grammatik selbst (die
+// kommt aus filelinks.js, EINE Quelle).
+const FILE_URL_FULL_RE_TEST = new RegExp("^" + FILE_URL_RE.source + "$");
 
 // Exakt die Link-Konfiguration aus DocEditor.jsx (v7.8, inkl. isAllowedUri
-// aus der Finding-2-Nachbesserung) – ein Test mit abweichender Konfiguration
-// (z. B. autolink:false oder ohne isAllowedUri) würde die eigentliche
-// Änderung dieser Version nicht abdecken.
+// aus der Finding-2-Nachbesserung; v7.31: zusätzlich file:-Grammatik) – ein
+// Test mit abweichender Konfiguration (z. B. autolink:false oder ohne
+// isAllowedUri) würde die eigentliche Änderung dieser Version nicht abdecken.
 const LinkExt = Link.configure({
   openOnClick: false,
   autolink: true,
   linkOnPaste: true,
-  isAllowedUri: (url, ctx) => ctx.defaultValidate(url) && /^https?:/i.test(url),
+  isAllowedUri: (url, ctx) =>
+    (ctx.defaultValidate(url) && /^https?:/i.test(url)) || FILE_URL_FULL_RE_TEST.test(String(url || "")),
 });
 
 function buildEditor(md) {
@@ -45,6 +53,7 @@ function buildEditor(md) {
       StarterKit.configure({ heading: { levels: [1, 2, 3] }, codeBlock: false, blockquote: false }),
       FencedCodeBlock,
       LinkExt,
+      FileLinkMarkdownIt,
       LinkDecorations,
       MdTable.configure({ resizable: false }),
       TableRow,
@@ -570,5 +579,141 @@ describe("Editor: Provider-Icon-Decoration vor generischen Links (v7.9)", () => 
   it("die Icon-Decoration ist eine reine View-Decoration und beeinflusst die Markdown-Serialisierung NICHT (No-op-Roundtrip bleibt stabil)", () => {
     const md = "# T\n\n## A\n\nSiehe [Ticket](https://dev.azure.com/acme/Proj/_workitems/edit/1) dazu.";
     expect(roundtrip(md)).toBe(md);
+  });
+});
+
+// v7.31 (Nutzer-Befund Live + Nutzerwunsch file:-Links): markdown-it blockt
+// "file:" per validateLink standardmäßig (siehe FileLinkMarkdownIt,
+// DocEditor.jsx) – OHNE den Patch bliebe "[Titel](file:///…)" beim Laden
+// Klartext (verlustfrei dank unescapeMd, aber nicht klickbar/nicht als
+// Link-Mark erhalten). MIT dem Patch + der erweiterten isAllowedUri bleibt
+// der Link-MARK selbst über den Roundtrip erhalten (echtes Ziel dieser
+// Version, nicht nur die MINDESTanforderung).
+describe("Editor-Roundtrip: file:-Links bleiben No-op-stabil UND als echter Link-Mark erhalten (v7.31)", () => {
+  it("[Titel](file:///C:/…) bleibt über Laden+Speichern byte-identisch", () => {
+    const md = "# T\n\n## A\n\n[Bericht](file:///C:/Users/x/Bericht.docx)";
+    expect(roundtrip(md)).toBe(md);
+  });
+
+  it("[Titel](file:///C:/…) mitten in einem Satz bleibt byte-identisch", () => {
+    const md = "# T\n\n## A\n\nSiehe [Bericht](file:///C:/Users/x/Bericht.docx) dazu.";
+    expect(roundtrip(md)).toBe(md);
+  });
+
+  it("ein UNC-Ziel (file://server/share/…) bleibt byte-identisch", () => {
+    const md = "# T\n\n## A\n\n[Datei](file://server/share/datei.md)";
+    expect(roundtrip(md)).toBe(md);
+  });
+
+  it("ein file:-Link mit numerischem Titel (KEINE Fußnote) bleibt byte-identisch", () => {
+    const md = "# T\n\n## A\n\nFakt[3](file:///C:/Users/x/Beleg.pdf) hier.";
+    expect(roundtrip(md)).toBe(md);
+  });
+
+  it("mehrere file:-Links UND ein http(s)-Link im selben Dokument bleiben unabhängig stabil", () => {
+    const md =
+      "# T\n\n## A\n\n- [Erster](file:///C:/a/Eins.txt)\n" +
+      "- [Zweiter](https://example.org/2)\n" +
+      "- [Dritter](file://server/share/x.md)";
+    expect(roundtrip(md)).toBe(md);
+  });
+
+  it("der Link-MARK selbst bleibt beim Laden erhalten (nicht bloß als Klartext-Roundtrip)", () => {
+    const md = "# T\n\n## A\n\n[Bericht](file:///C:/Users/x/Bericht.docx)";
+    const editor = buildEditor(md);
+    let href = null;
+    let text = null;
+    editor.state.doc.descendants((node) => {
+      const mark = node.isText && node.marks.find((m) => m.type.name === "link");
+      if (mark) { href = mark.attrs.href; text = node.text; }
+    });
+    editor.destroy();
+    expect(href).toBe("file:///C:/Users/x/Bericht.docx");
+    expect(text).toBe("Bericht");
+  });
+
+  it("die Decoration-Klasse ist 'doc-link', NICHT 'cite-link' (auch bei numerischem Titel)", () => {
+    const md = "# T\n\n## A\n\nFakt[3](file:///C:/Users/x/Beleg.pdf) hier.";
+    const editor = buildEditor(md);
+    const html = editor.view.dom.innerHTML;
+    editor.destroy();
+    expect(html).toContain("doc-link");
+    expect(html).not.toContain("cite-link");
+  });
+
+  it("kein Provider-Icon-Widget vor einem file:-Link", () => {
+    const md = "# T\n\n## A\n\n[Ticket](file:///C:/Users/x/dev.azure.com.txt)";
+    const editor = buildEditor(md);
+    const html = editor.view.dom.innerHTML;
+    editor.destroy();
+    expect(html).not.toContain("provider-link-icon");
+  });
+});
+
+describe("normalizeLinkUrl: file:-URLs und Windows-Pfade (Link-Dialog, v7.31)", () => {
+  it("akzeptiert eine bereits fertige file:///-URL unverändert", () => {
+    expect(normalizeLinkUrl("file:///C:/Users/x/Bericht.docx")).toEqual({
+      url: "file:///C:/Users/x/Bericht.docx",
+    });
+  });
+
+  it("wandelt einen absoluten Windows-Pfad in eine file:///-URL um", () => {
+    expect(normalizeLinkUrl("C:\\Users\\x\\Mein Bericht.docx")).toEqual({
+      url: "file:///C:/Users/x/Mein%20Bericht.docx",
+    });
+  });
+
+  it("wandelt einen UNC-Pfad in eine file://-URL um", () => {
+    expect(normalizeLinkUrl("\\\\server\\share\\datei.md")).toEqual({
+      url: "file://server/share/datei.md",
+    });
+  });
+
+  it("lehnt ftp:// weiterhin ab, mit dem aktualisierten Fehlertext", () => {
+    const r = normalizeLinkUrl("ftp://example.org/a");
+    expect(r.error).toBe("Nur http(s)- oder file:-Links werden unterstützt.");
+  });
+
+  it("ein relativer Pfad wird NICHT als file:-URL akzeptiert, sondern wie bisher als schemalose Domain behandelt (bestehendes Verhalten unverändert)", () => {
+    // "temp\bericht.docx" ist kein absoluter Windows-Pfad (pathToFileUrl
+    // liefert null, siehe filelinks.test.js) – normalizeLinkUrl fällt danach
+    // auf den bisherigen http(s)-Zweig zurück (https:// voranstellen), GENAU
+    // wie vor v7.31 (kein neues file:-Verhalten für relative Pfade).
+    const r = normalizeLinkUrl("temp\\bericht.docx");
+    expect(r.error).toBeUndefined();
+    expect(r.url.startsWith("https://")).toBe(true);
+    expect(r.url).not.toMatch(/^file:/);
+  });
+
+  it("javascript:/data: bleiben abgelehnt (v7.31 öffnet keine dritte, unsichere Alternative)", () => {
+    expect(normalizeLinkUrl("javascript:alert(1)").error).toBeDefined();
+    expect(normalizeLinkUrl("data:text/html,x").error).toBeDefined();
+  });
+});
+
+describe("Editor: der setLink-Befehl akzeptiert jetzt file:-URLs (isAllowedUri, v7.31)", () => {
+  it("setLink mit einer file:///-URL gelingt (Kontrast zum weiterhin abgelehnten mailto:, siehe Test oben)", () => {
+    const editor = buildEditor("# T\n\n## A\n\nAlt");
+    editor.commands.focus("end");
+    const ok = editor.chain().focus().setLink({ href: "file:///C:/Users/x/Bericht.docx" }).run();
+    editor.destroy();
+    expect(ok).toBe(true);
+  });
+
+  it("setLink mit einer file:-URL, die NICHT unserer strikten Grammatik entspricht (rohes Leerzeichen), scheitert weiterhin", () => {
+    const editor = buildEditor("# T\n\n## A\n\nAlt");
+    editor.commands.focus("end");
+    const ok = editor.chain().focus().setLink({ href: "file:///C:/Users/x/a b.docx" }).run();
+    editor.destroy();
+    expect(ok).toBe(false);
+  });
+});
+
+describe("Editor-Roundtrip: applyLink-Pfad mit einer per Link-Dialog eingegebenen file:-URL (v7.31)", () => {
+  it("ein Windows-Pfad im Link-Dialog wird zu einem file:-Link, der den Roundtrip übersteht", () => {
+    const { url, out, out2 } = roundtripViaDialog("C:\\Users\\x\\Bericht.docx", "Bericht");
+    expect(url).toBe("file:///C:/Users/x/Bericht.docx");
+    expect(out).toBe("# T\n\n## A\n\nAlt[Bericht](file:///C:/Users/x/Bericht.docx)");
+    expect(out2).toBe(out);
   });
 });

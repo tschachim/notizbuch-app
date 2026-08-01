@@ -183,6 +183,13 @@ describe("buildSystem", () => {
       .toContain("<cite index=");
   });
 
+  it("weist an, absolute Windows-Pfade als file:-Link mit Dateiname-ohne-Endung einzutragen (v7.31)", () => {
+    const sys = buildSystem(nbs, "Wissensbasis", null);
+    expect(sys).toContain("Absolute Windows-Pfade");
+    expect(sys).toContain("[Dateiname-ohne-Endung](file:///");
+    expect(sys).toContain("bestehende file:-Links im Dokument lässt du unverändert");
+  });
+
   it("verbietet Nebenbei-Ops bei reinen Fragen (QA-Findings C2/F2)", () => {
     const sys = buildSystem(nbs, "Wissensbasis", null);
     // Regressions-Schutz für die Prompt-Verträge aus v7.1: reine Fragen

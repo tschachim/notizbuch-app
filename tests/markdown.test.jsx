@@ -1,4 +1,12 @@
-import { describe, it, expect, afterEach } from "vitest";
+// @vitest-environment jsdom
+//
+// v7.31 (file:-Links): braucht ein ECHTES DOM für den Klick+Zwischenablage-
+// Test der FileLink-Komponente (createRoot/act unten) – renderToStaticMarkup
+// (weiter unten, restliche Tests dieser Datei) läuft unverändert auch unter
+// jsdom, per-Datei-Override wie in tests/docEditorLinks.test.jsx.
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { DocView, parseTree, renumberCitations, TASK_RE, IMG_LINE_RE } from "../src/lib/markdown.jsx";
 import { setLinkProviders } from "../src/lib/linkProviders.jsx";
@@ -1149,5 +1157,195 @@ describe("renumberCitations: Fenced-Codeblöcke bleiben unangetastet (v7.7)", ()
     const md = "a[3](https://a.de)\n\n```js\n[1](https://b.de)\n```\n\nb[3](https://a.de)";
     const once = renumberCitations(md);
     expect(renumberCitations(once)).toBe(once);
+  });
+});
+
+// v7.31 (Nutzer-Befund Live + Nutzerwunsch): "[Titel](file:///…)" wird als
+// generischer Link gerendert (nicht als Klartext, siehe Auftrag) – eigene
+// Komponente FileLink (Klick kopiert den Windows-Pfad in die Zwischenablage,
+// siehe zweiter describe-Block unten). CITE_LINK_RE/renumberCitations bleiben
+// dabei UNANGETASTET (siehe Block oben) – ein file:-Link mit numerischem
+// Titel bleibt deshalb IMMER ein normaler Link, nie eine <sup>-Fußnote.
+describe("DocView: file:-Links (v7.31)", () => {
+  it("[Titel](file:///C:/…) wird zu einem klickbaren Link mit href/title, kein <sup>", () => {
+    const html = render("# T\n\n## A\n\n- Siehe [Bericht](file:///C:/Users/x/Bericht.docx) dazu.");
+    expect(html).toMatch(
+      /<a[^>]*href="file:\/\/\/C:\/Users\/x\/Bericht\.docx"[^>]*title="C:\\Users\\x\\Bericht\.docx"[^>]*>Bericht<\/a>/
+    );
+    expect(html).not.toContain("<sup");
+    // KEIN target="_blank"/rel-Attribut (anders als bei http(s)-Links) –
+    // file:-Ziele sind keine externen Ressourcen, siehe FileLink, markdown.jsx.
+    expect(html).not.toContain('target="_blank"');
+  });
+
+  it("ein UNC-Ziel (file://server/share/…) wird ebenfalls verlinkt", () => {
+    const html = render("# T\n\n## A\n\n[Datei](file://server/share/datei.md)");
+    expect(html).toMatch(/<a[^>]*href="file:\/\/server\/share\/datei\.md"[^>]*>Datei<\/a>/);
+  });
+
+  it("ein rein numerischer Titel bleibt bei einem file:-Ziel ein NORMALER Link, NIE eine Fußnote", () => {
+    const html = render("# T\n\n## A\n\nFakt[3](file:///C:/Users/x/Beleg.pdf) hier.");
+    expect(html).not.toContain("<sup");
+    expect(html).toMatch(/<a[^>]*href="file:\/\/\/C:\/Users\/x\/Beleg\.pdf"[^>]*>3<\/a>/);
+  });
+
+  it("eine gleiche URL als http(s)-Fußnote bleibt <sup> (Kontrast-Test, unverändert)", () => {
+    const html = render("# T\n\n## A\n\nFakt[3](https://example.org/beleg) hier.");
+    expect(html).toMatch(/<sup[^>]*><a[^>]*href="https:\/\/example\.org\/beleg"[^>]*>\[3\]<\/a><\/sup>/);
+  });
+
+  it("kein Provider-Icon vor einem file:-Link (providerFor prüft nur http(s))", () => {
+    const html = render("# T\n\n## A\n\n[Ticket](file:///C:/Users/x/dev.azure.com.txt)");
+    expect(html).not.toContain("provider-link-icon");
+  });
+
+  it("javascript:/data:-Ziele bleiben weiterhin Klartext (die neue file:-Alternative öffnet KEINE dritte, unsichere Alternative)", () => {
+    const html = render(
+      "# T\n\n## A\n\n- [Klick mich](javascript:alert(1))\n- [Bild anzeigen](data:text/html,x)"
+    );
+    expect(html).not.toContain("<a ");
+    expect(html).toContain("[Klick mich](javascript:alert(1))");
+  });
+
+  it("eine file:-URL mit rohem Leerzeichen (kein %-Encoding) bleibt Klartext (Grammatik verlangt Whitespace-Freiheit)", () => {
+    const html = render("# T\n\n## A\n\n[Bericht](file:///C:/Users/x/a b.docx)");
+    expect(html).not.toContain("<a ");
+  });
+
+  it("Titel mit **fett** in einem file:-Link wird rekursiv gerendert", () => {
+    const html = render("# T\n\n## A\n\n[Sehr **wichtig**](file:///C:/Users/x/a.docx)");
+    expect(html).toMatch(/<a[^>]*href="file:\/\/\/C:\/Users\/x\/a\.docx"[^>]*>Sehr <strong[^>]*>wichtig<\/strong><\/a>/);
+  });
+});
+
+// Klick-Feedback + Zwischenablage (v7.31): braucht ein ECHTES DOM (createRoot/
+// act statt renderToStaticMarkup, siehe Datei-Kopf) – navigator.clipboard
+// existiert in jsdom NICHT von Haus aus und wird hier je Test gemockt.
+describe("FileLink: Klick kopiert den Windows-Pfad in die Zwischenablage (v7.31)", () => {
+  let container;
+  let root;
+
+  const mount = (md) => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <DocView text={md} collapsed={{}} onToggle={() => {}} imgMap={{}} onImgClick={() => {}} onToggleTask={() => {}} />
+      );
+    });
+  };
+
+  afterEach(() => {
+    if (root) act(() => root.unmount());
+    if (container) container.remove();
+    root = null;
+    container = null;
+    delete navigator.clipboard;
+    vi.useRealTimers();
+  });
+
+  it("ein Klick kopiert den Backslash-Pfad und zeigt kurz 'Pfad kopiert' an, das nach ~1,5 s wieder verschwindet", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    vi.useFakeTimers();
+
+    mount("# T\n\n## A\n\n[Bericht](file:///C:/Users/x/Mein%20Bericht.docx)");
+    const link = container.querySelector("a");
+    expect(link).toBeTruthy();
+    expect(container.textContent).not.toContain("Pfad kopiert");
+
+    await act(async () => {
+      link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      await Promise.resolve(); // Microtask: clipboard.writeText().then(...)
+    });
+    expect(writeText).toHaveBeenCalledWith("C:\\Users\\x\\Mein Bericht.docx");
+    expect(container.textContent).toContain("Pfad kopiert");
+
+    act(() => { vi.advanceTimersByTime(1500); });
+    expect(container.textContent).not.toContain("Pfad kopiert");
+  });
+
+  it("KEIN preventDefault: die Standard-Navigation des <a>-Elements wird nicht unterbunden", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+
+    mount("# T\n\n## A\n\n[Bericht](file:///C:/Users/x/Bericht.docx)");
+    const link = container.querySelector("a");
+    const evt = new MouseEvent("click", { bubbles: true, cancelable: true });
+    await act(async () => {
+      link.dispatchEvent(evt);
+      await Promise.resolve();
+    });
+    expect(evt.defaultPrevented).toBe(false);
+  });
+
+  it("ohne navigator.clipboard passiert nichts, kein Crash, kein Feedback", async () => {
+    delete navigator.clipboard; // Umgebung ohne Clipboard-API (ältere Browser)
+    mount("# T\n\n## A\n\n[Bericht](file:///C:/Users/x/Bericht.docx)");
+    const link = container.querySelector("a");
+    expect(() => {
+      act(() => {
+        link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      });
+    }).not.toThrow();
+    expect(container.textContent).not.toContain("Pfad kopiert");
+  });
+
+  // Review-Fix 🔵 Finding 4 (mitgenommen): ein zweiter Klick VOR Ablauf der
+  // ersten 1,5 s muss den bereits laufenden Ausblend-Timer zurücksetzen
+  // (clearTimeout, timerRef in FileLink) – sonst blendet der ERSTE Timer das
+  // Feedback verfrüht aus, obwohl der ZWEITE Klick es gerade erst wieder
+  // eingeblendet hat.
+  it("ein zweiter Klick VOR Ablauf der ersten 1,5 s setzt den Ausblend-Timer zurück (kein verfrühtes Verschwinden)", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    vi.useFakeTimers();
+
+    mount("# T\n\n## A\n\n[Bericht](file:///C:/Users/x/Bericht.docx)");
+    const link = container.querySelector("a");
+
+    await act(async () => {
+      link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("Pfad kopiert");
+
+    act(() => { vi.advanceTimersByTime(1000); }); // noch VOR den ursprünglichen 1500 ms
+    expect(container.textContent).toContain("Pfad kopiert");
+
+    // Zweiter Klick bei t=1000: OHNE den Fix würde der vom ERSTEN Klick
+    // gestartete Timer trotzdem bei t=1500 feuern und das Feedback
+    // ausblenden, obwohl der zweite Klick es gerade erneuert hat.
+    await act(async () => {
+      link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenCalledTimes(2);
+
+    // t=1000+600=1600 – NACH dem ursprünglichen 1500-ms-Zeitpunkt des ERSTEN
+    // Timers, aber VOR dem neuen (bei 1000+1500=2500): bleibt sichtbar NUR,
+    // wenn der alte Timer korrekt gecleart wurde.
+    act(() => { vi.advanceTimersByTime(600); });
+    expect(container.textContent).toContain("Pfad kopiert");
+
+    // Restliche Zeit bis zum NEUEN Timer (900 ms mehr = insgesamt 1500 ms
+    // nach dem zweiten Klick) – jetzt verschwindet das Feedback.
+    act(() => { vi.advanceTimersByTime(900); });
+    expect(container.textContent).not.toContain("Pfad kopiert");
+  });
+
+  it("eine abgelehnte Zwischenablage (Berechtigung verweigert) scheitert still, kein Crash, kein Feedback", async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error("denied"));
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+
+    mount("# T\n\n## A\n\n[Bericht](file:///C:/Users/x/Bericht.docx)");
+    const link = container.querySelector("a");
+    await act(async () => {
+      link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      await Promise.resolve().then(() => {}).catch(() => {});
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(container.textContent).not.toContain("Pfad kopiert");
   });
 });

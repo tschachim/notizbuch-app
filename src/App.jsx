@@ -10,6 +10,7 @@ import { applyOpsDetailed, dispHead, PLACEHOLDER_LINE, stripInboxPlaceholder } f
 import { applyMemoryOps, applyMemoryOpsDetailed } from "./lib/memory.js";
 import { diffLines, contextize } from "./lib/diff.js";
 import { DocView, IMG_REF_RE, TASK_RE, parseTree, renumberCitations, decodeBasicEntities } from "./lib/markdown.jsx";
+import { linkifyFilePaths } from "./lib/filelinks.js";
 import {
   prepareImage, newImgId, extForMime, mimeForName, dataUrlParts, blobToDataURL,
   makeNotebookIcon,
@@ -1441,7 +1442,19 @@ export default function NotizbuchApp() {
           }
           // Nach dem Anwenden dokumentweit durchnummerieren: neue Quellen-
           // Fußnoten kommen als [0](url)-Platzhalter aus den ops.
-          const applied = renumberCitations(detailed.text);
+          // linkifyFilePaths (v7.31) läuft NACH renumberCitations (unkritisch:
+          // CITE_LINK_RE/renumberCitations bleiben strikt http(s)-only,
+          // siehe markdown.jsx – ein file:-Link kann dort nie ins Spiel
+          // kommen) und VOR dem Commit weiter unten. Wie renumberCitations
+          // wirkt es auf das GESAMTE Dokument, nicht nur den neuen op-
+          // Ausschnitt (anders als resolveProviderLinkTitles oben) – ein
+          // bereits im Bestand vorhandener, noch nicht verlinkter absoluter
+          // Pfad wird also bei JEDEM Chat-Turn mit-verlinkt, der irgendeine
+          // Op für dieses Notizbuch anwendet (self-healing, gleiche
+          // Philosophie wie resolveProviderLinkTitles im Editor-Pfad unten,
+          // siehe DECISIONS). linkifyFilePaths wirft laut eigenem Vertrag
+          // nie und ist idempotent (siehe filelinks.js).
+          const applied = linkifyFilePaths(renumberCitations(detailed.text));
           if (applied === before) continue;
           // v7.22 (Review-Fund 🟡): Anlage-Platzhalter erst NACH einer
           // bereits feststehenden echten Änderung entfernen (siehe "applied
@@ -2467,8 +2480,13 @@ export default function NotizbuchApp() {
       // Notizbüchern beim nächsten Speichern automatisch"). Der leer-
       // geräumte Editor (unten, INITIAL_DOC-Zweig) bleibt bewusst
       // unangetastet – das frische Template darf den Platzhalter behalten.
+      // linkifyFilePaths (v7.31) läuft wie im Chat-Pfad NACH renumberCitations
+      // (siehe dort) über das GESAMTE gespeicherte Dokument – konsistent zu
+      // resolveProviderLinkTitles oben, das hier ebenfalls bereits
+      // dokumentweit statt fragmentweise arbeitet (Editor-Speichern kennt
+      // ohnehin nur den ganzen Text, kein Fragment-Konzept).
       cleaned = resolvedMd.trim()
-        ? stripInboxPlaceholder(renumberCitations(resolvedMd.replace(/\n{3,}/g, "\n\n").trim() + "\n"))
+        ? stripInboxPlaceholder(linkifyFilePaths(renumberCitations(resolvedMd.replace(/\n{3,}/g, "\n\n").trim() + "\n")))
         : INITIAL_DOC;
       if (cleaned !== oldDoc) {
         if (connected && settingsRef.current) {
@@ -2783,7 +2801,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.30</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.31</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"

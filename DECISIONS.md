@@ -4595,3 +4595,264 @@ aus `referenz-app.jsx` übernommen.
       kennt – das eigentliche Lese-Verbot ist also unabhängig von der
       Erkennungsliste vollständig, nur die AKTIVE Entfernung/Warnung bleibt
       auf bekannte Namen beschränkt.
+
+73. **file:-Links (v7.31, Nutzer-Befund Live + Nutzerwunsch).** Ein Markdown-
+    Link auf einen lokalen Dateipfad, z. B.
+    `[Bericht](file:///C:/Users/x/Bericht.docx)`, wurde im Dokument-Viewer
+    als LITERALTEXT gerendert statt als Link (LINK_URL_RE/INLINE_TOKEN_RE/
+    GENERIC_LINK_TOKEN_RE erlaubten strukturell nur http(s)). Zusätzlicher
+    Nutzerwunsch: ein absoluter Windows-Pfad, der per Chat/Editor in eine
+    Notiz gelangt, soll beim Speichern automatisch zu einem solchen
+    file:-Link (Linktext = Dateiname OHNE Endung) werden.
+    - **Neues Modul `src/lib/filelinks.js`** (reine Funktionen, BLATT im
+      Abhängigkeitsbaum wie `code.jsx`/`linkProviders.jsx` – importiert
+      nichts aus `markdown.jsx`/`DocEditor.jsx`, umgekehrt importieren beide
+      daraus, Zirkelbezug-Regel wie bei `linkProviders.jsx`):
+      - `FILE_URL_SRC`/`FILE_URL_RE`: Grammatik für file:-URLs, bewusst ENG
+        wie im Auftrag verlangt – NUR `file:///`+Laufwerksbuchstabe
+        (`file:///C:/…`) ODER UNC (`file://server/share/…`), kein
+        Whitespace, %-Encoding erlaubt (einfach `[^\s]`-Zeichenklassen,
+        gecappt auf 300 Zeichen je Alternative wie `LINK_URL_RE`/
+        `INLINE_TOKEN_RE` in `markdown.jsx`, gleicher Backtracking-Schutz).
+        Ein negativer Lookahead `(?![A-Za-z]:\/)` vor der UNC-Alternative
+        verhindert eine Grammatik-Lücke: OHNE ihn hätte ein kaputtes/
+        unvollständiges `file://C:/a.txt` (nur zwei statt drei Slashes vor
+        dem Laufwerksbuchstaben) als "UNC mit Servername C:" durchgehen
+        können – ein Laufwerksbuchstabe ist jetzt AUSSCHLIESSLICH über die
+        strikte Drei-Slash-Form gültig, gefunden beim Testschreiben,
+        gefixt vor dem Commit.
+      - `pathToFileUrl`/`fileUrlToWinPath`: Windows-Pfad ↔ file:-URL, je
+        Pfadsegment einzeln per `encSeg` kodiert (Leerzeichen, Umlaute, `#`,
+        `%`, `?`, UND `(`/`)` → `%28`/`%29`, siehe Nachbesserung Finding 2
+        unten); Laufwerksbuchstabe/Doppelpunkt/Trennschrägstriche bleiben roh.
+      - `linkifyFilePaths(md)`: wandelt nackte absolute Windows-Pfade UND
+        nackte file:-URLs in `[Basename-ohne-Endung](file:///…)`-Links um.
+        Fenced-Codeblöcke (`splitFenceSegments`) und Codespans/bestehende
+        `[…](…)`/`![…](…)`-Spannen bleiben unangetastet (letztere über
+        `PROTECTED_SPAN_RE`, gleiches Split-mit-Capture-Group-Muster wie
+        `renumberCitations`). Zwei Fälle: Inline OHNE Leerzeichen (muss auf
+        eine Datei-Endung enden, keine Wortmitte-Treffer per Lookbehind/
+        Lookahead, Satzzeichen am Ende abgetrennt – siehe Nachbesserung
+        Finding 3 unten) und Ganze-Zeile MIT Leerzeichen (häufigster
+        Paste-Fall – die komplette getrimmte Zeile ist der Pfad, mit
+        Prosa-Schutz – siehe Nachbesserung Finding 1 unten). Idempotent: ein
+        bereits erzeugter Link ist beim zweiten Lauf eine geschützte Spanne.
+        Ein Pfad/Ordner OHNE Datei-Endung wird NIE angefasst (bewusste
+        Heuristik-Grenze, im Modul dokumentiert) – ohne Endung lässt sich
+        ein Pfad im Fließtext nicht zuverlässig von umgebender Prosa
+        abgrenzen.
+    - **Viewer (`src/lib/markdown.jsx`):** `LINK_OR_FILE_URL_SRC` (http(s)
+      ODER `FILE_URL_RE`) ersetzt `LINK_URL_RE` NUR in der
+      `[Titel](url)`-Alternative von `INLINE_TOKEN_RE`/`GENERIC_LINK_TOKEN_RE`
+      – `CITE_LINK_RE`/`renumberCitations` bleiben UNVERÄNDERT strikt
+      http(s)-only (eigene, nicht wiederverwendete Regex-Bildung), ein
+      file:-Link mit rein numerischem Titel (`[3](file:///…)`) ist deshalb
+      strukturell NIE eine Quellen-Fußnote, IMMER ein normaler Link
+      (`renderInline` prüft zusätzlich zur Ziffernprobe das http(s)-Schema
+      der URL). Neue Komponente `FileLink`: `<a href={fileUrl}>` mit
+      `DOC_LINK_CLASS`, `title` = per `fileUrlToWinPath` dekodierter
+      Windows-Pfad, KEIN Provider-Icon (`providerFor` prüft ohnehin nur
+      http(s)), KEIN `target="_blank"`/`rel` (kein externes Ziel). Browser
+      blockieren die Navigation von einer https-Seite (GitHub Pages) zu
+      `file://` aus Sicherheitsgründen – ein Klick tut dort meist NICHTS
+      Sichtbares (nur lokal geöffnet oder mit einer Browser-Extension
+      navigiert er wirklich). Deshalb kopiert `onClick` ZUSÄTZLICH den
+      Windows-Pfad per `navigator.clipboard.writeText` in die
+      Zwischenablage (Fehler/fehlende API werden still geschluckt, kein
+      Crash) und zeigt ~1,5 s ein Inline-Feedback "Pfad kopiert" –
+      ausdrücklich KEIN `preventDefault`, damit eine erlaubte Navigation
+      (lokale App/Extension) trotzdem stattfindet.
+    - **Editor-Roundtrip (`src/components/DocEditor.jsx`), empirisch
+      ermittelt:** markdown-it (unter tiptap-markdown) blockt `file:` per
+      `validateLink` standardmäßig (`BAD_PROTO_RE` in
+      `node_modules/markdown-it/lib/index.mjs` – Schutz gegen
+      `file:`/`data:`/`javascript:`-Injection). Ohne Gegenmaßnahme bleibt
+      `[Titel](file:///…)` beim Laden Klartext – EMPIRISCH GEPRÜFT
+      (`tests/docEditorLinks.test.jsx`): das ist tatsächlich
+      VERLUSTFREI, weil `unescapeMd` (bereits bestehend, entfernt
+      Serializer-Escapes vor jedem Speichern) die von prosemirror-markdown
+      beim Serialisieren eines literalen `[`/`]` hinzugefügten
+      Backslash-Escapes rückstandslos wieder entfernt – die MINDEST-
+      anforderung des Auftrags ("verlustfreier Roundtrip") wäre also schon
+      ohne jede Änderung erfüllt gewesen. Umgesetzt wurde stattdessen das
+      volle Ziel (Link bleibt ein ECHTER, klickbarer Link-Mark):
+      - `FileLinkMarkdownIt` (neue, kleine `Extension`): nutzt den
+        `storage.markdown.parse.setup(md)`-Hook, den tiptap-markdown vor
+        jedem Rendern für jede registrierte Extension aufruft
+        (`MarkdownParser.js`), um `md.validateLink` so zu erweitern, dass
+        GENAU unsere strikte `FILE_URL_RE`-Grammatik zusätzlich durchgeht
+        (`javascript:`/`data:`/`vbscript:` bleiben über den ORIGINALEN
+        Validator weiterhin blockiert). Ein `__fileLinkPatched`-Flag auf
+        der `md`-Instanz verhindert mehrfaches Verschachteln des Wrappers
+        (die Instanz lebt für die gesamte Editor-Lebenszeit, `setup()`
+        läuft aber bei JEDEM `parse()`-Aufruf erneut).
+      - Reicht ALLEIN NICHT: ProseMirrors eigenes HTML→Doc-Parsing prüft
+        den Link-Mark ZUSÄTZLICH über `isAllowedUri`
+        (`@tiptap/extension-link`, `parseHTML`/`getAttrs` – UND
+        `setLink`/`toggleLink`/Autolink/Paste). `isAllowedUri` in der
+        `Link.configure()`-Aufrufstelle wurde daher um
+        `FILE_URL_FULL_RE.test(url)` ergänzt (ODER-verknüpft mit der
+        bestehenden http(s)-Prüfung) – ohne diese zweite Änderung hätte
+        ProseMirror den vom markdown-it-Patch erst ermöglichten
+        `<a href="file:…">` beim Doc-Aufbau sofort wieder verworfen.
+      - `normalizeLinkUrl` (Link-Dialog) akzeptiert jetzt zusätzlich zu
+        http(s) ENTWEDER eine fertige `file:///`-URL ODER einen absoluten
+        Windows-Pfad (`pathToFileUrl`) – VOR der http(s)-Schema-Ergänzung
+        geprüft, damit `C:\…` nicht versehentlich als schemalose Domain
+        behandelt wird. Fehlertext angepasst: "Nur http(s)- oder
+        file:-Links werden unterstützt." Ein file:-Eintrag mit rohem,
+        unkodiertem Whitespace wird bewusst NICHT automatisch nachkodiert
+        (anders als http(s)) – MINIMAL-Fall des Auftrags, keine
+        Encoding-Heilung für jede denkbare Mischform.
+      - `computeLinkDecorations` (Editor-CSS-Klasse `cite-link`/`doc-link`)
+        bekam dieselbe Nachbesserung wie `renderInline` im Viewer: reine
+        Ziffern zählen NUR bei einem http(s)-Ziel als Fußnote, sonst würden
+        Editor-Optik und Viewer-Rendering für denselben Link auseinander-
+        laufen (kleiner, aber notwendiger Konsistenz-Fix, nicht explizit im
+        Auftrag benannt, aber eine direkte Konsequenz der neuen
+        file:-Fußnoten-Ausnahme im Viewer).
+    - **Schreibpfade (`src/App.jsx`):** `linkifyFilePaths` läuft in BEIDEN
+      Schreibpfaden NACH `renumberCitations` (unkritisch: `CITE_LINK_RE`/
+      `renumberCitations` bleiben strikt http(s)-only, ein file:-Link kann
+      dort nie ins Spiel kommen) und VOR dem Commit/Persist: (a) Chat-Pfad,
+      auf `detailed.text` (das GESAMTE Dokument nach Op-Anwendung, gleicher
+      Geltungsbereich wie `renumberCitations` selbst – NICHT nur das neue
+      op-Fragment wie `resolveProviderLinkTitles`); (b) Editor-Speicherpfad,
+      ebenfalls auf das gesamte gespeicherte Dokument (konsistent zu
+      `resolveProviderLinkTitles` dort, das ebenfalls dokumentweit statt
+      fragmentweise arbeitet). Beide Stellen wirken dadurch bewusst
+      SELF-HEALING: ein im Bestand bereits vorhandener, noch nicht
+      verlinkter absoluter Pfad wird bei jedem folgenden Chat-Turn mit
+      irgendeiner Op für dieses Notizbuch bzw. bei jedem manuellen Editor-
+      Speichern mit-verlinkt – gleiche Philosophie wie die bestehende
+      `resolveProviderLinkTitles`-Selbstheilung (siehe Punkt 58).
+    - **System-Prompt (`src/lib/anthropic.js`):** neue Regel im
+      KONVENTIONEN-Block – absolute Windows-Pfade werden als
+      `[Dateiname-ohne-Endung](file:///…)`-Link abgelegt (Vorwärtsslashes,
+      %-Encoding), bestehende file:-Links bleiben unverändert.
+    - **Nachbesserung nach Code-Review (fünf Findings, VOR dem Commit
+      behoben/dokumentiert, Original-Version noch nie live/committet):**
+      - **🔴 Finding 1 (Pflicht) – Prosa-Schutz im Ganze-Zeile-Fall:** die
+        ursprüngliche `WHOLE_LINE_WIN_PATH_RE` erlaubte Leerzeichen im
+        Pfad-Körper (Regel d), konnte dadurch aber nicht zwischen einem
+        echten Pfad mit Leerzeichen und einer KOMPLETTEN PROSA-ZEILE
+        unterscheiden, die zufällig mit einem Pfad beginnt und mit etwas
+        Endungs-Artigem endet – bei jedem Chat-Turn/Editor-Save (Self-
+        Healing, siehe Schreibpfade oben) hätte das Bestandstext zerstört.
+        Der vom Reviewer vorgeschlagene Fix (zwei Guards: kein zweiter
+        Pfad-Start nach Whitespace; keine endungsartige Sequenz MIT
+        folgendem Text) deckte zwei der drei genannten Repro-Fälle ab,
+        wurde aber vor der Übernahme GEGEN ALLE DREI Fälle empirisch
+        geprüft – dabei zeigte sich, dass Repro-Fall 2
+        (`"C:\temp ist der Ordner fuer report.docx"`, EIN Segment ohne
+        weiteren Pfad-Start UND ohne Endung mitten im Satz, die einzige
+        Endung steht korrekt am Ende) von KEINEM der beiden Guards erfasst
+        wird. Ergänzt um einen DRITTEN Guard: eine Wortzahl-Obergrenze je
+        Pfad-Segment (`WORDS_PER_SEGMENT_CAP = 5`, großzügig gewählt) –
+        schließt genau diese Lücke. Alle drei Guards zusammen: (a) zweiter
+        Pfad-Start nach Whitespace, (b) endungsartige Sequenz vor Zeilenende
+        mit folgendem Text, (c) zu viele Wörter in einem Segment. Interessanter
+        Nebeneffekt, empirisch verifiziert: verwirft ein Guard den
+        Ganze-Zeile-Versuch, fällt die Zeile auf die Inline-Regel (c)
+        zurück – Repro-Fall 1 (zwei Pfade in einer Zeile) wird dadurch NICHT
+        einfach unverlinkt gelassen, sondern JEDER der beiden Pfade EINZELN
+        korrekt verlinkt (besser als reine Ablehnung); Repro-Fall 3 verlinkt
+        korrekt NUR den echten Pfad, der Rest bleibt Prosa. Nur Repro-Fall 2
+        bleibt komplett Klartext (kein isolierbarer echter Pfad darin).
+        Regressionstests für alle drei Fälle in `tests/filelinks.test.js`.
+      - **🟡 Finding 2 (Pflicht) – Idempotenz bei unbalancierter Klammer:**
+        `encodeURIComponent` lässt `(`/`)` unkodiert – ein Dateiname mit
+        einer UNBALANCIERTEN Klammer (z. B. `"a(b.docx"`) landete roh in der
+        URL; `PROTECTED_SPAN_RE` erkannte den bereits erzeugten Link beim
+        ZWEITEN `linkifyFilePaths`-Lauf dadurch nicht mehr als geschützte
+        Spanne (die Regex las die Wrapper-Klammer fälschlich als
+        Klammer-Partner der Datei-Klammer) – Doppel-Wrap. Fix: neuer
+        `encSeg`-Helfer (`encodeURIComponent` + `(`→`%28`/`)`→`%29`) in
+        BEIDEN Zweigen von `pathToFileUrl` (entspricht der bestehenden
+        http(s)-Konvention in `normalizeLinkUrl`, DocEditor.jsx). Ersetzt
+        damit auch die ursprüngliche (jetzt überholte) Design-Entscheidung
+        "Klammern bleiben bewusst unkodiert" – Windows' automatisches
+        "Kopie (1).docx" wird jetzt ebenfalls kodiert, bleibt aber über
+        `fileUrlToWinPath` beim Dekodieren korrekt lesbar. Regressionstest
+        (Original-Repro + Idempotenz über zwei Läufe) in
+        `tests/filelinks.test.js`.
+      - **🟡 Finding 3 (Pflicht) – Satzzeichen nach nackter file:-URL:** der
+        Körper der `FILE_URL_SRC`-Alternative in `INLINE_TARGET_RE` ist bis
+        zum nächsten Whitespace ungebunden – ein Satzpunkt/Komma direkt
+        hinter einer nackten `file:///…`-URL landete als Teil der (kaputten)
+        URL. Der Windows-Pfad-Zweig war NICHT betroffen (dessen
+        Endungs-Gruppe konsumiert ohnehin nur alphanumerische Zeichen).
+        Fix in `linkifyInline`: abschließende Satzzeichen (`.,;:!?`) werden
+        VOR dem Verlinken abgetrennt und danach wieder angehängt – analog
+        zu `trimBareUrl` (linkProviders.jsx) für http(s)-URLs, aber bewusst
+        ohne dessen Klammer-Bilanz-Logik (seit dem Finding-2-Fix enthält
+        eine selbst erzeugte file:-URL nie mehr eine rohe, unbalancierte
+        Klammer). Regressionstests mit Punkt/Komma/mehreren Satzzeichen in
+        `tests/filelinks.test.js`.
+      - **🔵 Finding 4 (klein, mitgenommen) – Timer-Reset bei Mehrfachklick:**
+        `FileLink` (markdown.jsx) hält die Ausblend-Timer-ID jetzt in einem
+        `useRef` statt nur lokal in `handleClick`; ein zweiter Klick VOR
+        Ablauf der ersten 1,5 s löscht per `clearTimeout` den noch laufenden
+        Timer, bevor ein neuer gestartet wird – ohne den Fix hätte der ERSTE
+        Timer das Feedback verfrüht ausgeblendet, obwohl der ZWEITE Klick es
+        gerade erst erneuert hatte. Zusätzlich `useEffect`-Cleanup beim
+        Unmount (Timer wird nicht mehr gebraucht, falls die Komponente vor
+        Ablauf der 1,5 s verschwindet). Regressionstest mit präzisem
+        `vi.advanceTimersByTime`-Timing in `tests/markdown.test.jsx`.
+      - **🔵 Finding 5 (nur dokumentiert) – List-/Zitat-Präfixe:** der
+        Ganze-Zeile-Fall (Regel d) verlangt, dass die getrimmte Zeile GENAU
+        mit dem Pfad beginnt – eine Listen-/Zitat-Zeile wie
+        `"- C:\Users\x\Bericht.docx"` oder `"> C:\Users\x\Bericht.docx"`
+        beginnt stattdessen mit dem Marker-Zeichen und bleibt deshalb
+        bewusst Klartext (die Inline-Regel greift ebenfalls nicht, sobald
+        der Pfad Leerzeichen enthält). Bewusst NICHT behoben – ein
+        generischer "Marker-Präfix ignorieren"-Mechanismus hätte den
+        Prosa-Schutz aus Finding 1 wieder aufgeweicht (z. B. wäre dann
+        unklar, ob "- " Teil einer Liste oder zufällig Satzanfang ist) und
+        war nicht Teil des ursprünglichen Auftrags.
+    - **Tests:** `tests/filelinks.test.js` (Pfad↔URL beide Richtungen inkl.
+      Leerzeichen/Umlaute/`#`/`%`/UNC/kaputte %-Sequenz/(un-)balancierte
+      Klammern-Dateinamen, `linkifyFilePaths` mit allen Randfällen aus dem
+      Auftrag inkl. Idempotenz, Grammatik-Lücken-Regression und den fünf
+      Review-Findings); `tests/markdown.test.jsx` (file:-Link-Rendering,
+      kein `<sup>` bei numerischem Titel, kein Provider-Icon,
+      javascript:/data: weiterhin unmöglich, Klick+Zwischenablage+Timeout-
+      Feedback UND Timer-Reset bei Mehrfachklick per echtem DOM/
+      `createRoot`/`act`, jsdom-Override wie in
+      `tests/docEditorLinks.test.jsx`); `tests/docEditorLinks.test.jsx`
+      (Roundtrip-Stabilität UND Link-Mark-Erhalt für file:-Links,
+      Decoration-Klasse, `setLink` akzeptiert file: aber weiterhin nicht
+      mailto:/ein grammatikwidriges file:, `normalizeLinkUrl`-Erweiterung,
+      Link-Dialog-Roundtrip); `tests/anthropic.test.js`
+      (Prompt-Vertragstest, `toContain`-Stil). Gesamtstand danach
+      1084/1084 grün (vorher 996).
+    - **Bewusste Restrisiken:** (1) Die Inline-/Ganze-Zeile-Heuristik in
+      `linkifyFilePaths` ist genau das – eine Heuristik, kein vollständiger
+      Windows-Pfad-Parser: ein Pfad/Ordner ohne Datei-Endung wird NIE
+      inline erkannt (dokumentierte, bewusste Grenze), und ein Pfad, der
+      direkt an ein Wortzeichen grenzt ("seeC:\a.txt"), wird ebenfalls
+      NICHT erkannt (Schutz gegen Wortmitte-Treffer, kann in seltenen
+      Fällen einen echten, ungewöhnlich eingebetteten Pfad übersehen). (2)
+      Eine file:-URL mit rohem, unkodiertem Whitespace bleibt sowohl beim
+      manuellen Eintippen im Link-Dialog als auch beim Parsen strikt
+      abgelehnt statt automatisch nachkodiert zu werden (anders als
+      http(s) in `normalizeLinkUrl`) – bewusst minimal gehalten. (3) Ein
+      Klick auf einen file:-Link navigiert auf GitHub Pages faktisch NIE
+      wirklich (Browser-Sicherheitsgrenze, nicht durch die App
+      beeinflussbar) – das Kopieren-in-die-Zwischenablage ist ein
+      bewusster Kompromiss, kein Ersatz für echte Navigation, und liefert
+      dem Nutzer keine Rückmeldung, WOHIN genau (außer dem Tooltip) er den
+      Pfad einfügen soll. (4) Der Prosa-Schutz-Guard (c) aus Finding 1
+      (Wortzahl-Obergrenze je Segment) ist selbst wieder eine Heuristik mit
+      einer harten Zahl (5) – ein echter, aber sehr wortreicher Dateiname
+      in einem einzelnen Segment bleibt dadurch Klartext (False Negative,
+      bewusst in Kauf genommen: sicherer als das Risiko, doch wieder echte
+      Prosa fälschlich zu verlinken). Umgekehrt bleibt ein
+      Rest-False-Positive-Fenster: eine kurze Telegramm-Prosa-Zeile
+      (≤ 5 Wörter je Segment), die mit einem Pfad-Start beginnt und auf
+      `.ext` endet (z. B. `C:\tools siehe readme.txt`), wird weiterhin als
+      Ganze-Zeile-Link gelesen; der Wortlaut bleibt dabei vollständig als
+      Linktext erhalten (kein Textverlust, per Editieren reversibel).
+      (5) List-/Zitat-Präfixe vor einem
+      Pfad mit Leerzeichen werden nie erkannt (Finding 5, siehe oben) –
+      dokumentierte, nicht behobene Grenze.

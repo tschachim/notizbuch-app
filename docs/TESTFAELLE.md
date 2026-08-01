@@ -750,6 +750,28 @@ zuverlässig). Auf einem schmalen/mobilen Fenster: Gliederungs-Leiste
 bleibt wie bisher (D10) ausgeblendet – kein Drag&Drop dort zu erwarten
 (kein Bug).
 
+**D14 [OFFEN] Absoluter Windows-Pfad wird automatisch zu einem
+file:-Link (v7.31, Nutzer-Befund Live + Nutzerwunsch).** Editor öffnen
+(Stift-Knopf, im QA-Notizbuch), in einen Absatz eine Testzeile mit einem
+erfundenen absoluten Windows-Pfad OHNE bestehenden Link tippen, z. B.
+„Beleg: C:\Users\test\QA-Beleg.docx im Ordner.“ Speichern. Erwartet: In
+der Dokument-Ansicht erscheint „QA-Beleg“ als unterstrichener, blauer
+Link genau an der Stelle des Pfads (Linktext = Dateiname OHNE Endung),
+der übrige Satz bleibt unverändert; KEIN hochgestelltes Fußnoten-Symbol.
+Mit der Maus über den Link fahren: Tooltip zeigt den vollen Windows-Pfad
+(Backslash-Form) an. Auf den Link klicken: Da die App per https läuft,
+blockiert der Browser die Navigation zu file:// üblicherweise (kein
+sichtbarer Sprung) – erwartet erscheint aber kurz ein Hinweis „Pfad
+kopiert“ direkt neben dem Link (verschwindet nach ~1,5 s von selbst).
+Direkt danach den Inhalt der Zwischenablage prüfen (z. B. in das
+Chat-Eingabefeld einfügen und wieder löschen): erwartet steht dort der
+Windows-Pfad in Backslash-Form („C:\Users\test\QA-Beleg.docx“). Editor
+erneut öffnen: Der Link bleibt als echter, klickbarer Link erhalten
+(kein Zerfall in eckige Klammern/Klartext) und lässt sich über den
+Link-Knopf (Cursor hineinsetzen, Kettensymbol) als
+„file:///C:/Users/test/QA-Beleg.docx“ im Popover ablesen. Danach die
+Testzeile wieder entfernen und speichern (Cleanup).
+
 ## E. Schnellnotizen
 
 **E1 [OFFEN] Post-it-Lebenszyklus.** „Schnellnotiz“-Knopf (Desktop:

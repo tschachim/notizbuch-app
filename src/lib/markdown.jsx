@@ -6,6 +6,7 @@
 /* klickbaren Kästchen (Zeilen behalten dafür ihren Original-Index).   */
 /* ------------------------------------------------------------------ */
 
+import { useState, useRef, useEffect } from "react";
 import { ChevronDown } from "lucide-react";
 import {
   MATH_TOKEN_RE, renderMathToken, renderKatexHtml,
@@ -13,6 +14,7 @@ import {
 } from "./math.jsx";
 import { FENCE_OPEN_RE, matchFenceBlock, splitFenceSegments, CodeBlockView } from "./code.jsx";
 import { providerFor, getLinkProviders, ProviderIcon, trimBareUrl } from "./linkProviders.jsx";
+import { FILE_URL_RE, fileUrlToWinPath } from "./filelinks.js";
 
 export const IMG_LINE_RE = /^!\[([^\]]*)\]\(img:([a-zA-Z0-9]+)\)$/;
 export const IMG_REF_RE = /!\[[^\]]*\]\(img:([a-zA-Z0-9]+)\)/g;
@@ -267,9 +269,21 @@ export const LINK_URL_RE = /https?:\/\/(?:[^\s()]|\([^\s()]*\))+/;
 // (`BARE_URL_INLINE_SRC === NAKED_URL_SRC`), damit künftige Änderungen HIER
 // nicht unbemerkt von der Kopie dort abweichen.
 export const BARE_URL_INLINE_SRC = "https?:\\/\\/[^\\s<>]+";
+
+// file:-Links (v7.31, Nutzer-Befund Live): "[Titel](file:///…)" soll wie ein
+// generischer http(s)-Link gerendert werden, NIE als Klartext. Die
+// file:-Grammatik (FILE_URL_RE) lebt in filelinks.js (BLATT, siehe dortiger
+// Kopfkommentar) – markdown.jsx importiert sie NUR für die
+// "[Titel](url)"-Alternative unten (Klammer-Form). NICHT eingemischt in
+// LINK_URL_RE selbst: CITE_LINK_RE/renumberCitations (weiter unten) bleiben
+// dadurch STRUKTURELL http(s)-only (unverändert, wie im Auftrag gefordert) –
+// eine Quellen-Fußnote [n](url) kann nie ein file:-Link sein.
+// LINK_OR_FILE_URL_SRC deckt NUR http(s) ODER GENAU unsere file:-Grammatik ab
+// – strukturell bleibt jedes andere Schema (javascript:/data:/…) unmöglich.
+const LINK_OR_FILE_URL_SRC = "(?:" + LINK_URL_RE.source + "|" + FILE_URL_RE.source + ")";
 const INLINE_TOKEN_RE = new RegExp(
   "(\\*\\*[^*\\n]+\\*\\*|~~[^~\\n]+~~|\\*[^*\\n]+\\*|(?<![\\w\\d])_[^_\\n]+_(?![\\w\\d])|`[^`\\n]+`" +
-  "|\\[[^\\]\\n]{1,300}\\]\\(" + LINK_URL_RE.source + "\\)" +
+  "|\\[[^\\]\\n]{1,300}\\]\\(" + LINK_OR_FILE_URL_SRC + "\\)" +
   "|<https?:\\/\\/[^\\s>]+>|<(?:span|mark)\\b[^>]*>|" + BARE_URL_INLINE_SRC + ")"
 );
 
@@ -423,7 +437,53 @@ function ProviderLinkIcon({ url }) {
 // wird) – jetzt EIN Modul-Level-Konstrukt mit demselben {1,300}-Titel-Cap
 // und derselben LINK_URL_RE-Klammergrammatik, einmalig kompiliert statt bei
 // jedem Aufruf neu (wie TASK_RE/OL_RE oben).
-const GENERIC_LINK_TOKEN_RE = new RegExp("^\\[([^\\]\\n]{1,300})\\]\\((" + LINK_URL_RE.source + ")\\)$");
+const GENERIC_LINK_TOKEN_RE = new RegExp("^\\[([^\\]\\n]{1,300})\\]\\((" + LINK_OR_FILE_URL_SRC + ")\\)$");
+
+// file:-Link-Komponente (v7.31): Browser blockieren die Navigation von einer
+// https-Seite (GitHub Pages) zu file:// aus Sicherheitsgründen – ein Klick
+// tut dort meist NICHTS Sichtbares (nur eine lokal geöffnete App oder eine
+// Browser-Extension navigiert wirklich). Deshalb kopiert der Klick
+// ZUSÄTZLICH den Windows-Pfad (Backslash-Form, fileUrlToWinPath aus
+// filelinks.js) in die Zwischenablage, mit kurzem Inline-Feedback. KEIN
+// preventDefault: erlaubt der Browser/eine Extension die Navigation doch,
+// soll sie ganz normal stattfinden – der Klick tut NUR zusätzlich etwas,
+// verhindert nichts. Kein Provider-Icon (file:-Ziele haben keinen Provider,
+// providerFor prüft ohnehin nur http(s), siehe linkProviders.jsx).
+function FileLink({ url, title }) {
+  const [copied, setCopied] = useState(false);
+  const winPath = fileUrlToWinPath(url);
+  // Timer-ID in einem Ref (Review-Fix 🔵 Finding 4): ein zweiter Klick
+  // VOR Ablauf der ersten 1,5 s löschte bisher NICHT den bereits laufenden
+  // Timer – der ERSTE Timer blendete das Feedback dann verfrüht aus, obwohl
+  // der ZWEITE Klick es gerade erst wieder eingeblendet hatte. clearTimeout
+  // vor jedem neuen Start UND beim Unmount (useEffect-Cleanup unten, falls
+  // der Nutzer wegnavigiert/das Dokument neu rendert, bevor die 1,5 s um sind).
+  const timerRef = useRef(null);
+  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
+  const handleClick = () => {
+    const clipboard = typeof navigator !== "undefined" ? navigator.clipboard : null;
+    if (!clipboard || typeof clipboard.writeText !== "function") return; // kein Crash ohne Clipboard-API
+    clipboard.writeText(winPath).then(
+      () => {
+        if (timerRef.current) clearTimeout(timerRef.current);
+        setCopied(true);
+        timerRef.current = setTimeout(() => {
+          setCopied(false);
+          timerRef.current = null;
+        }, 1500);
+      },
+      () => {} // Zwischenablage verweigert/nicht verfügbar: still scheitern.
+    );
+  };
+  return (
+    <>
+      <a href={url} title={winPath} className={DOC_LINK_CLASS} onClick={handleClick}>
+        {renderInline(title)}
+      </a>
+      {copied && <span className="ml-1 text-xs text-emerald-600 align-middle">Pfad kopiert</span>}
+    </>
+  );
+}
 
 function renderInline(text) {
   const parts = [];
@@ -516,12 +576,17 @@ function renderInline(text) {
       const cm = GENERIC_LINK_TOKEN_RE.exec(tok);
       if (!cm) { parts.push(tok); s = s.slice(after); continue; }
       const [, title, url] = cm;
-      // Reine Ziffern = Quellen-Fußnote (bisheriges Verhalten, von
-      // renumberCitations dokumentweit durchnummeriert); jeder andere
-      // Titel ist ein generischer Link mit eigener Optik (DOC_LINK_CLASS)
-      // und rekursiv gerendertem Titel (damit z. B. **fett** im Linktext
-      // funktioniert).
-      if (/^\d+$/.test(title)) {
+      // Reine Ziffern UND http(s)-Ziel = Quellen-Fußnote (bisheriges
+      // Verhalten, von renumberCitations dokumentweit durchnummeriert – DAS
+      // bleibt strikt http(s)-only, siehe CITE_LINK_RE weiter unten); jeder
+      // andere Titel ODER ein file:-Ziel ist ein generischer Link. v7.31:
+      // ein file:-Link ist IMMER ein generischer Link, NIE eine Fußnote,
+      // auch bei rein numerischem Titel ([3](file:///…) bleibt normaler
+      // Link) – renumberCitations nummeriert file:-Links ohnehin nie um
+      // (CITE_LINK_RE matcht sie strukturell nicht), eine Fußnoten-Optik
+      // dafür wäre also irreführend (keine echte, umnummerierbare Quelle).
+      const isFileLink = /^file:\/\//i.test(url);
+      if (/^\d+$/.test(title) && !isFileLink) {
         parts.push(
           <sup key={k++} className="ml-0.5">
             <a
@@ -535,6 +600,8 @@ function renderInline(text) {
             </a>
           </sup>
         );
+      } else if (isFileLink) {
+        parts.push(<FileLink key={k++} url={url} title={title} />);
       } else {
         parts.push(<ProviderLinkIcon key={k++} url={url} />);
         parts.push(

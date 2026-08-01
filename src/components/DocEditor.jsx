@@ -29,6 +29,7 @@ import {
 } from "../lib/math.jsx";
 import { splitFenceSegments } from "../lib/code.jsx";
 import { LINK_URL_RE } from "../lib/markdown.jsx";
+import { FILE_URL_RE, pathToFileUrl } from "../lib/filelinks.js";
 import {
   cleanupLinkTitle, providerFor, providerHasCredentials, fetchLinkTitle,
   getLinkProviders, buildProviderIconDom,
@@ -623,7 +624,12 @@ function computeLinkDecorations(doc) {
   let run = null; // { from, to, href, text }
   const flush = () => {
     if (run) {
-      const isCite = /^\d+$/.test(run.text);
+      // v7.31: dieselbe Bedingung wie in markdown.jsx (renderInline) – reine
+      // Ziffern zählen NUR bei einem http(s)-Ziel als Fußnote, ein file:-Link
+      // ist IMMER "doc-link" (auch bei zufällig rein numerischem Titel), sonst
+      // würden Editor-Optik und Viewer-Rendering für denselben Link
+      // auseinanderlaufen.
+      const isCite = /^\d+$/.test(run.text) && /^https?:\/\//i.test(run.href);
       decos.push(Decoration.inline(run.from, run.to, { class: isCite ? "cite-link" : "doc-link" }));
       // Provider-Icon (v7.9): NUR vor generischen Links, NIE vor einer
       // Quellen-Fußnote (Sicherheitsregel 2 im Auftrag – Icons rein aus dem
@@ -658,6 +664,57 @@ function computeLinkDecorations(doc) {
   flush();
   return DecorationSet.create(doc, decos);
 }
+
+// Anker-Variante von FILE_URL_RE (filelinks.js) – wie LINK_URL_FULL_RE unten
+// für http(s), NUR intern hier für die file:-Akzeptanzprüfungen gebraucht
+// (FileLinkMarkdownIt, isAllowedUri, normalizeLinkUrl).
+const FILE_URL_FULL_RE = new RegExp("^" + FILE_URL_RE.source + "$");
+
+/* -------------------------------------------------------------------- */
+/* file:-Links (v7.31, Nutzer-Befund Live + Nutzerwunsch): markdown-it     */
+/* (unter tiptap-markdown) blockt "file:" per validateLink standardmäßig   */
+/* (node_modules/markdown-it/lib/index.mjs, BAD_PROTO_RE – Schutz gegen    */
+/* file:/data:/javascript:-Injection) – ein "[Titel](file:///…)" würde     */
+/* beim Laden sonst NICHT als <a>-Tag erkannt: markdown-it's Link-Regel    */
+/* setzt href bei einem validateLink-Fehlschlag zwar zurück, kann die      */
+/* Klammer-Syntax dadurch aber nicht mehr schließen (siehe                 */
+/* rules_inline/link.mjs) und lässt die GESAMTE "[…](…)"-Syntax auf        */
+/* Klartext zurückfallen. tiptap-markdown ruft für jede registrierte       */
+/* Extension optional storage.markdown.parse.setup(md) VOR jedem Rendern   */
+/* auf (MarkdownParser.js) – hier genutzt, um GENAU unsere strikte         */
+/* file:-Grammatik (FILE_URL_RE, filelinks.js) zusätzlich zu erlauben,     */
+/* ohne validateLink komplett zu öffnen (javascript:/data:/vbscript:       */
+/* bleiben über den ORIGINALEN Validator weiterhin blockiert).             */
+/*                                                                         */
+/* __fileLinkPatched-Flag verhindert mehrfaches Verschachteln des          */
+/* Wrappers: setup() läuft bei JEDEM parse()-Aufruf erneut auf DERSELBEN   */
+/* md-Instanz (die lebt für die gesamte Editor-Lebenszeit, siehe           */
+/* MarkdownParser-Konstruktor) – ohne das Flag würde jeder weitere         */
+/* Ladevorgang (z. B. insertContentAt) den Validator um eine weitere,      */
+/* unnötige Wrapper-Schicht verlängern.                                    */
+/*                                                                         */
+/* Reicht ALLEIN NICHT: ProseMirrors eigenes HTML->Doc-Parsing (das        */
+/* renderte innerHTML von MarkdownParser.parse landet als "content"-String */
+/* im Editor) prüft den Link-Mark ZUSÄTZLICH über isAllowedUri             */
+/* (@tiptap/extension-link, parseHTML/getAttrs) – dafür siehe die           */
+/* erweiterte isAllowedUri in der Link.configure()-Aufrufstelle unten.     */
+export const FileLinkMarkdownIt = Extension.create({
+  name: "fileLinkMarkdownIt",
+  addStorage() {
+    return {
+      markdown: {
+        parse: {
+          setup(md) {
+            if (md.__fileLinkPatched) return;
+            md.__fileLinkPatched = true;
+            const orig = md.validateLink.bind(md);
+            md.validateLink = (url) => FILE_URL_FULL_RE.test(String(url)) || orig(url);
+          },
+        },
+      },
+    };
+  },
+});
 
 /* -------------------------------------------------------------------- */
 /* AutoKorrektur (v7.25, Nutzerwunsch: "Word-artige Zeichenersetzung     */
@@ -809,12 +866,26 @@ export function validateLinkTitle(raw) {
 // erst gegen die Grammatik prüfen (ein noch rohes Leerzeichen würde die
 // Klammer-Prüfung sonst verfälschen).
 const LINK_URL_FULL_RE = new RegExp("^" + LINK_URL_RE.source + "$");
+// v7.31 (Nutzerwunsch file:-Links, siehe FileLinkMarkdownIt oben): der
+// Link-Dialog akzeptiert zusätzlich zu http(s) ENTWEDER eine bereits
+// fertige file:///-URL ODER einen absoluten Windows-Pfad ("C:\…", per
+// pathToFileUrl aus filelinks.js umgewandelt) – VOR der http(s)-
+// Schema-Ergänzung geprüft, damit "C:\…" nicht versehentlich als
+// schemalose Domain behandelt und fälschlich "https://" vorangestellt
+// wird. Ein file:-Eintrag mit rohem, unkodiertem Whitespace (z. B. direkt
+// als "file:///C:/a b.txt" eingetippt statt über einen Pfad) wird bewusst
+// NICHT automatisch nachkodiert (anders als http(s) unten) – das ist
+// der dokumentierte MINIMAL-Fall des Auftrags (fertige file:///-URL ODER
+// Windows-Pfad), keine Encoding-Heilung für jede denkbare Mischform.
 export function normalizeLinkUrl(raw) {
   const trimmed = String(raw ?? "").trim();
   if (!trimmed) return { error: "Bitte eine URL angeben." };
+  if (FILE_URL_FULL_RE.test(trimmed)) return { url: trimmed };
+  const asFileUrl = pathToFileUrl(trimmed);
+  if (asFileUrl) return { url: asFileUrl };
   const withScheme = /^[a-z][a-z0-9+.-]*:/i.test(trimmed) ? trimmed : "https://" + trimmed;
   if (!/^https?:\/\//i.test(withScheme)) {
-    return { error: "Nur http(s)-Links werden unterstützt." };
+    return { error: "Nur http(s)- oder file:-Links werden unterstützt." };
   }
   let url = withScheme
     .replace(/\s/g, "%20")
@@ -1136,12 +1207,25 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
       // über denselben Mark-Typ und müssen den Roundtrip weiterhin
       // unverändert überstehen (renumberCitations, markdown.jsx – NICHT
       // angefasst).
+      // v7.31: isAllowedUri lässt ZUSÄTZLICH GENAU unsere file:-Grammatik zu
+      // (FILE_URL_FULL_RE, siehe FileLinkMarkdownIt oben) – diese Option ist
+      // der EINZIGE Gatekeeper für autolink/linkOnPaste/setLink/toggleLink
+      // UND für parseHTML/getAttrs (entscheidet, ob der Link-Mark beim Laden
+      // aus dem von markdown-it gerenderten HTML überhaupt erhalten bleibt –
+      // ohne diese Erweiterung würde ProseMirror den vom
+      // FileLinkMarkdownIt-Patch erst ermöglichten <a href="file:…">
+      // sofort wieder verwerfen). javascript:/data:/mailto:/… bleiben über
+      // den ersten Teil der Bedingung weiterhin blockiert.
       Link.configure({
         openOnClick: false,
         autolink: true,
         linkOnPaste: true,
-        isAllowedUri: (url, ctx) => ctx.defaultValidate(url) && /^https?:/i.test(url),
+        isAllowedUri: (url, ctx) =>
+          (ctx.defaultValidate(url) && /^https?:/i.test(url)) || FILE_URL_FULL_RE.test(String(url || "")),
       }),
+      // markdown-it lässt file:-URLs beim Laden zu (siehe Kopfkommentar dort) –
+      // OHNE diese Extension bleibt "[Titel](file:///…)" beim Öffnen Klartext.
+      FileLinkMarkdownIt,
       // Optische Unterscheidung Fußnote/generischer Link direkt im Editor
       // (siehe LinkDecorations oben).
       LinkDecorations,
