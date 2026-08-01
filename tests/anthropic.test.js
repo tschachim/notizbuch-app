@@ -350,6 +350,27 @@ describe("buildSystem", () => {
     expect(sys).toContain("NIEMALS ```-Codeblöcke oder Unicode");
   });
 
+  // v7.33 (E2E-Finding 🟡 C9b, Live-Befund): eine explizite Speicheranweisung
+  // ("Notiere den Satz des Pythagoras…") blieb wirkungslos, weil ein
+  // ähnlicher Eintrag in einem ANDEREN Notizbuch bereits existierte – das
+  // Modell interpretierte das fälschlich als Duplikat-Grund zum Auslassen.
+  describe("EINORDNUNG IN NOTIZBÜCHER: ausdrücklicher Speicherauftrag hat Vorrang vor Duplikat-Ähnlichkeit (v7.33, C9b-Fix)", () => {
+    it("verlangt Ausführung im adressierten/aktiven Notizbuch, auch bei ähnlichem Eintrag anderswo", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      const blockStart = sys.indexOf("EINORDNUNG IN NOTIZBÜCHER:");
+      const blockEnd = sys.indexOf("KONVENTIONEN IN JEDEM NOTIZBUCH:");
+      expect(blockStart).toBeGreaterThan(-1);
+      expect(sys).toContain("AUSDRÜCKLICHER Speicherauftrag geht IMMER vor");
+      expect(sys).toContain("KEIN Grund, die Ablage auszulassen");
+      const ruleAt = sys.indexOf("AUSDRÜCKLICHER Speicherauftrag geht IMMER vor");
+      expect(ruleAt).toBeGreaterThan(blockStart);
+      expect(ruleAt).toBeLessThan(blockEnd);
+      // Ein Hinweis auf die Ähnlichkeit ist erlaubt, ersetzt die Ablage aber
+      // NIE (explizit gefordert, nicht nur implizit).
+      expect(sys).toContain("ersetze die angeforderte Ablage aber niemals dadurch");
+    });
+  });
+
   // v7.14 (Nutzerwunsch "zweistufige Gliederung"): Prompt-Verträge für die
   // #-Kapitel-Konvention, die Vorschlags-Regel (Struktur-Umbau NUR nach
   // ausdrücklicher Zustimmung, ops:[] beim reinen Vorschlag) und das
@@ -371,6 +392,42 @@ describe("buildSystem", () => {
       expect(sys).toContain('"ops":[] bleibt dabei leer');
       expect(sys).toContain("AUSDRÜCKLICH zustimmt");
       expect(sys).toContain("per \"rewrite\"-Op um");
+    });
+
+    // v7.33 (E2E-Finding 🟡 C14, Live-Befund): "Siehe Gliederungsvorschlag
+    // oben …" ohne tatsächlich ausgeschriebenen Vorschlag – die GLIEDERUNGS-
+    // VORSCHLAG-Passage verlangt jetzt explizit, dass eine direkt erfragte
+    // Gliederung VOLLSTÄNDIG im reply steht statt referenziert zu werden.
+    it("verlangt bei einer DIREKT erfragten Gliederung die vollständige Outline im reply, niemals einen Verweis darauf (v7.33, C14-Fix)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("Schlage mir eine zweistufige Gliederung vor");
+      expect(sys).toContain("MUSS vollständig UND WÖRTLICH im reply-Feld ausgeschrieben stehen");
+      expect(sys).toContain("siehe Gliederungsvorschlag oben");
+      // Steht INNERHALB des GLIEDERUNGS-VORSCHLAG-Blocks, nicht nur zufällig
+      // irgendwo im Prompt.
+      const blockStart = sys.indexOf("GLIEDERUNGS-VORSCHLAG");
+      const blockEnd = sys.indexOf("FORMELN:");
+      const ruleAt = sys.indexOf("MUSS vollständig UND WÖRTLICH im reply-Feld ausgeschrieben stehen");
+      expect(ruleAt).toBeGreaterThan(blockStart);
+      expect(ruleAt).toBeLessThan(blockEnd);
+    });
+
+    // v7.33 Review-Nachbesserung (Finding 5/blau, siehe DECISIONS #77):
+    // klärt das Verhältnis zur INTERNET-RECHERCHE-Regel für Misch-Anfragen
+    // ("recherchiere X und schlage dann eine Gliederung vor") – die Outline
+    // ist KEIN recherchiertes Faktum und bleibt deshalb IMMER im reply,
+    // unabhängig davon, ob in derselben Antwort recherchiert wurde.
+    it("stellt das Verhältnis zur INTERNET-RECHERCHE-Regel klar: die Outline bleibt auch bei einer Misch-Anfrage mit Websuche im reply", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("recherchiere X und schlage dann eine Gliederung vor");
+      expect(sys).toContain("Die INTERNET-RECHERCHE-Regel oben verschiebt dabei nur die recherchierten FAKTEN");
+      expect(sys).toContain("die Outline selbst ist KEIN recherchiertes Faktum");
+      // Auch diese Klarstellung steht INNERHALB des GLIEDERUNGS-VORSCHLAG-Blocks.
+      const blockStart = sys.indexOf("GLIEDERUNGS-VORSCHLAG");
+      const blockEnd = sys.indexOf("FORMELN:");
+      const clarifyAt = sys.indexOf("die Outline selbst ist KEIN recherchiertes Faktum");
+      expect(clarifyAt).toBeGreaterThan(blockStart);
+      expect(clarifyAt).toBeLessThan(blockEnd);
     });
 
     // v7.23 (Verschiebe-Auftrag, Live-Befund – siehe DECISIONS): Test
@@ -1780,21 +1837,111 @@ describe("callClaude (fetch gemockt)", () => {
       expect(retryBody.diagnostics).toEqual({ previous_message_id: "msg_ok" });
     });
 
-    it("Warn-Politik: tools_changed löst console.warn aus (unsere Tools sind konstruktionsbedingt konstant)", async () => {
-      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-      try {
-        respond({
-          stop_reason: "end_turn",
-          content: [toolUse({ reply: "ok", ops: [] })],
-          usage: { cache_read_input_tokens: 100, cache_creation_input_tokens: 0 },
-          diagnostics: { cache_miss_reason: { type: "tools_changed" } },
-        });
-        await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
-        expect(warnSpy).toHaveBeenCalled();
-        expect(warnSpy.mock.calls[0][0]).toContain("tools_changed");
-      } finally {
-        warnSpy.mockRestore();
-      }
+    // v7.33 (E2E-Finding 🟡 D18/C18, Root-Cause-Fix): die alte Annahme
+    // "unsere Tools sind konstruktionsbedingt konstant" war falsch (siehe
+    // DECISIONS #76) – die Warn-Politik unterscheidet jetzt, ob SICH SELBST
+    // (App-seitig) die Tool-Auswahl seit dem letzten Request geändert hat.
+    describe("Warn-Politik: tools_changed (v7.33 Root-Cause-Fix)", () => {
+      it("echte, unerklärliche Divergenz: IDENTISCHER Kontext/Modell in zwei Requests, Server meldet trotzdem tools_changed -> console.warn (Bug-Verdacht)", async () => {
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+        try {
+          // Erster Request etabliert die Baseline-Signatur (kein Miss-Grund
+          // nötig) – KEIN warn, weil noch keine Vergleichsbasis existiert.
+          respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })], id: "msg_1" });
+          await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+          expect(warnSpy).not.toHaveBeenCalled();
+
+          // Zweiter Request: IDENTISCHER NB_CTX (keine Wissensbasis-
+          // Änderung) und IDENTISCHES Modell – die App hat an der
+          // Tool-Auswahl NICHTS geändert. Trotzdem meldet der Server
+          // tools_changed -> unerklärlich, echter Bug-Verdacht.
+          respond({
+            stop_reason: "end_turn",
+            content: [toolUse({ reply: "ok2", ops: [] })],
+            usage: { cache_read_input_tokens: 100, cache_creation_input_tokens: 0 },
+            diagnostics: { cache_miss_reason: { type: "tools_changed" } },
+            id: "msg_2",
+          });
+          await callClaude("key", "y", NB_CTX, [], "claude-sonnet-5", null, null);
+          expect(warnSpy).toHaveBeenCalled();
+          expect(warnSpy.mock.calls[0][0]).toContain("tools_changed");
+          expect(warnSpy.mock.calls[0][0]).toContain("unverändert war");
+        } finally {
+          warnSpy.mockRestore();
+        }
+      });
+
+      it("FALSE POSITIVE vermieden: tools_changed durch Wissensbasis-Wechsel (lookup_wissen wird neu aktiviert) löst KEIN console.warn aus (Live-Befund D18)", async () => {
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+        const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+        try {
+          // Erster Request: keine große Wissensdatei -> lookup_wissen NICHT
+          // im gesendeten Tool-Array (lookupEnabled === false).
+          respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })], id: "msg_1" });
+          await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+
+          // Zweiter Request: eine große Wissensdatei ist jetzt im aktiven
+          // Notizbuch vorhanden -> lookup_wissen wird NEU angeboten
+          // (legitime Änderung, exakt der Live-Befund: F3-F5 im QA-Lauf
+          // luden zwischendurch Wissensdateien hoch/runter). Der Server
+          // meldet erwartungsgemäß tools_changed.
+          const ctxWithKnow = {
+            ...NB_CTX,
+            knowledge: { activeFiles: [{ name: "handbuch.pdf", text: "x".repeat(90000) }], others: [] },
+          };
+          respond({
+            stop_reason: "end_turn",
+            content: [toolUse({ reply: "ok2", ops: [] })],
+            usage: { cache_read_input_tokens: 100, cache_creation_input_tokens: 0 },
+            diagnostics: { cache_miss_reason: { type: "tools_changed" } },
+            id: "msg_2",
+          });
+          await callClaude("key", "y", ctxWithKnow, [], "claude-sonnet-5", null, null);
+
+          expect(warnSpy).not.toHaveBeenCalled();
+          // Trotzdem sichtbar (keine stille Unterdrückung) – neutrale
+          // Debug-Zeile statt Bug-Verdacht.
+          expect(debugSpy.mock.calls.some((c) => String(c[0]).includes("tools_changed") && String(c[0]).includes("erwartet"))).toBe(true);
+        } finally {
+          warnSpy.mockRestore();
+          debugSpy.mockRestore();
+        }
+      });
+
+      it("identischer Re-Build (kein Miss-Grund gemeldet): niemals ein tools_changed-console.warn, egal wie oft wiederholt", async () => {
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+        try {
+          for (let i = 0; i < 3; i++) {
+            respond({
+              stop_reason: "end_turn",
+              content: [toolUse({ reply: "ok" + i, ops: [] })],
+              usage: { cache_read_input_tokens: 100, cache_creation_input_tokens: 0 },
+              id: "msg_" + i,
+            });
+            await callClaude("key", "x" + i, NB_CTX, [], "claude-sonnet-5", null, null);
+          }
+          expect(warnSpy).not.toHaveBeenCalled();
+        } finally {
+          warnSpy.mockRestore();
+        }
+      });
+
+      it("allererster Request der Sitzung ohne Vergleichsbasis: tools_changed löst KEIN console.warn aus", async () => {
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+        try {
+          respond({
+            stop_reason: "end_turn",
+            content: [toolUse({ reply: "ok", ops: [] })],
+            usage: { cache_read_input_tokens: 100, cache_creation_input_tokens: 0 },
+            diagnostics: { cache_miss_reason: { type: "tools_changed" } },
+            id: "msg_1",
+          });
+          await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+          expect(warnSpy).not.toHaveBeenCalled();
+        } finally {
+          warnSpy.mockRestore();
+        }
+      });
     });
 
     it("Warn-Politik: system_changed löst KEIN console.warn aus (nach Notizbuch-/Gedächtnis-Writes normal)", async () => {

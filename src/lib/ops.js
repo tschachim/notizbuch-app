@@ -15,7 +15,16 @@
 /* v7.32.1 (Review-Fix): findDeletableChapter() setzt die Suche NACH    */
 /* einer zuerst getroffenen Notizbuch-Titelzeile fort, statt ein GLEICH-*/
 /* NAMIGES echtes Kapitel darunter für dauerhaft unlöschbar zu erklären.*/
+/* v7.33 (Finding A, DECISIONS #75, supersedet #54/#60): findChapter/    */
+/* findSection/tidy sind jetzt FENCE-AWARE – eine "#"/"##"-Zeile         */
+/* INNERHALB eines geschlossenen ```-Codeblocks zählt nicht mehr als     */
+/* Kapitel-/Abschnitts-/BOUNDARY-Grenze (computeFenceLineMask aus         */
+/* code.jsx, dieselbe Maske wie markdown.jsx#parseTree). Vorher konnte    */
+/* eine Op an einer solchen Phantom-Grenze im Code enden und den Rest     */
+/* des Codeblocks (falsch) stehen lassen bzw. löschen/ersetzen.           */
 /* ------------------------------------------------------------------ */
+
+import { computeFenceLineMask } from "./code.jsx";
 
 const HEAD_RE = /^##\s+/;
 // EIN "#" gefolgt von Whitespace – matcht bewusst NICHT "## "/"### " (nach
@@ -29,11 +38,10 @@ const CHAPTER_RE = /^#\s+/;
 // dem letzten Abschnitt eines Kapitels wurde dadurch fälschlich zum
 // Vorgänger-Abschnitt gezählt und bei replace_section/delete_section
 // GELÖSCHT bzw. bei append_to_section übersprungen (die neue Zeile landete
-// vor der Kapitelzeile statt danach). Wie schon HEAD_RE ist auch diese
-// Grenze bewusst FENCE-BLIND (siehe markdown.jsx#parseTree und DECISIONS
-// #54) – eine "#"/"##"-Zeile innerhalb eines ```-Codeblocks im
-// Abschnittsinhalt würde ebenfalls (fälschlich) als Grenze zählen; dieselbe
-// dokumentierte, hier bewusst nicht behobene Grenze wie beim Renderer.
+// vor der Kapitelzeile statt danach). Seit v7.33 FENCE-AWARE (siehe oben) –
+// alle Aufrufer (findChapter/findSection/tidy) prüfen zusätzlich die
+// Fence-Maske, BEVOR sie BOUNDARY_RE/HEAD_RE/CHAPTER_RE gegen eine Zeile
+// testen.
 const BOUNDARY_RE = /^#{1,2}\s/;
 
 export const normHead = (h) => String(h || "").replace(/^#+\s*/, "").trim().toLowerCase();
@@ -47,18 +55,24 @@ export const dispHead = (h) => String(h || "").replace(/^#+\s*/, "").trim();
 // Default 0 (bisheriges Verhalten, unverändert für alle Aufrufer ohne
 // dritten Parameter). Wird von findDeletableChapter() unten genutzt, um NACH
 // einer bereits gefundenen Notizbuch-Titelzeile weiterzusuchen.
+// v7.33 (Finding A, DECISIONS #75): fence-aware – computeFenceLineMask wird
+// aus "lines" berechnet (derselbe Zeilenstand, den auch die Suche selbst
+// nutzt) und maskiert sowohl die START- als auch die END-Suche: eine
+// "# "-Zeile INNERHALB eines geschlossenen ```-Codeblocks kann weder eine
+// gesuchte Kapitelzeile SEIN noch das Kapitel BEENDEN.
 function findChapter(lines, chapterHeading, fromIdx) {
   const t = normHead(chapterHeading);
   if (!t) return null;
+  const mask = computeFenceLineMask(lines);
   const from = typeof fromIdx === "number" ? fromIdx : 0;
   let s = -1;
   for (let i = from; i < lines.length; i++) {
-    if (CHAPTER_RE.test(lines[i]) && normHead(lines[i]) === t) { s = i; break; }
+    if (!mask[i] && CHAPTER_RE.test(lines[i]) && normHead(lines[i]) === t) { s = i; break; }
   }
   if (s === -1) return null;
   let e = lines.length;
   for (let j = s + 1; j < lines.length; j++) {
-    if (CHAPTER_RE.test(lines[j])) { e = j; break; }
+    if (!mask[j] && CHAPTER_RE.test(lines[j])) { e = j; break; }
   }
   return [s, e];
 }
@@ -74,6 +88,11 @@ function findChapter(lines, chapterHeading, fromIdx) {
 // kannte diese Ausnahme bisher NICHT (findChapter/findSection behandeln JEDE
 // "# "-Zeile gleich) – für delete_chapter ist sie aber sicherheitskritisch,
 // siehe applyOne/explainSkip unten und DECISIONS #74.
+// KEINE Fence-Maske nötig (v7.33-Konsistenz-Prüfung, siehe DECISIONS #75 und
+// derselbe Kommentar in markdown.jsx#parseTree): "firstContentIdx" wäre nur
+// dann eine Fence-interne Zeile, wenn der Fence bereits VOR der ersten
+// nicht-leeren Zeile geöffnet UND geschlossen wäre – unmöglich, da die erste
+// nicht-leere Zeile selbst der öffnende Zaun wäre (matcht nie CHAPTER_RE).
 function titleLineIdx(lines) {
   const firstContentIdx = lines.findIndex((l) => l.trim() !== "");
   return firstContentIdx !== -1 && CHAPTER_RE.test(lines[firstContentIdx]) ? firstContentIdx : -1;
@@ -127,40 +146,80 @@ function findDeletableChapter(lines, chapterField) {
 // range (optional): [from, to) grenzt die Suche auf ein einzelnes Kapitel
 // ein (siehe findChapter oben). Ohne range: globale Suche wie bisher –
 // erster Treffer im gesamten Dokument gewinnt (unverändertes Verhalten für
-// Ops ohne "chapter"-Feld).
+// Ops ohne "chapter"-Feld). v7.33 (Finding A, DECISIONS #75): fence-aware –
+// wie findChapter oben maskiert computeFenceLineMask sowohl die HEAD_RE-
+// Start- als auch die BOUNDARY_RE-End-Suche.
 function findSection(lines, heading, range) {
   const t = normHead(heading);
   if (!t) return null;
+  const mask = computeFenceLineMask(lines);
   const from = range ? range[0] : 0;
   const to = range ? range[1] : lines.length;
   let s = -1;
   for (let i = from; i < to; i++) {
-    if (HEAD_RE.test(lines[i]) && normHead(lines[i]) === t) { s = i; break; }
+    if (!mask[i] && HEAD_RE.test(lines[i]) && normHead(lines[i]) === t) { s = i; break; }
   }
   if (s === -1) return null;
   let e = to;
   for (let j = s + 1; j < to; j++) {
-    if (BOUNDARY_RE.test(lines[j])) { e = j; break; }
+    if (!mask[j] && BOUNDARY_RE.test(lines[j])) { e = j; break; }
   }
   return [s, e];
 }
 
-function tidy(lines) {
+// v7.33 Review-Nachbesserung (Finding 3, siehe DECISIONS #75/#78): Kollabiert
+// Leerzeilen-Läufe (mehr als eine Leerzeile in Folge -> genau eine)
+// AUSSERHALB von Fences; Zeilen INNERHALB eines geschlossenen ```-
+// Codeblocks bleiben davon UNANGETASTET (z. B. zwei Leerzeilen zwischen
+// zwei Python-Funktionen) – sonst würde ein Op an GANZ ANDERER Stelle im
+// Dokument (tidy() läuft immer über den GESAMTEN Text) den Code-Inhalt
+// still byte-verändern. Eigener, wiederverwendbarer Helfer (statt Kopie),
+// weil tidy() ihn ZWEIMAL braucht: einmal auf den rohen Eingabe-Zeilen
+// (Pass 1) und einmal als Sicherheitsnetz ganz am Ende (Pass 3, ersetzt die
+// vorherige GLOBALE "\n{3,}"->"\n\n"-Regex – die hatte denselben Fence-
+// Blind-Fehler wie ursprünglich Pass 1/2: sie hätte einen von Pass 1
+// bewusst erhaltenen Mehrfach-Leerzeilen-Lauf INNERHALB eines Fences beim
+// abschließenden String-Replace wieder zunichtegemacht). Verhalten
+// AUSSERHALB von Fences bleibt zur alten Regex byte-identisch (siehe Tests):
+// die Kombination aus Pass 1 + der BOUNDARY-Einfüge-Regel (die NIE zwei
+// Leerzeilen in Folge erzeugt, siehe deren eigene Prüfung) lässt dort nie
+// mehr als eine Leerzeile in Folge entstehen – Pass 3 bleibt für den
+// Nicht-Fence-Fall ein reines (verifiziertes) Sicherheitsnetz.
+function collapseBlankRuns(lines) {
+  const mask = computeFenceLineMask(lines);
   const out = [];
   let blank = 0;
-  for (const l of lines) {
+  lines.forEach((l, i) => {
+    if (mask[i]) { blank = 0; out.push(l); return; }
     if (l.trim() === "") { blank++; if (blank <= 1) out.push(""); }
     else { blank = 0; out.push(l); }
-  }
+  });
+  return out;
+}
+
+// v7.33 (Finding A, DECISIONS #75): fence-aware bei der Leerzeilen-Regel VOR
+// Struktur-Zeilen (zweite Schleife unten) – eine BOUNDARY_RE-artige Zeile
+// INNERHALB eines geschlossenen ```-Codeblocks (z. B. ein Shell-Kommentar
+// "# …") bekommt KEINE künstlich eingefügte Leerzeile mehr davor, das würde
+// den Code-Inhalt sonst byte-verändern (DATENVERLUST-Risiko, siehe
+// Kopfkommentar der Datei). Die Fence-Maske wird NACH der Leerzeilen-
+// Kollaps-Schleife (Pass 1, "out") neu berechnet, weil sich Zeilenindizes
+// durch das Kollabieren verschieben können – bewusst NICHT vorab auf
+// "lines" berechnet und einfach weitergereicht.
+function tidy(lines) {
+  const out = collapseBlankRuns(lines);
+  const mask = computeFenceLineMask(out);
   const res = [];
   for (let i = 0; i < out.length; i++) {
     // v7.14: Leerzeile jetzt auch vor "# "-Kapitelzeilen erzwungen (BOUNDARY_RE
     // statt bisher nur "^##\s+") – ohne diese Erweiterung könnte eine per Op
     // neu eingefügte Kapitelzeile direkt an vorherigem Inhalt kleben.
-    if (BOUNDARY_RE.test(out[i]) && res.length && res[res.length - 1].trim() !== "") res.push("");
+    if (!mask[i] && BOUNDARY_RE.test(out[i]) && res.length && res[res.length - 1].trim() !== "") res.push("");
     res.push(out[i]);
   }
-  return res.join("\n").replace(/\n{3,}/g, "\n\n").trim() + "\n";
+  // Pass 3 (Sicherheitsnetz, siehe collapseBlankRuns-Kommentar oben) statt
+  // der vorherigen globalen "\n{3,}"->"\n\n"-Regex.
+  return collapseBlankRuns(res).join("\n").trim() + "\n";
 }
 
 function padEnd(lines) {

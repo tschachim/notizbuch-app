@@ -175,7 +175,7 @@ describe("parseTree: Kapitel (# , v7.14)", () => {
     expect(sections.map((s) => s.chapter)).toEqual([0, 1]);
   });
 
-  it("### mitten in einer Zeile bzw. #### bleiben unverändert unstrukturell (fence-blinde Grenze bewusst geteilt mit ##)", () => {
+  it("### mitten in einer Zeile bzw. #### bleiben unverändert unstrukturell (Zeilenanfang-Pflicht, unabhängig vom v7.33-Fence-Aware-Fix)", () => {
     // Kein Zeilenanfang -> keine Struktur, egal welche Ebene.
     const { sections, chapters } = parseTree("# T\n\n## A\n\nText mit # mittendrin\n\n#### Zu tief");
     expect(chapters).toEqual([]);
@@ -273,6 +273,117 @@ describe("parseTree: Kapitel (# , v7.14)", () => {
       const { pre, chapters } = parseTree(doc);
       expect(chapters).toEqual([]);
       expect(pre.some((l) => l.text === "Freier Vorspann-Text.")).toBe(true);
+    });
+  });
+
+  // v7.33 (E2E-Finding 🔴 A/C10/D6, DECISIONS #75, supersedet #54/#60):
+  // "#"/"##"/"###"-Zeilen INNERHALB eines geschlossenen ```-Codeblocks
+  // zählen NICHT mehr als Struktur-Grenze. Die beiden konkreten Live-Repros
+  // (Bash-Kommentarzeile, "$"-Preis-Zeile) sind hier als eigene Fälle
+  // gepinnt (siehe auch docs/TESTFAELLE.md C10/D6).
+  describe("Fence-Aware Struktur-Erkennung (v7.33-Fix)", () => {
+    it("Live-Repro 1: eine Bash-Kommentarzeile ('# Löscht …') im Codeblock erzeugt KEIN Phantom-Kapitel", () => {
+      const doc =
+        "# T\n\n# Skripte\n\n## Aufräumen\n\n```bash\n" +
+        "# Löscht alle .tmp-Dateien im aktuellen Verzeichnis (rekursiv)\n" +
+        'find . -name "*.tmp" -delete\n```\n\n- danach fertig';
+      const { sections, chapters } = parseTree(doc);
+      expect(chapters.map((c) => c.title)).toEqual(["Skripte"]);
+      expect(sections.map((s) => s.title)).toEqual(["Aufräumen"]);
+      // Der komplette Codeblock (Zaun + Kommentarzeile + Kommando) bleibt IN
+      // EINEM Rutsch im Abschnitt "Aufräumen" – kein Zerreißen in mehrere
+      // Absätze/Sektionen.
+      expect(sections[0].lines.map((l) => l.text)).toEqual([
+        "", "```bash",
+        "# Löscht alle .tmp-Dateien im aktuellen Verzeichnis (rekursiv)",
+        'find . -name "*.tmp" -delete', "```", "", "- danach fertig",
+      ]);
+    });
+
+    it("Live-Repro 2: eine '#'-Zeile mit '$'-Preisangabe im Codeblock erzeugt KEIN Phantom-Kapitel", () => {
+      const doc = "# T\n\n## A\n\n```\n# Preis: $5 | Menge: 3\n```\n\n- Rest";
+      const { sections, chapters } = parseTree(doc);
+      expect(chapters).toEqual([]);
+      expect(sections.map((s) => s.title)).toEqual(["A"]);
+      expect(sections[0].lines.some((l) => l.text === "# Preis: $5 | Menge: 3")).toBe(true);
+      expect(sections[0].lines.some((l) => l.text === "- Rest")).toBe(true);
+    });
+
+    it("eine '##'-Zeile im Codeblock erzeugt KEINEN Phantom-Abschnitt (bleibt im umgebenden Abschnitt)", () => {
+      const doc = "# T\n\n## A\n\n```\n## nicht echt\ncode\n```\n\n## B\n\n- b";
+      const { sections } = parseTree(doc);
+      expect(sections.map((s) => s.title)).toEqual(["A", "B"]);
+      expect(sections[0].lines.some((l) => l.text === "## nicht echt")).toBe(true);
+      expect(sections[0].lines.some((l) => l.text === "code")).toBe(true);
+    });
+
+    it("eine '###'-Zeile im Codeblock erzeugt KEIN Phantom-Unterthema (bleibt Absatz-Inhalt des Abschnitts)", () => {
+      const doc = "# T\n\n## A\n\n```\n### nicht echt\ncode\n```\n\n- danach";
+      const { sections } = parseTree(doc);
+      expect(sections).toHaveLength(1);
+      expect(sections[0].subs).toEqual([]);
+      expect(sections[0].lines.some((l) => l.text === "### nicht echt")).toBe(true);
+    });
+
+    it("ein Codeblock DIREKT nach einer Kapitelzeile (ohne '##' davor) bleibt Kapitel-Freitext, kein Phantom-Kapitel", () => {
+      const doc = "# T\n\n# Kapitel A\n\n```\n# not real\n```\n\n# Kapitel B\n\n## Zwei";
+      const { chapters, sections } = parseTree(doc);
+      expect(chapters.map((c) => c.title)).toEqual(["Kapitel A", "Kapitel B"]);
+      expect(chapters[0].lines.map((l) => l.text)).toEqual(["", "```", "# not real", "```", ""]);
+      expect(sections.map((s) => s.title)).toEqual(["Zwei"]);
+    });
+
+    it("mehrzeiliger Fence mit MEHREREN Struktur-artigen Zeilen bleibt vollständig EIN Block (kein Zerfall)", () => {
+      const doc =
+        "# T\n\n## A\n\n```\n# eins\n## zwei\n### drei\n```\n\n## B\n\n- b";
+      const { sections } = parseTree(doc);
+      expect(sections.map((s) => s.title)).toEqual(["A", "B"]);
+      expect(sections[0].lines.map((l) => l.text)).toEqual([
+        "", "```", "# eins", "## zwei", "### drei", "```", "",
+      ]);
+    });
+
+    it("verschachtelter 4-Backtick-Zaun um Inhalt mit eigenen 3-Backtick-Zeilen bleibt EIN Block, Struktur-Zeilen darin unwirksam", () => {
+      const doc = "# T\n\n## A\n\n````\n# nicht real\n```\ninner\n```\n````\n\n## B";
+      const { sections } = parseTree(doc);
+      expect(sections.map((s) => s.title)).toEqual(["A", "B"]);
+      expect(sections[0].lines.some((l) => l.text === "# nicht real")).toBe(true);
+      expect(sections[0].lines.some((l) => l.text === "inner")).toBe(true);
+    });
+
+    it("UNTERMINIERTER Zaun bleibt bewusst fence-blind: eine '#'-Zeile danach ist weiterhin eine echte Kapitelgrenze", () => {
+      // Kein schließender Zaun bis Dokumentende -> matchFenceBlock liefert
+      // null -> computeFenceLineMask maskiert NICHTS ab hier (siehe
+      // Kopfkommentar computeFenceLineMask/code.jsx) -> altes, unverändertes
+      // Verhalten: die "#"-Zeile bleibt eine strukturelle Kapitelgrenze.
+      const doc = "# T\n\n## A\n\n```\nkeine schließende Zeile\n\n# Kapitel B\n\n## Zwei";
+      const { chapters, sections } = parseTree(doc);
+      // "A" steht VOR dem ersten echten Kapitel -> bekommt wie gehabt ein
+      // implizites titelloses Kapitel (v7.14-Verhalten, unverändert).
+      expect(chapters.map((c) => c.title)).toEqual([null, "Kapitel B"]);
+      expect(sections.map((s) => s.title)).toEqual(["A", "Zwei"]);
+      expect(sections.map((s) => s.chapter)).toEqual([0, 1]);
+    });
+
+    it("DocView: Bash-Kommentarzeile im Codeblock rendert EINEN zusammenhängenden CodeBlockView, KEIN Phantom-Kapitel/-Überschrift", () => {
+      const html = render(
+        "# T\n\n# Skripte\n\n## Aufräumen\n\n```bash\n" +
+        "# Löscht alle .tmp-Dateien im aktuellen Verzeichnis (rekursiv)\n" +
+        'find . -name "*.tmp" -delete\n```'
+      );
+      expect((html.match(/<pre/g) || []).length).toBe(1);
+      expect(html).toContain("Löscht alle .tmp-Dateien");
+      expect(html).not.toContain("```");
+      // Nur EIN Kapitel-Header ("Skripte") und EIN Abschnitts-Header
+      // ("Aufräumen") – kein zusätzlicher, aus der Kommentarzeile
+      // fabrizierter h1/h2.
+      const { chapters, sections } = parseTree(
+        "# T\n\n# Skripte\n\n## Aufräumen\n\n```bash\n" +
+        "# Löscht alle .tmp-Dateien im aktuellen Verzeichnis (rekursiv)\n" +
+        'find . -name "*.tmp" -delete\n```'
+      );
+      expect(chapters.map((c) => c.title)).toEqual(["Skripte"]);
+      expect(sections.map((s) => s.title)).toEqual(["Aufräumen"]);
     });
   });
 });

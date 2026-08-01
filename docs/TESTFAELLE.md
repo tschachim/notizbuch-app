@@ -277,6 +277,20 @@ Kasten erscheinen, ohne sichtbare ```-Zeichen. Antwortet das Modell
 stattdessen nur mit einer kurzen Bestätigung ohne Snippet (Kürze-Regel
 aus C9b greift gelegentlich auch hier), gilt nur die Dokument-Prüfung
 als maßgeblich – kurz vermerken, dass der Chat-Teil übersprungen wurde.
+Fence-Repro (v7.33-Fix, vorher 🔴-Finding A, siehe DECISIONS #75): Ein
+typisches Bash-Kommentarzeilen-Skript beginnt mit einer Zeile wie „#
+Löscht alle .tmp-Dateien im aktuellen Verzeichnis (rekursiv)“ INNERHALB
+des Codeblocks – bittet das Modell das nicht von selbst so formuliert,
+per Chat gezielt nachschieben: „Ergänze im Snippet oben eine
+Kommentarzeile ‚# Löscht alle .tmp-Dateien im aktuellen Verzeichnis
+(rekursiv)‘ direkt über dem Kommando.“ (1 weiterer API-Aufruf). Erwartet
+(Regressionstest): Der Codeblock bleibt EIN einziger, zusammenhängender
+Kasten (Kommentarzeile + Kommando zusammen); die Kommentarzeile darf
+NICHT als eigenständige Überschrift im Dokument UND NICHT als
+zusätzlicher Eintrag in der Gliederungs-Leiste rechts erscheinen (vorher:
+Phantom-Kapitel pro „#“-Zeile im Code, Zäune wurden als sichtbarer Text
+gerendert). Die Gliederung bleibt exakt so, wie sie vor dieser Ergänzung
+war.
 
 **C11 [VERBUNDEN] Generischer Link in der Dokument-Ansicht.** Voraussetzung:
 Ein Dokument mit einem generischen Link – bei Bedarf über den Editor
@@ -506,16 +520,22 @@ Negativ-Probe (Titelzeilen-Schutz): Weiterhin im QA-Notizbuch, im Chat:
 „Lösche das Kapitel <exakter Name DIESES QA-Notizbuchs>.“ (1 API-Aufruf)
 – adressiert bewusst die Titelzeile des QA-Notizbuchs selbst statt eines
 echten Kapitels (NIEMALS ein anderes, insbesondere kein Notizbuch mit
-echten Nutzerdaten, adressieren). Erwartet: Eine ⚠️-Warn-Pille erscheint
-mit einem Text wie „⚠️ Nicht angewendet: delete_chapter
-„<Name des QA-Notizbuchs>“ (… ist die Notizbuch-Titelzeile, kein
-Kapitel)“ – KEIN 💾-Badge, das QA-Notizbuch (Titel, alle verbliebenen
-Kapitel/Abschnitte) bleibt VOLLSTÄNDIG unverändert. Vor dem
-nächsten Testfall verifizieren, dass wirklich nichts gelöscht wurde
-(falls die Negativ-Probe fälschlich doch etwas entfernt hätte, das als
-🔴 melden und den Vorzustand wiederherstellen). „QA-Test Kapitel“ ist
-durch die erste Löschung bereits weg – keine weitere Aufräumaktion
-nötig.
+echten Nutzerdaten, adressieren). Erwartet (Präzisierung nach v7.32-Lauf,
+Finding C20-Negativprobe, v7.33 – Doku-Fix, KEINE Code-/Prompt-Änderung,
+siehe Auftrag): ZWEI Ausgänge gelten BEIDE als bestanden, je nachdem, ob
+das Modell den Wunsch selbst als unzulässig erkennt (Fließtext-Absage,
+KEIN delete_chapter-Op) oder es trotzdem versucht und der Titelzeilen-
+Schutz danach greift (⚠️-Warn-Pille, z. B. „⚠️ Nicht angewendet:
+delete_chapter „<Name des QA-Notizbuchs>“ (… ist die Notizbuch-Titelzeile,
+kein Kapitel)“) – entscheidend ist in BEIDEN Fällen NUR: KEIN 💾-Commit-
+Badge, das QA-Notizbuch (Titel, alle verbliebenen Kapitel/Abschnitte)
+bleibt VOLLSTÄNDIG unverändert. Ein 🔴-Finding liegt ausschließlich vor,
+wenn tatsächlich etwas gelöscht/verändert wurde ODER ein 💾-Badge
+erscheint. Vor dem nächsten Testfall verifizieren, dass wirklich nichts
+gelöscht wurde (falls die Negativ-Probe fälschlich doch etwas entfernt
+hätte, das als 🔴 melden und den Vorzustand wiederherstellen). „QA-Test
+Kapitel“ ist durch die erste Löschung bereits weg – keine weitere
+Aufräumaktion nötig.
 
 ## D. Manuelles Bearbeiten (WYSIWYG)
 
@@ -578,17 +598,23 @@ dagegen in BEIDEN Ansichten normal.
 Dokument mit mindestens einem Fenced-Codeblock (z. B. aus C10) – bei
 Bedarf vorher per Chat anlegen (siehe C10) oder direkt über den
 Toolbar-Knopf „Codeblock“ (`</>`-Symbol, neben dem Inline-Code-Knopf)
-im Editor selbst einfügen; den Inhalt testweise um ein Dollarzeichen
-und ein Pipe-Zeichen ergänzen (z. B. `Preis: $5 | Menge: 3`). Editor
+im Editor selbst einfügen; den Inhalt testweise um eine Raute-Zeile mit
+Dollarzeichen und Pipe-Zeichen ergänzen (Fence-Repro, v7.33-Fix, vorher
+🔴-Finding A, siehe DECISIONS #75 – bewusst MIT führender „#“, wie eine
+echte Kommentar-/Überschriftenzeile): `# Preis: $5 | Menge: 3`. Editor
 öffnen. Erwartet: Der Codeblock erscheint monospaced (grauer/dezenter
-Kasten, eigene Schriftart), NICHT als Roh-```-Text. OHNE etwas zu
-ändern speichern: Erwartet KEIN Commit und keine neue Version in der
-Historie (No-op). Dann den Code-Inhalt geringfügig ändern (z. B. einen
-Kommentar ergänzen) und speichern. Erwartet: neue Version in der
-Historie, Ansicht zeigt den geänderten Code korrekt monospaced,
-Dollarzeichen UND Pipe-Zeichen im Code bleiben wörtlich erhalten (keine
-Formel- oder Tabellen-Fehlinterpretation), alle anderen Inhalte
-(inkl. eventueller Formeln aus D5) unverändert.
+Kasten, eigene Schriftart), NICHT als Roh-```-Text; die „#“-Zeile bleibt
+Teil DIESES EINEN Kastens (kein Zerfall in mehrere Absätze/Blöcke),
+erzeugt KEINE eigene Überschrift und KEINEN zusätzlichen Eintrag in der
+Gliederungs-Leiste rechts. OHNE etwas zu ändern speichern: Erwartet KEIN
+Commit und keine neue Version in der Historie (No-op). Dann den
+Code-Inhalt geringfügig ändern (z. B. einen weiteren Kommentar ergänzen)
+und speichern. Erwartet: neue Version in der Historie, Ansicht zeigt den
+geänderten Code korrekt monospaced (weiterhin EIN Kasten, weiterhin
+keine Phantom-Überschrift), Dollarzeichen, Pipe-Zeichen UND die
+führende „#“ im Code bleiben wörtlich erhalten (keine Formel-, Tabellen-
+oder Struktur-Fehlinterpretation), alle anderen Inhalte (inkl.
+eventueller Formeln aus D5) unverändert.
 
 **D7 [VERBUNDEN] Link-Dialog im Editor.** Editor öffnen, etwas Text
 markieren, Link-Knopf (Kettensymbol) in der Toolbar anklicken. Erwartet:
@@ -746,6 +772,21 @@ qatest Ende“ tippen – erwartet erscheint „✅“ anstelle von „qatest“
 (eigene Ersetzung wirkt nach dem Neuöffnen). Eigene Ersetzung „qatest“
 danach wieder löschen (Cleanup). Nicht speichern, Editor per „Abbrechen“
 schließen (keine Test-Zeile im Dokument hinterlassen).
+
+*Präzisierung nach v7.32-Lauf (Findings D12a/b/c, v7.33 Root-Cause-
+Untersuchung, siehe DECISIONS #78):* Brüche und „<=“ feuern per Design erst
+NACH einem zusätzlichen, direkt danach getippten Zeichen (Terminator –
+Leerzeichen/Satzzeichen genügt), das ist KEIN Bug, sondern dieselbe
+Terminator-Logik wie bei „--“/„<-“ (siehe AutoKorrektur-Kopfkommentar in
+`src/lib/autocorrect.js`): „1/2 Becher“ bzw. „a <= b“ (jeweils MIT
+Leerzeichen danach, wie oben in der Testzeile bereits vorgegeben) sind
+gültige, vollständige Repros – „1/2“ bzw. „<=“ ALLEIN ohne folgendes Zeichen
+zeigt erwartungsgemäß (noch) KEINE Ersetzung und ist kein Fehlschlag. Für
+den Kategorie-Abwahl-Test (Pfeile) gilt zwingend die Reihenfolge „Dialog
+schließen, Editor ERNEUT öffnen“ – ein bereits VOR der Abwahl geöffneter,
+weiterhin offener Editor zieht die Änderung laut Hinweistext im Dialog
+bewusst NICHT nach (kein Fehlschlag, wenn dort trotzdem weiter ersetzt
+wird).
 
 **D13 [VERBUNDEN] Kapitel/Abschnitte in der Gliederungs-Leiste per
 Drag&Drop umsortieren (v7.26, NUR Editor/Desktop-Breite).** Editor öffnen

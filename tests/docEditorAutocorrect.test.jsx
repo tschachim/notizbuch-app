@@ -196,6 +196,124 @@ describe("AutoKorrektur: feuert NICHT in Codeblock/Codespan", () => {
   });
 });
 
+// v7.33 (E2E-Finding 🟡 F/G, Root-Cause-Fix, siehe DECISIONS #78): "instant"-
+// Regeln (kind:"text" ohne Capture-Gruppe VOR diesem Fix) ließen
+// @tiptap/core#textInputRule bei einer MEHRZEICHEN-Einfügung in EINEM
+// handleTextInput-Aufruf (z. B. Diktier-Software, manche prädiktive
+// Tastaturen, Automatisierungs-Werkzeuge) mit einer RangeError abstürzen,
+// sobald der Trigger KÜRZER war als der gesamte eingefügte Text. Diese
+// Tests simulieren eine solche Mehrzeichen-Einfügung DIREKT über EINEN
+// handleTextInput-Aufruf (bewusst NICHT über typeText/typeChar, die immer
+// EIN Zeichen pro Aufruf senden – siehe Kopfkommentar der Datei).
+function typeBulk(editor, text) {
+  const { from, to } = editor.state.selection;
+  const handled = editor.view.someProp("handleTextInput", (f) => f(editor.view, from, to, text));
+  if (!handled) editor.view.dispatch(editor.view.state.tr.insertText(text, from, to));
+  return handled;
+}
+
+describe("AutoKorrektur: Mehrzeichen-Einfügung in EINEM handleTextInput-Aufruf (v7.33, F/G-Root-Cause-Fix)", () => {
+  it("REGRESSION (vorher: RangeError 'Position … out of range'): 'Pfeil ->' als EIN Bulk-Aufruf wirft NICHT mehr", () => {
+    const editor = buildEditor(null);
+    editor.commands.focus("end");
+    expect(() => typeBulk(editor, "Pfeil ->")).not.toThrow();
+    editor.destroy();
+  });
+
+  it("der Trigger ALLEIN als Bulk-Aufruf (kein Text davor) wird weiterhin korrekt ersetzt", () => {
+    const editor = buildEditor(null);
+    editor.commands.focus("end");
+    typeBulk(editor, "->");
+    expect(editor.state.doc.textContent).toBe("→");
+    editor.destroy();
+  });
+
+  it("mehrere weitere instant-Trigger als eigenständiger Bulk-Aufruf werfen ebenfalls nicht (Smiley, Marken-Kürzel)", () => {
+    for (const trigger of [":)", "(c)", "<3", "..."]) {
+      const editor = buildEditor(null);
+      editor.commands.focus("end");
+      expect(() => typeBulk(editor, trigger)).not.toThrow();
+      editor.destroy();
+    }
+  });
+
+  it("terminator-/word-kind (z. B. '<=', '1/2') werfen bei einer Mehrzeichen-Einfügung ebenfalls nicht, auch wenn der Terminator nicht das letzte Zeichen des gesamten Einfüge-Vorgangs ist (dokumentiertes Restrisiko: keine Ersetzung in diesem Fall, aber kein Crash und kein Datenverlust)", () => {
+    const editor = buildEditor(null);
+    editor.commands.focus("end");
+    expect(() => typeBulk(editor, "a <= b")).not.toThrow();
+    editor.destroy();
+
+    const editor2 = buildEditor(null);
+    editor2.commands.focus("end");
+    expect(() => typeBulk(editor2, "nimm 1/2 Becher")).not.toThrow();
+    editor2.destroy();
+  });
+
+  // v7.33 Review-Nachbesserung (Finding 1, siehe DECISIONS #78): Der
+  // multiply-Handler (eigene Custom-InputRule in DocEditor.jsx, KEIN
+  // textInputRule()) benutzte "range.from"/"range.to" bisher DIREKT ohne
+  // Gegenprüfung – bei derselben Mehrzeichen-Einfügung wie oben crashte er
+  // WEITERHIN (Review-Probe: "Rechne 2x3" als Bulk-Aufruf -> RangeError
+  // "Position 8 out of range"), obwohl die Kategorie "vergleiche" (enthält
+  // die multiply-Regel) DEFAULT-AKTIV ist – exakt die vom Fix-Auftrag
+  // adressierte Nutzer-Situation (Diktat/prädiktive Tastatur) blieb also
+  // in der Standard-Konfiguration reproduzierbar crash-anfällig.
+  it("REGRESSION (Review-Finding 1, vorher weiterhin: RangeError 'Position … out of range'): multiply-kind ('2x3') wirft bei Mehrzeichen-Einfügung NICHT mehr, Kategorie 'vergleiche' ist default-aktiv", () => {
+    const editor = buildEditor(null);
+    editor.commands.focus("end");
+    expect(() => typeBulk(editor, "Rechne 2x3")).not.toThrow();
+    editor.destroy();
+  });
+
+  it("multiply-kind: der Trigger ALLEIN als Bulk-Aufruf (kein Text davor) wird weiterhin korrekt ersetzt", () => {
+    const editor = buildEditor(null);
+    editor.commands.focus("end");
+    typeBulk(editor, "2x3");
+    expect(editor.state.doc.textContent).toBe("2×3");
+    editor.destroy();
+  });
+
+  // v7.33 Review-Nachbesserung (Finding 2, siehe DECISIONS #78): Die
+  // quote-Regeln (compileQuoteEntry, autocorrect.js) liefen wie "instant"
+  // VOR dem Fix ohne Capture-Gruppe durch dieselbe textInputRule() – bei
+  // Mehrzeichen-Einfügung entsprechend derselbe Absturz (Review-Proben:
+  // 'sagte "' -> "Position 7 out of range", 'er"' -> "Position 3 out of
+  // range"). Kategorie ist default AUS, aber per Einstellungen aktivierbar.
+  describe("Anführungszeichen (kind:'quote', opt-in) – Mehrzeichen-Einfügung", () => {
+    const quoteCfg = { enabled: true, categories: { anfuehrung_de: true }, custom: [] };
+
+    it("REGRESSION öffnend (Review-Finding 2): 'sagte \"' als Bulk-Aufruf wirft NICHT mehr", () => {
+      const editor = buildEditor(quoteCfg);
+      editor.commands.focus("end");
+      expect(() => typeBulk(editor, 'sagte "')).not.toThrow();
+      editor.destroy();
+    });
+
+    it("REGRESSION schließend (Review-Finding 2): '...er\"' als Bulk-Aufruf NACH einem Wort wirft NICHT mehr", () => {
+      const editor = buildEditor(quoteCfg);
+      editor.commands.focus("end");
+      typeText(editor, "Wort davor ");
+      expect(() => typeBulk(editor, 'er"')).not.toThrow();
+      editor.destroy();
+    });
+
+    it("der Trigger ALLEIN als Bulk-Aufruf wird weiterhin korrekt kontextabhängig ersetzt (öffnend am Zeilenanfang, schließend nach einem Wort)", () => {
+      const editorOpen = buildEditor(quoteCfg);
+      editorOpen.commands.focus("end");
+      typeBulk(editorOpen, '"');
+      expect(editorOpen.state.doc.textContent).toBe("„");
+      editorOpen.destroy();
+
+      const editorClose = buildEditor(quoteCfg);
+      editorClose.commands.focus("end");
+      typeText(editorClose, "Wort");
+      typeBulk(editorClose, '"');
+      expect(editorClose.state.doc.textContent).toBe("Wort“");
+      editorClose.destroy();
+    });
+  });
+});
+
 describe("AutoKorrektur: Undo (ProseMirror-Standard undoInputRule)", () => {
   it("direkt nach der Ersetzung stellt undoInputRule den getippten Originaltext wieder her", () => {
     const editor = buildEditor(null);

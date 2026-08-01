@@ -651,12 +651,13 @@ describe("applyOps: delete_chapter (v7.32, Live-Befund 'AI Codex Kapitel lösche
     // abgedeckt (DOC_CH hat kein zweites "# Wissensbasis"-Kapitel).
   });
 
-  // BEKANNTE, bewusst NICHT behobene Grenze (siehe BOUNDARY_RE-Kopfkommentar/
-  // DECISIONS #54): CHAPTER_RE ist FENCE-BLIND - eine "# "-Zeile INNERHALB
-  // eines ```-Codeblocks zählt fälschlich als Kapitelgrenze. Pin-Test
-  // dokumentiert das bestehende (nicht neu eingeführte) Verhalten für
-  // delete_chapter, kein Fix-Auftrag.
-  describe("FENCE-BLIND-Grenze (bestehend, dokumentiert, NICHT behoben) gilt auch für delete_chapter", () => {
+  // v7.33 (Finding A, DECISIONS #75, supersedet #54/#60): findChapter/
+  // findSection/tidy sind jetzt FENCE-AWARE - eine "# "-Zeile INNERHALB
+  // eines geschlossenen ```-Codeblocks zählt NICHT mehr als Kapitelgrenze.
+  // Test UMGEDREHT (pinnte vorher das alte, fehlerhafte Verhalten): der
+  // Codeblock samt der darin enthaltenen Phantom-"#"-Zeile gehört jetzt
+  // VOLLSTÄNDIG zu "Kapitel A" und wird komplett mitgelöscht.
+  describe("Fence-Aware-Grenze (v7.33, behoben) gilt auch für delete_chapter", () => {
     const DOC_FENCE = [
       "# Wissensbasis",
       "",
@@ -678,21 +679,178 @@ describe("applyOps: delete_chapter (v7.32, Live-Befund 'AI Codex Kapitel lösche
       "",
     ].join("\n");
 
-    it("eine '# '-Zeile INNERHALB eines ```-Codeblocks wird fälschlich als Kapitelende gewertet", () => {
+    it("eine '# '-Zeile INNERHALB eines ```-Codeblocks wird NICHT mehr als Kapitelende gewertet", () => {
       const out = applyOps(DOC_FENCE, [{ type: "delete_chapter", chapter: "Kapitel A" }]);
-      // Gewollt gelöscht: Kapitelzeile + "## Eins".
+      // Der GESAMTE Inhalt von "Kapitel A" ist weg - Kapitelzeile, "## Eins",
+      // der komplette Codeblock (inkl. der Phantom-"#"-Zeile darin) UND der
+      // Freitext danach, bis zum echten "# Kapitel B".
       expect(out).not.toContain("# Kapitel A");
       expect(out).not.toContain("## Eins");
-      // NICHT gewollt, aber dokumentiertes Bestandsverhalten: Die Löschung
-      // endet VOR der fingierten "#"-Zeile im Codeblock statt am echten
-      // Kapitelende - der Rest des (jetzt kaputten) Codeblocks bleibt als
-      // Textleiche stehen.
-      expect(out).toContain("# not a real chapter");
-      expect(out).toContain("- nach dem Codeblock");
-      expect(out).toContain("# Kapitel B");
-      expect(out).toContain("## Zwei");
-      expect(out).toContain("- b");
+      expect(out).not.toContain("# not a real chapter");
+      expect(out).not.toContain("- nach dem Codeblock");
+      expect(out).not.toContain("```");
+      expect(out).toBe("# Wissensbasis\n\n# Kapitel B\n\n## Zwei\n\n- b\n");
     });
+  });
+});
+
+// v7.33 (Finding A, DECISIONS #75, supersedet #54/#60): findChapter/
+// findSection/tidy sind FENCE-AWARE – eine "#"/"##"-Zeile INNERHALB eines
+// geschlossenen ```-Codeblocks zählt nicht mehr als Abschnitts-/Kapitel-
+// Grenze und bekommt in tidy() keine künstliche Leerzeile mehr davor
+// eingefügt (vorher ein DATENVERLUST-Risiko, siehe Kopfkommentar der
+// Datei: eine Op konnte an der Phantom-Grenze enden und falsche Bereiche
+// löschen/ersetzen, oder tidy() konnte Code-Inhalt durch eine eingefügte
+// Leerzeile verändern).
+describe("Fence-Aware Abschnitts-/Kapitel-Grenzen bei Ops (v7.33-Fix)", () => {
+  const DOC_FENCE_SECTION = [
+    "# T",
+    "",
+    "## Eins",
+    "",
+    "```",
+    "# fake chapter",
+    "## fake section",
+    "```",
+    "",
+    "- inhalt",
+    "",
+    "## Zwei",
+    "",
+    "- b",
+    "",
+  ].join("\n");
+
+  it("delete_section endet am ECHTEN Abschnittsende, nicht an einer Struktur-Zeile INNERHALB des Codeblocks", () => {
+    const out = applyOps(DOC_FENCE_SECTION, [{ type: "delete_section", heading: "## Eins" }]);
+    expect(out).toBe("# T\n\n## Zwei\n\n- b\n");
+  });
+
+  it("replace_section auf einen ANDEREN Abschnitt lässt einen Codeblock mit Struktur-artigen Zeilen in einem UNBETEILIGTEN Abschnitt byte-genau unangetastet", () => {
+    const doc = [
+      "# T", "", "## Eins", "", "- alt", "", "## Zwei", "",
+      "```", "# nicht real", "## auch nicht", "```", "", "- code Kommentar", "",
+    ].join("\n");
+    const out = applyOps(doc, [{ type: "replace_section", heading: "## Eins", content: "- neu" }]);
+    expect(out).toContain("## Eins\n\n- neu");
+    expect(out).not.toContain("- alt");
+    // Der komplette Codeblock in "## Zwei" bleibt byte-genau erhalten – KEINE
+    // eingefügte Leerzeile vor "# nicht real"/"## auch nicht" (tidy() ist
+    // jetzt fence-aware).
+    expect(out).toContain("```\n# nicht real\n## auch nicht\n```\n\n- code Kommentar");
+  });
+
+  it("append_to_section fügt NACH dem kompletten, im Abschnitt enthaltenen Codeblock an (nicht mittendrin)", () => {
+    const doc = [
+      "# T", "", "## Eins", "", "```", "# fake", "code", "```", "",
+    ].join("\n");
+    const out = applyOps(doc, [{ type: "append_to_section", heading: "## Eins", content: "- neu" }]);
+    // Der Codeblock bleibt vollständig VOR der neuen Zeile stehen.
+    expect(out.indexOf("```\n# fake\ncode\n```")).toBeLessThan(out.indexOf("- neu"));
+    expect(out).toContain("- neu");
+  });
+
+  it("delete_section mit chapter-Eingrenzung findet die Kapitelgrenze (findChapter) ebenfalls fence-aware", () => {
+    // Regressionscheck: das optionale "chapter"-Feld bei delete_section
+    // grenzt intern über findChapter (jetzt fence-aware) ein – ein
+    // Codeblock VOR dem eigentlich gesuchten Abschnitt darf die
+    // Kapitelgrenze nicht verschieben.
+    const doc = [
+      "# T", "", "# Kapitel A", "", "## Vorab", "", "```", "# fake", "```", "",
+      "## Eins", "", "- alt", "", "# Kapitel B", "", "## Zwei", "",
+    ].join("\n");
+    const out = applyOps(doc, [{ type: "delete_section", heading: "## Eins", chapter: "Kapitel A" }]);
+    expect(out).not.toContain("## Eins");
+    expect(out).not.toContain("- alt");
+    expect(out).toContain("# Kapitel B");
+    expect(out).toContain("## Zwei");
+    // Der Codeblock in "## Vorab" bleibt unangetastet.
+    expect(out).toContain("```\n# fake\n```");
+  });
+
+  it("tidy(): eine Struktur-artige Zeile INNERHALB eines Codeblocks bekommt KEINE künstliche Leerzeile mehr davor (Datenverlust-Fix)", () => {
+    // Ein Op, der an ANDERER Stelle im Dokument etwas ändert, ruft am Ende
+    // trotzdem tidy() auf dem GESAMTEN Dokument auf – der Codeblock hier
+    // muss dabei byte-genau bleiben.
+    const doc = [
+      "# T", "", "## Eins", "", "- alt", "", "## Zwei", "",
+      "```py", "# Kommentar", "## noch ein Kommentar", "code()", "```", "",
+    ].join("\n");
+    const out = applyOps(doc, [{ type: "append_to_section", heading: "## Eins", content: "- neu" }]);
+    expect(out).toContain("```py\n# Kommentar\n## noch ein Kommentar\ncode()\n```");
+  });
+
+  // v7.33 Review-Nachbesserung (Finding 3, siehe DECISIONS #75/#78):
+  // tidy()s Leerzeilen-KOLLAPS-Schleife (mehr als eine Leerzeile in Folge
+  // -> genau eine) war bisher FENCE-BLIND – eine per Op ANDERSWO im
+  // Dokument ausgelöste tidy()-Anwendung (tidy läuft immer über den
+  // GESAMTEN Text) kollabierte dabei still eine Doppel-Leerzeile INNERHALB
+  // eines Codeblocks (z. B. zwischen zwei Python-Funktionen) zu einer
+  // einzigen – reale Byte-Veränderung von Nutzer-Code ohne jeden fachlichen
+  // Anlass. Jetzt fence-aware (collapseBlankRuns), byte-genau gepinnt.
+  it("tidy(): eine DOPPELTE Leerzeile INNERHALB eines Codeblocks übersteht einen Op an ANDERER Stelle byte-genau (Review-Finding 3, Kollaps-Fix)", () => {
+    const doc = [
+      "# T", "", "## Eins", "", "- alt", "", "## Zwei", "",
+      "```py", "def f():", "    return 1", "", "", "def g():", "    return 2", "```", "",
+    ].join("\n");
+    const out = applyOps(doc, [{ type: "delete_section", heading: "## Eins" }]);
+    expect(out).not.toContain("## Eins");
+    expect(out).not.toContain("- alt");
+    // Die ZWEI Leerzeilen zwischen "return 1" und "def g():" bleiben exakt
+    // erhalten (kein Kollaps auf eine einzige Leerzeile).
+    expect(out).toContain(
+      "```py\ndef f():\n    return 1\n\n\ndef g():\n    return 2\n```"
+    );
+  });
+
+  it("UNTERMINIERTER Zaun bleibt bewusst fence-blind (dokumentiertes Restrisiko, GIGO-Philosophie): delete_section endet weiterhin an der Struktur-Zeile im offenen Block", () => {
+    const doc = [
+      "# T", "", "## Eins", "", "```", "keine schließende Zeile", "",
+      "## Zwei", "", "- b", "",
+    ].join("\n");
+    const out = applyOps(doc, [{ type: "delete_section", heading: "## Eins" }]);
+    // "## Zwei" bleibt eine echte, erkannte Grenze (kein schließender Zaun
+    // vorhanden -> keine Fence-Ausnahme, siehe computeFenceLineMask).
+    expect(out).not.toContain("## Eins");
+    expect(out).not.toContain("keine schließende Zeile");
+    expect(out).toContain("## Zwei");
+    expect(out).toContain("- b");
+  });
+
+  // v7.33 Review-Nachbesserung (Finding 6/blau, siehe DECISIONS #75):
+  // zwei billige, bisher fehlende Pin-Tests für die beiden Rand-Konstellationen
+  // "Heading existiert NUR im Fence" und "Heading im Fence VOR dem echten
+  // Abschnitt" – beide waren laut Review bereits korrekt implementiert
+  // (findSection/explainSkip sind fence-aware), aber ungepinnt.
+  it("ein Heading, das NUR innerhalb eines Codeblocks existiert, wird NICHT gefunden – Op wird korrekt übersprungen (kein echter Abschnitt)", () => {
+    const doc = [
+      "# T", "", "## Echt", "", "- x", "", "```", "## NurImCode", "code()", "```", "",
+    ].join("\n");
+    const { text, results } = applyOpsDetailed(doc, [
+      { type: "delete_section", heading: "## NurImCode" },
+    ]);
+    expect(text).toBe(doc); // byte-genau unverändert
+    expect(results[0].applied).toBe(false);
+    expect(results[0].reason).toContain("nicht gefunden");
+    // Der Codeblock samt der Phantom-Überschrift darin bleibt unangetastet.
+    expect(text).toContain("```\n## NurImCode\ncode()\n```");
+  });
+
+  it("ein Heading, das im Codeblock VOR dem echten, gleichnamigen Abschnitt steht, trifft den ECHTEN Abschnitt – der Codeblock bleibt byte-genau erhalten", () => {
+    const doc = [
+      "# T", "", "```", "## Echt", "alter Kommentar", "```", "",
+      "## Echt", "", "- echter Inhalt", "", "## Danach", "", "- d", "",
+    ].join("\n");
+    const out = applyOps(doc, [
+      { type: "replace_section", heading: "## Echt", content: "- ersetzt" },
+    ]);
+    expect(out).toContain("## Echt\n\n- ersetzt");
+    expect(out).not.toContain("- echter Inhalt");
+    // Der Codeblock (inkl. der fingierten "## Echt"-Zeile darin) bleibt
+    // byte-genau erhalten – die Ersetzung traf NICHT ihn.
+    expect(out).toContain("```\n## Echt\nalter Kommentar\n```");
+    expect(out).toContain("## Danach");
+    expect(out).toContain("- d");
   });
 });
 

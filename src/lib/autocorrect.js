@@ -252,6 +252,45 @@ export const AUTOCORRECT_CATEGORIES = [
 
 /* ---------------- Regel-Compiler (Kategorie-Eintrag → TipTap-taugliche Regex) ---------------- */
 
+// v7.33 (E2E-Finding 🟡 F/G, Live-Befund + Root-Cause-Fix): "instant"-Regeln
+// hatten bisher KEINE Capture-Gruppe um den Trigger (nur "esc$", siehe
+// unten) – @tiptap/core#textInputRule berechnet die Ersetzungs-Position
+// darüber, OB match[1] existiert (siehe node_modules/@tiptap/core/src/
+// inputRules/textInputRule.ts): fehlt sie, bleibt die von prosemirror-
+// inputrules vorberechnete "range" UNKORRIGIERT stehen. Diese "range"
+// nimmt an, dass die komplette neu eingefügte "text"-Zeichenkette Teil des
+// Treffers ist ("range.from = from - (match[0].length - text.length)") –
+// stimmt bei ECHTEM Zeichen-für-Zeichen-Tippen (text.length === 1) immer,
+// bricht aber bei einer MEHRZEICHEN-Einfügung in EINEM handleTextInput-
+// Aufruf (Diktier-Software, manche prädiktive/virtuelle Tastaturen,
+// Zwischenablage-artige Automatisierungs-Werkzeuge, die ganze Textstücke
+// statt einzelner Tasten einfügen), wenn der Trigger KÜRZER ist als der
+// gesamte eingefügte Text: "range.from" landet dann VOR dem Dokumentanfang
+// bzw. hinter dem Dokumentende, ProseMirror wirft eine
+// RangeError("Position … out of range") – VERIFIZIERT per Test
+// (tests/docEditorAutocorrect.test.jsx, "Mehrzeichen-Einfügung"). Fix: JEDE
+// über DIESE Funktion kompilierte Regel (terminator/word/backslash/instant)
+// bekommt jetzt eine Capture-Gruppe um den Trigger – @tiptap/core korrigiert
+// "range"/"insert" darüber selbst (siehe textInputRule.ts, "if (match[1])"),
+// der Absturz verschwindet. DIESELBE Lücke bestand (Review-Nachbesserung,
+// v7.33) auch bei zwei WEITEREN Regel-Familien mit `kind: "text"`, die
+// NICHT über compileEntry laufen und deshalb hier NICHT automatisch
+// mitgefixt wurden: (1) compileQuoteEntry() unten (Anführungszeichen,
+// eigener Fix dort) und (2) der `kind: "multiply"`-Handler in
+// DocEditor.jsx#AutoCorrect (kein Capture-Gruppen-Fall, sondern ein reiner
+// Custom-Handler ohne tiptaps match[1]-Korrektur – eigener Guard
+// `range.from > range.to` dort, siehe Kommentar in DocEditor.jsx). Restrisiko
+// (dokumentiert, bewusst nicht weiter behoben, gilt für ALLE DREI Stellen
+// oben): Bei einer solchen Mehrzeichen-Einfügung, bei der VOR dem Trigger
+// INNERHALB desselben Einfüge-Vorgangs noch weiterer, NOCH NICHT im Dokument
+// stehender Text liegt (z. B. "Pfeil ->" als EIN Diktier-/Automatisierungs-
+// Ereignis), geht dieser vorangehende Teil verloren (@tiptap/core kürzt ihn
+// beim "cutOff > 0"-Zweig auf den durch "range" gedeckten Bereich; der
+// multiply-Guard unten lässt in diesem Fall schlicht unersetzt) – kein
+// Crash mehr, aber auch kein Datenerhalt in diesem Extremfall. ECHTES
+// Tastatur-Tippen (die weit überwiegende Mehrheit aller Eingaben) dispatcht
+// pro physischem Tastendruck IMMER genau ein Zeichen und ist von diesem
+// Restrisiko nicht betroffen (siehe DECISIONS #78).
 function compileEntry(entry) {
   const esc = escapeRegex(entry.trigger);
   let source;
@@ -262,7 +301,7 @@ function compileEntry(entry) {
   } else if (entry.kind === "backslash") {
     source = "(" + esc + ")[^A-Za-z]$";
   } else {
-    source = esc + "$"; // "instant"
+    source = "(" + esc + ")$"; // "instant" – jetzt MIT Capture-Gruppe, siehe Kommentar oben
   }
   return { trigger: entry.trigger, replacement: entry.replacement, kind: "text", find: new RegExp(source) };
 }
@@ -284,10 +323,19 @@ function compileMultiplyEntry(entry) {
 // sonst "schließend". ZWEI Regeln (öffnend zuerst im Ergebnis-Array,
 // siehe buildActiveRules) statt einer bedingten Ersetzung, weil
 // textInputRule() pro Regel nur EIN festes replace kennt.
+// v7.33 Review-Nachbesserung (Finding 2, siehe DECISIONS #78): fehlten
+// bisher OHNE Capture-Gruppe um den Trigger (identischer Fehler wie beim
+// "instant"-kind vor dem F/G-Fix in compileEntry oben) – bei einer
+// Mehrzeichen-Einfügung (Diktat/prädiktive Tastatur/Automatisierung) ließ
+// das @tiptap/core#textInputRule ebenfalls mit einer RangeError abstürzen
+// (match[1] fehlte, die Korrektur der vorberechneten Range blieb aus).
+// Jetzt MIT Capture-Gruppe um den Trigger (Trigger steht am Match-Ende,
+// tiptaps match[1]-Korrektur hängt dadurch nichts Falsches an – normales
+// Zeichen-für-Zeichen-Tippen bleibt verhaltensgleich).
 function compileQuoteEntry(entry) {
   const esc = escapeRegex(entry.trigger);
-  const openFind = new RegExp("(?<![^\\s([{])" + esc + "$");
-  const closeFind = new RegExp(esc + "$");
+  const openFind = new RegExp("(?<![^\\s([{])(" + esc + ")$");
+  const closeFind = new RegExp("(" + esc + ")$");
   return [
     { trigger: entry.trigger, replacement: entry.open, kind: "text", find: openFind },
     { trigger: entry.trigger, replacement: entry.close, kind: "text", find: closeFind },

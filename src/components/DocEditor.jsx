@@ -753,6 +753,25 @@ export const AutoCorrect = Extension.create({
         ? new InputRule({
             find: rule.find,
             handler: ({ state, range, match }) => {
+              // v7.33 Review-Nachbesserung (Finding 1, siehe DECISIONS #78):
+              // "range" wird von prosemirror-inputrules VORBERECHNET unter
+              // der Annahme, der GESAMTE neu eingefügte Text sei Teil des
+              // Treffers (dieselbe Prämisse wie bei textInputRule, siehe
+              // Kommentar in lib/autocorrect.js#compileEntry) – bei einer
+              // MEHRZEICHEN-Einfügung in EINEM handleTextInput-Aufruf (Diktat/
+              // prädiktive Tastatur/Automatisierung), die LÄNGER ist als der
+              // eigentliche Treffer, kann "range.from" dadurch NACH
+              // "range.to" liegen (range.from > range.to) – ein direkter
+              // insertText()-Aufruf mit einer solchen Range wirft eine
+              // RangeError, GENAU wie beim instant-kind-Absturz, den dieser
+              // Handler (anders als textInputRule) NICHT automatisch
+              // korrigiert bekommt (kein match[1]-Ausgleich hier, siehe
+              // textInputRule.ts). Guard: bei einer ungültigen Range einfach
+              // NICHT ersetzen (keine Transaktion, siehe InputRule.ts:
+              // "!tr.steps.length" -> No-op) statt abzustürzen – normales
+              // Zeichen-für-Zeichen-Tippen ist davon nie betroffen
+              // (range.from <= range.to gilt dort immer).
+              if (range.from > range.to) return;
               const [, digit1, spaceBefore, spaceAfter, digit2] = match;
               state.tr.insertText(digit1 + spaceBefore + "×" + spaceAfter + digit2, range.from, range.to);
             },

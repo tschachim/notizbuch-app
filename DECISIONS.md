@@ -5020,3 +5020,434 @@ aus `referenz-app.jsx` übernommen.
         außerdem die Namensgleichheits-Behandlung als neues Restrisiko (4)
         ergänzt, plus Pin-Test „zwei gleichnamige ECHTE Kapitel → erster
         Treffer gewinnt“ (konsistent zur Abschnitts-Semantik).
+
+75. **Fence-Aware Struktur-Erkennung – FENCE-BLIND-Grenze aus #54/#60
+    behoben (v7.33, 🔴 E2E-Finding A/C10/D6, Live-Befund).** Ein Bash-
+    Snippet mit einer Kommentarzeile „# Löscht alle .tmp-Dateien im
+    aktuellen Verzeichnis (rekursiv)“ per Chat abgelegt zerriss die
+    DOKUMENT-Ansicht: Die ```-Zäune erschienen als sichtbarer Text, JEDE
+    „# “-Zeile im Code wurde zum eigenständigen Phantom-Kapitel (in
+    Dokument UND Gliederungs-Leiste), der Codeblock zerfiel in mehrere
+    Absätze. Zweites Repro identisch mit „# Preis: $5 | Menge: 3“. Ursache:
+    `parseTree` (`markdown.jsx`) und `findChapter`/`findSection`/`tidy`
+    (`ops.js`) splitteten Kapitel/Abschnitte/Unterthemen zeilenweise OHNE
+    Fence-Tracking – eine Struktur-Zeile INNERHALB eines ```-Codeblocks
+    zählte fälschlich als Grenze (bewusst dokumentierte, aber nie behobene
+    Einschränkung aus #54/#60). In `ops.js` sogar mit DATENVERLUST-Risiko:
+    eine Op konnte an der Phantom-Grenze im Code enden und falsche Bereiche
+    löschen/ersetzen, `tidy()` konnte eine künstliche Leerzeile in
+    Code-Inhalt einfügen. **Dieser Eintrag supersedet #54 und den
+    Fence-Blind-Teil von #60** – die dort dokumentierte Grenze ist ab v7.33
+    behoben; die übrigen Teile von #54 (Codeblock-Support an sich,
+    `code.jsx`-Design, `~~~`-Fence-Restriktion) bleiben unverändert gültig.
+    **Supersede-Vervollständigung (Review-Nachbesserung, append-only):**
+    Dieselbe, wortgleich wiederholte FENCE-BLIND-Formulierung („#54/#60
+    geteilte, dokumentierte Grenze“) stand außerdem an ZWEI weiteren
+    Stellen als Alt-Text und gilt ab hier ebenfalls als superseded/behoben:
+    (a) **#68** (Drag&Drop-Umsortierung in der EDITOR-Gliederungs-Leiste,
+    v7.26), Restrisiko (3) – betraf dort allerdings NIE den in #68
+    beschriebenen Editor-Outline-Pfad selbst (`extractOutline` traversiert
+    das ECHTE ProseMirror-Dokument, ein Codeblock ist dort strukturell ein
+    eigener Node-Typ und wird von `heading`-Knoten bereits durch
+    ProseMirror selbst sauber getrennt – Editor-Outline und Drag&Drop waren
+    also SCHON IMMER fence-aware, siehe Code-Review v7.33); die damalige
+    Restrisiko-Formulierung war zu pauschal aus #54/#60 übernommen und
+    bezog sich der Sache nach auf `parseTree`/`ops.js` (die DIESER Eintrag
+    hier behebt) – Viewer/Editor-Outline sind durch den v7.33-Umbau jetzt
+    ERSTMALS konsistent fence-aware. (b) **#74** (`delete_chapter`-Op,
+    v7.32), Restrisiko (1) – verwies auf genau die BOUNDARY_RE-Fence-
+    Blindheit in `ops.js`, die dieser Eintrag behebt, UND auf den
+    zugehörigen Pin-Test in `tests/ops.test.js`, der mit v7.33 bewusst
+    UMGEDREHT wurde (pinnte vorher das alte, fehlerhafte Verhalten – siehe
+    oben, „Bestehende FENCE-BLIND-Pin-Tests umgedreht“). Alt-Text an beiden
+    Stellen bewusst NICHT rückwirkend verändert (append-only-Konvention
+    dieser Datei) – dieser Verweis hier ist die maßgebliche Aktualisierung.
+    - **EINE Quelle der Wahrheit (`src/lib/code.jsx`, `computeFenceLineMask`,
+      neu):** Baut aus einem Zeilen-Array eine `boolean[]`-Maske
+      „Zeilenindex → Teil eines GESCHLOSSENEN Fenced-Codeblocks“ (Zaun-
+      Zeilen INKLUSIVE – die matchen ohnehin nie `#`/`##`/`###`, eine
+      Markierung schadet also nicht und macht die Grenze für Aufrufer
+      eindeutig). Läuft strukturell wie das bestehende
+      `splitFenceSegments` (öffnender Zaun → `matchFenceBlock` → bei
+      Erfolg überspringen), bewusst NICHT darauf aufgesetzt (arbeitet
+      direkt auf einem Zeilen-Array statt einem String, kein Join/Split-
+      Umweg bei langen Dokumenten). UNTERMINIERTE Zäune bleiben bewusst
+      UNMARKIERT bis Dokumentende – dieselbe konservative „GIGO“-
+      Philosophie wie überall in `code.jsx`: ein vergessener Schluss-Zaun
+      soll nicht das halbe Dokument strukturlos machen. `code.jsx` bleibt
+      dabei weiterhin das Blatt im Abhängigkeitsbaum (importiert selbst
+      nichts) – `ops.js` importiert jetzt ERSTMALS aus `code.jsx`
+      (Importrichtung geprüft: keine Zirkelbeziehung, da `code.jsx`
+      nichts aus `ops.js`/`markdown.jsx` importiert).
+    - **`markdown.jsx#parseTree`:** Berechnet die Maske einmal pro Aufruf
+      und prüft sie zusätzlich zu jeder `#`/`##`/`###`-Zeilenprüfung –
+      eine maskierte Zeile fällt normal in den aktuellen Kontext
+      (pre/Kapitel/Abschnitt/Unterthema), GENAU wie jede andere Nicht-
+      Struktur-Zeile. Dadurch bleibt ein mehrzeiliger Fence über Struktur-
+      Zeilen hinweg IMMER im selben `lines`-Array desselben Abschnitts –
+      `renderBlocks` (unverändert, war bereits fence-aware INNERHALB einer
+      Section) erkennt ihn dadurch automatisch wieder zusammenhängend,
+      OHNE selbst angefasst werden zu müssen (verifiziert mit Tests: EIN
+      `CodeBlockView`, kein Phantom-Kapitel). `titleLineIdx`
+      (Titelzeilen-Erkennung) braucht KEINE Maske: die erste nicht-leere
+      Zeile des Dokuments kann strukturell nie innerhalb eines bereits
+      geöffneten UND geschlossenen Fences liegen (sie wäre sonst selbst
+      der öffnende Zaun, der nie `#`/`##`/`###` matcht) – als Konsistenz-
+      Hinweis im Code dokumentiert statt stillschweigend ausgelassen.
+    - **`ops.js` (`findChapter`/`findSection`/`tidy`):** Alle drei
+      berechnen die Maske aus dem jeweils aktuellen Zeilenstand (kein
+      geteilter, potenziell veralteter Cache über mehrere Aufrufe hinweg –
+      Einfachheit vor Mikro-Optimierung, Dokumente sind klein). `tidy()`
+      berechnet die Maske NACH der bestehenden Leerzeilen-Kollaps-Schleife
+      neu (Zeilenindizes verschieben sich dabei) und maskiert NUR die
+      BOUNDARY_RE-Leerzeilen-Einfüge-Regel (der eigentliche Datenverlust-
+      Hebel) – die vorgelagerte Blank-Kollaps-Schleife sowie das
+      abschließende `\n{3,}` → `\n\n` bleiben bewusst FENCE-BLIND
+      (Restrisiko, siehe unten), das war explizit NICHT Teil des Auftrags
+      („Leerzeilen-Regel VOR Struktur-Zeilen“).
+    - **Unterminierter Zaun (bewusste Design-Entscheidung, wie oben):**
+      Ab einem öffnenden ``` ohne Schließer gilt bis Dokumentende wieder
+      die ALTE, fence-blinde Erkennung – eine `#`-Zeile danach bleibt eine
+      echte Struktur-Grenze. Andernfalls würde ein simpler Tippfehler
+      (vergessener Schluss-Zaun) das gesamte restliche Dokument
+      strukturlos machen; konsistent mit der bestehenden Philosophie bei
+      `matchDisplayBlock`/`matchFenceBlock` (unterminiert = literal, nichts
+      verschlucken). Mit Test abgesichert.
+    - **Bestehende FENCE-BLIND-Pin-Tests umgedreht:** Der einzige Pin-Test,
+      der das ALTE (fehlerhafte) Verhalten dokumentierte
+      (`tests/ops.test.js`, `delete_chapter` mit Fence im Kapitelinhalt),
+      pinnt jetzt das NEUE, korrekte Verhalten (das GESAMTE Kapitel samt
+      Codeblock wird gelöscht). Alle übrigen 280 Bestandstests blieben
+      unverändert grün – die Fence-Blind-Grenze wurde in KEINEM anderen
+      Testfall vorausgesetzt.
+    - **Neue Tests:** `tests/code.test.jsx` (`computeFenceLineMask` direkt:
+      kein Fence, ein/zwei geschlossene Blöcke, unterminiert, 4-Backtick-
+      Zaun um 3-Backtick-Inhalt, leeres Array, Block am Dokumentanfang/
+      -ende). `tests/markdown.test.jsx` (`parseTree`+`DocView`: beide
+      Live-Repros aus dem Finding, `##`/`###` im Fence, Fence direkt nach
+      einer Kapitelzeile ohne `##` davor, mehrere Struktur-Zeilen im selben
+      Block, verschachtelter 4-Backtick-Zaun, unterminierter Zaun bleibt
+      bewusst fence-blind, DocView-Rendering mit Gliederungs-Konsistenz-
+      Check). `tests/ops.test.js` (`delete_section`/`replace_section`/
+      `append_to_section` über Dokumente mit Fences: byte-genaue
+      Erwartungen, ein UNBETEILIGTER Abschnitt mit Fence bleibt bei einem
+      Op woanders byte-genau erhalten, `chapter`-Eingrenzung mit Fence
+      davor, `tidy()`-Datenverlust-Regressionstest, unterminierter Zaun
+      bleibt fence-blind).
+    - **Bewusste Restrisiken:** (1) **[Review-Nachbesserung, Finding 3,
+      BEHOBEN – ursprünglicher Text unten durchgestrichen dokumentiert statt
+      gelöscht, append-only]** ~~Die Leerzeilen-KOLLAPS-Schleife in `tidy()`
+      (mehr als eine Leerzeile in Folge → genau eine) sowie das
+      abschließende `\n{3,}` → `\n\n` bleiben FENCE-BLIND – mehrere
+      aufeinanderfolgende Leerzeilen INNERHALB eines Codeblocks (z. B.
+      Python-Quelltext mit zwei Leerzeilen zwischen Funktionen) könnten
+      dadurch beim nächsten Schreibzugriff auf das GESAMTE Dokument (nicht
+      nur den bearbeiteten Bereich) kollabiert werden. Nicht behoben, weil
+      der Auftrag sich ausdrücklich auf die Leerzeilen-Regel VOR Struktur-
+      Zeilen beschränkte.~~ Der Code-Review v7.33 stufte dieses Restrisiko
+      als real und mit der neuen Maske billig behebbar ein (per Probe
+      bestätigt: ein `append_to_section` an ANDERER Stelle im Dokument
+      kollabierte eine Doppel-Leerzeile in einem `py`-Codeblock zu einer
+      einzigen). Neuer Helfer `collapseBlankRuns(lines)` (`ops.js`) –
+      fence-aware, wird JETZT zweimal angewendet: Pass 1 auf den rohen
+      Eingabe-Zeilen (ersetzt die alte, fence-blinde erste Schleife) und
+      Pass 3 ganz am Ende als Sicherheitsnetz (ersetzt die alte, ebenfalls
+      fence-blinde globale `\n{3,}`→`\n\n`-Regex – ohne diesen zweiten
+      Fence-aware-Durchlauf hätte GENAU dieses Sicherheitsnetz Pass 1s
+      Schutz für einen mehrzeiligen Leerzeilen-Lauf INNERHALB eines Fences
+      am Ende wieder zunichtegemacht). Verhalten AUSSERHALB von Fences
+      bleibt zur alten Regex byte-identisch (die Kombination aus Pass 1 und
+      der BOUNDARY-Einfüge-Regel erzeugt dort nie mehr als eine Leerzeile
+      in Folge – neuer Byte-Pin in `tests/ops.test.js` bestätigt sowohl den
+      Erhalt der Doppel-Leerzeile IM Fence als auch die unveränderte
+      Ein-Leerzeile-Grenze AUSSERHALB). (2) `~~~`-Zäune und eingerückter
+      Code bleiben unverändert NICHT als Fence erkannt (siehe #54,
+      W1-Restriktion) – dieser Fix ändert daran nichts, betrifft also auch
+      weiterhin nur Backtick-Zäune. (3) Für Bestandsdokumente: Ein
+      Dokument, das sich BISHER auf die fence-blinde Zerreißung als
+      (unbeabsichtigtes) Verhalten „verlassen“ hätte, gibt es nach
+      menschlichem Ermessen nicht – die alte Grenze war ausschließlich ein
+      Bug, kein irgendwo dokumentiertes Feature; ein erneutes Öffnen/
+      Speichern verändert an einem Bestandsdokument nichts von sich aus
+      (nur `applyOps`/`parseTree` LESEN jetzt anders, es gibt keinen
+      automatischen Re-Write). Migrationsrisiko dadurch praktisch null.
+
+76. **Cache-Diagnostics: `tools_changed`-Warnung war ein FALSE POSITIVE
+    (v7.33, 🟡 E2E-Finding D18/C18, Root-Cause-Fix).** Der QA-Lauf meldete
+    eine Konsolen-Warnung „[cache] tools_changed gemeldet …“ zwischen zwei
+    Aufrufen, während zwischenzeitlich Wissensdateien hoch-/runtergeladen
+    wurden (F3–F5). Die bisherige Warn-Politik (#71) ging davon aus, die
+    gesendeten Tools (`NOTEBOOK_TOOL`/`LOOKUP_TOOL`/Websuche) seien
+    „konstruktionsbedingt konstant“ – FALSCH, wie die Root-Cause-Analyse
+    zeigt: Das tatsächlich gesendete `tools`-Array hängt legitim von DREI
+    Faktoren ab, die sich zwischen zwei Requests ändern können, ohne dass
+    das ein Bug wäre: (a) `mode` (`callClaude`/`buildRequest`) – „search“
+    sendet Websuche + optional `LOOKUP_TOOL` + `NOTEBOOK_TOOL`, „forced“
+    nur `NOTEBOOK_TOOL`, „none“ gar keine Tools; (b) `lookupEnabled` – ob
+    `LOOKUP_TOOL` überhaupt angeboten wird, hängt vom Wissensdatei-Zustand
+    des AKTIVEN Notizbuchs ab (wechselt beim Notizbuch-Wechsel UND beim
+    Hoch-/Runterladen großer Wissensdateien – exakt der Live-Befund); (c)
+    `modelId` – `webSearchToolFor` liefert je nach Modell eine andere
+    Websuche-Tool-Variante (bereits als eigener Grund `model_changed` von
+    der Warn-Politik ausgenommen, betrifft strukturell aber AUCH
+    `tools_changed`, weil sich damit das gesendete `tools`-Array
+    mitändert). **Ergebnis: FALSE POSITIVE, KEINE echte Mutation** –
+    verifiziert, dass `NOTEBOOK_TOOL`/`LOOKUP_TOOL` selbst unverändert
+    bleiben (die bestehende Klon-statt-Mutation-Absicherung, #71, greift
+    weiterhin und wurde nicht angefasst).
+    - **Fix (`src/lib/anthropic.js`):** Neuer Modul-Ref `lastToolsSignature`
+      (Session-Lebensdauer, gleiches Muster wie `lastMessageId`) hält die
+      `toolsSignatureFor(mode)`-Signatur (kompakter String aus
+      `mode`+`modelId`+`lookupEnabled`) des LETZTEN ERFOLGREICHEN Requests
+      fest. `postOnce()` erfasst VOR dem Fetch sowohl die Signatur DIESES
+      Requests als auch den bisherigen `lastToolsSignature`-Stand
+      (`priorToolsSignature`) und aktualisiert den Ref erst NACH einer
+      erfolgreichen Antwort, im GLEICHEN Guard wie `lastMessageId` (beide
+      Refs beschreiben gemeinsam „was wurde beim letzten erfolgreichen
+      Request gesendet“). Meldet der Server `tools_changed`: Ist
+      `priorToolsSignature === requestToolsSig` (die App hat SELBST NICHTS
+      geändert), bleibt es beim `console.warn` (echter Bug-Verdacht,
+      unerklärliche Divergenz). Weicht die Signatur ab ODER gibt es noch
+      keine Baseline (`priorToolsSignature === null`, erster Request der
+      Sitzung), ist die Änderung ERWARTET – neutrale `console.debug`-Zeile
+      statt Bug-Verdacht (kein stilles Verschlucken, aber keine
+      Falschmeldung mehr).
+    - **Tests (`tests/anthropic.test.js`):** echte, unerklärliche Divergenz
+      (identischer Kontext/Modell in zwei Requests, Server meldet trotzdem
+      `tools_changed`) → `console.warn`; Wissensbasis-Wechsel (großer
+      Wissensdatei-Upload aktiviert `lookup_wissen` neu) → KEIN
+      `console.warn`, stattdessen neutrale Debug-Zeile; identischer
+      Re-Build über mehrere Turns ohne gemeldeten Miss-Grund → nie ein
+      `tools_changed`-Warn; allererster Request der Sitzung (keine
+      Vergleichsbasis) → kein Warn, selbst wenn der Server `tools_changed`
+      meldet.
+    - **Restrisiken:** `lastToolsSignature` lebt wie `lastMessageId`
+      ausschließlich modulintern (kein Persist) – nach einem Reload/
+      Sitzungsende ist die Baseline weg, der allererste Folge-Request
+      startet wieder ohne Vergleichsbasis (harmlos, siehe oben, exakt wie
+      bei `lastMessageId`/`previous_message_not_found`). Die Signatur
+      bildet bewusst NUR die drei bekannten, dokumentierten Einflussfaktoren
+      ab – ein künftiger vierter Faktor (z. B. ein neues Tool, das von
+      weiteren Bedingungen abhängt) müsste `toolsSignatureFor` entsprechend
+      erweitern, sonst könnte diese Warn-Politik wieder falsch-negativ
+      (keine Warnung bei einer inzwischen ECHTEN Mutation) werden – bewusst
+      in Kauf genommen, da genau diese drei Faktoren aktuell die einzigen
+      sind, die das `tools`-Array beeinflussen (im Code an der Stelle
+      dokumentiert).
+
+77. **Prompt-Präzisierungen nach dem v7.32-QA-Lauf (v7.33, 🟡 E2E-Findings
+    B/C9b und C/C14).** Zwei unabhängige Live-Befunde in
+    `src/lib/anthropic.js`, beide reine Prompt-Schärfungen ohne
+    Code-Logik-Änderung:
+    - **B (C9b) – explizite Speicheranweisung wurde durch Duplikat-
+      Ähnlichkeit blockiert:** „Notiere den Satz des Pythagoras…“ im
+      aktiven QA-Notizbuch führte zu KEINEM Eintrag, weil im Notizbuch
+      „Wissensbasis“ bereits Ähnliches stand – die DEINE-AUFGABEN-Regel 3
+      („Prüfe … ob Dubletten erzeugt … über ALLE Notizbücher hinweg“) wurde
+      vom Modell fälschlich als Auslass-Grund gelesen. Neue Regel im
+      EINORDNUNG-IN-NOTIZBÜCHER-Block: Ein AUSDRÜCKLICHER Speicherauftrag
+      (klar erkennbares „notiere/lege ab/speichere/trag ein“) wird IMMER im
+      adressierten (sonst aktiven) Notizbuch ausgeführt – ein ähnlicher
+      Eintrag in einem ANDEREN Notizbuch ist KEIN Auslass-Grund, sondern
+      höchstens ein ZUSÄTZLICHER Hinweis in reply, der die Ablage niemals
+      ersetzt. Platzierung bewusst im EINORDNUNG-Block (dort, wo bereits
+      geregelt ist, WOHIN ein op wirkt), nicht im Duplikat-Satz der
+      DEINE-AUFGABEN-Regel selbst – Letztere bleibt für die INHALTLICHE
+      Dublettenpflege (Zusammenführen, Hinweisen) unverändert gültig, nur
+      das AUSLASSEN einer ausdrücklich verlangten Ablage ist jetzt explizit
+      ausgeschlossen.
+    - **C (C14) – Gliederungsvorschlag per Verweis statt ausgeschrieben:**
+      Auf „Schlage mir eine zweistufige Gliederung vor“ antwortete das
+      Modell „Siehe Gliederungsvorschlag oben…“, obwohl es keinen gab. Die
+      generelle „kein siehe oben“-Regel (ANTWORTFORMAT, #57) griff hier
+      nicht spürbar, weil die GLIEDERUNGS-VORSCHLAG-Passage den Vorschlag
+      bis dahin nur als etwas beschrieb, das das Modell „NEBENBEI“
+      beobachtet und in reply „vorschlägt“ – eine DIREKT erfragte
+      Gliederung (expliziter Nutzerwunsch statt Nebenbei-Beobachtung) war
+      dort nicht gesondert adressiert. Neue Regel direkt im GLIEDERUNGS-
+      VORSCHLAG-Block: Bei einer direkt erfragten Gliederung MUSS die
+      komplette Outline vollständig UND WÖRTLICH im reply-Feld stehen,
+      niemals nur angekündigt oder referenziert – mit Verweis auf dieselbe
+      Selbstverweis-Logik wie in den Antwortformat-Vorgaben (kein „oben“
+      aus Nutzersicht), aber OHNE das Wort „ANTWORTFORMAT:“ wörtlich zu
+      wiederholen (das hätte bestehende positionsbasierte Prompt-Tests
+      verwirrt, die `indexOf("ANTWORTFORMAT:")` zur Abschnitts-Erkennung
+      nutzen – beim Schreiben der Regel entdeckt und vor dem Commit
+      korrigiert).
+    - **Review-Nachbesserung (blau, klein, VOR dem Commit mitgenommen):**
+      Der Review wies auf eine theoretische Kante zwischen der neuen
+      C14-Regel („Outline MUSS vollständig im reply stehen“) und der
+      bestehenden INTERNET-RECHERCHE-Regel (nach einer Websuche gehört die
+      inhaltliche Antwort als Text VOR den Tool-Aufruf, reply bleibt dann
+      NUR Bestätigung) hin: Bei „recherchiere X und schlage dann eine
+      Gliederung vor“ widersprächen sich beide Regeln formal, wenn man
+      "Outline" versehentlich als Teil der "recherchierten Antwort"
+      läse. Praktisch unwahrscheinlich (kein Handlungszwang laut Review),
+      aber billig klarzustellen: neuer Satz direkt im GLIEDERUNGS-
+      VORSCHLAG-Block – die Outline ist KEIN recherchiertes Faktum, die
+      INTERNET-RECHERCHE-Regel verschiebt nur die recherchierten Fakten
+      selbst vor den Tool-Aufruf, die Outline bleibt UNABHÄNGIG davon immer
+      vollständig im reply. Test ergänzt.
+    - **Tests (`tests/anthropic.test.js`):** neuer Block „EINORDNUNG IN
+      NOTIZBÜCHER: ausdrücklicher Speicherauftrag …“ (Regel-Text vorhanden,
+      steht INNERHALB des EINORDNUNG-Blocks); neuer Test „verlangt bei
+      einer DIREKT erfragten Gliederung die vollständige Outline im
+      reply …“ (Regel-Text vorhanden, steht INNERHALB des GLIEDERUNGS-
+      VORSCHLAG-Blocks, VOR dem FORMELN-Block); neuer Test „stellt das
+      Verhältnis zur INTERNET-RECHERCHE-Regel klar …“ (Review-
+      Nachbesserung, ebenfalls positionsgeprüft innerhalb desselben
+      Blocks). Alle drei reine Prompt-Vertragstests (kein Modell-Aufruf,
+      wie der Rest der Datei).
+    - **Restrisiken:** Beide Regeln sind Prompt-Text, keine Code-
+      Durchsetzung – ein Modell kann sie im Einzelfall trotzdem ignorieren
+      (wie jede andere Prompt-Regel dieser Datei auch). Kein zusätzlicher
+      Code-Schutz vorgesehen (analog zu allen anderen rein prompt-basierten
+      Konventionen in diesem Modul).
+
+78. **AutoKorrektur: Root-Cause-Untersuchung dreier E2E-Findings (v7.33,
+    🟡 D12a/Brüche, D12b/„&lt;=“, D12c/Pfeile-Kategorie).** Drei separate
+    Live-Befunde beim Testfall D12 (`src/lib/autocorrect.js`/
+    `src/components/DocEditor.jsx`).
+    - **D12a/D12b – Root-Cause-Analyse, KEIN reproduzierbarer Logik-Bug,
+      dabei ein ECHTER, unabhängiger Bug GEFUNDEN und behoben:** „1/2“→„½“
+      und „a <= b“→„a ≤ b“ sind über `tests/autocorrect.test.js`/
+      `tests/docEditorAutocorrect.test.jsx` bereits mit ECHTEM Zeichen-für-
+      Zeichen-Tippen (`handleTextInput` pro Zeichen, wie im Browser)
+      abgedeckt und BESTANDEN vor UND nach diesem Fix – auch mit der
+      VOLLEN echten Editor-Extension-Liste (Link-Autolink, Tabellen,
+      Formel-Nodes) nachgestellt, weiterhin grün. Die im Auftrag genannte
+      „heiße Spur“ für D12b (das v7.24-Entity-Escaping „&lt;“ statt „<“)
+      wurde GEZIELT WIDERLEGT: `textInputRule`s `find`-Regex läuft auf der
+      LIVEN ProseMirror-Text-Node-Ebene (`$from.parent.textBetween(…)`),
+      NICHT auf dem serialisierten Markdown – ein getipptes „<“ ist dort
+      immer das echte Zeichen, „&lt;“ entsteht nachweislich ERST beim
+      Markdown-Serialisieren (`escapeHTML`, siehe #66), lange NACH dem
+      InputRule-Match. Beim Nachstellen verschiedenster Tipp-Sequenzen
+      (Bullet-Liste, Satzende, verschiedene Terminator-Zeichen) wurde
+      stattdessen ein ECHTER, unabhängiger Bug entdeckt: Eine MEHRZEICHEN-
+      Einfügung in EINEM `handleTextInput`-Aufruf (z. B. Diktier-Software,
+      manche prädiktive/virtuelle Tastaturen, Automatisierungs-Werkzeuge,
+      die ganze Textstücke statt einzelner Tasten einfügen – eine
+      plausible Erklärung für die Live-Beobachtung, falls das
+      QA-Tastatur-Werkzeug Text nicht strikt zeichenweise sendet) ließ
+      `textInputRule` (`@tiptap/core`) für "instant"-Regeln (Pfeile,
+      Marken, Smileys, …) mit einer `RangeError("Position … out of
+      range")` ABSTÜRZEN, sobald der Trigger KÜRZER war als der gesamte
+      eingefügte Text – reproduziert und verifiziert per Test
+      (`editor.view.someProp("handleTextInput", …)` mit einem
+      Mehrzeichen-String). Ursache: `compileEntry` baute für `kind:
+      "instant"` bisher OHNE Capture-Gruppe (`esc + "$"`) – `@tiptap/core`
+      korrigiert die von `prosemirror-inputrules` vorberechnete
+      (bei Mehrzeichen-Text FEHLERHAFTE) Ersetzungs-Position NUR, wenn
+      `match[1]` existiert (siehe `textInputRule.ts`). **Fix:** Trigger
+      bekommt jetzt AUCH bei `kind:"instant"` eine Capture-Gruppe
+      (`"(" + esc + ")$"`) – dieselbe Klammerung, die `terminator`/`word`/
+      `backslash` bereits hatten. Kein Absturz mehr FÜR DIESE VIER, über
+      `compileEntry` kompilierten Kinds (Review-Nachbesserung unten:
+      zwei WEITERE Regel-Familien mit demselben `range`-Problem, aber
+      eigenem Compile-/Handler-Pfad, wurden vom Review gefunden und
+      separat gefixt). Bei einer solchen
+      Mehrzeichen-Einfügung mit Text VOR dem Trigger im selben
+      Einfüge-Vorgang bleibt als dokumentiertes Restrisiko, dass dieser
+      vorangehende Teil verloren geht (kein Crash, aber auch kein
+      Datenerhalt in diesem Extremfall – `@tiptap/core` kürzt ihn selbst
+      auf den durch die Ersatz-Range gedeckten Bereich). ECHTES
+      Tastatur-Tippen (die weit überwiegende Mehrheit) dispatcht pro
+      physischem Tastendruck IMMER genau ein Zeichen und ist davon nicht
+      betroffen.
+    - **D12b im Speziellen (Terminator-Design, KEIN Bug):** „<=“ ist wie
+      „--“/„<-“ ein `kind:"terminator"`-Trigger (Präfix von „<==“/„<=>“) –
+      er feuert per Design erst, wenn DIREKT DANACH ein weiteres,
+      nicht-„=>“-Zeichen getippt wird (Terminator, `[^=>]$`), NICHT schon
+      beim „=“ selbst. Isoliertes Tippen von NUR „<=“ ohne Folgezeichen
+      zeigt deshalb erwartungsgemäß (noch) keine Ersetzung – identisch zur
+      bereits dokumentierten Brüche-Logik (`word`-kind, #67). Kein Bug,
+      aber die Testfall-Doku (`docs/TESTFAELLE.md`, D12) wurde präzisiert
+      (siehe dort), damit ein künftiger Testlauf diese Design-Eigenschaft
+      nicht erneut als Fehlschlag meldet.
+    - **D12c (Pfeile-Kategorie trotz Abwahl weiter aktiv) – KEIN Bug
+      gefunden, bestehende, bereits dokumentierte Grenze bestätigt:**
+      `sanitizeAutocorrectConfig`/`isCategoryEnabled`/`buildActiveRules`
+      wurden gezielt mit einer deaktivierten Kategorie gegengeprüft (auch
+      mit der vollen echten Editor-Extension-Liste) – ein FRISCH
+      gemounteter Editor mit `categories:{pfeile:false}` ersetzt „->“
+      nachweislich NICHT, kein Diskrepanz-Bug im Konfigurations-
+      Auswertungspfad gefunden. Der SettingsDialog trägt bereits (v7.25,
+      #67) den expliziten Hinweistext „Ein bereits geöffneter Editor zieht
+      Änderungen erst beim nächsten Öffnen nach“ – die wahrscheinlichste
+      Erklärung ist ein Testlauf, der die Kategorie im BEREITS offenen
+      Editor abgewählt hat, statt ihn danach neu zu öffnen (dieselbe,
+      bereits in #67 als bewusste Restriktion (4) dokumentierte Grenze,
+      NICHT neu). `docs/TESTFAELLE.md` D12 wurde um eine explizite
+      Präzisierung ergänzt (siehe dort), die die zwingende Reihenfolge
+      „Dialog schließen, Editor ERNEUT öffnen“ hervorhebt. Eine echte
+      „live“-Reaktivität (Regel-Änderung OHNE Editor-Neustart) wurde
+      geprüft und bewusst NICHT umgesetzt: `addInputRules()` baut die
+      ProseMirror-InputRules-Plugin-Instanz EINMALIG bei der Editor-
+      Erstellung; ein nachträgliches Aktualisieren von
+      `this.options.rules` hat keine Wirkung mehr auf die bereits gebaute
+      Plugin-Closure. Die einzige technisch saubere Lösung wäre ein
+      erzwungener Editor-Neustart bei jeder Konfigurationsänderung
+      (Verlust von Cursor-Position/Undo-Historie/Fokus während einer
+      laufenden Bearbeitung) – ein deutlich größerer Eingriff mit echtem
+      Regressionsrisiko für eine bereits dokumentierte, im UI kommunizierte
+      Design-Entscheidung; nicht umgesetzt.
+    - **Neue Tests:** `tests/docEditorAutocorrect.test.jsx`, Block
+      „Mehrzeichen-Einfügung in EINEM handleTextInput-Aufruf“ (Regressions-
+      Pin gegen den Absturz, Trigger allein als Bulk-Aufruf, mehrere
+      instant-Trigger, terminator-/word-kind werfen ebenfalls nicht).
+    - **Review-Nachbesserung (zwei Findings, VOR dem Commit behoben,
+      Original-Version noch nie live/committet):** Die erste Fassung dieses
+      Eintrags behauptete „der Absturz verschwindet“ – das galt NICHT
+      uneingeschränkt für ALLE Stellen, die dieselbe von `prosemirror-
+      inputrules` vorberechnete (bei Mehrzeichen-Text potenziell ungültige)
+      `range` verwenden. Der Code-Review fand per jsdom-Probe ZWEI weitere,
+      strukturell identische Absturzstellen:
+      - **🟡 Finding 1 (Pflicht) – `kind:"multiply"` (Kategorie
+        „vergleiche“, DEFAULT-AKTIV) crashte WEITERHIN:** Der
+        multiply-Handler (`src/components/DocEditor.jsx#AutoCorrect`) ist
+        eine eigene Custom-`InputRule` (kein `textInputRule()`) und
+        verwendet `range.from`/`range.to` DIREKT für `state.tr.insertText`
+        – ohne Capture-Gruppen-Mechanik profitiert er NICHT vom compileEntry-
+        Fix oben. Probe: „Rechne 2x3“ als Bulk-Aufruf → `RangeError:
+        Position 8 out of range` – reproduzierbar in der Standard-
+        Konfiguration (genau die Diktat-/prädiktive-Tastatur-Prämisse
+        dieses Fixes). Fix: Guard `if (range.from > range.to) return;` am
+        Anfang des Handlers (keine Ersetzung statt Crash, normales
+        Zeichen-für-Zeichen-Tippen bleibt unverändert, da dort
+        `range.from <= range.to` immer gilt).
+      - **🟡 Finding 2 (Pflicht) – `kind:"quote"` (Kategorie
+        „anfuehrung_de“, default AUS, aber aktivierbar) crashte
+        WEITERHIN:** `compileQuoteEntry` (`autocorrect.js`) baute
+        `openFind`/`closeFind` OHNE Capture-Gruppe um den Trigger – dieselbe
+        Lücke wie beim `instant`-kind vor dem ursprünglichen Fix, da beide
+        ebenfalls `kind:"text"` sind und durch `textInputRule()` laufen,
+        aber NICHT über `compileEntry` kompiliert werden (eigener
+        Compile-Pfad). Proben: `'sagte "'` (öffnend) →
+        `RangeError: Position 7 out of range`, `'er"'` (schließend, nach
+        einem Wort) → `RangeError: Position 3 out of range`. Fix: Capture-
+        Gruppe ergänzt (`"(?<![^\s([{])(" + esc + ")$"` bzw.
+        `"(" + esc + ")$"`) – identisches Muster wie bei `compileEntry`.
+      Beide Stellen sind jetzt im Kopfkommentar von `compileEntry`
+      (`autocorrect.js`) explizit als „NICHT automatisch mitgefixt,
+      eigener Fix nötig“ benannt, damit eine künftige VIERTE Stelle mit
+      demselben Muster nicht erneut übersehen wird. Neue Tests:
+      `tests/docEditorAutocorrect.test.jsx` – multiply-kind Bulk-Regression
+      (`"Rechne 2x3"`, wirft nicht mehr) + Trigger-allein-Kontrolltest
+      (`"2x3"` → `"2×3"`, weiterhin korrekt); eigener Block für die
+      quote-Regeln (öffnend/schließend, je ein Bulk-Regressionstest + ein
+      Kontrolltest für den Trigger allein in BEIDEN Kontexten). Alle vier
+      neuen Regressionstests wurden VOR der Nachbesserung gezielt gegen den
+      unbehobenen Stand laufen gelassen (per `git stash` auf die
+      betroffenen Dateien) und schlugen dort mit exakt denselben
+      `RangeError`-Meldungen wie in den Review-Proben fehl – kein
+      Pro-forma-Test.
+    - **Restrisiken:** Siehe D12a/D12b oben (Datenverlust-Restrisiko bei
+      Mehrzeichen-Einfügung MIT vorangehendem, noch nicht im Dokument
+      stehendem Text) – gilt nach der Review-Nachbesserung GLEICHERMASSEN
+      für den multiply-Guard (keine Ersetzung statt Datenerhalt in diesem
+      Extremfall) und die quote-Regeln. Sollte sich D12c trotz der
+      Doku-Präzisierung im nächsten QA-Lauf erneut UND nachweislich MIT
+      korrektem Neuöffnen reproduzieren, ist das ein neuer, bisher
+      unbekannter Bug und separat zu untersuchen (in diesem Umsetzungslauf
+      nicht reproduzierbar).

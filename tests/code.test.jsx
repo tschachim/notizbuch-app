@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   FENCE_OPEN_RE, FENCE_CLOSE_RE, matchFenceBlock, splitFenceSegments,
-  CodeBlockView, expandFencedCodeInNodes,
+  CodeBlockView, expandFencedCodeInNodes, computeFenceLineMask,
 } from "../src/lib/code.jsx";
 import { renderMathText, expandMathInNodes } from "../src/lib/math.jsx";
 
@@ -168,6 +168,46 @@ describe("splitFenceSegments", () => {
       { code: true, lang: "js", text: "Beispiel:\n```\ninner\n```", raw: text },
     ]);
     expect(reconstruct(text)).toBe(text);
+  });
+});
+
+// v7.33 (Finding A, DECISIONS #75): EINE Quelle der Wahrheit für
+// markdown.jsx#parseTree UND ops.js (findChapter/findSection/tidy).
+describe("computeFenceLineMask (v7.33, Finding A – gemeinsame Fence-Aware-Maske)", () => {
+  it("Text ohne Fence liefert eine Maske aus lauter 'false'", () => {
+    expect(computeFenceLineMask(["a", "b", "c"])).toEqual([false, false, false]);
+  });
+
+  it("markiert einen geschlossenen Block INKLUSIVE beider Zaun-Zeilen", () => {
+    const lines = ["vorher", "```", "code1", "code2", "```", "nachher"];
+    expect(computeFenceLineMask(lines)).toEqual([false, true, true, true, true, false]);
+  });
+
+  it("mehrere Blöcke im selben Dokument werden unabhängig markiert", () => {
+    const lines = ["a", "```", "x", "```", "b", "```js", "y", "```", "c"];
+    expect(computeFenceLineMask(lines)).toEqual([
+      false, true, true, true, false, true, true, true, false,
+    ]);
+  });
+
+  it("ein UNTERMINIERTER Zaun bleibt bewusst UNMARKIERT bis Dokumentende (GIGO-Philosophie, kein struktureller Kollateralschaden)", () => {
+    const lines = ["a", "```", "x", "y", "z"];
+    expect(computeFenceLineMask(lines)).toEqual([false, false, false, false, false]);
+  });
+
+  it("ein 4-Backtick-Zaun um Inhalt mit eigenen 3-Backtick-Zeilen markiert den GESAMTEN äußeren Block (K1-Szenario)", () => {
+    const lines = ["a", "````", "Beispiel:", "```", "inner", "```", "````", "b"];
+    expect(computeFenceLineMask(lines)).toEqual([
+      false, true, true, true, true, true, true, false,
+    ]);
+  });
+
+  it("ein leeres Zeilen-Array liefert eine leere Maske (keine Endlosschleife)", () => {
+    expect(computeFenceLineMask([])).toEqual([]);
+  });
+
+  it("ein Block direkt am Dokumentanfang UND -ende markiert ALLE Zeilen", () => {
+    expect(computeFenceLineMask(["```", "x", "```"])).toEqual([true, true, true]);
   });
 });
 

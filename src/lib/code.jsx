@@ -117,6 +117,48 @@ export function splitFenceSegments(text) {
   return segments;
 }
 
+// v7.33 (Finding A/Fence-Aware-Umbau, DECISIONS #75, supersedet #54/#60):
+// Baut eine "Zeilenindex -> ist Teil eines GESCHLOSSENEN Fenced-Codeblocks"-
+// Maske für ein bereits in Zeilen zerlegtes Dokument – EINE Quelle der
+// Wahrheit, die markdown.jsx#parseTree UND ops.js (findChapter/findSection/
+// tidy) BEIDE importieren, statt die Fence-Erkennung zweimal (und potenziell
+// abweichend) zu implementieren. Markiert werden ALLE Zeilen eines Blocks
+// INKLUSIVE der beiden Zaun-Zeilen selbst (die matchen ohnehin nie #/##/###
+// – Backtick-Zeilen beginnen nie mit "#" –, eine Maskierung schadet also
+// nicht und macht die Grenze für Aufrufer eindeutig: "diese Zeile gehört
+// zum Codeblock, niemals eine Struktur-Grenze"). Läuft strukturell wie
+// splitFenceSegments oben (derselbe Scan: öffnender Zaun -> matchFenceBlock
+// -> bei Erfolg überspringen, bei Misserfolg eine Zeile weiter), bewusst
+// NICHT auf splitFenceSegments selbst aufgesetzt (das arbeitet auf einem
+// EINZELNEN String samt "\n".split, wir bekommen hier bereits ein
+// Zeilen-Array – ein Join+Split-Umweg wäre unnötig und bei sehr langen
+// Dokumenten teurer).
+//
+// UNTERMINIERTER Zaun (matchFenceBlock liefert null): bleibt bewusst
+// UNMARKIERT, alle Zeilen AB dort fallen normal durch die Struktur-
+// Erkennung – dieselbe konservative "GIGO"-Philosophie wie überall sonst
+// in dieser Datei (siehe matchFenceBlock-Kommentar oben und
+// splitFenceSegments): ein vergessener Schluss-Zaun soll nicht das halbe
+// Dokument strukturlos machen (eine "#"-Zeile nach einem vergessenen
+// Schluss-Zaun bleibt weiterhin eine normale Kapitelgrenze, statt bis
+// Dokumentende als "Codeblock" fehlinterpretiert zu werden).
+export function computeFenceLineMask(lines) {
+  const mask = new Array(lines.length).fill(false);
+  let i = 0;
+  while (i < lines.length) {
+    if (FENCE_OPEN_RE.test(lines[i])) {
+      const block = matchFenceBlock(lines, i);
+      if (block) {
+        for (let j = i; j <= block.endIdx; j++) mask[j] = true;
+        i = block.endIdx + 1;
+        continue;
+      }
+    }
+    i++;
+  }
+  return mask;
+}
+
 // Monospaced Darstellung eines Codeblocks – für Dokument-Ansicht UND Chat
 // gemeinsam, an die bestehende Codespan-Optik angelehnt (font-mono,
 // dezenter Hintergrund, Rahmen, abgerundet). WICHTIG: overflow-x-auto nur

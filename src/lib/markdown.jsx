@@ -12,7 +12,7 @@ import {
   MATH_TOKEN_RE, renderMathToken, renderKatexHtml,
   DISPLAY_MATH_START_RE, matchDisplayBlock,
 } from "./math.jsx";
-import { FENCE_OPEN_RE, matchFenceBlock, splitFenceSegments, CodeBlockView } from "./code.jsx";
+import { FENCE_OPEN_RE, matchFenceBlock, splitFenceSegments, CodeBlockView, computeFenceLineMask } from "./code.jsx";
 import { providerFor, getLinkProviders, ProviderIcon, trimBareUrl } from "./linkProviders.jsx";
 import { FILE_URL_RE, fileUrlToWinPath } from "./filelinks.js";
 
@@ -73,11 +73,20 @@ const TABLE_SEP_RE = /^\s*\|(\s*:?-+:?\s*\|)+\s*$/;
    Einrückung), damit ein Dokument OHNE jede echte "#"-Kapitelzeile
    weiterhin "chapters:[]" liefert (kein Sonderfall in den Renderern nötig).
 
-   Wie schon bei "##"/"###" ist die Erkennung bewusst FENCE-BLIND (siehe
-   DECISIONS #54): eine "# "-Zeile INNERHALB eines ```-Codeblocks wird hier
-   nicht ausgenommen und kann fälschlich als Kapitelgrenze zählen – dieselbe
-   dokumentierte, bewusst in Kauf genommene Grenze wie bei "##" gilt jetzt
-   auch für "#".
+   FENCE-AWARE seit v7.33 (DECISIONS #75, supersedet #54/#60 – E2E-Finding
+   🔴 A): "#"/"##"/"###"-Zeilen INNERHALB eines geschlossenen ```-Codeblocks
+   zählen NICHT mehr als Struktur-Grenze (Kapitel/Abschnitt/Unterthema) –
+   sie bleiben Inhalt des jeweils AKTUELLEN Kontexts (pre/Kapitel/Abschnitt/
+   Unterthema), computeFenceLineMask (code.jsx, EINE Quelle der Wahrheit mit
+   ops.js) markiert sie vorab. Vorher zerriss z. B. ein Bash-Kommentar
+   ("# Löscht alle .tmp-Dateien …") als Codeblock-Inhalt den Block in
+   mehrere Phantom-Kapitel UND rendererte die Zäune selbst als Klartext
+   (renderBlocks bekam wegen des Section-Zerfalls nie mehr den kompletten,
+   zusammenhängenden Block zu sehen, siehe DECISIONS #75). UNTERMINIERTE
+   Zäune bleiben bewusst UNMARKIERT (siehe computeFenceLineMask) – ab dort
+   gilt wieder die alte, fence-blinde Erkennung bis Dokumentende (ein
+   vergessener Schluss-Zaun soll nicht das halbe Dokument strukturlos
+   machen).
 
    Dasselbe title:null-Muster gibt es seit v7.28 auch eine Ebene tiefer bei
    ABSCHNITTEN: ein "###"-Unterthema OHNE vorausgehendes "##" bekommt eine
@@ -97,13 +106,30 @@ export function parseTree(text) {
 
   // Titelzeile per POSITION bestimmen (siehe Kopfkommentar): NUR wenn die
   // erste nicht-leere Zeile des Dokuments eine "# "-Zeile ist, ist GENAU
-  // ihr Original-Index von der Kapitel-Erkennung ausgenommen.
+  // ihr Original-Index von der Kapitel-Erkennung ausgenommen. KEINE
+  // Fence-Sonderbehandlung nötig (Konsistenz-Hinweis, wie in ops.js#
+  // titleLineIdx dokumentiert): Ein Fence müsste bereits VOR der ersten
+  // nicht-leeren Zeile geöffnet UND wieder geschlossen sein, damit
+  // "firstContentIdx" überhaupt in einem Codeblock läge – strukturell
+  // unmöglich, die erste nicht-leere Zeile IST der öffnende Zaun selbst
+  // (matcht nie "^#\s+", da er mit Backticks beginnt).
   const firstContentIdx = lines.findIndex((l) => l.trim() !== "");
   const titleLineIdx =
     firstContentIdx !== -1 && /^#\s+/.test(lines[firstContentIdx]) ? firstContentIdx : -1;
 
+  // Fence-Maske (v7.33, DECISIONS #75): Zeilen INNERHALB eines
+  // geschlossenen ```-Codeblocks (Zaun-Zeilen inklusive) zählen unten NIE
+  // als #/##/###-Struktur-Grenze, unabhängig vom aktuellen Kontext
+  // (pre/Kapitel/Abschnitt/Unterthema) – sie fallen stattdessen normal in
+  // die curSub/cur/chapters/pre-Zweige weiter unten, GENAU wie jede andere
+  // Nicht-Struktur-Zeile. Dadurch bleibt ein mehrzeiliger Fence über
+  // Struktur-Zeilen hinweg IMMER im selben "lines"-Array desselben
+  // Abschnitts – renderBlocks (siehe dort) erkennt ihn dann wieder
+  // zusammenhängend, weil seine Zeilen positionsgleich aufeinanderfolgen.
+  const fenceMask = computeFenceLineMask(lines);
+
   lines.forEach((line, idx) => {
-    if (/^###\s+/.test(line)) {
+    if (!fenceMask[idx] && /^###\s+/.test(line)) {
       // v7.28-Fix (Nutzer-Befund, Live): ein "###"-Unterthema OHNE
       // vorausgehendes "##" bekam hier früher einen FABRIZIERTEN Abschnitt
       // "Allgemein" (Altlast der Referenz-App) – ein Titel, der im
@@ -117,11 +143,11 @@ export function parseTree(text) {
       if (!cur) { cur = { title: null, lines: [], subs: [], chapter: chapterIdx }; sections.push(cur); }
       curSub = { title: line.replace(/^###\s+/, "").trim(), lines: [] };
       cur.subs.push(curSub);
-    } else if (/^##\s+/.test(line)) {
+    } else if (!fenceMask[idx] && /^##\s+/.test(line)) {
       cur = { title: line.replace(/^##\s+/, "").trim(), lines: [], subs: [], chapter: chapterIdx };
       sections.push(cur);
       curSub = null;
-    } else if (idx !== titleLineIdx && /^#\s+/.test(line)) {
+    } else if (!fenceMask[idx] && idx !== titleLineIdx && /^#\s+/.test(line)) {
       // Strukturelle Kapitelzeile (siehe Kopfkommentar) – jede "# "-Zeile
       // außer der einen Titelzeile, unabhängig davon, ob schon ein "##"
       // gesehen wurde.

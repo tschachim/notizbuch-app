@@ -272,6 +272,7 @@ EINORDNUNG IN NOTIZBÜCHER:
 - Gehört eine Information thematisch eindeutig in ein ANDERES vorhandenes Notizbuch, trage sie dort ein: setze dazu im op das Feld "notebook" auf dessen exakten Namen und erwähne die Einordnung kurz in reply (z. B. „Habe ich in ‚Kochrezepte' abgelegt.").
 - Ohne "notebook"-Feld wirkt ein op auf das aktive Notizbuch.
 - Verwende ausschließlich exakt die weiter unten unter ALLE NOTIZBÜCHER genannten Notizbuch-Namen; lege niemals neue Notizbücher an.
+- AUSDRÜCKLICHER Speicherauftrag geht IMMER vor: Formuliert der Nutzer klar, WAS und WOHIN gespeichert werden soll (z. B. „notiere …“, „lege … ab“, „speichere … in X“, „trag … ein“), führst du das im adressierten (sonst aktiven) Notizbuch AUS – ein ähnlicher, verwandter oder scheinbar redundanter Eintrag in einem ANDEREN Notizbuch ist KEIN Grund, die Ablage auszulassen oder "ops":[] zurückzugeben. Weise auf die Ähnlichkeit höchstens ZUSÄTZLICH in reply hin (z. B. „Steht so ähnlich schon in ‚Wissensbasis' – hier trotzdem ergänzt.“), ersetze die angeforderte Ablage aber niemals dadurch.
 
 KONVENTIONEN IN JEDEM NOTIZBUCH:
 - Erste Zeile bleibt die Titelzeile des Notizbuchs: "# " + Name des Notizbuchs.
@@ -285,6 +286,7 @@ KONVENTIONEN IN JEDEM NOTIZBUCH:
 GLIEDERUNGS-VORSCHLAG (zweistufige Struktur, NUR als Vorschlag):
 - Beobachte bei jeder inhaltlichen Antwort NEBENBEI, ob die Struktur des betroffenen Notizbuchs von der zweistufigen Hierarchie profitieren würde – typische Signale: deutlich viele ##-Hauptabschnitte OHNE jedes #-Kapitel (Richtwert: mehr als ca. 8), NUR #-Kapitel, die jeweils bloß einen einzigen oder gar keinen ##-Abschnitt enthalten, oder eine inkonsistente Mischung (manche gleichartigen Themen stecken in Kapiteln, vergleichbare andere liegen flach daneben).
 - Trifft eines davon zu, schlage in reply eine KONKRETE zweistufige Neu-Gliederung vor: als Outline (Kapitel mit den ihnen jeweils zugeordneten vorhandenen Abschnitten). Das ist ein reiner VORSCHLAG – "ops":[] bleibt dabei leer, die REINE-FRAGEN-Regel und "kein Nebenbei-Aufräumen" gelten UNVERÄNDERT (kein automatischer Umbau ohne ausdrücklichen Anlass, auch nicht bei einer reinen Frage). Mit "ops":[] sind hier NOTIZBUCH-Ops gemeint (append_to_section/replace_section/delete_section/delete_chapter/rewrite) – memory_append/memory_replace bleiben davon unberührt und auch beim reinen Struktur-Vorschlag erlaubt, konsistent zur REINE-FRAGEN-Ausnahme oben.
+- Das gilt UNVERÄNDERT, wenn der Nutzer DIREKT nach einer Gliederung fragt (z. B. „Schlage mir eine zweistufige Gliederung vor“): Die komplette Outline (alle Kapitel samt ihrer zugeordneten Abschnitte) MUSS vollständig UND WÖRTLICH im reply-Feld ausgeschrieben stehen – niemals nur angekündigt, zusammengefasst oder mit „siehe Gliederungsvorschlag oben“/„siehe oben“ referenziert (dieselbe Selbstverweis-Regel wie weiter unten bei den Antwortformat-Vorgaben: reply IST die gesamte sichtbare Antwort, es gibt kein „oben“). Ein Vorschlag, auf den reply nur VERWEIST, ohne ihn tatsächlich auszuschreiben, ist ein Fehler. Das gilt AUCH bei einer Misch-Anfrage mit Websuche (z. B. „recherchiere X und schlage dann eine Gliederung vor“): Die INTERNET-RECHERCHE-Regel oben verschiebt dabei nur die recherchierten FAKTEN in den Antworttext VOR dem Tool-Aufruf (reply bleibt sonst nur kurze Bestätigung) – die Outline selbst ist KEIN recherchiertes Faktum, sondern dein eigener Strukturvorschlag, und bleibt deshalb IMMER vollständig im reply-Feld, unabhängig davon, ob in derselben Antwort recherchiert wurde.
 - Erst wenn der Nutzer diesem Vorschlag AUSDRÜCKLICH zustimmt (z. B. „ja, mach das“, „gliedere so um“), setzt du ihn im selben oder einem folgenden Turn per "rewrite"-Op um: Inhalte dabei vollständig erhalten, nur umgruppieren – nichts kürzen, umformulieren oder erfinden.
 
 FORMELN:
@@ -681,6 +683,15 @@ const sanitizeWarningForHistory = (w) =>
 // Referenz, siehe previous_message_not_found unten).
 let lastMessageId = null;
 
+// v7.33 (Root-Cause-Fix D18/C18, siehe DECISIONS #76): Modul-Ref auf die
+// toolsSignatureFor()-Signatur des LETZTEN ERFOLGREICHEN Requests – dieselbe
+// Session-Lebensdauer/-Semantik wie lastMessageId oben (kein Persist, zieht
+// im Gleichschritt mit lastMessageId mit, siehe postOnce). Ermöglicht der
+// Warn-Politik dort zu unterscheiden, ob eine vom Server gemeldete
+// "tools_changed"-Divergenz durch eine EIGENE, bewusste Änderung der
+// Tool-Auswahl erklärbar ist (kein Bug) oder nicht (echter Bug-Verdacht).
+let lastToolsSignature = null;
+
 // Graceful-Degradation-Flag (Beta, v7.29-Nachtrag/Re-Review 🔵, siehe
 // DECISIONS): Cache-Diagnostics ist eine Beta – wird der Header/das
 // diagnostics-Feld serverseitig irgendwann deprecatet/entfernt, könnte JEDER
@@ -701,6 +712,7 @@ let diagnosticsDisabled = false;
 // Produktions-Aufrufpfad nutzt diese Funktion.
 export function resetCacheDiagnosticsForTests() {
   lastMessageId = null;
+  lastToolsSignature = null;
   diagnosticsDisabled = false;
 }
 
@@ -851,6 +863,29 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     return res || "Keine Treffer – versuche andere Suchbegriffe oder fordere einen Seitenbereich an.";
   };
 
+  // v7.33 (E2E-Finding 🟡 D18/C18, Root-Cause-Fix, siehe DECISIONS): Die
+  // bisherige Warn-Politik unten ("tools_changed" -> IMMER console.warn,
+  // Begründung "unsere Tools sind konstruktionsbedingt konstant") war
+  // FALSCH – das tatsächlich gesendete tools-Array hängt von DREI legitim
+  // wechselnden Faktoren ab: "mode" (search/forced/none senden
+  // unterschiedliche Tool-Mengen, siehe buildRequest unten), "lookupEnabled"
+  // (Wissensdatei-Zustand des AKTIVEN Notizbuchs – wechselt beim Notizbuch-
+  // Wechsel UND beim Hoch-/Runterladen großer Wissensdateien, exakt der
+  // Live-Befund: im QA-Lauf wurden zwischen zwei Aufrufen Wissensdateien
+  // hoch-/runtergeladen) und "modelId" (Websuche-Tool-Variante, siehe
+  // webSearchToolFor – ändert sich nur bei einem Nutzer-Modellwechsel,
+  // bereits als "model_changed" von der Warn-Politik ausgenommen, betrifft
+  // strukturell aber AUCH tools_changed, weil sich die web_search-Tool-
+  // Variante mitändert). toolsSignatureFor() bildet GENAU diese drei
+  // Faktoren als kompakten String ab (alle drei sind zum Zeitpunkt des
+  // Requests bereits bekannt, kein teures Objekt-Diffing nötig).
+  const toolsSignatureFor = (mode) =>
+    mode === "search"
+      ? "search|" + modelId + "|" + (lookupEnabled ? "lookup" : "nolookup")
+      : mode === "forced"
+      ? "forced"
+      : "none";
+
   // Prompt-Caching (v7.20, Nutzer-Entscheidung, siehe DECISIONS): EINMAL pro
   // callClaude()-Aufruf berechnet, danach in JEDEM postOnce()-Request
   // wiederverwendet (Erst-Request, lookup_wissen-Runden, pause_turn-
@@ -972,6 +1007,14 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
   };
 
   const postOnce = async (messages, mode) => {
+    // v7.33 (Root-Cause-Fix D18/C18): Signatur DIESES Requests (was WIR
+    // gleich senden) VOR dem Fetch erfassen, und die Signatur des LETZTEN
+    // ERFOLGREICHEN Requests (lastToolsSignature, Modul-Ref wie
+    // lastMessageId) VOR einer eventuellen Aktualisierung sichern – der
+    // Vergleich unten muss den Stand VOR diesem Request kennen, nicht den
+    // gerade erst geschriebenen.
+    const requestToolsSig = toolsSignatureFor(mode);
+    const priorToolsSignature = lastToolsSignature;
     let { response, data } = await doFetch(messages, mode, !diagnosticsDisabled);
     // Graceful Degradation (Beta, v7.29-Nachtrag/Re-Review 🔵, siehe
     // DECISIONS): NUR bei einem HTTP 400 MIT erkennbar diagnostics-/Beta-
@@ -1002,7 +1045,13 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     // frischer History) ist harmlos – die API antwortet dafür bestenfalls
     // mit cache_miss_reason "previous_message_not_found", explizit einer der
     // vier dokumentierten, unkritischen Zustände (siehe formatCacheDebug).
-    if (data && typeof data.id === "string" && data.id) lastMessageId = data.id;
+    // v7.33: lastToolsSignature zieht IM GLEICHSCHRITT mit lastMessageId mit
+    // (dieselbe Guard-Bedingung) – beide Refs beschreiben zusammen "was
+    // wurde beim LETZTEN ERFOLGREICHEN Request gesendet".
+    if (data && typeof data.id === "string" && data.id) {
+      lastMessageId = data.id;
+      lastToolsSignature = requestToolsSig;
+    }
     // Verifikations-Hook (v7.20, erweitert v7.29 um Cache-Diagnostics): kein
     // UI, rein für E2E-Nachweis/Kosten-Diagnose über die Browser-Konsole –
     // cache_read_input_tokens > 0 zeigt einen Cache-Treffer,
@@ -1012,30 +1061,43 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     // Kommentar oben zu den Aufrufpfaden).
     if (data && data.usage) {
       console.debug("[cache] " + formatCacheDebug(data.usage, data.diagnostics));
-      // Warn-Politik (bewusst KONSERVATIV, siehe DECISIONS): NUR bei
-      // "tools_changed" wird gewarnt. Unsere Tools (NOTEBOOK_TOOL/LOOKUP_TOOL/
-      // Websuche) sind konstruktionsbedingt konstant innerhalb einer Session
-      // – eine Divergenz dort kann NICHT durch normale App-Nutzung entstehen,
-      // wäre also IMMER ein echter Bug (z. B. ein versehentlich mutierter
-      // Tool-Klon, siehe die cache_control-Klon-Warnung weiter oben).
-      // Bewusst NICHT gewarnt wird bei: "system_changed" (nach JEDEM
-      // Notizbuch-/Gedächtnis-Write erwartbar – der dynamicBlock ändert sich
-      // absichtlich, siehe buildSystemBlocks), "messages_changed" (unser
-      // gleitendes 12-Nachrichten-Fenster verschiebt den messages-Anfang bei
-      // jedem vollen Fenster – GENAU der Grund, warum messages bewusst KEIN
-      // cache_control bekommt, siehe Kommentar oben), "model_changed"
-      // (Nutzer-Dropdown, legitime Nutzeraktion) und
-      // "previous_message_not_found"/"unavailable" (harmlos bzw. schlicht
-      // noch kein Ergebnis, siehe formatCacheDebug). Alle Zustände landen
-      // trotzdem in der debug-Zeile oben – nur tools_changed eskaliert
-      // zusätzlich zu console.warn.
+      // Warn-Politik (v7.33 Root-Cause-Fix, siehe DECISIONS #76): NUR bei
+      // "tools_changed" wird überhaupt unterschieden. Die FRÜHERE Annahme
+      // ("unsere Tools sind konstruktionsbedingt konstant") war FALSCH – das
+      // gesendete tools-Array hängt legitim von "mode"/"lookupEnabled"/
+      // "modelId" ab (siehe toolsSignatureFor oben). Deshalb: console.warn
+      // (echter Bug-Verdacht) NUR, wenn WIR SELBST seit dem letzten
+      // erfolgreichen Request NICHTS an der Tool-Auswahl geändert haben
+      // (requestToolsSig === priorToolsSignature) und der Server TROTZDEM
+      // tools_changed meldet – das ist dann unerklärlich (z. B. eine
+      // versehentlich mutierte Tool-Konstante, siehe die cache_control-Klon-
+      // Warnung weiter oben). Hat SICH die Signatur dagegen geändert (Modus-
+      // Wechsel, Wissensbasis-Zustand, Modellwechsel) ODER gibt es noch
+      // keine Baseline (priorToolsSignature === null, erster Request der
+      // Sitzung), ist tools_changed ERWARTET – neutrale console.debug-Zeile
+      // statt Bug-Verdacht (kein stilles Verschlucken, aber auch keine
+      // Falschmeldung). "system_changed" (nach JEDEM Notizbuch-/Gedächtnis-
+      // Write erwartbar, siehe buildSystemBlocks), "messages_changed"
+      // (gleitendes 12-Nachrichten-Fenster, siehe Kommentar oben),
+      // "model_changed" (Nutzer-Dropdown) und
+      // "previous_message_not_found"/"unavailable" bleiben unverändert OHNE
+      // jede Eskalation. Alle Zustände landen trotzdem in der debug-Zeile
+      // oben.
       const missType = data.diagnostics && data.diagnostics.cache_miss_reason &&
         data.diagnostics.cache_miss_reason.type;
       if (missType === "tools_changed") {
-        console.warn(
-          "[cache] tools_changed gemeldet – unsere Tools sollten konstant sein, das deutet auf einen echten Bug hin " +
-          "(z. B. eine versehentlich mutierte Tool-Konstante)."
-        );
+        if (priorToolsSignature !== null && requestToolsSig === priorToolsSignature) {
+          console.warn(
+            "[cache] tools_changed gemeldet, obwohl unsere Tool-Auswahl seit dem letzten Request unverändert war " +
+            "(Modus/Modell/Wissensbasis-Zustand identisch) – das deutet auf einen echten Bug hin " +
+            "(z. B. eine versehentlich mutierte Tool-Konstante)."
+          );
+        } else {
+          console.debug(
+            "[cache] tools_changed – erwartet, unsere Tool-Auswahl hat sich seit dem letzten Request bewusst " +
+            "geändert (Modus/Modell/Wissensbasis-Zustand), kein Bug-Verdacht."
+          );
+        }
       }
     }
     return data;
