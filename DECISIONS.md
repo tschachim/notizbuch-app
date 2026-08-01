@@ -5303,6 +5303,58 @@ aus `referenz-app.jsx` übernommen.
       (wie jede andere Prompt-Regel dieser Datei auch). Kein zusätzlicher
       Code-Schutz vorgesehen (analog zu allen anderen rein prompt-basierten
       Konventionen in diesem Modul).
+    - **Nachtrag (v7.34, Live-Retest NACH dem v7.33-Deploy – zweite
+      Schärfung von C9b).** Der Live-Retest bestätigte alle v7.33-Fixes
+      AUSSER C9b: Auf dieselbe Testnachricht („Notiere den Satz des
+      Pythagoras mit gerenderter Formel.“, wortgleicher Eintrag in
+      „Wissensbasis“) antwortete das Modell diesmal NICHT mit Auslassen,
+      sondern mit einer RÜCKFRAGE („Da es sich um eine exakte Dublette
+      handeln würde, habe ich keinen neuen Eintrag angelegt. Falls du ihn
+      zusätzlich hier … haben möchtest, sag einfach Bescheid.“, weiterhin
+      "ops":[], kein Commit). Die v7.33-Regel deckte zwei Lücken nicht ab:
+      (1) sie sprach von „ähnlich, verwandt, scheinbar redundant“, aber
+      nicht ausdrücklich von „wortgleich“/„exakt identisch“ – das Modell
+      behandelte eine ALS EXAKT erkannte Dublette offenbar als
+      Sonderfall AUSSERHALB der Regel; (2) sie verbot nur das AUSLASSEN
+      ("ops":[]) explizit, nicht aber das Ausweichen in eine RÜCKFRAGE als
+      dritten Ausweg. Fix (`src/lib/anthropic.js`, EINORDNUNG-Block):
+      Regelsatz umformuliert – „ähnlicher, verwandter, WORTGLEICHER oder
+      sogar EXAKT IDENTISCHER Eintrag“ deckt jetzt ausdrücklich auch den
+      Wortgleich-Fall ab; neuer Satz verbietet EXPLIZIT, aus dem
+      ausdrücklichen Auftrag eine Rückfrage/ein Opt-in zu machen (der
+      Auftrag selbst IST bereits die Bestätigung), inklusive der
+      Formulierung „auch wenn es sich um eine ‚exakte Dublette‘ handelt“,
+      um genau die beobachtete Ausweich-Begründung des Modells
+      abzuschneiden. Neu ergänzt: ein Fehler-/Korrekt-Beispielpaar mit dem
+      LIVE BEOBACHTETEN Wortlaut als Negativbeispiel (dasselbe bewährte
+      Muster wie beim WIEDERHOLUNGS-VERBOT, #57/#77 oben) – Labels bewusst
+      „Fehlerhaftes Beispiel“/„Korrektes Beispiel“ statt „Beispiel
+      FALSCH“/„Beispiel RICHTIG“, um NICHT mit dem bereits an anderer
+      Stelle positionsgeprüften „Beispiel FALSCH“ der WIEDERHOLUNGS-
+      VERBOT-Regel zu kollidieren (beim Schreiben der Tests entdeckt: ein
+      `indexOf("Beispiel FALSCH")` hätte sonst die NEUE, früher im Prompt
+      stehende Stelle statt der ursprünglich gemeinten getroffen – vor dem
+      Commit korrigiert). Zusätzlich in DEINE AUFGABEN Punkt 2 (Struktur-/
+      Dubletten-Pflege) und Punkt 3 (proaktive Dubletten-Hinweise über
+      alle Notizbücher) je ein Kreuzverweis auf die EINORDNUNG-Regel
+      ergänzt, damit diese beiden Stellen die neue Regel nicht wieder
+      untergraben (der Auftrag hatte ausdrücklich verlangt, andere
+      Prompt-Stellen auf Widersprüche zu prüfen – das GEDÄCHTNIS-Dubletten-
+      Konzept betrifft dagegen ausschließlich das globale Gedächtnis,
+      nicht Notizbuch-Inhalte, und wurde als bereits eindeutig abgegrenzt
+      identifiziert, keine Änderung nötig). Tests
+      (`tests/anthropic.test.js`): bestehender C9b-Test an die neue
+      Formulierung angepasst, drei neue Tests (Wortgleich-/Rückfrage-
+      Verbot-Regeltext vorhanden und positioniert, Fehler-/Korrekt-
+      Beispielpaar mit dem realen Wortlaut vorhanden und richtig
+      geordnet, Kreuzverweise in DEINE AUFGABEN Punkt 2/3 vorhanden und
+      VOR dem EINORDNUNG-Block positioniert). Restrisiko unverändert:
+      reiner Prompt-Text, keine Code-Durchsetzung – sollte sich das
+      Muster (Ausweichen in eine dritte Antwortform) ein drittes Mal
+      zeigen, ist das ein Hinweis, dass die Duplikat-Vermeidungs-Neigung
+      des Modells stärker ist als bisher angenommen, und würde einen
+      grundsätzlicheren Ansatz (z. B. Tool-Schema-seitige Pflichtfelder)
+      statt einer weiteren Prompt-Iteration nahelegen.
 
 78. **AutoKorrektur: Root-Cause-Untersuchung dreier E2E-Findings (v7.33,
     🟡 D12a/Brüche, D12b/„&lt;=“, D12c/Pfeile-Kategorie).** Drei separate

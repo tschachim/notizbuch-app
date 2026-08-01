@@ -354,20 +354,71 @@ describe("buildSystem", () => {
   // ("Notiere den Satz des Pythagoras…") blieb wirkungslos, weil ein
   // ähnlicher Eintrag in einem ANDEREN Notizbuch bereits existierte – das
   // Modell interpretierte das fälschlich als Duplikat-Grund zum Auslassen.
-  describe("EINORDNUNG IN NOTIZBÜCHER: ausdrücklicher Speicherauftrag hat Vorrang vor Duplikat-Ähnlichkeit (v7.33, C9b-Fix)", () => {
-    it("verlangt Ausführung im adressierten/aktiven Notizbuch, auch bei ähnlichem Eintrag anderswo", () => {
+  // v7.34 (Live-Retest der v7.33-Regel, zweite Schärfung): Die v7.33-Fassung
+  // reichte nicht – bei einer WORTGLEICHEN/"exakten" Dublette wandelte das
+  // Modell den Speicherauftrag stattdessen in eine Rückfrage um ("sag
+  // Bescheid, falls du ihn zusätzlich hier haben möchtest"). Die Regel
+  // deckt jetzt explizit auch wortgleiche/exakt identische Einträge ab UND
+  // verbietet ausdrücklich, aus einem ausdrücklichen Auftrag eine
+  // Rückfrage zu machen.
+  describe("EINORDNUNG IN NOTIZBÜCHER: ausdrücklicher Speicherauftrag hat Vorrang vor Duplikat-Ähnlichkeit (v7.33/v7.34, C9b-Fix)", () => {
+    it("verlangt Ausführung im adressierten/aktiven Notizbuch, auch bei ähnlichem ODER wortgleichem/exakt identischem Eintrag anderswo", () => {
       const sys = buildSystem(nbs, "Wissensbasis", null);
       const blockStart = sys.indexOf("EINORDNUNG IN NOTIZBÜCHER:");
       const blockEnd = sys.indexOf("KONVENTIONEN IN JEDEM NOTIZBUCH:");
       expect(blockStart).toBeGreaterThan(-1);
-      expect(sys).toContain("AUSDRÜCKLICHER Speicherauftrag geht IMMER vor");
-      expect(sys).toContain("KEIN Grund, die Ablage auszulassen");
-      const ruleAt = sys.indexOf("AUSDRÜCKLICHER Speicherauftrag geht IMMER vor");
+      expect(sys).toContain("AUSDRÜCKLICHER Speicherauftrag geht IMMER vor UND wird NIE zur Rückfrage");
+      expect(sys).toContain("WORTGLEICHER oder sogar EXAKT IDENTISCHER Eintrag");
+      expect(sys).toContain("ist NIEMALS ein Grund, die Ablage auszulassen");
+      const ruleAt = sys.indexOf("AUSDRÜCKLICHER Speicherauftrag geht IMMER vor UND wird NIE zur Rückfrage");
       expect(ruleAt).toBeGreaterThan(blockStart);
       expect(ruleAt).toBeLessThan(blockEnd);
       // Ein Hinweis auf die Ähnlichkeit ist erlaubt, ersetzt die Ablage aber
       // NIE (explizit gefordert, nicht nur implizit).
-      expect(sys).toContain("ersetze die angeforderte Ablage aber niemals dadurch");
+      expect(sys).toContain("nie ANSTELLE der Ablage");
+    });
+
+    it("verbietet ausdrücklich, aus dem Speicherauftrag eine Rückfrage/ein Opt-in zu machen (v7.34, Live-Retest-Fix)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("stattdessen NACHZUFRAGEN");
+      expect(sys).toContain('ein weiteres Opt-in („sag Bescheid, falls du ihn zusätzlich hier haben möchtest“) ist VERBOTEN');
+      expect(sys).toContain('auch wenn es sich um eine „exakte Dublette“ handelt');
+    });
+
+    it("enthält ein Fehler-/Korrekt-Beispielpaar mit dem exakten, live beobachteten Fehlerfall (Pythagoras-Dublette)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("Notiere den Satz des Pythagoras mit gerenderter Formel");
+      expect(sys).toContain("Da es sich um eine exakte Dublette handeln würde, habe ich keinen neuen Eintrag angelegt");
+      expect(sys).toContain("Falls du ihn zusätzlich hier … haben möchtest, sag einfach Bescheid");
+      expect(sys).toContain("Fehlerhaftes Beispiel");
+      expect(sys).toContain("Korrektes Beispiel");
+      // Reihenfolge: fehlerhaftes Beispiel VOR dem korrekten, beide INNERHALB
+      // des EINORDNUNG-Blocks.
+      const blockStart = sys.indexOf("EINORDNUNG IN NOTIZBÜCHER:");
+      const blockEnd = sys.indexOf("KONVENTIONEN IN JEDEM NOTIZBUCH:");
+      const falschAt = sys.indexOf("Fehlerhaftes Beispiel");
+      const richtigAt = sys.indexOf("Korrektes Beispiel");
+      expect(falschAt).toBeGreaterThan(blockStart);
+      expect(falschAt).toBeLessThan(richtigAt);
+      expect(richtigAt).toBeLessThan(blockEnd);
+    });
+
+    it("kreuzverweist in DEINE AUFGABEN (Punkt 2 Struktur-/Dubletten-Pflege UND Punkt 3 proaktive Dubletten-Hinweise) auf die EINORDNUNG-Regel, damit beide Stellen ihr nicht widersprechen", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      const aufgabenStart = sys.indexOf("DEINE AUFGABEN:");
+      const einordnungStart = sys.indexOf("EINORDNUNG IN NOTIZBÜCHER:");
+      expect(aufgabenStart).toBeGreaterThan(-1);
+      expect(einordnungStart).toBeGreaterThan(aufgabenStart);
+      // Punkt 2 (Struktur-/Dubletten-Pflege): explizite Klarstellung, dass sie
+      // nie einen ausdrücklichen Speicherauftrag blockiert.
+      const punkt2Hint = sys.indexOf("Diese Dubletten-PFLEGE betrifft die Struktur INNERHALB eines Notizbuchs");
+      expect(punkt2Hint).toBeGreaterThan(aufgabenStart);
+      expect(punkt2Hint).toBeLessThan(einordnungStart);
+      // Punkt 3 (proaktive Dubletten-Hinweise über alle Notizbücher hinweg):
+      // ebenfalls klargestellt, dass das nur ein Hinweis ist.
+      const punkt3Hint = sys.indexOf("Eine erkannte Dublette in einem ANDEREN Notizbuch ist dabei IMMER nur ein HINWEIS");
+      expect(punkt3Hint).toBeGreaterThan(aufgabenStart);
+      expect(punkt3Hint).toBeLessThan(einordnungStart);
     });
   });
 
