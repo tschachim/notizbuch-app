@@ -465,71 +465,67 @@ function ProviderLinkIcon({ url }) {
 // jedem Aufruf neu (wie TASK_RE/OL_RE oben).
 const GENERIC_LINK_TOKEN_RE = new RegExp("^\\[([^\\]\\n]{1,300})\\]\\((" + LINK_OR_FILE_URL_SRC + ")\\)$");
 
-// file:-Link-Komponente (v7.31, Protokoll-Trigger v7.35): Browser blockieren
-// die Navigation von einer https-Seite (GitHub Pages) zu file:// aus
-// Sicherheitsgründen – ein Klick tut dort meist NICHTS Sichtbares (nur eine
-// lokal geöffnete App oder eine Browser-Extension navigiert wirklich).
+// file:-Link-Komponente (v7.31, Direkt-Navigation v7.36 – siehe DECISIONS
+// #79 "Review-Nachbesserung 5" für den vollständigen Live-Befund): Browser
+// blockieren die Navigation von einer https-Seite (GitHub Pages) zu file://
+// aus Sicherheitsgründen – ein Klick tut dort meist NICHTS Sichtbares (nur
+// eine lokal geöffnete App oder eine Browser-Extension navigiert wirklich).
 // Deshalb kopiert der Klick ZUSÄTZLICH den Windows-Pfad (Backslash-Form,
 // fileUrlToWinPath aus filelinks.js) in die Zwischenablage, mit kurzem
-// Inline-Feedback. KEIN preventDefault: erlaubt der Browser/eine Extension
-// die Navigation doch, soll sie ganz normal stattfinden – der Klick tut NUR
-// zusätzlich etwas, verhindert nichts. Kein Provider-Icon (file:-Ziele haben
-// keinen Provider, providerFor prüft ohnehin nur http(s), siehe
-// linkProviders.jsx).
+// Inline-Feedback. KEIN preventDefault: die Navigation zum href MUSS ganz
+// normal stattfinden – der Klick tut NUR zusätzlich etwas, verhindert
+// nichts. Kein Provider-Icon (file:-Ziele haben keinen Provider, providerFor
+// prüft ohnehin nur http(s), siehe linkProviders.jsx).
 //
-// v7.35: ZUSÄTZLICH zum Clipboard-Copy löst der Klick jetzt das eigene
-// "notizbuch-open:"-Protokoll aus (buildProtocolUrl, filelinks.js) – ein
-// lokal registrierter Handler (tools/notizbuch-open-*.ps1) öffnet die Datei
-// dann im dafür registrierten Windows-Programm, wie ein Explorer-
-// Doppelklick (siehe DECISIONS). buildProtocolUrl liefert null für
-// UNC-Ziele (der Handler lehnt UNC grundsätzlich ab, SMB-Credential-Leak-
-// Risiko) – in dem Fall bleibt es beim reinen Clipboard-Copy, unverändert
-// zu v7.31.
+// v7.35 → v7.36: DIREKTE TOP-LEVEL-NAVIGATION statt Iframe-Trigger.
+// v7.35 hatte den Klick ZUSÄTZLICH über ein unsichtbares <iframe> das eigene
+// "notizbuch-open:"-Protokoll auslösen lassen (buildProtocolUrl,
+// filelinks.js), während href weiterhin die file:-URL blieb. LIVE-BEFUND
+// nach der v7.35-Installation (siehe DECISIONS #79): Der Handler UND die
+// Windows-Protokollauflösung funktionieren nachweislich (Direktaufruf sowie
+// "Start-Process notizbuch-open:...​" lösen zuverlässig aus, Log-Eintrag
+// entsteht) – aber der Iframe-Trigger löst im echten Browser NICHTS aus,
+// weder Variante "verstecktes iframe" noch "programmatisch erzeugter Anchor
+// + .click()" (beide mit echter User-Geste getestet). Genau die in v7.35
+// als "GEPLANTE, NICHT umgesetzte Option" dokumentierte Bedingung ist damit
+// eingetreten: Chromium lässt externe Custom-Protocol-Starts aus einem
+// Iframe/programmatischen Klick nicht mehr zu – nur eine ECHTE, vom Nutzer
+// direkt angeklickte <a href>-TOP-LEVEL-Navigation zu einem Custom-Scheme
+// wird noch akzeptiert (derselbe Weg, den z. B. VS Code für "vscode://…"
+// nutzt). Deshalb jetzt: href IST bei einem Laufwerkspfad direkt die
+// "notizbuch-open:v1?path=…"-Kontrakt-URL (buildProtocolUrl liefert null
+// für UNC-Ziele – der Handler lehnt UNC grundsätzlich ab, SMB-Credential-
+// Leak-Risiko –, dann bleibt href wie bisher die file:-URL). Der Klick ist
+// damit eine ganz normale Browser-Navigation, kein JS-Trigger mehr nötig
+// (triggerProtocolOpen/Iframe-Mechanik ersatzlos entfernt).
 //
-// BEWUSST NUR das Iframe, KEIN location.href-Fallback (Review-Runde
-// Sicherheits-Review v7.35, siehe DECISIONS #79 "Review-Nachbesserung 2"):
-// ein zusätzlicher direkter location.href-Versuch wurde testweise ergänzt
-// und wieder ENTFERNT, weil er kein Fallback im eigentlichen Sinn war,
-// sondern IMMER parallel zum Iframe lief – bei installiertem Handler wird
-// das Protokoll dann bei JEDEM Klick zweimal ausgelöst (Happy Path, nicht
-// "im schlimmsten Fall"), bei nicht installiertem Handler (der Zustand der
-// meisten Nutzer, Opt-in-Setup) reaktiviert die Top-Level-Zuweisung genau
-// das sichtbare Fehlerdialog-Problem, dessentwegen darüber bereits das
-// Iframe gewählt wurde – gegen einen unbelegten Nutzen (Hypothese
-// "Chromium blockiert Iframe-Protokollstarts", nie verifiziert). Als
-// GEPLANTE Option in DECISIONS #79 dokumentiert: erst aktivieren, falls der
-// manuelle Testfall D14b (docs/TESTFAELLE.md, [MANUELL]) zeigt, dass das
-// Iframe den Protokollstart im echten Browser NICHT auslöst – dann mit
-// einer blur/visibilitychange-Erkennung (nur auslösen, wenn das Iframe
-// NACHWEISLICH nichts bewirkt hat), nicht unbedingt parallel.
-function triggerProtocolOpen(url) {
-  // Unsichtbares <iframe> statt einer direkten location-Zuweisung: Setzt
-  // man window.location/location.href DIREKT auf ein (beim Nutzer evtl.
-  // noch NICHT registriertes) fremdes Protokoll, zeigen manche Browser im
-  // SICHTBAREN Dokument kurz eine Fehlerseite ("Diese Seite ist nicht
-  // erreichbar" o. Ä.), obwohl die App-Seite dabei gar nicht wirklich
-  // verlassen wird. Ein Navigationsversuch in einem KIND-Frame scheitert
-  // bei einem unbekannten/nicht erlaubten Schema dagegen still, ohne dass
-  // irgendetwas im sichtbaren Dokument passiert – kein Entladen der Seite,
-  // kein Popup-Blocker-Konflikt (anders als window.open, das zudem einen
-  // echten neuen Tab/ein Fenster öffnen würde). Das Iframe wird nach
-  // kurzer Zeit wieder entfernt (kein dauerhaft wachsendes verstecktes DOM
-  // bei wiederholten Klicks).
-  try {
-    const iframe = document.createElement("iframe");
-    iframe.style.display = "none";
-    iframe.src = url;
-    document.body.appendChild(iframe);
-    setTimeout(() => { iframe.remove(); }, 1000);
-  } catch (e) {
-    // Kein document/DOM verfügbar (z. B. SSR) – der Klick bleibt über das
-    // normale <a href>/den Clipboard-Copy trotzdem funktionsfähig.
-  }
-}
-
+// Bewusst in Kauf genommen (siehe DECISIONS #79): Auf einem Rechner OHNE
+// installierten Handler (Opt-in-Setup, siehe tools/notizbuch-open-setup.ps1)
+// zeigt der Klick jetzt eine browsereigene Fehlermeldung ("Für dieses
+// Protokoll ist keine App verknüpft" o. Ä.) statt still nur zu kopieren –
+// die frühere v7.35-Begründung für das Iframe ("keine sichtbare Fehlerseite
+// beim Klick") ist durch den Live-Befund überholt: das Iframe verhinderte
+// die Fehlerseite nur, weil es GENERELL nichts auslöste, auch nicht bei
+// installiertem Handler. Der Pfad landet trotzdem in der Zwischenablage
+// (Clipboard-Copy läuft unverändert bei JEDEM Klick) – ein funktionierender
+// Klick für Nutzer MIT Handler war die ausdrückliche Priorität, eine
+// zusätzliche Fehlermeldung für Nutzer OHNE Handler der bewusst akzeptierte
+// Preis dafür.
+//
+// KEIN target="_blank": Bei einem Klick auf einen Custom-Scheme-Link in
+// einem NEUEN Tab (target="_blank") bliebe dieser neue, leere Tab nach dem
+// Hand-off an die externe App bestehen (der Browser kann ihn nicht einfach
+// wieder schließen) – ein sichtbarer, verwirrender Nebeneffekt. Ohne
+// target bleibt es bei genau der aktuellen Seite/demselben Tab (siehe auch
+// bestehenden Test "KEIN target=_blank/rel-Attribut" unten).
 function FileLink({ url, title }) {
   const [copied, setCopied] = useState(false);
   const winPath = fileUrlToWinPath(url);
+  // href: die Protokoll-URL (Laufwerkspfad) oder unverändert die file:-URL
+  // (UNC-Ziel, buildProtocolUrl liefert dafür null) – NICHT mehr
+  // menschenlesbar, deshalb bleibt "title" explizit der Backslash-Pfad
+  // (siehe unten), damit der Tooltip weiterhin aussagekräftig ist.
+  const href = buildProtocolUrl(url) ?? url;
   // Timer-ID in einem Ref (Review-Fix 🔵 Finding 4): ein zweiter Klick
   // VOR Ablauf der ersten 1,5 s löschte bisher NICHT den bereits laufenden
   // Timer – der ERSTE Timer blendete das Feedback dann verfrüht aus, obwohl
@@ -538,10 +534,18 @@ function FileLink({ url, title }) {
   // der Nutzer wegnavigiert/das Dokument neu rendert, bevor die 1,5 s um sind).
   const timerRef = useRef(null);
   useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
+  // NUR NOCH Clipboard-Copy + Feedback, KEIN preventDefault: die Navigation
+  // zu href (Protokoll-Start bzw. file:-URL) muss normal ablaufen. Reihen-
+  // folge bewusst so belassen: clipboard.writeText() wird HIER synchron
+  // ANGESTOSSEN (liefert sofort ein Promise zurück, der eigentliche Kopier-
+  // vorgang läuft asynchron), handleClick kehrt danach ohne preventDefault
+  // zurück – die Standard-Aktion des Klicks (Navigation) startet direkt im
+  // Anschluss. Eine Navigation zu einem REGISTRIERTEN Custom-Scheme entlädt
+  // die aktuelle Seite dabei NICHT (der Browser übergibt nur an die externe
+  // App/zeigt einen Erlaubnis-Prompt, das Dokument bleibt bestehen) – der
+  // asynchrone Clipboard-Vorgang wird also nicht durch die Navigation
+  // abgebrochen.
   const handleClick = () => {
-    const protoUrl = buildProtocolUrl(url);
-    if (protoUrl) triggerProtocolOpen(protoUrl);
-
     const clipboard = typeof navigator !== "undefined" ? navigator.clipboard : null;
     if (!clipboard || typeof clipboard.writeText !== "function") return; // kein Crash ohne Clipboard-API
     clipboard.writeText(winPath).then(
@@ -558,7 +562,7 @@ function FileLink({ url, title }) {
   };
   return (
     <>
-      <a href={url} title={winPath} className={DOC_LINK_CLASS} onClick={handleClick}>
+      <a href={href} title={winPath} className={DOC_LINK_CLASS} onClick={handleClick}>
         {renderInline(title)}
       </a>
       {copied && <span className="ml-1 text-xs text-emerald-600 align-middle">Pfad kopiert</span>}

@@ -5694,41 +5694,46 @@ aus `referenz-app.jsx` übernommen.
       Registry-Eintrag sonst kaputt, ohne dass das beim nächsten
       Link-Klick ersichtlich wäre (der Klick täte dann wieder NICHTS,
       genau das Ausgangsproblem).
-    - **`triggerProtocolOpen` (`markdown.jsx#FileLink`): NUR ein
-      unsichtbares `<iframe>`, bewusst KEIN paralleler
-      `location.href`-Versuch (siehe „Review-Nachbesserung 2“ unten für
-      die Begründung, warum ein testweise ergänzter Fallback wieder
-      entfernt wurde).** Setzt man `window.location`/`location.href`
-      DIREKT auf ein (beim Nutzer evtl. noch nicht registriertes)
-      fremdes Protokoll, zeigen manche Browser im sichtbaren Dokument
-      kurz eine Fehlerseite, obwohl die App-Seite dabei gar nicht
-      wirklich verlassen wird. Ein Navigationsversuch in einem
-      Kind-Frame scheitert bei einem unbekannten/nicht erlaubten Schema
-      dagegen still, ohne dass irgendetwas im sichtbaren Dokument
-      passiert – kein Entladen der Seite, kein Popup-Blocker-Konflikt
-      (anders als `window.open`, das zudem einen echten neuen Tab öffnen
-      würde und als Popup geblockt werden könnte). Das Iframe wird nach
-      1 s wieder entfernt (kein wachsendes verstecktes DOM bei
-      wiederholten Klicks). Der Klick löst das Protokoll ZUSÄTZLICH zum
-      bestehenden Clipboard-Copy aus (KEIN preventDefault, unverändert
-      seit v7.31); liefert `buildProtocolUrl` `null` (UNC-Ziel), bleibt
-      es beim reinen Clipboard-Copy wie bisher.
-    - **GEPLANTE, NICHT umgesetzte Option: `location.href`-Fallback nur
-      bei nachgewiesenem Iframe-Fehlschlag.** Ein direkter
-      `location.href`-Versuch ZUSÄTZLICH zum Iframe wurde in einer
-      Zwischenrunde ergänzt UND wieder entfernt (siehe
-      „Review-Nachbesserung 2“) – die Grundidee (Absicherung gegen eine
-      mögliche künftige Chromium-Einschränkung des Iframe-Wegs) bleibt
-      als Option bestehen, aber NUR mit einer echten
-      Fehlschlag-Erkennung statt eines unbedingten Parallel-Versuchs:
-      erst aktivieren, falls der manuelle Testfall D14b
-      (`docs/TESTFAELLE.md`, `[MANUELL]`) NACHWEIST, dass das Iframe den
-      Protokollstart im echten Browser NICHT auslöst, und dann mit einer
-      `blur`/`visibilitychange`-Erkennung (der Fallback feuert nur, wenn
-      das Iframe NACHWEISLICH nichts bewirkt hat – z. B. kein
-      `blur`-Event auf `window` innerhalb einer kurzen Frist nach dem
-      Klick, ein Indiz dafür, dass der Handler NICHT angesprungen ist),
-      nicht unbedingt parallel zum Iframe.
+    - **`FileLink`-Mechanismus v7.36: DIREKTE Top-Level-Navigation statt
+      Iframe-Trigger (`triggerProtocolOpen` ersatzlos entfernt) – siehe
+      „Review-Nachbesserung 5“ unten für den vollständigen Live-Befund,
+      der diesen Wechsel ausgelöst hat.** `href` IST bei einem
+      Laufwerkspfad DIREKT `buildProtocolUrl(url)` (die
+      `notizbuch-open:v1?path=…`-Kontrakt-URL); liefert `buildProtocolUrl`
+      `null` (UNC-Ziel), bleibt `href` unverändert die file:-URL. Ein
+      Klick ist damit eine ganz normale Browser-Navigation zu einem
+      Custom-Scheme – derselbe, von Browsern etablierte Weg, den z. B.
+      VS Code für `vscode://…`-Links nutzt – KEIN JS-Trigger mehr nötig.
+      `title` bleibt bewusst der lesbare Backslash-Pfad (der `href` ist
+      es jetzt nicht mehr). KEIN `target="_blank"`: Ein neuer Tab bliebe
+      nach dem Hand-off an die externe App leer stehen (die Navigation
+      "verlässt" die Seite bei einem registrierten Custom-Scheme nicht
+      wirklich, ein separater Tab hätte also keinen Rückweg/Grund mehr,
+      sich zu schließen) – bewusst ohne `target`, bleibt im selben Tab.
+      Der Klick löst NUR NOCH den bestehenden Clipboard-Copy aus (KEIN
+      preventDefault – die Navigation MUSS stattfinden, das ist jetzt
+      der GESAMTE Mechanismus). Reihenfolge: `clipboard.writeText(...)`
+      wird synchron direkt im Klick-Handler ANGESTOSSEN (liefert sofort
+      ein Promise, der eigentliche Kopiervorgang läuft asynchron),
+      danach kehrt der Handler ohne `preventDefault` zurück – die
+      Standard-Navigation startet im Anschluss. Eine Navigation zu einem
+      REGISTRIERTEN Custom-Scheme entlädt die aktuelle Seite dabei NICHT
+      (der Browser übergibt nur an die externe App bzw. zeigt einen
+      Erlaubnis-Prompt, das Dokument bleibt bestehen) – der asynchrone
+      Clipboard-Vorgang wird durch die Navigation also nicht abgebrochen.
+    - **Bewusst in Kauf genommen (v7.36): Ohne installierten Handler zeigt
+      der Klick jetzt eine BROWSEREIGENE Fehlermeldung statt still nur zu
+      kopieren.** Die v7.35-Begründung für den Iframe-Umweg („keine
+      sichtbare Fehlerseite beim Klick“) ist durch den Live-Befund
+      überholt: Das Iframe verhinderte die Fehlerseite nur, weil es
+      GENERELL nichts auslöste, auch nicht bei installiertem Handler
+      (siehe „Review-Nachbesserung 5“). Der Pfad landet trotzdem in der
+      Zwischenablage (Clipboard-Copy läuft unverändert bei JEDEM Klick) –
+      ein funktionierender Klick für Nutzer MIT Handler war die
+      ausdrückliche Priorität, eine zusätzliche Browser-Fehlermeldung für
+      Nutzer OHNE Handler der bewusst akzeptierte Preis dafür (ähnlich
+      wie ein Klick auf einen `vscode://…`-Link ohne installiertes VS
+      Code ebenfalls eine Fehlermeldung zeigt statt still zu scheitern).
     - **`-Validate`-Diagnosemodus (`notizbuch-open-handler.ps1`):**
       Vitest kann PowerShell nicht testen – der Handler bekam deshalb
       einen expliziten `-Validate <url>`-Schalter, der dieselbe
@@ -5751,8 +5756,8 @@ aus `referenz-app.jsx` übernommen.
       Windows-Dateiendungen (siehe dort für die vollständigen Ist-
       Ergebnisse), ein CLSID-Shell-Namespace-Ordner, ein extensionsloser
       Dateiname und mehrere 8.3-Kurzname-Fälle auf beiden Seiten.
-    - **Neue Tests:** `tests/filelinks.test.js` (`buildProtocolUrl`) –
-      Kontrakt-Beispiel aus dem Auftrag, Umlaute/UTF-8-Encoding,
+    - **Tests (Stand v7.36):** `tests/filelinks.test.js` (`buildProtocolUrl`)
+      – Kontrakt-Beispiel aus dem Auftrag, Umlaute/UTF-8-Encoding,
       `#`/`%` im Dateinamen, UNC → `null` (zwei Varianten), fremde
       URL/http(s) → `null`, leere Eingabe → `null`, Roundtrip
       `decodeURIComponent(buildProtocolUrl(...))` zum ursprünglichen
@@ -5761,25 +5766,21 @@ aus `referenz-app.jsx` übernommen.
       von `pathToFileUrl`/`encSeg` (die ist NUR für die
       Markdown-Link-Idempotenz nötig, siehe #-Eintrag zu Finding 2 im
       v7.31-Block – `buildProtocolUrl` baut keine Markdown-Syntax, für
-      die eine rohe Klammer ein Problem wäre). `tests/markdown.test.jsx`
-      (neuer Block „Klick löst zusätzlich das notizbuch-open:-Protokoll
-      aus“) – Iframe mit korrekter Kontrakt-URL + `display:none`,
-      Clipboard-Copy bleibt zusätzlich aktiv, automatisches Entfernen
-      nach 1 s, UNC-Ziel löst KEIN Iframe aus, kein `window.open`-Aufruf,
-      mehrere unabhängige Klicks/Iframes (ein testweise ergänzter
-      `location.href`-Fallback-Test samt der dafür nötigen
-      `Object.defineProperty(window, "location", …)`-Mock-Infrastruktur
-      wurde zusammen mit dem Fallback selbst wieder entfernt, siehe
-      „Review-Nachbesserung 2“ unten). Ein datei-weiter `afterEach`-Hook
-      wurde
-      ergänzt, der nach JEDEM Test dieser Datei liegen gebliebene
-      Iframes entfernt (der Klick-Handler hängt sie direkt an
-      `document.body`, nicht an den Test-„container“ – ohne diesen Hook
-      leckten Iframes aus Tests mit ECHTEN Timern, die die 1-s-
-      Entfernung nicht selbst per `vi.advanceTimersByTime` abwarten, in
-      nachfolgende Tests hinein; betrifft transitiv auch die
-      BESTEHENDEN v7.31-Clipboard-Tests, da jeder dortige Klick auf
-      einen Nicht-UNC-Pfad jetzt ebenfalls ein Iframe erzeugt).
+      die eine rohe Klammer ein Problem wäre). `tests/markdown.test.jsx`:
+      der Block „DocView: file:-Links“ prüft per `renderToStaticMarkup`
+      direkt, dass `href` bei einem Laufwerkspfad die
+      `notizbuch-open:v1?path=…`-URL ist (statisch, inkl. Titel mit
+      Formatierung/numerischem Titel) und bei einem UNC-Ziel unverändert
+      die file:-URL bleibt; ein eigener Block „href ist die Protokoll-URL,
+      Klick navigiert direkt“ verifiziert dasselbe zusätzlich per echtem
+      DOM/Klick (`getAttribute("href")`, `title` bleibt der Backslash-Pfad,
+      Clipboard-Copy bleibt bei jedem Klick aktiv, `defaultPrevented ===
+      false`, kein `window.open`-Aufruf) – die frühere v7.35-Iframe-
+      Testsuite (Iframe-Erzeugung/-Entfernung, Mehrfach-Klicks) wurde
+      ERSATZLOS entfernt, da die Iframe-Mechanik selbst nicht mehr
+      existiert (siehe „Review-Nachbesserung 5“ unten). Der frühere
+      datei-weite `afterEach`-Hook zum Iframe-Aufräumen ist ebenfalls
+      entfernt (keine Iframes mehr, die aufzuräumen wären).
     - **`docs/TESTFAELLE.md`:** D14 um einen `[MANUELL]`-Teilfall für
       den Protokoll-Klick ergänzt (Browser-Erlaubnis-Prompt beim ersten
       Klick + lokal installierter Handler sind nicht automatisierbar,
@@ -6227,6 +6228,43 @@ aus `referenz-app.jsx` übernommen.
           es aber nicht restlos“ abgeschwächt – ein vom Nutzer bereits
           zugeordnetes Netzlaufwerk (z. B. `Z:` für `\\server\share`)
           sieht für die Prüfung wie ein normaler Laufwerksbuchstabe aus.
+    - **Review-Nachbesserung 5 (LIVE-Befund NACH der v7.35-Installation –
+      Architekturwechsel des Browser-seitigen Trigger-Mechanismus, PS-
+      Handler/Setup UNVERÄNDERT, siehe `FileLink`-Eintrag oben für den
+      aktuellen Stand):** Nach Installation des Handlers (siehe
+      `notizbuch-open-setup.ps1`) auf einem echten Windows-Rechner wurde
+      die gesamte Kette diagnostisch zerlegt:
+      - ✅ **Handler funktioniert:** Direktaufruf (`powershell.exe -File
+        notizbuch-open-handler.ps1 "notizbuch-open:v1?path=…"`) öffnet
+        die Datei zuverlässig im registrierten Programm, Log-Eintrag
+        entsteht.
+      - ✅ **Windows-Protokollauflösung funktioniert:**
+        `Start-Process "notizbuch-open:v1?path=…"` löst korrekt aus,
+        neuer Log-Eintrag entsteht – der Registry-Eintrag
+        (`notizbuch-open-setup.ps1`) ist also korrekt.
+      - ❌ **Browser-Seite (v7.35-Mechanismus) funktioniert NICHT:** Im
+        Browser-Pane der LIVE-App (v7.35 im Header bestätigt, Bundle
+        enthält nachweislich den `notizbuch-open`-/Iframe-Code) wurden
+        ZWEI Varianten mit ECHTER Maus-Klick-Nutzer-Geste getestet –
+        (A) ein unsichtbares Iframe, exakt wie `triggerProtocolOpen`,
+        und (B) ein programmatisch erzeugter `<a>` + `.click()`. BEIDE
+        erzeugten KEINEN einzigen Handler-Log-Eintrag und KEINE
+        Konsolenfehler – das Handler-Log enthielt ausschließlich die
+        manuellen Direktaufrufe oben, keinen einzigen aus dem Browser.
+      **Schlussfolgerung:** Genau die in v7.35 als „GEPLANTE, NICHT
+      umgesetzte Option“ dokumentierte Bedingung ist eingetreten – der
+      manuelle Testfall D14b zeigt, dass ein JS-getriebener
+      (Iframe-/Anchor-Klick-)Protokollstart im echten Browser NICHT
+      auslöst (aktuelle Chromium-Versionen lassen offenbar nur noch
+      ECHTE, vom Nutzer direkt angeklickte Top-Level-Navigationen zu
+      Custom-Schemes zu, keine aus Skript ausgelösten). **Fix:** `href`
+      IST jetzt direkt die Protokoll-URL (siehe `FileLink`-Eintrag oben) –
+      kein JS-Trigger mehr, ein Klick ist eine gewöhnliche
+      Browser-Navigation. Der PowerShell-Handler UND
+      `notizbuch-open-setup.ps1` bleiben dabei VOLLSTÄNDIG unverändert
+      (beide bereits als funktionierend bestätigt) – betroffen ist
+      AUSSCHLIESSLICH die Browser-seitige Auslöse-Mechanik in
+      `markdown.jsx`.
     - **Restrisiken (nach dem Architekturwechsel auf die Positivliste,
       Review-Nachbesserung 3 – das Risikoprofil hat sich grundlegend
       GEDREHT: statt „eine gefährliche Endung rutscht durch“ ist das
@@ -6277,10 +6315,16 @@ aus `referenz-app.jsx` übernommen.
       (5) `notizbuch-open-setup.ps1`/`-handler.ps1` selbst wurden NICHT
       automatisiert getestet (Vitest kann kein PowerShell ausführen) –
       Absicherung über den `-Validate`-Diagnosemodus und die im
-      Umsetzungsbericht/den vier Review-Nachbesserungsrunden gelisteten
-      manuellen Testaufrufe (inkl. eines 94-Endungen-Probelaufs); eine
-      ECHTE Installation + Live-Klick-Verifikation steht noch aus (siehe
-      offene Punkte im jeweiligen Umsetzungsbericht).
+      Umsetzungsbericht/den Review-Nachbesserungsrunden gelisteten
+      manuellen Testaufrufe (inkl. eines 94-Endungen-Probelaufs). Eine
+      ECHTE Installation + Live-Klick-Verifikation HAT mittlerweile
+      stattgefunden (siehe „Review-Nachbesserung 5“ oben) – Handler UND
+      Windows-Protokollauflösung sind damit LIVE bestätigt funktionsfähig;
+      offen bleibt nur noch die erneute Live-Verifikation DES NEUEN
+      direkten `href`-Mechanismus selbst (die Ursache für den v7.35-
+      Fehlschlag lag nachweislich auf der Browser-Trigger-Seite, nicht im
+      PowerShell-Teil – trotzdem steht ein Live-Klick-Test mit v7.36 noch
+      aus, siehe offene Punkte im Umsetzungsbericht).
       (6) Symlinks/Reparse-Points wurden NICHT gesondert behandelt:
       `Get-Item` löst einen Symlink nicht zu seinem Ziel auf, ein
       Symlink mit erlaubter Endung, der auf eine Datei mit NICHT
@@ -6314,3 +6358,15 @@ aus `referenz-app.jsx` übernommen.
       dagegen keinen aktiven Schutz – als Grenze benannt statt implizit
       als „vollständig geschlossen“ behauptet (Review-Nachbesserung 4,
       Finding 4, Nit).
+      (9) Seit v7.36 (Review-Nachbesserung 5, direkte Top-Level-
+      Navigation statt Iframe-Trigger): Auf einem Rechner OHNE
+      installierten Handler zeigt ein Klick jetzt eine BROWSEREIGENE
+      Fehlermeldung ("Für dieses Protokoll ist keine Anwendung
+      verknüpft" o. Ä.), statt wie in v7.31-v7.35 still nur zu kopieren.
+      Bewusst in Kauf genommen: Ein funktionierender Klick für Nutzer MIT
+      installiertem Handler war die ausdrückliche Priorität, die
+      zusätzliche (harmlose, rein informative) Browser-Fehlermeldung für
+      Nutzer OHNE Handler der akzeptierte Preis dafür – der Windows-Pfad
+      landet in BEIDEN Fällen unverändert in der Zwischenablage. Dieselbe
+      Charakteristik zeigen andere etablierte Custom-Protocol-Links (z. B.
+      `vscode://…` ohne installiertes VS Code).

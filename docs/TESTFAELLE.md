@@ -835,34 +835,66 @@ der Dokument-Ansicht erscheint „QA-Beleg“ als unterstrichener, blauer
 Link genau an der Stelle des Pfads (Linktext = Dateiname OHNE Endung),
 der übrige Satz bleibt unverändert; KEIN hochgestelltes Fußnoten-Symbol.
 Mit der Maus über den Link fahren: Tooltip zeigt den vollen Windows-Pfad
-(Backslash-Form) an. Auf den Link klicken: Da die App per https läuft,
-blockiert der Browser die Navigation zu file:// üblicherweise (kein
-sichtbarer Sprung) – erwartet erscheint aber kurz ein Hinweis „Pfad
-kopiert“ direkt neben dem Link (verschwindet nach ~1,5 s von selbst).
+(Backslash-Form) an (der eigentliche Link-Href ist seit v7.36 NICHT mehr
+menschenlesbar, siehe unten). Auf den Link klicken: erwartet erscheint
+kurz ein Hinweis „Pfad kopiert“ direkt neben dem Link (verschwindet nach
+~1,5 s von selbst) – das gilt IMMER, unabhängig vom Rest dieses Absatzes.
+Was der Klick DARÜBER HINAUS auslöst, hängt seit v7.36 vom Testkanal ab:
+- **Im eingebetteten Browser-Pane dieses Testlaufs:** Custom-Protocol-
+  Navigation (`notizbuch-open:…`) löst dort grundsätzlich NICHTS aus,
+  unabhängig vom Mechanismus – das ist KEIN Fehler und wird nicht als
+  Finding gemeldet (siehe D14b für den Grund und den echten Testkanal).
+- **Im echten Browser des Nutzers** (nicht Teil dieses automatisierten
+  Laufs, siehe D14b): Der Klick navigiert direkt zur
+  `notizbuch-open:v1?path=…`-Protokoll-URL – mit installiertem Handler
+  öffnet sich die Datei im registrierten Programm, ohne installierten
+  Handler zeigt der Browser eine eigene Fehlermeldung („keine App für
+  dieses Protokoll“ o. Ä.), der Pfad bleibt aber trotzdem kopiert.
 Direkt danach den Inhalt der Zwischenablage prüfen (z. B. in das
 Chat-Eingabefeld einfügen und wieder löschen): erwartet steht dort der
 Windows-Pfad in Backslash-Form („C:\Users\test\QA-Beleg.docx“). Editor
 erneut öffnen: Der Link bleibt als echter, klickbarer Link erhalten
 (kein Zerfall in eckige Klammern/Klartext) und lässt sich über den
 Link-Knopf (Cursor hineinsetzen, Kettensymbol) als
-„file:///C:/Users/test/QA-Beleg.docx“ im Popover ablesen. Danach die
-Testzeile wieder entfernen und speichern (Cleanup).
+„file:///C:/Users/test/QA-Beleg.docx“ im Popover ablesen (die im
+Dokument gespeicherte Markdown-Syntax bleibt unverändert file:-basiert –
+nur der beim Anzeigen gerenderte Link-Href wird zur Protokoll-URL
+umgebaut, siehe D14b). Danach die Testzeile wieder entfernen und
+speichern (Cleanup).
 
 **D14b [MANUELL] Protokoll-Klick öffnet die Datei im registrierten
-Programm (v7.35).** NICHT durch den Tester-Agenten ausführbar (siehe
-Markierungs-Legende oben) – Voraussetzung ist eine EINMALIGE, lokale
-Einrichtung durch den Nutzer selbst:
-`notizbuch-app/tools/notizbuch-open-setup.ps1` einmal per PowerShell auf
-dem Testrechner ausführen (registriert `notizbuch-open:` NUR unter
-HKCU, keine Adminrechte nötig; `-Uninstall` entfernt es wieder
+Programm (v7.35, Mechanismus überarbeitet in v7.36).** NICHT durch den
+Tester-Agenten ausführbar UND NICHT im eingebetteten Browser-Pane dieses
+Testlaufs überprüfbar (siehe Markierungs-Legende oben) – ein Klick auf
+eine `notizbuch-open:…`-Protokoll-URL löst dort GRUNDSÄTZLICH nichts aus
+(Custom-Protocol-Navigation aus eingebetteten/automatisierten
+Browser-Kontexten wird von Chromium unterbunden), UNABHÄNGIG davon, ob
+die App per Iframe-Trigger (v7.35, mittlerweile entfernt) oder per
+direktem `href` (v7.36, aktueller Stand) arbeitet – ein Fehlschlag DORT
+ist also KEIN Hinweis auf einen Fehler. Dieser Testfall gilt AUSSCHLIESS-
+LICH im echten, eigenständig geöffneten Browser des Nutzers (z. B. ein
+normales Edge-/Chrome-Fenster, NICHT das Browser-Pane dieses Tools).
+Voraussetzung ist eine EINMALIGE, lokale Einrichtung durch den Nutzer
+selbst: `notizbuch-app/tools/notizbuch-open-setup.ps1` einmal per
+PowerShell auf dem Testrechner ausführen (registriert `notizbuch-open:`
+NUR unter HKCU, keine Adminrechte nötig; `-Uninstall` entfernt es wieder
 rückstandsfrei). Danach wie in D14 einen file:-Link mit einem TATSÄCHLICH
 existierenden Testpfad erzeugen (z. B. eine echte, harmlose Datei wie
-eine `.txt`) und anklicken. Erwartet: Der Browser fragt beim
-ALLERERSTEN Klick einmalig, ob „notizbuch-open“-Links geöffnet werden
-dürfen (Bestätigen); danach öffnet sich die Datei im dafür unter
-Windows registrierten Programm – genau wie ein Explorer-Doppelklick.
-Das bisherige Verhalten (Clipboard-Copy + „Pfad kopiert“-Hinweis, D14)
-bleibt dabei ZUSÄTZLICH bestehen. Der Handler öffnet automatisch NUR
+eine `.txt`) und im echten Browser anklicken. Erwartet (Mechanismus seit
+v7.36: der gerenderte Link-Href IST direkt die `notizbuch-open:v1?
+path=…`-Protokoll-URL, ein normaler Linkklick navigiert also direkt
+dorthin – siehe DECISIONS #79 „Review-Nachbesserung 5“ für den Live-Befund,
+der diesen Wechsel ausgelöst hat): Der Browser fragt beim ALLERERSTEN
+Klick einmalig, ob „notizbuch-open“-Links geöffnet werden dürfen
+(Bestätigen); danach öffnet sich die Datei im dafür unter Windows
+registrierten Programm – genau wie ein Explorer-Doppelklick. Das
+bisherige Clipboard-Copy-Verhalten („Pfad kopiert“-Hinweis, D14) bleibt
+dabei ZUSÄTZLICH bestehen (unabhängig vom Ausgang der Navigation).
+**Ohne installierten Handler** (nicht Teil dieses Testfalls, aber gut zu
+kennen): der Browser zeigt jetzt eine EIGENE Fehlermeldung („Für dieses
+Protokoll ist keine Anwendung verknüpft“ o. Ä.) statt still nichts zu
+tun – bewusst in Kauf genommen (siehe DECISIONS #79), der Pfad landet
+trotzdem in der Zwischenablage. Der Handler öffnet automatisch NUR
 Dateitypen von einer festen Positivliste gängiger Dokument-/Medien-
 formate (u. a. `.pdf`, `.txt`, `.docx`, `.png`, `.mp3` – siehe
 `tools/notizbuch-open-handler.ps1` für die vollständige Liste); der
