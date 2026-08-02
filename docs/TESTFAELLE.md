@@ -862,34 +862,63 @@ nur der beim Anzeigen gerenderte Link-Href wird zur Protokoll-URL
 umgebaut, siehe D14b). Danach die Testzeile wieder entfernen und
 speichern (Cleanup).
 
+**D14c [OFFEN] Zitierter Windows-Pfad mit Leerzeichen wird ebenfalls
+automatisch verlinkt (v7.37, Nutzer-Befund Live).** Windows liefert
+einen Pfad bei „Als Pfad kopieren“ (Explorer, Umschalt+Rechtsklick) IN
+doppelten Anführungszeichen – genau so fügt ein Nutzer ihn typischerweise
+ein, und genau das erkannte D14 bisher NICHT (weder die Inline- noch die
+Ganze-Zeile-Regel dort). Editor öffnen, eine Testzeile mit einem
+erfundenen, IN ANFÜHRUNGSZEICHEN eingeschlossenen Pfad MIT Leerzeichen
+tippen, z. B. `"C:\Users\test\QA Ordner\QA Beleg mit Leerzeichen.docx"`
+(die Anführungszeichen gehören mit zur Testzeile). Speichern. Erwartet:
+In der Dokument-Ansicht erscheint „QA Beleg mit Leerzeichen“ als
+klickbarer Link – die Anführungszeichen sind dabei VERSCHWUNDEN (werden
+beim Verlinken bewusst entfernt, siehe DECISIONS #79). Der übrige Test
+(Tooltip, Klick-Verhalten, Editor-Roundtrip) läuft wie in D14. Danach
+zusätzlich prüfen: derselbe Pfad OHNE Anführungszeichen, aber mit einem
+kurzen (≤ 5 Wörter je Pfadsegment) Leerzeichen-Segment, allein auf einer
+Zeile (z. B. „C:\Users\test\QA Ordner\QA Beleg.docx“), wird ebenfalls
+verlinkt (bestehende Ganze-Zeile-Regel, D14 – kein neues Verhalten,
+schadet aber nicht, das hier nochmal mitzuprüfen). Danach die Testzeile(n)
+wieder entfernen und speichern (Cleanup).
+
 **D14b [MANUELL] Protokoll-Klick öffnet die Datei im registrierten
-Programm (v7.35, Mechanismus überarbeitet in v7.36).** NICHT durch den
-Tester-Agenten ausführbar UND NICHT im eingebetteten Browser-Pane dieses
-Testlaufs überprüfbar (siehe Markierungs-Legende oben) – ein Klick auf
-eine `notizbuch-open:…`-Protokoll-URL löst dort GRUNDSÄTZLICH nichts aus
-(Custom-Protocol-Navigation aus eingebetteten/automatisierten
-Browser-Kontexten wird von Chromium unterbunden), UNABHÄNGIG davon, ob
-die App per Iframe-Trigger (v7.35, mittlerweile entfernt) oder per
-direktem `href` (v7.36, aktueller Stand) arbeitet – ein Fehlschlag DORT
-ist also KEIN Hinweis auf einen Fehler. Dieser Testfall gilt AUSSCHLIESS-
-LICH im echten, eigenständig geöffneten Browser des Nutzers (z. B. ein
-normales Edge-/Chrome-Fenster, NICHT das Browser-Pane dieses Tools).
+Programm (v7.35, Mechanismus überarbeitet in v7.36 UND v7.37).** NICHT
+durch den Tester-Agenten ausführbar UND NICHT im eingebetteten
+Browser-Pane dieses Testlaufs überprüfbar (siehe Markierungs-Legende
+oben) – ein Klick auf eine `notizbuch-open:…`-Protokoll-URL löst dort
+GRUNDSÄTZLICH nichts aus (Custom-Protocol-Navigation aus eingebetteten/
+automatisierten Browser-Kontexten wird von Chromium unterbunden),
+UNABHÄNGIG vom Mechanismus – ein Fehlschlag DORT ist also KEIN Hinweis
+auf einen Fehler. Dieser Testfall gilt AUSSCHLIESSLICH im echten,
+eigenständig geöffneten Browser des Nutzers (z. B. ein normales
+Edge-/Chrome-Fenster, NICHT das Browser-Pane dieses Tools).
+**DIAGNOSE-HINWEIS für künftige, ähnliche Fälle:** Ein Protokoll-Ziel,
+dessen Registry-Befehl auf einen SKRIPT-INTERPRETER zeigt (powershell.exe,
+cmd.exe, wscript.exe, …), wird von Chrome nachweislich still verworfen
+(kein Dialog, kein Aufruf), OBWOHL Windows selbst das Protokoll korrekt
+auflöst – siehe DECISIONS #79 „Launcher-Architektur“ für die vollständigen
+Kontrollmessungen. Seit v7.37 zeigt die Registry deshalb auf eine eigene,
+kompilierte `notizbuch-open.exe` (Launcher), NICHT mehr auf
+`powershell.exe` direkt.
 Voraussetzung ist eine EINMALIGE, lokale Einrichtung durch den Nutzer
 selbst: `notizbuch-app/tools/notizbuch-open-setup.ps1` einmal per
-PowerShell auf dem Testrechner ausführen (registriert `notizbuch-open:`
-NUR unter HKCU, keine Adminrechte nötig; `-Uninstall` entfernt es wieder
-rückstandsfrei). Danach wie in D14 einen file:-Link mit einem TATSÄCHLICH
-existierenden Testpfad erzeugen (z. B. eine echte, harmlose Datei wie
-eine `.txt`) und im echten Browser anklicken. Erwartet (Mechanismus seit
-v7.36: der gerenderte Link-Href IST direkt die `notizbuch-open:v1?
-path=…`-Protokoll-URL, ein normaler Linkklick navigiert also direkt
-dorthin – siehe DECISIONS #79 „Review-Nachbesserung 5“ für den Live-Befund,
-der diesen Wechsel ausgelöst hat): Der Browser fragt beim ALLERERSTEN
-Klick einmalig, ob „notizbuch-open“-Links geöffnet werden dürfen
-(Bestätigen); danach öffnet sich die Datei im dafür unter Windows
-registrierten Programm – genau wie ein Explorer-Doppelklick. Das
-bisherige Clipboard-Copy-Verhalten („Pfad kopiert“-Hinweis, D14) bleibt
-dabei ZUSÄTZLICH bestehen (unabhängig vom Ausgang der Navigation).
+PowerShell auf dem Testrechner ausführen (kompiliert dabei den Launcher
+MIT dem im System vorhandenen `csc.exe` – kein zusätzliches SDK nötig;
+registriert `notizbuch-open:` NUR unter HKCU, keine Adminrechte nötig;
+`-Uninstall` entfernt Launcher + Handler wieder rückstandsfrei). Danach
+wie in D14 einen file:-Link mit einem TATSÄCHLICH existierenden Testpfad
+erzeugen (z. B. eine echte, harmlose Datei wie eine `.txt`) und im echten
+Browser anklicken. Erwartet (Mechanismus seit v7.36/v7.37: der gerenderte
+Link-Href IST direkt die `notizbuch-open:v1?path=…`-Protokoll-URL, ein
+normaler Linkklick navigiert also direkt dorthin; Windows ruft dafür den
+kompilierten Launcher auf, der unveraendert an den PowerShell-Handler
+weiterreicht): Der Browser fragt beim ALLERERSTEN Klick einmalig, ob
+„notizbuch-open“-Links geöffnet werden dürfen (Bestätigen); danach öffnet
+sich die Datei im dafür unter Windows registrierten Programm – genau wie
+ein Explorer-Doppelklick. Das bisherige Clipboard-Copy-Verhalten („Pfad
+kopiert“-Hinweis, D14) bleibt dabei ZUSÄTZLICH bestehen (unabhängig vom
+Ausgang der Navigation).
 **Ohne installierten Handler** (nicht Teil dieses Testfalls, aber gut zu
 kennen): der Browser zeigt jetzt eine EIGENE Fehlermeldung („Für dieses
 Protokoll ist keine Anwendung verknüpft“ o. Ä.) statt still nichts zu

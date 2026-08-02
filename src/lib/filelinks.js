@@ -289,8 +289,10 @@ function buildFileLinkMarkdown(raw) {
   return "[" + title + "](" + url + ")";
 }
 
-// Wortzahl-Obergrenze je Pfad-SEGMENT für den Ganze-Zeile-Fall (Review-Fix
-// 🔴 Finding 1, dritter Guard – siehe linkifyWholeLine): ein legitimer
+// Wortzahl-Obergrenze je Pfad-SEGMENT (Review-Fix 🔴 Finding 1, v7.31,
+// ursprünglich NUR für den Ganze-Zeile-Fall unten, siehe linkifyWholeLine –
+// seit dem Review-Fix zu den zitierten Pfaden (v7.37, Runde 2) auch DORT
+// wiederverwendet, siehe linkifyQuotedPathsInSegment): ein legitimer
 // Ordner-/Dateiname mit Leerzeichen hat realistisch wenige Wörter ("Max
 // Mustermann", "Mein Bericht.docx"); ein SATZ, der zufällig direkt nach
 // einem kurzen Pfad-Anfang ohne weiteren Trennschrägstrich weiterläuft
@@ -299,8 +301,179 @@ function buildFileLinkMarkdown(raw) {
 // aber echter mehrwortiger Dateiname bleibt im Zweifel lieber Klartext
 // (False Negative, sicher) statt dass ein Satz fälschlich verlinkt wird
 // (False Positive, zerstört Nutzertext beim dokumentweiten Self-Healing,
-// siehe App.jsx).
+// siehe App.jsx). Deshalb VOR die Zitierte-Pfade-Sektion verschoben (war
+// bis Review-Runde 2 weiter unten, direkt bei linkifyWholeLine).
 const WORDS_PER_SEGMENT_CAP = 5;
+
+/* ---------------- Zitierte Pfade (v7.37) ---------------- */
+//
+// Nutzer-Befund Live: Windows liefert einen Pfad bei "Als Pfad kopieren"
+// (Explorer, Umschalt+Rechtsklick) IN doppelten Anführungszeichen, z. B.
+// "C:\Users\x\OneDrive - Firma\Bericht.docx" – genau SO fügt ein Nutzer ihn
+// typischerweise ein. Weder die Inline-Regel (c, verlangt Whitespace-
+// Freiheit) noch die Ganze-Zeile-Regel (d, verlangt, dass die getrimmte
+// Zeile GENAU mit dem Pfad beginnt – ein führendes Anführungszeichen bricht
+// diesen Anker) erkennen das, selbst wenn man die Anführungszeichen entfernen
+// würde, kämen zusätzlich noch die PROSA-SCHUTZ-Guards aus Regel d
+// (WORDS_PER_SEGMENT_CAP etc., siehe oben) ins Spiel.
+//
+// SONDERBEHANDLUNG: Ein in Anführungszeichen eingeschlossener absoluter
+// Pfad wird verlinkt – inline, an beliebiger Stelle im Text, unabhängig von
+// Leerzeichen. Begründung: Die Anführungszeichen sind (meistens) ein vom
+// NUTZER bewusst gesetzter, eindeutiger Begrenzer. **Review-Fix Runde 2
+// (🟡 A1/A2, Sicherheits-/Qualitäts-Review, VOR dem Commit gemeldet):**
+// Die ursprüngliche v7.37-Fassung verzichtete DESHALB komplett auf die
+// Prosa-Guards aus Regel d – das war zu weitgehend: Anführungszeichen
+// werden in echtem Fließtext auch für PROSA-ZITATE verwendet, die zufällig
+// mit einem gültigen Laufwerks-/UNC-Anfang beginnen können, z. B.
+// `Er sagte: "C:\Windows ist der Systemordner und darf nie geloescht
+// werden" und ging.` – das komplette Zitat wäre sonst zu einem einzigen,
+// den Nutzertext irreversibel umschreibenden Link verschluckt worden
+// (exakt dieselbe Schadensklasse wie Finding 1 in v7.31, nur diesmal durch
+// die Anführungszeichen statt durch die Zeilen-Anker ausgelöst). Ein
+// zweiter Fall belegte zusätzlich, dass UNBALANCIERTE Anführungszeichen
+// (z. B. drei "-Zeichen in einer Zeile statt eines geraden Paars) Text
+// zwischen zwei UNZUSAMMENGEHÖRIGEN Zitaten fälschlich verschluckten. Die
+// Guards unten (siehe linkifyQuotedPathsInSegment) beheben BEIDE Fälle,
+// OHNE die Erkennung der eigentlichen Nutzer-Pfade einzuschränken (Live-
+// Fall "OneDrive - Planon" bleibt grün) – konsistent mit v7.31: Prosa-
+// Schutz schlägt Erkennungsrate.
+//
+// Datei-ENDUNG NICHT zwingend erforderlich (anders als Inline-/Ganze-Zeile-
+// Regel c/d): ein zitierter ORDNER-Pfad ist genauso eindeutig abgegrenzt wie
+// ein zitierter Datei-Pfad (die Anführungszeichen allein reichen als
+// Begrenzung, nicht die Endung) – und der Handler
+// (tools/notizbuch-open-handler.ps1) öffnet Ordner ausdrücklich.
+//
+// Die Anführungszeichen werden beim Ersetzen ENTFERNT (nicht um den
+// fertigen Link herum stehen gelassen): '"[Bericht](file:///…)"' sähe mit
+// zusätzlichen Anführungszeichen um einen bereits farbig/unterstrichen
+// hervorgehobenen Link unnötig unruhig aus – kein anderer Fall dieser
+// Heuristik umgibt den erzeugten Link mit zusätzlicher Interpunktion, das
+// bleibt hier konsistent.
+//
+// TYPOGRAFISCHE Anführungszeichen werden GLEICHERMASSEN unterstützt
+// (Review-Fix 🟡 A3): Der System-Prompt schreibt dem Modell im
+// Dokumenttext ausdrücklich "typografische Anführungszeichen" vor (siehe
+// anthropic.js) – ein vom Modell selbst geschriebener zitierter Pfad in
+// „…" (deutsche Konvention) wäre von einer rein ASCII-basierten Regel NIE
+// erkannt worden. OEFFNER-Klasse ("/„/") und SCHLIESSER-Klasse ("/"/")
+// überschneiden sich bewusst in "（U+201C) statt eine strikte, konventions-
+// abhängige Öffner/Schließer-PAARUNG zu erzwingen (deutsch „…", englisch
+// "…") – es geht nur darum, EINEN zitierten Pfad zu erkennen, nicht
+// typografische Korrektheit zu prüfen; ein "gemischtes" Paar wie „…"
+// funktioniert also ebenfalls.
+const QUOTE_OPEN_RE_SRC = '["\u201E\u201C]';
+const QUOTE_CLOSE_RE_SRC = '["\u201C\u201D]';
+// Der Pfad-KÖRPER schließt ALLE unterstützten Anführungszeichen-Glyphen aus
+// (nicht nur die konkrete Öffner-Glyphe DIESES Treffers) – sonst könnte er
+// über eine ANDERE Anführungszeichen-Art hinaus konsumieren, falls beide
+// Stile im selben Text gemischt vorkommen.
+const QUOTED_PATH_BODY_EXCLUDE = '"\u201C\u201D\u201E';
+//
+// Lookbehind "(?<![\w])" (Review-Fix 🔵 A4, dieselbe Wortmitte-Absicherung
+// wie bei INLINE_TARGET_RE oben): OHNE ihn würde z. B. `sieh"C:\a\b.txt"an`
+// (das öffnende Anführungszeichen klebt direkt an einem Wortzeichen) den
+// Pfad trotzdem erkennen – analog zu "seeC:\a.txt" beim unquotierten
+// Inline-Fall bewusst NICHT gewünscht. Am SCHLIESSENDEN Anführungszeichen
+// ist dagegen KEIN analoger Lookahead nötig: das schließende Zeichen ist
+// bereits ein eindeutiger, vom Nutzer gesetzter Begrenzer (anders als beim
+// unquotierten Fall, wo der Wortmitte-Schutz die EINZIGE Abgrenzung ist) –
+// direkt danach folgender Text wie in `"Bugfix"artig` ist normale,
+// legitime Prosa und kein Erkennungsproblem.
+//
+// Cap {0,300} auf den ROHEN (nicht kodierten) Pfad-Körper zwischen den
+// Anführungszeichen – dieselbe Backtracking-Überlegung wie bei
+// WHOLE_LINE_WIN_PATH_RE (flache, quantifizierte Zeichenklasse ohne
+// Verschachtelung, linear in der Textlänge): 300 rohe Zeichen sind für
+// einen MAX_PATH-Pfad (260) reichlich (anders als der {0,1000}-Cap in
+// FILE_URL_SRC, der auf bereits PROZENT-KODIERTEN Text wirkt, siehe
+// Kommentar dort – hier ist der Pfad noch roh, keine Kodierungs-Expansion).
+// Die Suche endet zwangsläufig am nächsten Anführungszeichen (jeder
+// unterstützten Art), ohne dass eine (lazy-artige) Rückwärtssuche nötig wäre.
+const QUOTED_WIN_PATH_RE = new RegExp(
+  "(?<![\\w])" + QUOTE_OPEN_RE_SRC +
+    "(" + WIN_PATH_START_RE.source + "[^" + QUOTED_PATH_BODY_EXCLUDE + "\\n]{0,300})" +
+    QUOTE_CLOSE_RE_SRC,
+  "g"
+);
+
+// Wendet die Zitierte-Pfade-Regel auf EIN Text-Segment außerhalb jedes
+// Fenced-Codeblocks an (derselbe Aufrufkontext wie linkifySegment unten) –
+// respektiert dieselben geschützten Spannen (Codespans/bestehende Links,
+// Regel a/b) über eine EIGENE PROTECTED_SPAN_RE-Aufteilung: ein zitierter
+// Pfad INNERHALB eines Codespans (z. B. "`\"C:\\a.txt\"`") bleibt dadurch
+// unangetastet. Läuft bewusst als SEPARATER, VORGELAGERTER Durchlauf vor
+// linkifySegment (siehe linkifyFilePaths) – nicht als weitere Alternative
+// innerhalb von INLINE_TARGET_RE/linkifyWholeLine, weil die Zitierte-Pfade-
+// Regel strukturell andere Eigenschaften hat (kein Whitespace-Verbot, keine
+// Endungspflicht). IDEMPOTENT: Ein bereits erzeugter Link "[Titel](file:///
+// …)" enthält keine Anführungszeichen mehr (die wurden ja entfernt) und
+// wird beim zweiten Lauf schon von der eigenen PROTECTED_SPAN_RE-Aufteilung
+// hier ALS GESCHÜTZTE SPANNE erkannt, lange bevor QUOTED_WIN_PATH_RE
+// überhaupt zum Zug käme.
+//
+// PROSA-GUARDS (Review-Fix Runde 2, 🟡 A1/A2 – siehe Begründung oben,
+// gefunden VOM REVIEWER beim Testschreiben, VOR dem Commit gemeldet): DREI
+// Signale werden geprüft, JEDES MUSS fehlen, sonst bleibt der Treffer
+// unangetastet Klartext (`m`, der komplette Roh-Treffer INKLUSIVE
+// Anführungszeichen, wird unverändert zurückgegeben – kein Textverlust):
+// (a) der Körper endet auf ein Leerzeichen – ein ECHTER Windows-Pfad endet
+//     nie auf Leerzeichen (siehe auch Schritt 2b im PowerShell-Handler,
+//     dieselbe Prämisse); ein Prosa-Zitat, das zufällig VOR dem
+//     schließenden Anführungszeichen noch normalen Text hat, endet dagegen
+//     fast immer auf ein Leerzeichen-getrenntes Wort. Fängt zusätzlich den
+//     Unbalanciert-Quotes-Fall (A2) ab: ein "verschluckendes" Match bis zum
+//     NÄCHSTEN (eigentlich unzusammengehörigen) Anführungszeichen hat an
+//     der Bruchstelle so gut wie immer ein Leerzeichen davor.
+// (b) der Körper (ab dem dritten Zeichen, ALSO NACH Laufwerksbuchstabe +
+//     ":") enthält eines der in Windows-Dateinamen verbotenen Zeichen
+//     `: * ? < > |` – ein Doppelpunkt MITTEN im Text (z. B. "D: die
+//     Datenpartition") verrät zuverlässig, dass der Rest kein Pfad-Körper
+//     mehr ist, sondern Prosa. Der ERSTE Doppelpunkt (Laufwerksbuchstabe)
+//     wird bewusst NICHT mitgeprüft (core.slice(2) überspringt "X:").
+// (c) ein Pfad-SEGMENT mit mehr als WORDS_PER_SEGMENT_CAP Wörtern – exakt
+//     derselbe, bereits bewährte dritte Guard wie im unquotierten
+//     Ganze-Zeile-Fall (siehe linkifyWholeLine unten), hier wiederverwendet
+//     statt dupliziert.
+// Zusätzlich (d): ein bloßer Laufwerks-WURZELPFAD ohne jeden weiteren
+// Inhalt (z. B. `"C:\"`) wird abgelehnt (Review-Fix 🔵 A5) – kein echter
+// Datei-/Ordnername, den ein Nutzer sinnvoll zitieren würde, der Titel
+// wäre nur der nackte Laufwerksbuchstabe. Ein Pfad MIT Inhalt, der auf
+// einen Trennstrich endet (z. B. `"C:\Users\x\"`), bleibt dagegen bewusst
+// ERLAUBT – der abgeleitete Titel ("x") ist sinnvoll, ein häufiger,
+// legitimer Copy-Paste-Fall (Ordnerpfad mit Trailing-Backslash aus der
+// Explorer-Adressleiste).
+const QUOTED_PATH_ROOT_ONLY_RE = /^[A-Za-z]:[\\/]$/;
+const QUOTED_PATH_FORBIDDEN_CHARS_RE = /[:*?<>|]/;
+
+function linkifyQuotedPathsInSegment(raw) {
+  const chunks = raw.split(PROTECTED_SPAN_RE);
+  return chunks
+    .map((chunk, ci) =>
+      ci % 2
+        ? chunk // geschützte Spanne: byte-genau unangetastet
+        : chunk.replace(QUOTED_WIN_PATH_RE, (m, core) => {
+            if (/ $/.test(core)) return m; // (a)
+            if (QUOTED_PATH_FORBIDDEN_CHARS_RE.test(core.slice(2))) return m; // (b)
+            if (
+              core.split(/[\\/]/).some(
+                (seg) => seg.trim().split(/\s+/).filter(Boolean).length > WORDS_PER_SEGMENT_CAP
+              )
+            ) {
+              return m; // (c)
+            }
+            if (QUOTED_PATH_ROOT_ONLY_RE.test(core)) return m; // (d)
+            return buildFileLinkMarkdown(core) ?? m;
+          })
+    )
+    .join("");
+}
+
+// WORDS_PER_SEGMENT_CAP ist jetzt WEITER OBEN definiert (vor der Zitierte-
+// Pfade-Sektion) – seit Review-Fix Runde 2 (v7.37) wird derselbe Guard
+// AUCH von linkifyQuotedPathsInSegment verwendet, keine zweite Konstante
+// mehr nötig.
 
 // Ganze Zeile prüfen (Regel d) – "line" ist eine VOLLSTÄNDIGE Original-Zeile
 // (der Aufrufer stellt das sicher, siehe linkifySegment). Liefert die
@@ -416,13 +589,22 @@ function linkifySegment(raw) {
 // beim zweiten Lauf eine geschützte Spanne (PROTECTED_SPAN_RE) und wird
 // unverändert übersprungen.
 //
-// GRENZEN DER HEURISTIK (bewusst, siehe Auftrag):
-// - Pfade/Ordner OHNE Datei-Endung werden inline NIE angefasst (Regel c
-//   verlangt zwingend eine Endung) – ein Verzeichnispfad wie
+// ZITIERTE PFADE (v7.37, siehe eigener Abschnitt oben "Zitierte Pfade"):
+// Ein in doppelte Anführungszeichen eingeschlossener absoluter Pfad läuft
+// VOR der unquotierten Heuristik unten und ist von FAST ALLEN Grenzen
+// dieses Abschnitts ausgenommen (kein Whitespace-Verbot, keine
+// Endungspflicht, keine Prosa-Guards) – siehe QUOTED_WIN_PATH_RE/
+// linkifyQuotedPathsInSegment weiter oben für die vollständige Begründung.
+//
+// GRENZEN DER (unquotierten) HEURISTIK (bewusst, siehe Auftrag):
+// - Pfade/Ordner OHNE Datei-Endung werden UNQUOTIERT inline NIE angefasst
+//   (Regel c verlangt zwingend eine Endung) – ein Verzeichnispfad wie
 //   "C:\Users\x\Projekt" bleibt Klartext. Grund: ohne Endung lässt sich ein
 //   Pfad im Fließtext nicht zuverlässig von umgebender Prosa abgrenzen
 //   (wo genau hört er auf?) – der Ganze-Zeile-Fall (Regel d) hat dasselbe
-//   Endung-Erfordernis, aus demselben Grund.
+//   Endung-Erfordernis, aus demselben Grund. Ein ZITIERTER Ordnerpfad
+//   (siehe oben) IST dagegen erkannt, weil die Anführungszeichen die
+//   Abgrenzung übernehmen, keine Endung nötig ist.
 // - Ein file:-Pfad/-URL, der VOR dem allerersten Segment-/Zeilenzeichen von
 //   einem Wortzeichen "berührt" wird (siehe Lookbehind), wird bewusst NICHT
 //   erkannt ("keine Wortmitte-Treffer") – das kann in seltenen Fällen einen
@@ -450,6 +632,17 @@ function linkifySegment(raw) {
 export function linkifyFilePaths(md) {
   const text = String(md ?? "");
   return splitFenceSegments(text)
-    .map((seg) => (seg.code ? seg.raw : linkifySegment(seg.raw)))
+    .map((seg) => {
+      if (seg.code) return seg.raw;
+      // Zitierte Pfade (v7.37) laufen ZUERST, als eigener, vollständig
+      // isolierter Durchlauf (siehe linkifyQuotedPathsInSegment oben) –
+      // linkifySegment (unquotierte Heuristik) verarbeitet danach das
+      // ERGEBNIS: ein dabei frisch erzeugter Link "[Titel](file:///…)"
+      // wird von linkifySegments EIGENER PROTECTED_SPAN_RE-Aufteilung
+      // korrekt als bereits fertige, geschützte Spanne erkannt und nicht
+      // ein zweites Mal angefasst (kein Doppel-Wrap, kein Hineinpfuschen
+      // in die frisch gebaute URL).
+      return linkifySegment(linkifyQuotedPathsInSegment(seg.raw));
+    })
     .join("\n");
 }

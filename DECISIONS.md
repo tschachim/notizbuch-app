@@ -4856,6 +4856,181 @@ aus `referenz-app.jsx` übernommen.
       (5) List-/Zitat-Präfixe vor einem
       Pfad mit Leerzeichen werden nie erkannt (Finding 5, siehe oben) –
       dokumentierte, nicht behobene Grenze.
+    - **Nachtrag v7.37 (Nutzer-Befund Live): zitierte Pfade werden IMMER
+      verlinkt, unabhängig von Leerzeichen und Prosa-Schutz.** Konkreter
+      Live-Fall: `"C:\Users\majoac\OneDrive - Planon\Development\
+      gremlin.txt"` blieb im Dokument Klartext. Ursache verifiziert: die
+      Inline-Regel (c) verlangt Whitespace-Freiheit, die Ganze-Zeile-Regel
+      (d) verankert an `^` – ein FÜHRENDES Anführungszeichen bricht diesen
+      Anker, bevor der eigentliche Pfad überhaupt geprüft wird (siehe
+      Finding 5 oben, dieselbe strukturelle Ursachenklasse: ein
+      "fremdes" Zeichen vor dem Pfad-Start). **Der UNQUOTIERTE Fall wurde
+      dabei gezielt gegengeprüft und funktioniert bereits korrekt:**
+      derselbe Pfad OHNE Anführungszeichen, allein auf einer Zeile, wird
+      von der bestehenden Ganze-Zeile-Regel bereits verlinkt – das
+      Segment „OneDrive - Planon" hat 3 Wörter (`WORDS_PER_SEGMENT_CAP` =
+      5), keiner der drei Prosa-Guards aus Finding 1 greift. Kein Bug im
+      unquotierten Pfad, per Regressionstest gepinnt.
+      - **Neue Regel: zitierte Pfade.** Windows liefert einen Pfad bei
+        „Als Pfad kopieren" (Explorer, Umschalt+Rechtsklick) IN doppelten
+        Anführungszeichen – genau so fügt ein Nutzer ihn typischerweise
+        ein. `QUOTED_WIN_PATH_RE`/`linkifyQuotedPathsInSegment`
+        (`filelinks.js`) erkennen `"<absoluter Pfad>"` (Laufwerk oder UNC)
+        JETZT immer, inline an beliebiger Stelle, unabhängig von
+        Leerzeichen UND ausdrücklich OHNE die Prosa-Guards aus Finding 1
+        (WORDS_PER_SEGMENT_CAP etc.). **Begründung für die
+        Sonderbehandlung:** Die Anführungszeichen sind ein vom NUTZER
+        bewusst gesetzter, eindeutiger Begrenzer – anders als beim
+        unquotierten Ganze-Zeile-Fall (wo eine komplette Prosa-Zeile
+        zufällig wie ein Pfad aussehen könnte) gibt es hier strukturell
+        keine Ambiguität: ein Text enthält normalerweise keine
+        Anführungszeichen unmittelbar um einen Windows-Pfad, es sei denn,
+        er meint genau diesen Pfad als zusammenhängende Einheit.
+      - **Endung NICHT zwingend erforderlich (Entscheidung, bewusst
+        abweichend von Regel c/d).** Ein zitierter ORDNER-Pfad ist genauso
+        eindeutig abgegrenzt wie ein zitierter Datei-Pfad – die
+        Anführungszeichen allein reichen als Begrenzung, nicht die
+        Endung – und der Handler (`tools/notizbuch-open-handler.ps1`)
+        öffnet Ordner ausdrücklich. Ohne diese Entscheidung bliebe z. B.
+        ein zitierter Ordnerpfad wie `"C:\Users\x\OneDrive - Firma\
+        Development"` trotz eindeutiger Anführungszeichen-Begrenzung
+        Klartext – inkonsequent gegenüber der eigentlichen Begründung der
+        Sonderregel.
+      - **Anführungszeichen werden beim Ersetzen ENTFERNT (Entscheidung).**
+        `'"[Bericht](file:///…)"'` sähe mit zusätzlichen Anführungszeichen
+        um einen bereits farbig/unterstrichen hervorgehobenen Link unnötig
+        unruhig aus – kein anderer Fall dieser Heuristik umgibt den
+        erzeugten Link mit zusätzlicher Interpunktion, das bleibt hier
+        konsistent. Idempotenz ist davon unabhängig gegeben: ein bereits
+        erzeugter Link enthält keine Anführungszeichen mehr und wird beim
+        zweiten Lauf ohnehin schon vom generischen `PROTECTED_SPAN_RE`
+        als geschützte Spanne erkannt, bevor `QUOTED_WIN_PATH_RE`
+        überhaupt zum Zug käme.
+      - **Architektur: separater, VORGELAGERTER Durchlauf statt weiterer
+        Alternative in `INLINE_TARGET_RE`/`linkifyWholeLine`.** Die
+        Zitierte-Pfade-Regel hat strukturell andere Eigenschaften (kein
+        Whitespace-Verbot, keine Endungspflicht, keine Prosa-Guards) –
+        `linkifyQuotedPathsInSegment` läuft deshalb VOR der bestehenden
+        `linkifySegment` (unquotierten Heuristik), mit einer EIGENEN
+        `PROTECTED_SPAN_RE`-Aufteilung (respektiert Fences/Codespans/
+        bestehende Links unabhängig). Ein dabei frisch erzeugter Link wird
+        von der NACHFOLGENDEN `linkifySegment`-Aufteilung korrekt als
+        bereits fertige, geschützte Spanne erkannt (kein Doppel-Wrap, kein
+        Hineinpfuschen in die frisch gebaute URL – zwei unabhängige,
+        jeweils selbst schon geschützte-Spannen-bewusste Durchläufe statt
+        einer gemeinsamen, fehleranfälligeren Vermischung).
+      - **Cap {0,300} auf den rohen Pfad-Körper zwischen den
+        Anführungszeichen** – dieselbe Backtracking-Überlegung wie bei
+        `WHOLE_LINE_WIN_PATH_RE` (flache, quantifizierte Zeichenklasse
+        ohne Verschachtelung, linear in der Textlänge); 300 rohe Zeichen
+        sind für einen MAX_PATH-Pfad (260) reichlich (der Pfad ist hier
+        noch UNKODIERT, anders als der {0,1000}-Cap in `FILE_URL_SRC` für
+        bereits prozent-kodierten Text, siehe dortiger Kommentar/Review-
+        Fix Runde 4).
+      - **Neue Tests** (`tests/filelinks.test.js`): der exakte Live-Fall
+        (quotiert, ganze Zeile UND inline), mehrere aufeinanderfolgende
+        Leerzeichen, Bindestrich-Segment (`OneDrive - Planon`), quotierter
+        UNC-Pfad, quotierter Ordnerpfad (keine Endung), Entfernen der
+        Anführungszeichen, Idempotenz, Fence-/Codespan-Ausnahme,
+        gewöhnliche zitierte Prosa bleibt unangetastet, ein Prosa-Zitat
+        UND ein zitierter Pfad im selben Satz (nur Letzterer wird
+        verlinkt), Interaktion mit einem bestehenden Markdown-Link
+        daneben, ein sehr wortreicher zitierter Pfad wird TROTZDEM
+        verlinkt (Beleg, dass die Prosa-Guards hier bewusst NICHT
+        greifen) – plus der unquotierte „OneDrive - Planon"-Regressionstest
+        (Beleg, dass Punkt 2 des Auftrags bereits funktionierte) und alle
+        bestehenden Prosa-Schutz-Regressionen aus Finding 1 (unverändert
+        grün).
+      - **Restrisiko:** Ein zitierter String, der ZUFÄLLIG wie ein
+        absoluter Windows-Pfad beginnt, aber inhaltlich etwas anderes
+        meint (z. B. ein Code-Snippet-Zitat `"C:\foo\bar"` in einer
+        Diskussion über Pfad-SYNTAX selbst, nicht über eine echte Datei),
+        wird ebenfalls verlinkt – dieselbe grundsätzliche Grenze wie bei
+        jeder Mustererkennung ohne Kontext-Verständnis; als bewusst
+        hingenommen eingestuft, weil ein Nutzer, der Anführungszeichen UM
+        einen syntaktisch gültigen absoluten Pfad setzt, in der weit
+        überwiegenden Mehrheit der Fälle tatsächlich genau diesen Pfad
+        meint (siehe Begründung der Sonderregel oben).
+    - **Review-Fix Runde 2 (v7.37, VOR dem Commit gemeldet): die
+      Sonderbehandlung "zitierte Pfade IMMER ohne Prosa-Guards" war zu
+      weitgehend – zwei stille Textzerstörungen, exakt dieselbe
+      Schadensklasse wie Finding 1 oben (nur durch Anführungszeichen statt
+      durch Zeilen-Anker ausgelöst).**
+      - **🟡 A1 (Prosa-Zitat mit gültigem Laufwerks-Anfang wird komplett
+        verschluckt).** Repro: `Er sagte: "C:\Windows ist der
+        Systemordner und darf nie geloescht werden" und ging.` wurde zu
+        `Er sagte: [Windows ist der Systemordner und darf nie geloescht
+        werden](file:///C:/Windows%20…) und ging.` – der komplette Satz
+        wurde zu einem einzigen, den Nutzertext irreversibel
+        umschreibenden Link. Zweiter Repro-Fall mit Doppelpunkt mitten im
+        Zitat: `Merke: "C:/ ist bei uns die Systempartition, D: die
+        Datenpartition"`.
+      - **🟡 A2 (unbalancierte Anführungszeichen verschlucken Text
+        zwischen zwei unzusammengehörigen Zitaten).** Repro: `Pfad
+        "C:\a\b.txt und dann noch "C:\c\d.txt"`.
+      - **Fix: drei Prosa-Guards, JEDER MUSS fehlen** (siehe
+        `linkifyQuotedPathsInSegment`, `filelinks.js`), sonst bleibt der
+        Treffer unangetastet Klartext (die komplette Fundstelle inkl.
+        Anführungszeichen, kein Textverlust):
+        (a) Körper endet auf Leerzeichen (ein echter Pfad tut das nie;
+        fängt zusätzlich A2 ab – ein "verschluckendes" Match bis zum
+        nächsten, eigentlich unzusammengehörigen Anführungszeichen hat an
+        der Bruchstelle so gut wie immer ein Leerzeichen davor);
+        (b) Körper (ab dem dritten Zeichen, nach Laufwerksbuchstabe+":")
+        enthält ein in Windows-Dateinamen verbotenes Zeichen
+        (`: * ? < > |`);
+        (c) ein Pfad-SEGMENT mit mehr als `WORDS_PER_SEGMENT_CAP` (5)
+        Wörtern – derselbe, bereits bewährte Guard wie im unquotierten
+        Ganze-Zeile-Fall (Finding 1), jetzt gemeinsam genutzt statt
+        dupliziert. **Bewusste Umkehrung:** der bisherige Test "ein sehr
+        wortreicher zitierter Pfad wird TROTZDEM verlinkt" musste
+        umgedreht werden – seither gilt konsistent zu v7.31: Prosa-Schutz
+        schlägt Erkennungsrate, auch im zitierten Fall. Der Live-Fall
+        (`OneDrive - Planon`, 3 Wörter) sowie Ordner-, UNC- und
+        Mehrfach-Leerzeichen-Fälle bleiben unverändert grün.
+      - **🟡 A3 (typografische Anführungszeichen fehlten).** Der
+        System-Prompt schreibt dem Modell im Dokumenttext ausdrücklich
+        "typografische Anführungszeichen" vor (siehe `anthropic.js`) –
+        ein vom Modell selbst geschriebener zitierter Pfad in „…"
+        (deutsche Konvention) oder "…" (englische Konvention) wurde von
+        der rein ASCII-basierten Regel nie erkannt. Fix: Öffner-Klasse
+        `["„"]`/Schließer-Klasse `["""]` (bewusst überschneidend statt
+        strikter Öffner/Schließer-Paarung – auch gemischte Stile wie
+        „…" werden erkannt, es geht nur um EINEN erkannten zitierten
+        Pfad, nicht um typografische Korrektheitsprüfung).
+      - **🔵 A4 (Wortmitte-Treffer bei der zitierten Regel).** Ohne
+        Lookbehind `(?<![\w])` (analog `INLINE_TARGET_RE`) hätte
+        `sieh"C:\a\b.txt"an` die Anführungszeichen als Nutzer-Begrenzer
+        akzeptiert und entfernt. Mit Lookbehind bleiben die
+        Anführungszeichen als literale Zeichen stehen
+        (`sieh"[b](file:///C:/a/b.txt)"an`) – der eingeschlossene Pfad
+        wird trotzdem verlinkt, aber über die bereits bestehende
+        UNQUOTIERTE Inline-Regel (c), die unabhängig greift (deren
+        eigener Lookbehind prüft das Zeichen VOR dem Pfad-Anfang, hier
+        ein Anführungszeichen, kein Wortzeichen). Kein Regressions-Risiko,
+        nur ein Konsistenz-Fix für die zitierte Regel selbst.
+      - **🔵 A5 (bloßer Laufwerks-Wurzelpfad).** `"C:\"` ergäbe nur den
+        nackten Laufwerksbuchstaben als Titel – kein sinnvoller
+        Dateiname. Neuer Guard (d): ein zitierter Pfad, der NACH dem
+        Entfernen der Anführungszeichen exakt `X:\` oder `X:/` ist, bleibt
+        Klartext. Ein Pfad MIT Inhalt, der auf einen Trennstrich endet
+        (`"C:\Users\x\"`, häufiger Explorer-Adressleisten-Copy-Paste-Fall),
+        bleibt dagegen bewusst verlinkt (Titel "x" ist sinnvoll ableitbar).
+      - **Neue Regressionstests** (`tests/filelinks.test.js`): beide
+        A1-Repro-Fälle, der A2-Repro-Fall (Beleg: kein Textverlust, "und
+        dann noch" bleibt erhalten), beide typografischen Anführungszeichen-
+        Stile (deutsch/englisch) einzeln sowie gemischt, der A4-Wortmitte-
+        Fall, beide A5-Fälle (Wurzelpfad abgelehnt, Ordnerpfad mit
+        Trailing-Trennstrich weiterhin verlinkt) sowie die Umkehrung des
+        wortreichen Falls (siehe oben). Alle bisherigen Regressionstests
+        (Live-Fall, Idempotenz, Fence-/Codespan-Ausnahme, Prosa-Zitat-und-
+        Pfad-im-selben-Satz) bleiben unverändert grün.
+      - **Restrisiko (unverändert gegenüber der Erstfassung):** ein
+        zitierter String, der zufällig wie ein absoluter Windows-Pfad
+        beginnt, aber inhaltlich etwas anderes meint, kann weiterhin
+        fälschlich verlinkt werden, wenn er ALLE drei Guards besteht
+        (kurz, keine verbotenen Zeichen, kein Leerzeichen am Ende) – siehe
+        Begründung der Sonderregel oben, bewusst hingenommen.
 
 74. **delete_chapter-Op (v7.32, Live-Befund).** Der Nutzer bat den Chat:
     „Lösche das AI Codex Kapitel“. Ablauf des Fehlschlags: (1) Das Modell
@@ -6032,6 +6207,17 @@ aus `referenz-app.jsx` übernommen.
         wird am Ende AUS DER REGISTRY ZURÜCKGELESEN und ausgegeben (ein
         Schreibfehler wäre sonst nicht sichtbar, obwohl der Text im
         Terminal stimmt).
+        **KORREKTUR (v7.37, siehe „Launcher-Architektur" weiter unten):**
+        Dieser Fix behob NUR das direkte Symptom (falscher, unter
+        PowerShell 7 kaputter Pfad) – die implizite Grundannahme dieses
+        Findings, dass eine funktionierende, korrekt aufgelöste
+        `powershell.exe` als Registry-Ziel UNPROBLEMATISCH sei, hat sich
+        NACHTRÄGLICH als falsch herausgestellt: Chrome blockiert JEDEN
+        Skript-Interpreter als Protokoll-Ziel, unabhängig davon, ob der
+        Pfad dorthin korrekt aufgelöst ist oder nicht (siehe „Launcher-
+        Architektur (v7.37, Live-Befund)" weiter unten für den
+        vollständigen Beleg). Der Registry-Befehl zeigt seitdem auf einen
+        eigenen Launcher, NICHT mehr direkt auf `powershell.exe`.
       - **🟡 Weitere Findings (alle behoben):**
         - Umgebungsvariablen-Muster verschärft: `%[^%\\]{1,64}%` lehnte
           nachweislich legitime Dateinamen mit ZWEI Prozentzeichen im
@@ -6265,6 +6451,110 @@ aus `referenz-app.jsx` übernommen.
       (beide bereits als funktionierend bestätigt) – betroffen ist
       AUSSCHLIESSLICH die Browser-seitige Auslöse-Mechanik in
       `markdown.jsx`.
+    - **Launcher-Architektur (v7.37, Live-Befund NACH der v7.36-
+      Installation – Registry zeigt jetzt auf eine eigene .exe statt
+      direkt auf `powershell.exe`; PS-Handler/`FileLink`/`href`
+      UNVERÄNDERT, betroffen ist AUSSCHLIESSLICH `notizbuch-open-
+      setup.ps1` plus die neue `tools/NotizbuchOpenLauncher.cs`):**
+      Trotz des v7.36-Fixes (direkte `href`-Navigation statt Iframe)
+      löste ein Klick im echten Chrome IMMER NOCH nichts aus. Drei
+      Kontrollmessungen (alle im echten Chrome des Nutzers) belegen die
+      Ursache abschließend:
+      - Ein Klick auf den `notizbuch-open:`-Link löste `beforeunload`
+        aus (Chrome BEGANN die Navigation), aber KEIN Dialog, KEIN
+        Handler-Log-Eintrag, keine Konsolenmeldung.
+      - **Kontrolle A:** Ein Link auf `ms-word:` zeigt SOFORT einen
+        modalen Bestätigungsdialog (Renderer blockiert normalerweise
+        nicht).
+      - **Kontrolle B (entscheidend):** Ein eigens registriertes
+        Wegwerf-Protokoll `notizbuch-probe`, IDENTISCH aufgebaut wie
+        `notizbuch-open`, aber mit `command = "C:\WINDOWS\System32\
+        notepad.exe" "%1"`, zeigt SOFORT den Erlaubnis-Dialog – obwohl es
+        ERST NACH dem Chrome-Start registriert wurde (widerlegt damit
+        auch die vorher denkbare Cache-/Neustart-Hypothese: Chrome
+        erkennt frisch registrierte Protokolle sofort). Windows selbst
+        arbeitete währenddessen einwandfrei: `AssocQueryString
+        ('notizbuch-open','open')` lieferte `rc=0` mit `powershell.exe`,
+        `HKCR` zeigte den Schlüssel korrekt, `Start-Process` mit der URL
+        öffnete die Datei zuverlässig und schrieb eine Handler-Log-Zeile.
+      **Schlussfolgerung:** Der EINZIGE Unterschied zwischen dem
+      funktionierenden Kontroll-Fall (notepad.exe) und dem nicht
+      funktionierenden echten Fall (powershell.exe) ist das
+      Ziel-Executable – Chrome blockiert (mindestens auf diesem Stand)
+      External-Protocol-Handler, deren Ziel-Executable ein bekannter
+      SKRIPT-INTERPRETER ist (powershell.exe, vermutlich auch cmd.exe,
+      wscript.exe, …), vermutlich als Sicherheitsmaßnahme gegen genau
+      das Muster, das dieses Feature selbst nutzt (ein Link startet
+      einen Interpreter mit einem vom Web kontrollierten Argument). Dies
+      korrigiert die BISHERIGE Annahme in diesem Dokument (siehe Blocker
+      2, „KORREKTUR" oben), eine korrekt aufgelöste `powershell.exe` als
+      Registry-Ziel sei unproblematisch.
+      - **Fix: `tools/NotizbuchOpenLauncher.cs` (neu), ein minimales
+        C#-Programm** (`/target:winexe`, kein Konsolenfenster), das NUR
+        `args[0]` (die geklickte URL) entgegennimmt und DAMIT
+        unverändert denselben `powershell.exe -NoProfile
+        -ExecutionPolicy Bypass -WindowStyle Hidden -File "<Handler>"
+        "<URL>"`-Aufruf startet, den `notizbuch-open-setup.ps1` vorher
+        direkt in die Registry geschrieben hat. Für Chrome ist der
+        Launcher ein "normales" Programm (wie `notepad.exe` in
+        Kontrolle B) – der Erlaubnis-Dialog erscheint wieder wie
+        erwartet.
+      - **KEINE eigene Sicherheitsprüfung im Launcher (bewusste
+        Entscheidung):** Er reicht die URL unverändert durch. Die
+        VOLLSTÄNDIGE Validierung (Präfix, Positivliste, Traversal, ADS,
+        Shell-Namespace, …) bleibt AUSSCHLIESSLICH im PowerShell-Handler
+        – eine zweite, eigene Prüfung im Launcher hätte nur Code
+        dupliziert und das Risiko abweichender/veraltender Regeln
+        eingeführt (zwei Quellen der Wahrheit statt einer).
+      - **Handler-Pfad wird NICHT hartkodiert geraten**, sondern relativ
+        zur eigenen `.exe` gesucht (`AppDomain.CurrentDomain.
+        BaseDirectory + "notizbuch-open-handler.ps1"`, existenzgeprüft,
+        sonst MessageBox) – Launcher UND Handler werden von
+        `notizbuch-open-setup.ps1` gemeinsam nach demselben
+        `%LOCALAPPDATA%\NotizbuchOpen\`-Ordner geschrieben, bleiben also
+        immer zusammen. `powershell.exe` wird IM LAUNCHER SELBST
+        nochmals über `%SystemRoot%\System32\WindowsPowerShell\v1.0\
+        powershell.exe` aufgelöst und existenzgeprüft (dieselbe Stelle,
+        dieselbe Begründung wie im Setup-Skript) – der Launcher verlässt
+        sich nicht darauf, dass die Umgebung zur Laufzeit identisch zur
+        Setup-Zeit ist.
+      - **Kommandozeilen-Quotierung:** `ProcessStartInfo.Arguments` wird
+        aus Handler-Pfad und URL manuell zusammengesetzt (die auf diesem
+        Stand des .NET Framework verfügbare API bietet kein sicheres
+        `ArgumentList`) – über eine eigene `QuoteArgument`-Funktion nach
+        dem Standard-Windows-Kommandozeilen-Quotierungsverfahren
+        (identisch zu dem, was `CommandLineToArgvW`/.NETs eigene
+        Argumentzusammensetzung intern verwenden: Backslashes vor einem
+        Anführungszeichen werden verdoppelt plus ein zusätzlicher
+        Escape-Backslash, Backslashes ohne folgendes Anführungszeichen
+        bleiben unverändert). Nötig, weil sowohl der Handler-PFAD
+        (Nutzername kann Leerzeichen enthalten, z. B.
+        `C:\Users\Max Mustermann\...`) als auch die URL (der zitierte
+        Pfad DARIN kann nach v7.37 Leerzeichen enthalten, siehe
+        `QUOTED_WIN_PATH_RE`-Feature oben) Leerzeichen tragen können; ein
+        rohes Anführungszeichen in der URL ist nach unserem eigenen
+        Kontrakt zwar ausgeschlossen (`encodeURIComponent` kodiert es zu
+        `%22`), wird aber TROTZDEM defensiv escaped, da der Launcher die
+        URL vom Betriebssystem entgegennimmt, nicht garantiert nur von
+        unserer eigenen App.
+      - **`notizbuch-open-setup.ps1` kompiliert den Launcher SELBST**, MIT
+        dem auf dem Zielrechner bereits vorhandenen `csc.exe` (.NET
+        Framework, Teil jeder Standard-Windows-Installation, KEIN
+        zusätzliches SDK/keine Internet-Abhängigkeit nötig) – 64-Bit-Pfad
+        bevorzugt, 32-Bit als Fallback, beide liefern ein identisches
+        „AnyCPU"-Kompilat. Reihenfolge UNVERÄNDERT nach dem Muster aus
+        Review-Nachbesserung 3/Blocker 2: ERST powershell.exe UND
+        csc.exe auflösen/verifizieren, DANN erst irgendetwas schreiben
+        (Handler kopieren → Launcher kompilieren → Registry) – ein
+        Compiler-Fehler (`csc.exe`-Exit-Code ≠ 0, inkl. vollständiger
+        Compiler-Ausgabe in der Fehlermeldung) bricht VOR jedem
+        Schreibzugriff ab. Rollback-/Rückroll-Logik (nur in DIESEM Lauf
+        neu angelegte Teile werden bei einem Fehlschlag zurückgerollt)
+        und die Rückleseprüfung des geschriebenen Registry-Befehls
+        bleiben unverändert bestehen, decken jetzt zusätzlich den
+        Kompilierschritt ab. `-Uninstall` entfernt den gesamten
+        Installationsordner (Handler-Skript UND kompilierten Launcher
+        gemeinsam) weiterhin über einen einzigen `Remove-Item -Recurse`.
     - **Restrisiken (nach dem Architekturwechsel auf die Positivliste,
       Review-Nachbesserung 3 – das Risikoprofil hat sich grundlegend
       GEDREHT: statt „eine gefährliche Endung rutscht durch“ ist das
@@ -6370,3 +6660,20 @@ aus `referenz-app.jsx` übernommen.
       landet in BEIDEN Fällen unverändert in der Zwischenablage. Dieselbe
       Charakteristik zeigen andere etablierte Custom-Protocol-Links (z. B.
       `vscode://…` ohne installiertes VS Code).
+      (10) Seit v7.37 (Launcher-Architektur): Der lokal kompilierte
+      Launcher ist eine UNSIGNIERTE .exe – Windows SmartScreen/ein
+      Virenscanner könnte beim ALLERERSTEN Start eine zusätzliche
+      Warnung zeigen (bei lokal selbst kompilierten, nicht aus dem
+      Internet heruntergeladenen Dateien in der Praxis selten, aber nicht
+      ausgeschlossen); nicht durch dieses Skript beeinflussbar, ohne ein
+      Code-Signing-Zertifikat zu beschaffen (bewusst nicht Teil dieses
+      Umfangs). Der Launcher selbst führt keine eigene Sicherheitsprüfung
+      durch (siehe „Launcher-Architektur" oben) – er ist reine
+      Weiterleitung, das Risikoprofil des Gesamtsystems ändert sich
+      dadurch NICHT (die Validierung bleibt vollständig im Handler). Ein
+      erneutes Setup kompiliert die .exe jedes Mal NEU (kein Cache) – bei
+      einer AUSNAHMSWEISE noch laufenden alten Launcher-Instanz (der
+      Prozess beendet sich normalerweise sofort nach dem Start des
+      Handlers) könnte die Zieldatei kurzzeitig gesperrt sein; das Setup
+      meldet das dann über die reguläre Fehlerbehandlung (csc.exe-Exit-
+      Code samt Compiler-Meldung) statt stillschweigend zu scheitern.

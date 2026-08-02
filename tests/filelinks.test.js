@@ -418,6 +418,149 @@ describe("linkifyFilePaths: Prosa-Schutz im Ganze-Zeile-Fall (Review-Fix 🔴 Fi
   });
 });
 
+// v7.37, Nutzer-Befund Live: Windows liefert einen Pfad bei "Als Pfad
+// kopieren" (Explorer, Umschalt+Rechtsklick) IN doppelten Anführungszeichen
+// – genau der reale Fall, den weder die Inline-Regel (c, kein Whitespace)
+// noch die Ganze-Zeile-Regel (d, Anker "^" bricht am führenden
+// Anführungszeichen) erkennen. Ein zitierter Pfad wird deshalb IMMER
+// verlinkt, unabhängig von Position/Leerzeichen und OHNE die Prosa-Guards
+// aus dem Block oben (siehe linkifyQuotedPathsInSegment, filelinks.js).
+describe("linkifyFilePaths: zitierte Pfade (v7.37, Windows 'Als Pfad kopieren')", () => {
+  it("der exakte Live-Fall: eine komplette Zeile aus NUR einem zitierten Pfad", () => {
+    const md = '"C:\\Users\\majoac\\OneDrive - Planon\\Development\\gremlin.txt"';
+    expect(linkifyFilePaths(md)).toBe(
+      "[gremlin](file:///C:/Users/majoac/OneDrive%20-%20Planon/Development/gremlin.txt)"
+    );
+  });
+
+  it("der exakte Live-Fall INLINE mitten in einem Satz", () => {
+    const md = 'Siehe "C:\\Users\\majoac\\OneDrive - Planon\\Development\\gremlin.txt" bitte.';
+    expect(linkifyFilePaths(md)).toBe(
+      "Siehe [gremlin](file:///C:/Users/majoac/OneDrive%20-%20Planon/Development/gremlin.txt) bitte."
+    );
+  });
+
+  it("ein zitierter Pfad mit MEHREREN aufeinanderfolgenden Leerzeichen wird vollständig übernommen", () => {
+    const md = '"C:\\Users\\x\\Sehr    viele    Leerzeichen.docx"';
+    expect(linkifyFilePaths(md)).toBe(
+      "[Sehr    viele    Leerzeichen](file:///C:/Users/x/Sehr%20%20%20%20viele%20%20%20%20Leerzeichen.docx)"
+    );
+  });
+
+  it("ein zitierter ORDNER-Pfad (keine Datei-Endung) wird ebenfalls verlinkt – anders als der unquotierte Fall (Regel c/d verlangen dort zwingend eine Endung)", () => {
+    const md = 'Ordner: "C:\\Users\\majoac\\OneDrive - Planon\\Development" da.';
+    expect(linkifyFilePaths(md)).toBe(
+      "Ordner: [Development](file:///C:/Users/majoac/OneDrive%20-%20Planon/Development) da."
+    );
+  });
+
+  it("ein zitierter UNC-Pfad wird ebenfalls erkannt", () => {
+    const md = '"\\\\server\\share\\report file.docx"';
+    expect(linkifyFilePaths(md)).toBe(
+      "[report file](file://server/share/report%20file.docx)"
+    );
+  });
+
+  it("die Anführungszeichen werden beim Ersetzen ENTFERNT (bewusste Design-Entscheidung, siehe Kommentar in filelinks.js)", () => {
+    const md = '"C:\\a\\Bericht.docx"';
+    const out = linkifyFilePaths(md);
+    expect(out).not.toContain('"');
+    expect(out).toBe("[Bericht](file:///C:/a/Bericht.docx)");
+  });
+
+  it("ein zitierter Pfad ist IDEMPOTENT (zweiter Lauf verändert nichts mehr)", () => {
+    const md = '"C:\\Users\\majoac\\OneDrive - Planon\\Development\\gremlin.txt"';
+    const once = linkifyFilePaths(md);
+    expect(linkifyFilePaths(once)).toBe(once);
+  });
+
+  it("ein zitierter Pfad INNERHALB eines Fenced-Codeblocks bleibt unangetastet", () => {
+    const md = 'Text davor.\n\n```\n"C:\\Users\\x\\a.txt"\n```\n\nText danach.';
+    expect(linkifyFilePaths(md)).toBe(md);
+  });
+
+  it("ein zitierter Pfad INNERHALB eines Codespans bleibt unangetastet", () => {
+    const md = 'Siehe `"C:\\Users\\x\\a.txt"` im Code.';
+    expect(linkifyFilePaths(md)).toBe(md);
+  });
+
+  it("gewöhnliche zitierte PROSA (keine Windows-Pfad-Form) bleibt komplett unangetastet", () => {
+    const md = 'Er sagte "hallo Welt" und ging.';
+    expect(linkifyFilePaths(md)).toBe(md);
+  });
+
+  it("EIN zitiertes Prosa-Zitat UND EIN zitierter Pfad im selben Satz: nur der Pfad wird verlinkt, das Prosa-Zitat bleibt inkl. Anführungszeichen unangetastet", () => {
+    const md = 'Er sagte "klar" und schickte "C:\\temp\\bericht.docx" mit.';
+    expect(linkifyFilePaths(md)).toBe(
+      'Er sagte "klar" und schickte [bericht](file:///C:/temp/bericht.docx) mit.'
+    );
+  });
+
+  it("ein zitierter Pfad neben einem bestehenden Markdown-Link stört diesen nicht (keine gegenseitige Beeinflussung)", () => {
+    const md = 'Siehe [Web](https://example.org) und "C:\\a\\b.docx" dazu.';
+    expect(linkifyFilePaths(md)).toBe(
+      "Siehe [Web](https://example.org) und [b](file:///C:/a/b.docx) dazu."
+    );
+  });
+
+  it("ein sehr wortreicher zitierter Pfad bleibt bewusst Klartext (Review-Fix Runde 2, 🟡 A1/A2: umgekehrte Erwartung ggü. der ursprünglichen v7.37-Fassung) – WORDS_PER_SEGMENT_CAP gilt seither AUCH für den zitierten Fall, konsistent zu v7.31 (Prosa-Schutz schlägt Erkennungsrate)", () => {
+    const md = '"C:\\a\\Bericht mit sehr vielen Wörtern im Dateinamen version zwei.docx"';
+    expect(linkifyFilePaths(md)).toBe(md);
+  });
+
+  it("Review-Fix Runde 2 🟡 A1: eine PROSA-Aussage, die zufällig mit einer gültigen Laufwerksangabe beginnt, wird NICHT mehr komplett verschluckt (v7.37-Erstfassung hätte hier den kompletten Satz zu einem Link gemacht)", () => {
+    const md = 'Er sagte: "C:\\Windows ist der Systemordner und darf nie geloescht werden" und ging.';
+    expect(linkifyFilePaths(md)).toBe(md); // Guard (c): Segment "Windows ist der..." hat > WORDS_PER_SEGMENT_CAP Wörter
+  });
+
+  it("Review-Fix Runde 2 🟡 A1 (zweiter Repro-Fall): ein Doppelpunkt MITTEN im Zitat (\"D: die Datenpartition\") verrät Prosa und verhindert das Verschlucken", () => {
+    const md = 'Merke: "C:/ ist bei uns die Systempartition, D: die Datenpartition"';
+    expect(linkifyFilePaths(md)).toBe(md); // Guard (b): verbotenes Zeichen ":" mitten im Körper
+  });
+
+  it("Review-Fix Runde 2 🟡 A2: UNBALANCIERTE Anführungszeichen (zwei getrennte zitierte Pfade ohne sauber gepaarte Anführungszeichen) verschlucken keinen Text mehr – der erste (mehrdeutige) Treffer bleibt Klartext, die beiden EINZELNEN Pfade werden von der bestehenden UNQUOTIERTEN Inline-Regel (c) unabhängig erkannt, die Anführungszeichen selbst bleiben als literale Zeichen erhalten", () => {
+    const md = 'Pfad "C:\\a\\b.txt und dann noch "C:\\c\\d.txt"';
+    const out = linkifyFilePaths(md);
+    // Kein Textverlust: "und dann noch" bleibt vollständig erhalten.
+    expect(out).toContain("und dann noch");
+    expect(out).toBe(
+      'Pfad "[b](file:///C:/a/b.txt) und dann noch "[d](file:///C:/c/d.txt)"'
+    );
+  });
+
+  it("Review-Fix Runde 2 🟡 A3: typografische Anführungszeichen (deutsche Konvention „…“) werden gleichermaßen erkannt – der System-Prompt schreibt dem Modell genau diese Zeichen vor", () => {
+    const md = "Siehe \u201EC:\\Users\\x\\OneDrive - Firma\\Bericht.docx\u201C bitte.";
+    expect(linkifyFilePaths(md)).toBe(
+      "Siehe [Bericht](file:///C:/Users/x/OneDrive%20-%20Firma/Bericht.docx) bitte."
+    );
+  });
+
+  it("Review-Fix Runde 2 🟡 A3: typografische Anführungszeichen (englische Konvention “…”) werden ebenfalls erkannt", () => {
+    const md = "Siehe \u201CC:\\Users\\x\\Bericht.docx\u201D bitte.";
+    expect(linkifyFilePaths(md)).toBe("Siehe [Bericht](file:///C:/Users/x/Bericht.docx) bitte.");
+  });
+
+  it("Review-Fix Runde 2 🟡 A3: GEMISCHTE Anführungszeichen-Stile (Öffner „, Schließer\") funktionieren ebenfalls – die Regel erzwingt keine Öffner/Schließer-Paarung nach EINER Konvention", () => {
+    const md = 'Siehe "C:\\Users\\x\\Bericht.docx\u201D bitte.';
+    expect(linkifyFilePaths(md)).toBe("Siehe [Bericht](file:///C:/Users/x/Bericht.docx) bitte.");
+  });
+
+  it("Review-Fix Runde 2 🔵 A4: ein an ein Wortzeichen angrenzendes Anführungszeichen (\"sieh\\\"C:\\\\a\\\\b.txt\\\"an\") wird von der ZITIERTEN Regel NICHT als Nutzer-Begrenzer akzeptiert (Lookbehind, analog INLINE_TARGET_RE) – die Anführungszeichen bleiben deshalb als literale Zeichen stehen; der eingeschlossene Pfad wird trotzdem verlinkt, aber über die BESTEHENDE unquotierte Inline-Regel (c), nicht über das Entfernen der Anführungszeichen", () => {
+    const md = 'sieh"C:\\a\\b.txt"an';
+    expect(linkifyFilePaths(md)).toBe('sieh"[b](file:///C:/a/b.txt)"an');
+  });
+
+  it("Review-Fix Runde 2 🔵 A5: ein bloßer zitierter Laufwerks-WURZELPFAD ohne Inhalt bleibt Klartext (kein sinnvoller Titel ableitbar)", () => {
+    const md = '"C:\\"';
+    expect(linkifyFilePaths(md)).toBe(md);
+  });
+
+  it("Review-Fix Runde 2 🔵 A5: ein zitierter ORDNERPFAD MIT Inhalt, der auf einen Trennstrich endet (Explorer-Adressleisten-Fall), bleibt dagegen verlinkt", () => {
+    const md = '"C:\\Users\\x\\"';
+    expect(linkifyFilePaths(md)).toBe("[x](file:///C:/Users/x)");
+  });
+});
+
 describe("linkifyFilePaths: Fence/Codespan/Bestehender-Link-Ausnahmen (Regel a/b)", () => {
   it("lässt einen Pfad INNERHALB eines Fenced-Codeblocks unangetastet", () => {
     const md = "Text davor.\n\n```\nC:\\Users\\x\\Report.docx\n```\n\nText danach.";
