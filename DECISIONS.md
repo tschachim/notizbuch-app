@@ -5503,3 +5503,814 @@ aus `referenz-app.jsx` übernommen.
       korrektem Neuöffnen reproduzieren, ist das ein neuer, bisher
       unbekannter Bug und separat zu untersuchen (in diesem Umsetzungslauf
       nicht reproduzierbar).
+
+79. **file:-Links per Klick im registrierten Windows-Programm öffnen –
+    eigenes URL-Protokoll `notizbuch-open:` (v7.35).** Ein Klick auf einen
+    file:-Link (D14, v7.31) kopiert bisher NUR den Windows-Pfad in die
+    Zwischenablage – https-Seiten dürfen aus Browser-Sicherheitsgründen
+    nicht direkt zu `file://` navigieren. Nutzerwunsch: ein Klick soll die
+    Datei stattdessen wie ein Explorer-Doppelklick im registrierten
+    Programm öffnen. Umgesetzt über ein eigenes, LOKAL registriertes
+    URL-Protokoll statt einer Browser-Extension/eines lokalen Web-Servers
+    (kein zusätzlicher laufender Prozess, kein offener Port, Einrichtung
+    ist ein einmaliger, rückstandsfrei entfernbarer Registry-Eintrag).
+    - **Kontrakt v1 (beide Seiten – App und Handler – müssen exakt
+      dazu passen, deshalb explizit versioniert):** Die App baut
+      `notizbuch-open:v1?path=<encodeURIComponent(Windows-Pfad,
+      Backslash-Form)>` (`buildProtocolUrl`, `src/lib/filelinks.js`,
+      nutzt die bestehende `fileUrlToWinPath`-Umwandlung – EIN
+      Pfad-Format für Clipboard-Copy UND Protokoll statt einer zweiten,
+      potenziell abweichenden Herleitung). Der Handler
+      (`tools/notizbuch-open-handler.ps1`) bekommt vom Browser die
+      KOMPLETTE URL als einziges Argument (`%1`), prüft das exakte
+      Präfix `notizbuch-open:v1?path=` (case-insensitiv, siehe unten),
+      dekodiert den Rest per `[Uri]::UnescapeDataString` (funktional
+      äquivalent zu `decodeURIComponent`) und validiert danach in fest
+      vorgegebenen Schritten (siehe unten). Eine künftige inkompatible
+      Kontrakt-Änderung bekäme ein neues `v2`-Präfix, ohne den
+      `v1`-Pfad für ältere installierte Handler zu brechen.
+    - **Bedrohungsmodell (SICHERHEITSKRITISCH):** Nach der Einrichtung
+      kann PRINZIPIELL JEDE Webseite (nicht nur diese App) nach einem
+      Nutzer-Klick eine `notizbuch-open:…`-URL feuern – der Handler ist
+      system-/browserweit für den angemeldeten Windows-Benutzer aktiv.
+      Er ist deshalb die einzige Verteidigungslinie gegen einen
+      bösartig präparierten Link, der versucht, über diesen Umweg
+      beliebige Dateien/Programme zu öffnen/auszuführen. Validierung in
+      DIESER REIHENFOLGE (vollständige Begründung im Kopfkommentar von
+      `notizbuch-open-handler.ps1`; die Reihenfolge/Ableitung wurde
+      durch den Sicherheits-Review VOR dem ersten Commit korrigiert,
+      siehe „Review-Nachbesserung“ unten):
+      1. Nur absolute Laufwerkspfade (`^[A-Za-z]:\`) – **UNC-Pfade
+         (`\\server\share\…`) werden ABGELEHNT**, sowohl vom Handler
+         als auch bereits App-seitig (`buildProtocolUrl` liefert für
+         ein UNC-Ziel `null`, die App bietet das Protokoll für solche
+         Links dann gar nicht erst an – beidseitiges Verbot, konsistent
+         statt nur einseitig durchgesetzt). Grund: Ein Zugriff auf eine
+         UNC-Freigabe schickt automatisch die aktuellen
+         Anmeldeinformationen des Benutzers per SMB-Handshake an den
+         Zielserver – ein bösartiger Link auf einen vom Angreifer
+         kontrollierten Server könnte darüber NTLM-Hash-/
+         Credential-Material abgreifen (bekannte
+         „UNC-Path-Injection“-Angriffsklasse; siehe Restrisiko (8) unten
+         für die bekannte Grenze dieses Schutzes bei bereits gemappten
+         Netzlaufwerken). Formate, die INTERN selbst wieder eine UNC-/
+         WebDAV-Adresse referenzieren könnten (z. B. `.scf`,
+         `.library-ms`, `.searchconnector-ms`, `.theme`,
+         `.deskthemepack`, `.website`) und dasselbe Leck über einen
+         Umweg wieder öffnen würden, stehen deshalb erst gar nicht auf
+         der Positivliste aus Schritt 4.
+      2. Keine `..`-Segmente (Split auf **beide** Trennzeichen `\`/`/`
+         – Review-Fix Finding 4, siehe unten), keine
+         Steuerzeichen/Nullbytes, keine erkennbaren
+         Umgebungsvariablen-Platzhalter (`%NAME%`, `$env:…`) – GEZIELT
+         per Muster statt eines pauschalen „kein %-Zeichen erlaubt“,
+         weil ein einzelnes rohes `%` auch in einem legitimen
+         Dateinamen vorkommen kann (z. B. „Bericht 100%.docx“, siehe
+         bereits bestehende `pathToFileUrl`-Tests für genau dieses
+         Zeichen).
+      2b. **Kanonisierungs-/Namespace-Tricks:** Pfad endet auf
+          Leerzeichen/Punkt, ein weiterer `:` nach dem Laufwerks-Präfix
+          (Alternate Data Stream), ein Ordner-/Pfadsegment mit einem
+          Shell-Namespace-Muster (`.{<GUID>}`, „God-Mode-Ordner“ –
+          Review-Nachbesserung 3, Blocker 1b, siehe dort). Ein früher
+          hier zusätzlich gepruefter 8.3-Kurzname-Musterschutz
+          (`~<Ziffer>`) wurde nach einem gezielten empirischen Test
+          WIEDER ENTFERNT (siehe Review-Nachbesserung 3/„8.3-Redundanz“
+          unten) – Details/vollständige Begründung im Kopfkommentar des
+          Skripts.
+      3. `Test-Path -LiteralPath` muss den Pfad bestätigen – VOR der
+         Endungsprüfung, damit Schritt 4 die Endung vom KANONISCHEN,
+         tatsächlich aufgelösten Element ableiten kann statt vom
+         Rohstring.
+      4. **POSITIVLISTE (`$script:AllowedExtensions`) statt Sperrliste**
+         (Architekturwechsel, Review-Nachbesserung 3/Blocker 1 – siehe
+         dort für den vollständigen Beleg, warum die vorherige Sperrliste
+         verworfen wurde), abgeleitet vom KANONISCHEN, über
+         `Get-Item -Force` aufgelösten Dateisystem-Eintrag (nicht vom
+         rohen String). Nur Endungen aus der Positivliste werden
+         geöffnet, ALLES andere (inkl. jeder unbekannten/künftigen
+         Endung) wird abgelehnt – siehe eigener Abschnitt unten für die
+         Liste samt Begründung/Abgrenzung der Zweifelsfälle. Ordner sind
+         strukturell erlaubt (öffnet Explorer) – AUSSER dem
+         Shell-Namespace-Fall aus Schritt 2b. Eine Datei OHNE erkennbare
+         Endung wird ABGELEHNT (fail-closed).
+      **Positivliste (Startmenge, case-insensitive):** pdf, txt, md,
+      markdown, log, csv, tsv, json, xml, yaml, yml, ini, cfg, conf, rtf,
+      doc, docx, odt, xls, xlsx, ods, ppt, pptx, odp, png, jpg, jpeg,
+      gif, bmp, webp, tif, tiff, heic, mp3, wav, flac, m4a, mp4, mkv,
+      mov, avi, webm, zip, 7z, tar, gz, eml, msg, epub (49 Endungen).
+      Auswahlprinzip: NUR Formate, die ein Windows-Standardprogramm
+      ANZEIGT statt AUSFÜHRT. Abgrenzung der Zweifelsfälle:
+        - `svg` bewusst AUSGESCHLOSSEN: anders als PNG/JPG (reine
+          Rasterdaten) kann eine SVG eingebettetes JavaScript enthalten –
+          je nachdem, welches Programm auf dem jeweiligen Windows-Rechner
+          als Standard für `.svg` registriert ist (Bild-Viewer vs. ein
+          Browser), könnte dieses Skript beim Öffnen ausgeführt werden.
+        - `docm`/`xlsm`/`pptm` (die Makro-Varianten der modernen
+          OOXML-Formate) bewusst AUSGESCHLOSSEN. Die ÄLTEREN Binärformate
+          `doc`/`xls`/`ppt` sind trotzdem AUFGENOMMEN, obwohl sie (anders
+          als die docx/xlsx/pptx-Familie) KEINE separate Makro-Variante
+          kennen – ein VBA-Makro kann technisch im selben Container
+          stecken. Praxisnutzen überwiegt, aber als benanntes Restrisiko
+          dokumentiert statt stillschweigend hingenommen (siehe
+          Restrisiken unten).
+        - `rtf` und `odt`/`ods`/`odp` gehören in DIESELBE Risikoklasse und
+          werden hier der Ehrlichkeit halber mitbenannt (Review-Fund,
+          Abschluss-Review): RTF hat eine lange Historie eingebetteter
+          OLE-/Equation-Editor-Objekte und wird lokal ohne Protected View
+          geöffnet; die OpenDocument-Formate können LibreOffice-Basic-Makros
+          enthalten. Wie bei `doc`/`xls`/`ppt` überwiegt der Praxisnutzen,
+          das Risiko ist benannt statt stillschweigend hingenommen.
+        - `csv`/`tsv` aufgenommen, mit demselben Vorbehalt: die ältere
+          „CSV-/Formula-Injection“-Angriffsklasse (z. B.
+          `=cmd|'/c calc'!A1`) ist seit Jahren durch deaktiviertes
+          DDE/Warnhinweise in modernen Excel-Versionen stark entschärft,
+          aber nicht theoretisch ausgeschlossen – ebenfalls benannt statt
+          ausgeschlossen.
+        - `zip`/`7z`/`tar`/`gz` aufgenommen: `Invoke-Item` öffnet nur eine
+          Inhalts-ANSICHT (Explorer-Zip-Ordner bzw. die GUI von
+          7-Zip/WinRAR) – nichts darin wird automatisch entpackt oder
+          ausgeführt, identisch zum manuellen Öffnen eines
+          heruntergeladenen Zips über den Explorer.
+        - Medienformate (Bild/Audio/Video): das inhärente Restrisiko
+          eines fehlerhaften Datei-PARSERS (Codec-/Bibliotheks-CVEs) gilt
+          grundsätzlich für JEDES geöffnete Format (auch PDF/DOCX) – kein
+          Kriterium, das sich per Positiv-/Sperrliste ausschließen ließe,
+          als allgemeines Restrisiko der GESAMTEN Funktion dokumentiert
+          (siehe Restrisiken unten), nicht je Format wiederholt.
+      Bei JEDER Ablehnung (Schritte 1-4) erscheint eine kleine
+      Windows-MessageBox mit Grund + gekürztem Pfad (`Add-Type`/
+      `System.Windows.Forms.MessageBox`, `-WindowStyle Hidden` beim
+      Registry-Aufruf verhindert Konsolenfenster-Flackern) – kein
+      stilles Nichtstun, sonst wirkt der Klick kaputt UND ein aktiver
+      Angriffsversuch würde verschleiert. Bei einer abgelehnten
+      Endung/einem abgelehnten Dateityp (Schritt 4) verweist die
+      MessageBox zusätzlich auf die Zwischenablage („… Der Pfad wurde in
+      die Zwischenablage kopiert.“) – die App (`FileLink`, `markdown.jsx`)
+      kopiert den Windows-Pfad bei JEDEM Klick ohnehin schon dorthin, das
+      ist also ein bereits vorhandener, brauchbarer Rückfallweg für den
+      Nutzer. Ein reiner PRÄFIX-Mismatch (URL beginnt gar nicht mit
+      `notizbuch-open:v1?path=`, case-insensitiv verglichen – Review-
+      Nachbesserung 3, siehe dort –, z. B. ein künftiges `v2` oder ein
+      völlig fremder Aufruf) ist dagegen KEIN abgelehnter Notizbuch-Link,
+      sondern schlicht kein gültiger Aufruf dieses Handlers – dafür nur
+      ein stiller Exit + Log-Eintrag
+      (`%LOCALAPPDATA%\NotizbuchOpen\notizbuch-open-handler.log`, rein
+      diagnostisch, ein Schreibfehler dabei darf den Handler nie zum
+      Absturz bringen; die Log-Nachricht wird IMMER von Zeilenumbrüchen
+      bereinigt – Review-Fix 🔵 Finding 7, siehe unten).
+    - **Praxisbedingte Ergänzung, kein Teil des ursprünglichen
+      Kontrakts, aber für echte Chromium-Browser notwendig:**
+      Chrome/Edge hängen an eine per Registry registrierte
+      Protokoll-URL OHNE `//` nach dem Schema-Doppelpunkt (unser
+      Kontrakt hat kein `//`) bekanntermaßen automatisch einen
+      einzelnen `/` an, bevor sie den registrierten Befehl aufrufen.
+      Da `encodeURIComponent` (App-Seite) JEDEN rohen `/`/`\` im Pfad
+      zu `%2F`/`%5C` kodiert, kann eine SELBST gebaute Kontrakt-URL nie
+      roh auf `/` enden – ein angehängter trailing `/` stammt also
+      garantiert vom Browser und wird im Handler defensiv genau einmal
+      abgeschnitten, BEVOR irgendetwas anderes geprüft wird. Ohne diese
+      Toleranz würde der Klick in den meisten Windows-Standardbrowsern
+      wirkungslos verpuffen (nicht Teil des ursprünglichen Auftrags,
+      hier bewusst ergänzt und im Kopfkommentar des Handlers explizit
+      benannt, damit sie bei einer künftigen Kontrakt-Änderung nicht
+      versehentlich verloren geht).
+    - **Warum NUR HKCU, kein HKLM (`tools/notizbuch-open-setup.ps1`):**
+      `HKCU:\Software\Classes` wird von Windows bei der
+      Protokoll-Auflösung IMMER vor `HKLM:\Software\Classes` geprüft –
+      ein normaler Benutzer kann sich damit ein eigenes Protokoll
+      registrieren, ohne Maschinen-weite Einstellungen zu verändern
+      oder erhöhte Rechte zu benötigen. Das Setup-Skript verändert
+      AUSSCHLIESSLICH `HKCU:\Software\Classes\notizbuch-open` (samt
+      Unterschlüsseln) und den eigenen Ordner
+      `%LOCALAPPDATA%\NotizbuchOpen\` – sonst nichts. `-Uninstall`
+      entfernt beides rückstandsfrei, mehrfacher Aufruf (Install wie
+      Uninstall) ist idempotent.
+    - **Warum die Handler-Datei nach `%LOCALAPPDATA%` KOPIERT wird,
+      statt die Registry direkt auf den Repo-Pfad zeigen zu lassen:**
+      `%LOCALAPPDATA%` ist ein vom jeweiligen Repo-Klon-Pfad
+      unabhängiger, stabiler Ort – verschiebt/löscht der Nutzer sein
+      Repo-Verzeichnis später, bliebe ein direkt auf das Repo zeigender
+      Registry-Eintrag sonst kaputt, ohne dass das beim nächsten
+      Link-Klick ersichtlich wäre (der Klick täte dann wieder NICHTS,
+      genau das Ausgangsproblem).
+    - **`triggerProtocolOpen` (`markdown.jsx#FileLink`): NUR ein
+      unsichtbares `<iframe>`, bewusst KEIN paralleler
+      `location.href`-Versuch (siehe „Review-Nachbesserung 2“ unten für
+      die Begründung, warum ein testweise ergänzter Fallback wieder
+      entfernt wurde).** Setzt man `window.location`/`location.href`
+      DIREKT auf ein (beim Nutzer evtl. noch nicht registriertes)
+      fremdes Protokoll, zeigen manche Browser im sichtbaren Dokument
+      kurz eine Fehlerseite, obwohl die App-Seite dabei gar nicht
+      wirklich verlassen wird. Ein Navigationsversuch in einem
+      Kind-Frame scheitert bei einem unbekannten/nicht erlaubten Schema
+      dagegen still, ohne dass irgendetwas im sichtbaren Dokument
+      passiert – kein Entladen der Seite, kein Popup-Blocker-Konflikt
+      (anders als `window.open`, das zudem einen echten neuen Tab öffnen
+      würde und als Popup geblockt werden könnte). Das Iframe wird nach
+      1 s wieder entfernt (kein wachsendes verstecktes DOM bei
+      wiederholten Klicks). Der Klick löst das Protokoll ZUSÄTZLICH zum
+      bestehenden Clipboard-Copy aus (KEIN preventDefault, unverändert
+      seit v7.31); liefert `buildProtocolUrl` `null` (UNC-Ziel), bleibt
+      es beim reinen Clipboard-Copy wie bisher.
+    - **GEPLANTE, NICHT umgesetzte Option: `location.href`-Fallback nur
+      bei nachgewiesenem Iframe-Fehlschlag.** Ein direkter
+      `location.href`-Versuch ZUSÄTZLICH zum Iframe wurde in einer
+      Zwischenrunde ergänzt UND wieder entfernt (siehe
+      „Review-Nachbesserung 2“) – die Grundidee (Absicherung gegen eine
+      mögliche künftige Chromium-Einschränkung des Iframe-Wegs) bleibt
+      als Option bestehen, aber NUR mit einer echten
+      Fehlschlag-Erkennung statt eines unbedingten Parallel-Versuchs:
+      erst aktivieren, falls der manuelle Testfall D14b
+      (`docs/TESTFAELLE.md`, `[MANUELL]`) NACHWEIST, dass das Iframe den
+      Protokollstart im echten Browser NICHT auslöst, und dann mit einer
+      `blur`/`visibilitychange`-Erkennung (der Fallback feuert nur, wenn
+      das Iframe NACHWEISLICH nichts bewirkt hat – z. B. kein
+      `blur`-Event auf `window` innerhalb einer kurzen Frist nach dem
+      Klick, ein Indiz dafür, dass der Handler NICHT angesprungen ist),
+      nicht unbedingt parallel zum Iframe.
+    - **`-Validate`-Diagnosemodus (`notizbuch-open-handler.ps1`):**
+      Vitest kann PowerShell nicht testen – der Handler bekam deshalb
+      einen expliziten `-Validate <url>`-Schalter, der dieselbe
+      Validierungsfunktion wie der Normalbetrieb durchläuft, aber NUR
+      das Ergebnis als Text ausgibt (nichts öffnet, keine MessageBox
+      zeigt) und einen Exit-Code ungleich 0 bei „Reject“/„PrefixMismatch“
+      liefert (0 nur bei „Ok“ – Review-Nachbesserung 3, macht
+      Validate-Läufe aus einer Testliste heraus automatisch auswertbar).
+      Alle Test-Aufrufe aus dem Umsetzungsbericht UND allen vier
+      Review-Nachbesserungsrunden (siehe unten) wurden lokal per
+      `-Validate` gegen den Handler verifiziert – u. a. gültiger Pfad,
+      UNC, `..`-Traversal per `\` UND per gemischtem `/`, nicht
+      existenter Pfad, Ordner, `%NAME%`-/`$env:`-Platzhalter, legitime
+      Dateinamen mit ein oder zwei Prozentzeichen, Präfix-Mismatch
+      (inkl. Groß-/Kleinschreibung), Trailing-Slash-Toleranz,
+      Trailing-Space/-Punkt-Bypassversuch, Alternate-Data-Stream,
+      illegale Zeichen `<`/`|`/`"`, Log-Injection-Versuch, Kelvin-Zeichen-
+      /Soft-Hyphen-Unicode-Kollisionen (Endung UND Laufwerksbuchstabe),
+      sowie – für Review-Nachbesserung 3 – ein systematischer Lauf mit 94 realen
+      Windows-Dateiendungen (siehe dort für die vollständigen Ist-
+      Ergebnisse), ein CLSID-Shell-Namespace-Ordner, ein extensionsloser
+      Dateiname und mehrere 8.3-Kurzname-Fälle auf beiden Seiten.
+    - **Neue Tests:** `tests/filelinks.test.js` (`buildProtocolUrl`) –
+      Kontrakt-Beispiel aus dem Auftrag, Umlaute/UTF-8-Encoding,
+      `#`/`%` im Dateinamen, UNC → `null` (zwei Varianten), fremde
+      URL/http(s) → `null`, leere Eingabe → `null`, Roundtrip
+      `decodeURIComponent(buildProtocolUrl(...))` zum ursprünglichen
+      Backslash-Pfad (inkl. Leerzeichen/Klammern/`#`/`%` gemeinsam),
+      Klammern-Verhalten bewusst OHNE die `%28`/`%29`-Sonderbehandlung
+      von `pathToFileUrl`/`encSeg` (die ist NUR für die
+      Markdown-Link-Idempotenz nötig, siehe #-Eintrag zu Finding 2 im
+      v7.31-Block – `buildProtocolUrl` baut keine Markdown-Syntax, für
+      die eine rohe Klammer ein Problem wäre). `tests/markdown.test.jsx`
+      (neuer Block „Klick löst zusätzlich das notizbuch-open:-Protokoll
+      aus“) – Iframe mit korrekter Kontrakt-URL + `display:none`,
+      Clipboard-Copy bleibt zusätzlich aktiv, automatisches Entfernen
+      nach 1 s, UNC-Ziel löst KEIN Iframe aus, kein `window.open`-Aufruf,
+      mehrere unabhängige Klicks/Iframes (ein testweise ergänzter
+      `location.href`-Fallback-Test samt der dafür nötigen
+      `Object.defineProperty(window, "location", …)`-Mock-Infrastruktur
+      wurde zusammen mit dem Fallback selbst wieder entfernt, siehe
+      „Review-Nachbesserung 2“ unten). Ein datei-weiter `afterEach`-Hook
+      wurde
+      ergänzt, der nach JEDEM Test dieser Datei liegen gebliebene
+      Iframes entfernt (der Klick-Handler hängt sie direkt an
+      `document.body`, nicht an den Test-„container“ – ohne diesen Hook
+      leckten Iframes aus Tests mit ECHTEN Timern, die die 1-s-
+      Entfernung nicht selbst per `vi.advanceTimersByTime` abwarten, in
+      nachfolgende Tests hinein; betrifft transitiv auch die
+      BESTEHENDEN v7.31-Clipboard-Tests, da jeder dortige Klick auf
+      einen Nicht-UNC-Pfad jetzt ebenfalls ein Iframe erzeugt).
+    - **`docs/TESTFAELLE.md`:** D14 um einen `[MANUELL]`-Teilfall für
+      den Protokoll-Klick ergänzt (Browser-Erlaubnis-Prompt beim ersten
+      Klick + lokal installierter Handler sind nicht automatisierbar,
+      auch nicht durch den Tester-Subagenten – erfordert vorherige
+      Ausführung von `notizbuch-open-setup.ps1` auf dem Testrechner).
+    - **Review-Nachbesserung 1 (Sicherheits-Review VOR dem ersten Commit,
+      noch nie live/committet – sieben Findings, alle behoben):**
+      - **🔴 Finding 1 (Pflicht) – Endungs-Sperrliste per Trailing-
+        Space/Trailing-Punkt VOLLSTÄNDIG umgehbar, per `-Validate`
+        belegt** (`…calc.exe ` → fälschlich `OK`, `…calc.exe.` →
+        fälschlich `OK`): `[System.IO.Path]::GetExtension()` arbeitete
+        auf dem ROHEN, unkanonisierten String – Windows entfernt
+        abschließende Leerzeichen/Punkte aber beim TATSÄCHLICHEN
+        Dateizugriff, wodurch z. B. `.exe ` nicht als `.exe` erkannt
+        wurde, `Test-Path`/`Invoke-Item` die Datei aber anstandslos
+        öffneten. Kritisch, weil die Angriffskette bereits in der App
+        beginnt (Notizbuch-Inhalte stammen vom Modell/aus dem
+        Daten-Repo): `[x](file:///C:/Windows/System32/calc.exe%20)`
+        läuft sauber durch `FILE_URL_RE` → `buildProtocolUrl` → Handler
+        → `Invoke-Item`. **Fix:** Reihenfolge umgestellt (erst Existenz,
+        dann Endung – siehe Schritt 3/4 oben), Endung wird jetzt aus dem
+        über `Get-Item -Force` aufgelösten KANONISCHEN Element
+        abgeleitet, `Invoke-Item` öffnet konsequent `$item.FullName`
+        statt des Rohstrings. Zusätzlich EXPLIZIT abgelehnt (Schritt
+        2b, VOR der Existenzprüfung, da diese Tricks unabhängig von der
+        Kanonisierung ohnehin ungültige/gefährliche Pfade sind):
+        Trailing Space/Punkt, ein weiterer `:` nach dem Laufwerks-
+        Präfix (Alternate Data Stream, z. B. `calc.exe::$DATA` – hätte
+        sonst einen versteckten Datenstrom statt der Haupt-Datei
+        geöffnet), 8.3-Kurzname-Segmente (`~<Ziffer>`, z. B.
+        `LONGFI~1.APP` für `LangerName.application` – eine lange Endung
+        wird im generierten Kurznamen auf max. drei Zeichen gekürzt,
+        was die Sperrliste ebenfalls umgangen hätte). Für den
+        8.3-Fall bewusst PATTERN-basiert abgelehnt statt versucht, den
+        Kurznamen zuverlässig aufzulösen – eine falsch-negative
+        Auflösung wäre sicherheitskritisch, ein selten/zufällig
+        abgelehnter echter „~1“-Dateiname dagegen nur ein harmloser
+        False Positive (sicherer Trade-off).
+      - **🟡 Finding 2 (Pflicht) – Sperrliste unvollständig, Kopfkommentar
+        zu stark formuliert:** Um pif, scf, msc, hlp, wsc, sct, ws, xll,
+        msu, appinstaller, appx, appxbundle, msixbundle, jnlp, gadget,
+        mdb, mde, accdb, ade, adp, shs, shb, settingcontent-ms,
+        library-ms, searchconnector-ms, website, theme, themepack,
+        deskthemepack ergänzt. Mehrere davon (scf, library-ms,
+        searchconnector-ms, theme, deskthemepack, website) können
+        INTERN auf eine UNC-/WebDAV-Adresse zeigen und reißen damit das
+        SMB-Credential-Leck wieder auf, das Schritt 1 für den äußeren
+        Pfad schließt. Die Kopfkommentar-Behauptung „deckt … vollständig
+        ab“ (im Widerspruch zum bereits korrekt formulierten Restrisiko
+        (1) unten) wurde auf „deckt … ab, ohne Anspruch auf
+        Vollständigkeit“ abgeschwächt.
+      - **🟡 Finding 3 (Pflicht) – stiller Absturz statt MessageBox/Log
+        bei bestimmten Sonderzeichen:** Mit `$ErrorActionPreference=
+        'Stop'` warfen `Test-Path`/`Get-Item` bei Zeichen wie `<`, `|`,
+        `"` im Pfad eine Exception – unter `-WindowStyle Hidden` wäre
+        das ein STILLER Absturz OHNE MessageBox/Log gewesen, exakt das
+        vom Kopfkommentar ausgeschlossene Verhalten. Per `-Validate`
+        verifiziert: alle drei Zeichen liefern nach dem Fix einen
+        sauberen `Reject` („Pfad konnte nicht geprüft werden …“) statt
+        eines Stack-Trace-Abbruchs. **Fix:** Schritt 3 (Existenz) und
+        Schritt 4 (kanonische Endung) laufen jetzt je in einem eigenen
+        `try`/`catch` mit sauberem `Reject`-Ergebnisobjekt.
+      - **🟡 Finding 4 (Pflicht) – Traversal-Split nur auf `\`, Bypass
+        per gemischtem `/`:** `C:\Users\Public/../../Windows/win.ini`
+        bestand Schritt 1 (beginnt mit `C:\`), das `..`-Segment war
+        aber nur durch `/` abgetrennt und wurde vom `-split '\\'` NICHT
+        erkannt, obwohl `Test-Path`/`Invoke-Item` `/` genauso wie `\`
+        auflösen – lief vor dem Fix fälschlich als `OK` durch. **Fix:**
+        Split jetzt auf `[\\/]` (beide Trennzeichen).
+      - **🔵 Finding 5 – „Immer erlauben“-Browser-Prompt nicht erwähnt:**
+        Restrisiko (2) unten ergänzt – nach einmaligem Anhaken von
+        „Immer erlauben/nicht mehr fragen“ im Browser-Prompt entfällt
+        die Rückfrage dauerhaft für JEDE Seite, nicht nur für diese App.
+      - **🔵 Finding 6 – `triggerProtocolOpen` ohne Fallback:** Chromium
+        schränkt das Auslösen externer Protokolle aus Iframes zunehmend
+        ein; ein zusätzlicher direkter `location.href`-Versuch wurde
+        daraufhin ergänzt – und in „Review-Nachbesserung 2“ (unten)
+        NACH einem zweiten Review wieder ENTFERNT, weil er kein echter
+        Fallback war (siehe dort für die vollständige Begründung). Der
+        `triggerProtocolOpen`-Eintrag oben beschreibt den AKTUELLEN,
+        Iframe-only-Stand.
+      - **🔵 Finding 7 – Log-Injection über eingebettetes CR/LF:** Ein
+        Präfix-Mismatch loggt den KOMPLETTEN Rohwert der URL, BEVOR
+        dieser je die Steuerzeichen-Prüfung aus Schritt 2 durchlaufen
+        hat; auch ein per Schritt 2 abgelehnter Pfad wird trotzdem (mit
+        Ablehnungsgrund) mitprotokolliert. Ohne Bereinigung ließe sich
+        per eingebettetem CR/LF eine vom echten Log-Format nicht mehr
+        unterscheidbare Zusatzzeile einschleusen. Per manuellem Test
+        verifiziert: eine Eingabe mit eingebettetem `\r\n` UND
+        vorgetäuschtem zweiten Log-Eintrag landet nach dem Fix
+        vollständig auf EINER Zeile. **Fix:** `Write-NotizbuchLog`
+        ersetzt `[\r\n]` IMMER durch ein Leerzeichen, unabhängig vom
+        Aufrufer.
+      Alle sieben Findings betreffen ausschließlich
+      `notizbuch-open-handler.ps1` (Findings 5-7 teils zusätzlich
+      Dokumentation/`markdown.jsx`) – `notizbuch-open-setup.ps1` war
+      nicht betroffen.
+    - **Review-Nachbesserung 2 (zweiter Review-Durchgang, EIN Finding,
+      betrifft NUR `markdown.jsx`/Tests/Doku, NICHT den Handler –
+      Handler-Fixes aus Review-Nachbesserung 1 bereits freigegeben):**
+      - **🟡 Finding – `location.href`-Fallback (Finding 6 oben) lief
+        IMMER parallel zum Iframe, nicht erst bei dessen Fehlschlag.**
+        Zwei konkrete Folgen: (a) Mit installiertem Handler wird das
+        Protokoll bei JEDEM Klick ZWEIMAL ausgelöst – erst zwei
+        Browser-Erlaubnis-Prompts, nach einmaligem „Immer erlauben“
+        (siehe Finding 5) öffnet sich JEDE Datei bei JEDEM Klick
+        doppelt. Das ist der HAPPY PATH (Normalfall bei korrekt
+        eingerichtetem Handler), nicht „im schlimmsten Fall“, wie der
+        ursprüngliche Code-Kommentar es beschrieb – eine Falschaussage,
+        die ebenfalls zu korrigieren war. (b) OHNE installierten
+        Handler (Opt-in-Setup, der Zustand der MEISTEN Nutzer)
+        reaktiviert die zusätzliche Top-Level-Zuweisung genau das
+        Problem, dessentwegen direkt darüber bereits das Iframe gewählt
+        wurde (siehe Kommentar an derselben Stelle) – je nach Browser
+        ein sichtbarer Fehlerdialog bei JEDEM file:-Link-Klick, wo
+        v7.31 zuvor still nur den Pfad kopierte. Der behauptete Nutzen
+        (Hypothese „Chromium blockiert künftig Iframe-Protokollstarts“)
+        war zudem nie belegt, der UX-Preis dagegen sicher UND laufend.
+        **Fix:** Der Fallback wurde vollständig ENTFERNT –
+        `triggerProtocolOpen` löst wieder NUR das Iframe aus, wie vor
+        Review-Nachbesserung 1 (siehe `triggerProtocolOpen`-Eintrag
+        oben). Die Idee bleibt als GEPLANTE, nicht umgesetzte Option
+        dokumentiert (siehe eigener Eintrag oben) – mit der vom Review
+        skizzierten `blur`/`visibilitychange`-Erkennung statt eines
+        unbedingten Parallel-Versuchs, und nur, falls D14b tatsächlich
+        einen Iframe-Fehlschlag nachweist. Betroffene Tests
+        (`tests/markdown.test.jsx`) wieder zurückgebaut: der
+        `location.href`-Fallback-Test samt `Object.defineProperty
+        (window, "location", …)`-Mock-Infrastruktur entfernt, die
+        UNC-Negativprobe wieder auf die einfache Iframe-Prüfung
+        reduziert – die Iframe-Mechanik selbst bleibt vollständig
+        getestet (unverändert).
+      - **🔵 Optional aufgegriffen – 8.3-Kurzname-Muster verschärft
+        (`notizbuch-open-handler.ps1`, Schritt 2b/c):** Das ursprüngliche
+        pauschale `~\d` aus Review-Nachbesserung 1/Finding 1 verwarf
+        nachweislich auch echte, nicht-generierte Dateinamen wie
+        `Backup~2024` oder `Bericht~1.txt` (per `-Validate` belegt).
+        Bewusst ENGER gefasst auf
+        `^[^.\\/]{1,6}~\d{1,2}(\.[^.\\/]{1,3})?$` je Segment (Begründung
+        an der Prüfstelle im Skript): Basisname vor dem `~` höchstens 6
+        Zeichen, danach 1-2 Ziffern, optional eine auf 3 Zeichen
+        gekürzte Endung – exakt die Form eines echten, von Windows
+        generierten 8.3-Kurznamens. Weiterhin per `-Validate` bestätigt
+        abgelehnt: `PROGRA~1`, `CALC~1.EXE`, `LONGFI~1.APP` (die
+        sicherheitsrelevanten Fälle, inkl. des ursprünglichen
+        Auslöse-Beispiels aus Finding 1). Neu NICHT mehr abgelehnt (nur
+        noch am regulären Existenz-Schritt gescheitert, wie jeder andere
+        nicht existierende Testpfad): `Backup~2024`, `Bericht~1.txt`.
+        **Nachtrag (Review-Nachbesserung 3):** Diese verschärfte Prüfung
+        wurde spaeter VOLLSTÄNDIG ENTFERNT, nachdem ein gezielter
+        empirischer Test zeigte, dass sie strukturell redundant war –
+        siehe „Review-Nachbesserung 3 / Blocker 1, 8.3-Redundanz“ unten
+        für den Beleg und die vollständige Begründung.
+    - **Review-Nachbesserung 3 (unabhängige Mehrfach-Prüfung „4 Lenses +
+      adversarische Gegenprüfung“ VOR der geplanten Installation, noch
+      nie live/committet – ARCHITEKTURWECHSEL, siehe Kopfkommentar des
+      Handlers für die vollständige technische Fassung):**
+      - **🔴 Blocker 1 (Pflicht) – der Sperrlisten-Ansatz selbst ist
+        gescheitert, per Probelauf mit 94 realen Windows-Dateiendungen
+        BELEGT:** 88 von 94 Endungen lieferten unter der (bereits zweimal
+        nachgebesserten) Sperrliste `OK` – Invoke-Item hätte sie
+        anstandslos geöffnet. Durchgelassen u. a.: `py`/`pyw`
+        (Python-Interpreter führt den Code aus), `rdp` (Remote-Desktop zu
+        einem angreifergewählten Host), `iqy`/`slk` (Excel holt beim
+        Öffnen eine REMOTE-URL nach – dasselbe SMB-/WebDAV-Credential-
+        Leck, das Schritt 1 für UNC-Pfade eigentlich schließen soll),
+        `mam`/`accde`/`accdr` (Access mit Makro-/VBA-Code),
+        `diagpkg`/`diagcfg` (startet `msdt.exe` – Windows liefert allein
+        unter System32 21 solcher Dateien selbst mit aus),
+        `psc1`/`pssc`/`ps1xml`/`msh`/`mshxml`/`cdxml` (PowerShell-
+        Konsolen-/Session-/CIM-Konfiguration), `cer`/`crt`/`pfx`/`p12`/
+        `p7b` (Zertifikats-Installationsdialog), `xla`/`xlam`/`ppam`
+        (Office-Add-Ins mit Makro-Ausführung beim Öffnen – bei der
+        Sperrlisten-Erweiterung in Review-Nachbesserung 1 schlicht
+        vergessen), sowie `ppkg`, `xlsm`/`xlsb`/`docm`/`pptm`, `img`,
+        `vhds`/`avhdx`, `wim`, `wsb`, `job`, `mst`, `cab`, `xnk`, `udl`,
+        `mht`, `prf`, `printerexport`, `appv`, `ins`, `isp`, `ahk`, `pl`,
+        `rb`, `php`, `dif`, `search-ms`, `msrcincident` (51 zusätzlich
+        gefundene, insgesamt 66 inkl. bereits bekannter Fälle wie `exe`).
+        Die Registry-Zuordnung dieser Endungen wurde lesend auf einem
+        echten Windows-Rechner verifiziert (z. B. `.py` → `py.exe "%L"`,
+        `.rdp` → `mstsc.exe`, `.pfx` → Zertifikats-Import-Assistent).
+        **Erkenntnis: Eine Sperrliste für „was Windows ausführt“ ist
+        prinzipiell nicht gewinnbar** – jede Ergänzung lässt die nächste,
+        strukturell gleichartige Geschwister-Endung offen (das Muster
+        selbst ist die Schwachstelle, nicht eine einzelne vergessene
+        Endung). **Fix: vollständiger Architekturwechsel auf eine
+        POSITIVLISTE**, fail-closed (siehe eigener Abschnitt oben für
+        Liste + Begründung) – NUR explizit vetted Formate öffnen sich,
+        alles andere (inkl. jeder heute unbekannten Endung) wird
+        abgelehnt. Verifikation: derselbe 94-Endungen-Probelauf NACH dem
+        Umbau lieferte 0 Durchlässe bei den 66 vormals problematischen
+        Endungen UND alle 49 Positivlisten-Einträge weiterhin `OK` (per
+        `-Validate` erneut vollständig durchlaufen, siehe Testbericht).
+        **8.3-Redundanz (Nachtrag zu Review-Nachbesserung 1/2):** Der
+        dedizierte 8.3-Kurzname-Musterschutz (siehe oben) wurde im Zuge
+        dieses Umbaus GEZIELT empirisch geprüft und dann entfernt: eine
+        eigens angelegte Datei mit langem Namen (generierter Kurzname
+        `ALONGF~1.APP`) lieferte über `Get-Item -Force -LiteralPath
+        <Kurzname>` als `.Extension` verlässlich `.application` (die
+        LANGE, kanonische Endung), NICHT `.APP` – ebenso eine eigens
+        angelegte `.exe`-Datei über ihren generierten Kurznamen
+        (`.Extension` weiterhin `.exe`). Die Positivlisten-Prüfung in
+        Schritt 4 sieht damit bereits von sich aus die WAHRE Endung,
+        unabhängig vom Kurz- oder Langnamen-Zugriffspfad – der
+        Musterschutz war strukturell redundant UND lehnte nachweislich
+        legitime Namen (`Backup~2024`, `Bericht~1.txt`) weiterhin
+        fälschlich ab. Nach der Entfernung per `-Validate` erneut
+        bestätigt: `Backup~2024.txt`/`Bericht~1.txt` liefern jetzt `OK`,
+        ein eigens angelegtes `ALongMaliciousLookingProgramName.exe`
+        liefert über seinen generierten Kurznamen (`ALONGM~1.EXE`)
+        weiterhin korrekt `Reject` (Endung `.exe` nicht auf der
+        Positivliste) – die sicherheitsrelevante Eigenschaft bleibt ohne
+        den dedizierten Vorab-Check erhalten.
+      - **🟡 Blocker 1b (Pflicht, gehört zu Blocker 1) – Shell-Namespace-
+        Ordner („God-Mode-Ordner“), per `-Validate` belegt (lief als
+        `OK` durch):** Ein ECHTER, auf der Festplatte existierender
+        Ordner, dessen Name auf `.{<GUID>}` endet bzw. eine solche
+        Sequenz enthält (z. B.
+        `Systemsteuerung.{21EC2020-3AEA-1069-A2DD-08002B30309D}`), wird
+        von `ShellExecute`/`Invoke-Item` NICHT als normaler Ordnerinhalt
+        geöffnet, sondern startet die registrierte Shell-Namespace-
+        Erweiterung für diese CLSID. Die Kopfkommentar-Aussage „Ordner
+        sind grundsätzlich harmlos“ galt damit NICHT uneingeschränkt.
+        **Fix:** Schritt 2b prüft jetzt zusätzlich JEDES Pfad-Segment auf
+        ein `.{`-Muster und lehnt bei Treffer ab – Ordner bleiben sonst
+        erlaubt. Per `-Validate` verifiziert: ein eigens angelegter
+        `Test.{21EC2020-…}`-Ordner (direkt UND als Zwischen-Segment eines
+        längeren Pfads) liefert jetzt `Reject`, ein normaler Ordner ohne
+        dieses Muster weiterhin `OK`.
+      - **🔴 Blocker 2 (Pflicht) – `notizbuch-open-setup.ps1` hätte einen
+        KAPUTTEN Registry-Befehl geschrieben, wenn unter PowerShell 7
+        ausgeführt:** `$powershellExe = Join-Path $PSHOME 'powershell.exe'`
+        leitete den Interpreter-Pfad vom GERADE AUSFÜHRENDEN Host ab.
+        PowerShell 7 (häufige Standard-Shell, z. B. Version 7.6.x) hat
+        `$PSHOME = 'C:\Program Files\PowerShell\7'` – dort liegt KEINE
+        `powershell.exe` (die 7er-Engine heißt `pwsh.exe`). Der
+        geschriebene Registry-Befehl hätte auf eine nicht existierende
+        Datei verwiesen – ein Klick auf einen file:-Link hätte danach
+        still NICHTS mehr getan, ohne dass irgendwo ein Fehler sichtbar
+        gewesen wäre (genau das Ausgangsproblem, das dieses Feature
+        eigentlich löst). **Fix:** Windows PowerShell 5.1 wird jetzt
+        EXPLIZIT über `$env:SystemRoot\System32\WindowsPowerShell\v1.0\
+        powershell.exe` aufgelöst (der Handler ist bewusst gegen diese
+        Engine geschrieben, u. a. wegen des STA-Standard-Apartments für
+        die WinForms-MessageBox), die Existenz wird per `Test-Path`
+        VERIFIZIERT (Abbruch mit klarer Meldung, KEIN Registry-Eintrag
+        bei Fehlen), und der tatsächlich in der Registry stehende Befehl
+        wird am Ende AUS DER REGISTRY ZURÜCKGELESEN und ausgegeben (ein
+        Schreibfehler wäre sonst nicht sichtbar, obwohl der Text im
+        Terminal stimmt).
+      - **🟡 Weitere Findings (alle behoben):**
+        - Umgebungsvariablen-Muster verschärft: `%[^%\\]{1,64}%` lehnte
+          nachweislich legitime Dateinamen mit ZWEI Prozentzeichen im
+          selben Segment ab (`50% Rabatt 100%.txt`,
+          `Anteil 5%-10% Analyse.txt`, per `-Validate` belegt). Neues
+          Muster `%[A-Za-z_][A-Za-z0-9_()]{0,63}%` verlangt eine ECHTE
+          Variablennamen-Form – beide Beispiele liefern jetzt `OK`
+          (wenn die Datei existiert), `%APPDATA%` weiterhin `Reject`.
+        - Präfix-Vergleich lief bisher ordinal/case-sensitiv, die
+          Windows-Protokollauflösung selbst ist es nicht (URL-Schemas
+          sind laut RFC 3986 case-insensitiv) – `Notizbuch-Open:v1?...`
+          hätte zu stillem Nichtstun geführt. Jetzt
+          `OrdinalIgnoreCase`, per `-Validate` mit genau diesem
+          Groß-/Kleinschreibungs-Fall verifiziert.
+        - Handler-Datei war UTF-8 OHNE BOM: Windows PowerShell 5.1 liest
+          eine BOM-lose UTF-8-Datei im ANSI-Codepage der Maschine, was
+          Nicht-ASCII-Zeichen in String-Literalen (z. B. deutsche
+          Umlaute in einer künftigen MessageBox) doppelt/falsch kodiert
+          hätte. Per direktem Vergleichstest belegt: dieselbe Zeichen-
+          kette (mit „ö“/„ü“) lieferte OHNE BOM unter Windows PowerShell
+          5.1 nachweislich korrupte Bytes (`Ã¶` statt `ö`), MIT BOM
+          identisch korrekte UTF-8-Bytes unter Windows PowerShell 5.1
+          UND PowerShell 7. Datei jetzt als UTF-8 MIT BOM gespeichert
+          (im Kopfkommentar vermerkt, inkl. Warnung an künftige
+          Bearbeiter).
+        - 8.3-Kurzname-Prüfung als redundant identifiziert und entfernt
+          – siehe Blocker 1 oben für den vollständigen Beleg.
+        - `EndsWith('/')` lief ohne explizite `StringComparison` (also
+          kulturabhängig) – jetzt explizit `Ordinal`.
+        - `-Validate` liefert jetzt Exit-Code `0` nur bei `Ok`, sonst `1`
+          (siehe `-Validate`-Diagnosemodus-Eintrag oben).
+        - Logger: ein benannter, prozessübergreifender Mutex serialisiert
+          jetzt den Schreibzugriff (JEDER Klick startet einen NEUEN
+          `powershell.exe`-Prozess – parallele Klicks hätten sonst
+          Log-Zeilen ineinander verschmelzen lassen können; per
+          gleichzeitig gestarteten Testaufrufen verifiziert: 5 parallele
+          Aufrufe erzeugten 5 saubere, unvermischte Zeilen). Zusätzlich
+          Log-Rotation bei > 1 MB (eine Ebene Historie als `.log.old`,
+          per künstlich vergrößerter Log-Datei verifiziert).
+      - **Verwaiste/kleinere Doku-Korrekturen (mitgenommen):**
+        `tests/markdown.test.jsx` enthielt nach dem Rückbau des
+        `location.href`-Fallbacks (Review-Nachbesserung 2) noch einen
+        Kommentar, der von einem „Iframe-Mock“ sprach, den es an dieser
+        Stelle gar nicht mehr gibt (nur noch reines Aufräumen) –
+        präzisiert. Das in Review-Nachbesserung 2 zitierte 8.3-Muster
+        war in diesem Dokument um ein Backslash-Zeichen verkürzt
+        wiedergegeben (Markdown-/Kopier-Artefakt, nicht im Skript selbst)
+        – korrigiert.
+    - **Review-Nachbesserung 4 (dritter unabhängiger Review-Durchgang –
+      „0 Blocker, alle drei Lenses safe_to_install“ – vier bestätigte
+      Warnungen, alle behoben; DABEI zusätzlich einen ECHTEN, beim
+      Testen der eigenen Runde-4-Fixes selbst gefundenen Bug entdeckt
+      und sofort korrigiert, siehe Finding 1 unten):**
+      - **🟡 Finding 1 – Positivlisten-Vergleich war NICHT ordinal, per
+        `-Validate` an einer ECHTEN, auf der Platte angelegten Datei
+        belegt:** PowerShells `-contains`-Operator vergleicht Strings
+        NICHT ordinal, sondern über eine linguistische/kollations-
+        basierte Regel – das KELVIN-ZEICHEN (`U+212A`, sieht aus wie
+        „K“) blieb selbst nach `ToLowerInvariant()` als eigenständiges
+        Zeichen erhalten, wurde von `-contains` aber trotzdem als
+        Treffer für `mkv` gewertet; ein eingestreutes SOFT HYPHEN
+        (`U+00AD`, unsichtbar) wurde von der Kollation vollständig
+        ignoriert. **Fix:** `$script:AllowedExtensionSet` – ein
+        `[System.Collections.Generic.HashSet[string]]` mit
+        `[System.StringComparer]::OrdinalIgnoreCase` – ersetzt den
+        `-contains`-Vergleich auf dem Array; zusätzlich werden Endungen
+        mit JEDEM Nicht-ASCII-Zeichen jetzt generell abgelehnt (schließt
+        die gesamte Klasse von Unicode-Kollisions-/Homoglyphen-Tricks
+        auf einen Schlag, nicht nur die zwei belegten Einzelfälle).
+        **Beim Verifizieren dieses Fixes selbst einen ECHTEN, neuen Bug
+        gefunden (VOR dem Commit korrigiert):** Die Nicht-ASCII-Prüfung
+        `$extRaw -match '[^\x00-\x7F]'` erkannte das Kelvin-Zeichen
+        NICHT als Treffer (`-match` lieferte `False`), obwohl es
+        unstrittig außerhalb `\x00-\x7F` liegt – Ursache: PowerShells
+        Vergleichsoperatoren sind OHNE `c`-Präfix per Default CASE-
+        INSENSITIV, und .NETs `IgnoreCase`-Regex-Modus faltet das
+        Kelvin-Zeichen zu „k“ (seiner definierten Unicode-Kleinschreib-
+        Entsprechung) – dadurch „verschwindet“ es aus der NEGIERTEN
+        Zeichenklasse. Direkter Beleg:
+        `[regex]::IsMatch($s, '[^\x00-\x7F]')` lieferte korrekt `True`,
+        derselbe Test über den `-match`-OPERATOR lieferte `False`.
+        Dieselbe Falte betraf – EBENFALLS per Test belegt – noch zwei
+        WEITERE, bereits bestehende Prüfungen mit `[A-Za-z...]`-
+        Zeichenklassen: den Laufwerksbuchstaben-Check (Schritt 1;
+        `-notmatch '^[A-Za-z]:\...'` ließ einen mit dem Kelvin-Zeichen
+        STATT eines echten Laufwerksbuchstabens beginnenden Pfad
+        fälschlich als „gültig“ durch) und das Umgebungsvariablen-
+        Muster (Schritt 2). **Fix:** ALLE betroffenen Vergleiche auf
+        `-cmatch`/`-cnotmatch` (case-sensitiv/ordinal) umgestellt – nicht
+        nur die eine neue Prüfung, sondern konsequent jede
+        `[A-Za-z...]`-Zeichenklasse im Skript. Der Laufwerksbuchstaben-
+        Fall war in der Praxis niedrigeres Risiko (ein nicht-ASCII
+        „Laufwerksbuchstabe“ hätte ohnehin nie ein echtes Windows-
+        Laufwerk getroffen und wäre spätestens an `Test-Path`
+        gescheitert) – trotzdem korrigiert, um die Prüfungen präzise
+        UND nicht von einem zufälligen nachgelagerten Fehlschlag
+        abhängig zu halten. `$env:`-Erkennung (Schritt 2) bewusst NICHT
+        auf `-cmatch` umgestellt: PowerShells eigener `env:`-Namensraum
+        ist selbst case-insensitiv, Groß-/Kleinschreibungs-Varianten wie
+        `$ENV:`/`$Env:` sollen weiterhin erkannt werden. Nach dem Fix
+        per `-Validate` erneut verifiziert: Kelvin-Zeichen- UND
+        Soft-Hyphen-Endung liefern jetzt die PRÄZISE „Nicht-ASCII“-
+        Ablehnung (statt der generischen „nicht auf der Liste“-
+        Ablehnung, die vorher – dank des ordinalen HashSets als zweiter
+        Verteidigungslinie – IMMERHIN noch korrekt ablehnte, aber mit
+        irreführender Begründung), eine ECHTE `.mkv`-Datei liefert
+        weiterhin `OK`, ein Kelvin-Zeichen als Laufwerksbuchstabe liefert
+        jetzt korrekt „kein absoluter Laufwerkspfad“ statt fälschlich
+        durchzulaufen.
+      - **🟡 Finding 2 – `notizbuch-open-setup.ps1`: Interpreter-Prüfung
+        lief ZU SPÄT, nach bereits erfolgten Schreibzugriffen:** Die
+        Reihenfolge war „Installationsordner anlegen → Handler kopieren
+        → Registry-Schlüssel + `URL Protocol`-Marker + command-Schlüssel
+        anlegen → ERST DANACH powershell.exe auflösen/prüfen“. Die
+        Fehlermeldung beim damaligen `throw` behauptete „Einrichtung
+        abgebrochen, KEIN Registry-Eintrag geschrieben“ – nachweislich
+        falsch, ein HALB registriertes Protokoll wäre zurückgeblieben
+        (Browser bietet es als installiert an, ein Klick tut aber
+        nichts, weil der command-Wert schon geschrieben war, BEVOR die
+        Prüfung überhaupt lief). **Fix:** Reihenfolge umgedreht – der
+        Interpreter wird jetzt GANZ ZU BEGINN aufgelöst und per
+        `Test-Path` verifiziert, VOR jedem einzigen Schreibzugriff;
+        schlägt die Prüfung fehl, bricht das Skript ab, ohne
+        irgendetwas geschrieben zu haben. Zusätzlich: die eigentlichen
+        Schreibzugriffe (Ordner/Kopie/Registry) laufen jetzt in einem
+        `try`/`catch` – schlägt trotzdem noch etwas mittendrin fehl,
+        rollt das Skript NUR die in DIESEM Lauf neu angelegten Teile
+        zurück (ein bereits vorher funktionierender Registry-Schlüssel
+        aus einem früheren erfolgreichen Lauf bleibt unangetastet,
+        statt eine funktionierende Alt-Installation zu zerstören).
+      - **🟡 Finding 3 – `filelinks.js`/`FILE_URL_SRC`: Der 300-Zeichen-
+        Cap wirkte auf die bereits PROZENT-KODIERTE URL, der Kommentar
+        behauptete das Gegenteil („MAX_PATH 260, 300 ist reichlich“ –
+        zwei verschiedene Längen-Domänen verglichen):** Gemessen an der
+        echten, gebündelten Implementierung brach das Cap mit
+        Leerzeichen im Pfad bereits ab 229 Rohzeichen ab (~297 kodierte
+        Zeichen) und erkannte ab 244 Rohzeichen GAR KEINEN Treffer mehr
+        – deutlich VOR einem vollen MAX_PATH-Pfad (260 Zeichen). **Fix:**
+        Cap auf 1000 angehoben (deckt einen vollen 260-Zeichen-MAX_PATH-
+        Pfad auch bei durchgehender Leerzeichen-Kodierung komfortabel
+        ab), Kommentar korrigiert (erklärt jetzt Kodierungs-Expansion:
+        Leerzeichen ×3, mehrbytige Umlaute ×6). Backtracking-Risiko
+        geprüft: das Muster ist eine einzelne, flache, quantifizierte
+        Zeichenklasse ohne verschachtelte/mehrdeutige Wiederholungen –
+        ein größerer, aber weiterhin KONSTANTER Cap ändert nur den
+        konstanten Faktor (linear in Zeilenlänge × Cap), nicht die
+        Backtracking-Komplexitätsklasse; kein neues Risiko. Neue Tests
+        in `tests/filelinks.test.js` pinnen einen MAX_PATH-langen Pfad
+        mit Leerzeichen UND einen mit Umlauten (beide jetzt erkannt) so-
+        wie einen bewusst weit über dem Cap liegenden Pfad (bleibt
+        unerkannt – Cap ist endlich, das ist gewollt). `docs/
+        TESTFAELLE.md` D14b um einen Hinweis auf diese Grenze ergänzt,
+        damit ein manueller Test sie nicht als Fehler missdeutet.
+      - **🔵 Finding 4 – Doku-Konsistenz + ehrlichere Formulierungen:**
+        - DECISIONS #79/Kopfkommentar trugen an mehreren Stellen noch
+          Sperrlisten-Wortlaut aus der Zeit vor dem Architekturwechsel
+          (Review-Nachbesserung 3) – nachgezogen.
+        - Das Auswahlprinzip „Windows ANZEIGT statt AUSFÜHRT“ war zu
+          absolut formuliert: auf einem konkret geprüften Rechner
+          öffneten `.md`/`.markdown`/`.json`/`.yaml`/`.yml`/`.cfg` in
+          VS Code und `.xml` im Browser – kein belegter Code-
+          AUSFÜHRUNGS-Weg darunter, aber WELCHES Programm eine Endung
+          öffnet, ist geräteabhängig, nicht endungsabhängig. Umformuliert
+          (Kopfkommentar + Positivlisten-Kommentar im Skript): die Liste
+          begrenzt nur, WAS der Handler überhaupt anbietet – Formate ohne
+          bekannten Windows-AUSFÜHRUNGSweg –, nicht was ein bestimmtes
+          Programm im Einzelfall damit tut.
+        - Die MessageBox/Reject-Texte versprachen die Zwischenablage-
+          Kopie unbedingt, obwohl sie fehlschlagen kann (Browser
+          verweigert die Berechtigung). Formulierung auf „… - sofern der
+          Browser das zulässt - in die Zwischenablage kopiert“
+          entschärft. Dabei GEPRÜFT, dass die Kopie tatsächlich bei
+          JEDEM Klick versucht wird, auch wenn der Protokollstart
+          ausgelöst wird: `FileLink#handleClick` (`markdown.jsx`) ruft
+          `triggerProtocolOpen` auf und läuft DANACH ungebremst (kein
+          `return`/keine Bedingung dazwischen) in den bestehenden
+          `clipboard.writeText(...)`-Aufruf – bereits durch den Test
+          „Clipboard-Copy (v7.31) bleibt UNVERÄNDERT zusätzlich aktiv“
+          (`tests/markdown.test.jsx`) abgedeckt, keine Code-Änderung
+          nötig, nur die Formulierung war zu stark.
+        - `notizbuch-open-setup.ps1` wurde auf ein Nicht-ASCII-Zeichen
+          ohne BOM geprüft (genau der Fall, vor dem der Handler-Kopf
+          warnt) – Ergebnis: 0 Nicht-ASCII-Bytes in der aktuellen
+          Fassung, kein Handlungsbedarf (die Datei folgt bereits
+          durchgängig der ASCII-Transliterations-Konvention
+          "ue"/"oe"/"ae"/"ss" wie der Rest beider Skripte).
+        - Nits (mitgenommen, wie erbeten "wenn billig"): Kopfkommentar
+          des Shell-Namespace-Checks (Schritt 2b/c) ergänzt um das
+          bekannte Restrisiko, dass sich dieselbe Wirkung auch OHNE
+          `.{` im Ordnernamen über eine `desktop.ini` mit CLSID-Eintrag
+          erzeugen lässt (von der reinen Namens-Musterprüfung nicht
+          erkennbar). UNC-Verbot-Begründung (Schritt 1) von „schließt
+          dieses Leck“ auf „verringert dieses Risiko deutlich, schließt
+          es aber nicht restlos“ abgeschwächt – ein vom Nutzer bereits
+          zugeordnetes Netzlaufwerk (z. B. `Z:` für `\\server\share`)
+          sieht für die Prüfung wie ein normaler Laufwerksbuchstabe aus.
+    - **Restrisiken (nach dem Architekturwechsel auf die Positivliste,
+      Review-Nachbesserung 3 – das Risikoprofil hat sich grundlegend
+      GEDREHT: statt „eine gefährliche Endung rutscht durch“ ist das
+      verbleibende Risiko jetzt primär „eine LEGITIME, aber noch nicht
+      gelistete Endung wird abgelehnt“ – ein UX-Kompromiss, KEIN
+      Sicherheitsloch):**
+      (1) Die Positivliste deckt bewusst nur eine Startmenge gängiger,
+      anzeige-orientierter Formate ab (siehe eigener Abschnitt oben) –
+      ein Nutzer mit einem legitimen, aber nicht gelisteten Dateityp
+      (z. B. eine CAD-Zeichnung, ein Nischenformat) bekommt bis zu einer
+      Erweiterung der Liste NUR die Zwischenablage-Kopie statt eines
+      automatischen Öffnens. Das ist eine bewusste, dokumentierte
+      Design-Entscheidung (Sicherheit vor Bequemlichkeit für den
+      selteneren Fall), keine vergessene Lücke – die Liste ist bei
+      Bedarf erweiterbar, jede Erweiterung sollte aber dieselbe
+      Anzeige-statt-Ausführung-Prüfung durchlaufen wie die Startmenge.
+      Innerhalb der Liste bestehen zwei BENANNTE (nicht ausgeschlossene)
+      Restrisiken: `doc`/`xls`/`ppt` können – anders als die
+      docx/xlsx/pptx-Familie – technisch Makrocode im selben Container
+      tragen; `csv`/`tsv` sind theoretisch für eine (in modernen
+      Excel-Versionen stark entschärfte) Formel-Injection anfällig. Und
+      ganz grundsätzlich: das inhärente Risiko eines fehlerhaften
+      Datei-PARSERS (Codec-/Bibliotheks-CVEs) gilt für JEDES geöffnete
+      Format, auch die harmlos wirkenden.
+      (2) Der Handler ist, sobald einmal installiert, für JEDE Webseite
+      erreichbar, nicht nur für diese App – das ist der Preis für ein
+      simples, serverloses Protokoll-Modell; die Validierungsschritte
+      sind die einzige Absicherung dagegen. Zusätzlich: Der
+      browsereigene Erlaubnis-Prompt beim ersten Klick hat i. d. R. eine
+      „Immer erlauben“/„Nicht mehr fragen“-Option – wählt der Nutzer
+      diese, fragt der Browser DAUERHAFT nicht mehr nach, für JEDE
+      Seite, die künftig `notizbuch-open:`-Links feuert, nicht nur für
+      diese App. Das ist Browser-Standardverhalten für
+      Custom-Protocol-Handler (nicht durch dieses Skript beeinflussbar)
+      und macht die Validierungsschritte im Handler noch wichtiger, weil
+      sie dann die EINZIGE verbleibende Hürde sind.
+      (3) Die Trailing-Slash-Toleranz akzeptiert einen zusätzlichen
+      Freiheitsgrad gegenüber dem strikten Kontrakt-Wortlaut – bewusst
+      in Kauf genommen, weil sonst Chrome/Edge (die häufigsten
+      Windows-Standardbrowser) das Feature gar nicht erst nutzbar
+      machen würden; sie ändert nichts an den eigentlichen
+      Sicherheits-Validierungsschritten.
+      (4) `Invoke-Item` startet das für die Endung registrierte
+      Programm mit den Rechten des angemeldeten Benutzers – identisch
+      zu einem Explorer-Doppelklick, kein zusätzliches Risiko gegenüber
+      dem, was ein Nutzer ohnehin manuell tun könnte, WENN die
+      Validierungsschritte greifen.
+      (5) `notizbuch-open-setup.ps1`/`-handler.ps1` selbst wurden NICHT
+      automatisiert getestet (Vitest kann kein PowerShell ausführen) –
+      Absicherung über den `-Validate`-Diagnosemodus und die im
+      Umsetzungsbericht/den vier Review-Nachbesserungsrunden gelisteten
+      manuellen Testaufrufe (inkl. eines 94-Endungen-Probelaufs); eine
+      ECHTE Installation + Live-Klick-Verifikation steht noch aus (siehe
+      offene Punkte im jeweiligen Umsetzungsbericht).
+      (6) Symlinks/Reparse-Points wurden NICHT gesondert behandelt:
+      `Get-Item` löst einen Symlink nicht zu seinem Ziel auf, ein
+      Symlink mit erlaubter Endung, der auf eine Datei mit NICHT
+      erlaubter Endung zeigt, würde beim Doppelklick trotzdem das Ziel
+      öffnen (identisch zum Explorer-Verhalten) – ein Angreifer müsste
+      dafür aber bereits einen solchen Symlink auf dem Zielrechner
+      platziert haben (deutlich engerer Angriffsvektor als ein reiner
+      Link-Klick), als bekannte Grenze dokumentiert statt
+      stillschweigend übergangen.
+      (7) Der Shell-Namespace-Schutz (Schritt 2b, Blocker 1b) ist
+      PATTERN-basiert (`.{` im Segment) – deckt das bekannte
+      „God-Mode-Ordner“-Muster (CLSID-Suffix) vollständig ab, kann aber
+      naturgemäß kein heute unbekanntes, strukturell anderes
+      Shell-Namespace-Triggermuster erkennen; dieselbe grundsätzliche
+      Grenze wie bei jeder musterbasierten Erkennung (siehe (1) zur
+      Positivliste selbst). Insbesondere (Review-Nachbesserung 4,
+      Finding 4, Nit): dieselbe Shell-Namespace-Wirkung lässt sich auch
+      OHNE `.{` im Ordnernamen erzeugen, über eine `desktop.ini`-Datei
+      MIT einem CLSID-Eintrag im Zielordner – von dieser reinen
+      Namensmuster-Prüfung nicht erkennbar, da der Ordnername selbst
+      unauffällig bleibt.
+      (8) Das UNC-Verbot (Schritt 1) prüft nur die Pfad-SCHREIBWEISE
+      (`\\server\share\...`) – ein vom Nutzer bereits zugeordnetes
+      Netzlaufwerk (z. B. `Z:` für dieselbe Freigabe) sieht für diese
+      Prüfung wie ein ganz normaler lokaler Laufwerksbuchstabe aus und
+      wird NICHT erkannt. Das ursprüngliche SMB-Credential-Leak-Risiko
+      (automatischer Anmeldeinformations-Versand beim Zugriff) besteht
+      für ein bereits gemapptes Laufwerk grundsätzlich WENIGER akut
+      (die Anmeldung ist zu dem Zeitpunkt bereits erfolgt, i. d. R. vom
+      Nutzer selbst bewusst eingerichtet), aber die Prüfung bietet
+      dagegen keinen aktiven Schutz – als Grenze benannt statt implizit
+      als „vollständig geschlossen“ behauptet (Review-Nachbesserung 4,
+      Finding 4, Nit).

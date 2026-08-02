@@ -23,6 +23,28 @@ const render = (text, imgMap = {}) =>
     />
   );
 
+// Datei-weiter Hook (v7.35): SEIT v7.35 löst JEDER Klick auf einen FileLink
+// mit einem Nicht-UNC-Ziel ZUSÄTZLICH triggerProtocolOpen aus (ein
+// unsichtbares <iframe>, siehe markdown.jsx#FileLink) – das betrifft nicht
+// nur die dedizierten Protokoll-Tests weiter unten, sondern JEDEN Klick-Test
+// in dieser Datei, auch die schon bestehenden Clipboard-Copy-Tests (v7.31).
+// Ein per setTimeout nach 1 s selbst entferntes Iframe bleibt bei Tests mit
+// ECHTEN Timern (kein vi.useFakeTimers) über das Testende hinaus im DOM
+// stehen (document.body wird NICHT zwischen Tests zurückgesetzt) – wird
+// deshalb hier zentral statt in jedem einzelnen Test aufgeräumt.
+//
+// Erwartetes Nebengeräusch: jsdom protokolliert für jeden Klick
+// "Not implemented: navigation to another Document" auf stderr (jsdom kann
+// eine echte Navigation zu einem fremden URL-Schema nicht ausführen – genau
+// das ist ja auch der Zweck, siehe Kommentar bei triggerProtocolOpen,
+// markdown.jsx). Das ist eine bekannte, harmlose jsdom-Einschränkung, KEIN
+// Testfehler, und wird von keinem der Tests unten fälschlich als Fehlschlag
+// gewertet.
+afterEach(() => {
+  document.querySelectorAll("iframe").forEach((el) => el.remove());
+  vi.restoreAllMocks();
+});
+
 describe("parseTree", () => {
   it("liefert Abschnitte mit Original-Zeilenindizes (Grundlage fürs Checkbox-Toggling)", () => {
     const doc = "# T\n\n## A\n\n- [ ] eins\n\n### Sub\n\n- [x] zwei\n\n## B\n\n- drei";
@@ -1458,5 +1480,147 @@ describe("FileLink: Klick kopiert den Windows-Pfad in die Zwischenablage (v7.31)
       await new Promise((r) => setTimeout(r, 0));
     });
     expect(container.textContent).not.toContain("Pfad kopiert");
+  });
+});
+
+// Protokoll-Trigger (v7.35): ein Klick löst ZUSÄTZLICH zum Clipboard-Copy
+// (Block oben, unverändert) das eigene "notizbuch-open:"-Protokoll über ein
+// unsichtbares <iframe> aus (triggerProtocolOpen, markdown.jsx). Ein zuvor
+// versuchsweise ergänzter, PARALLEL laufender location.href-Fallback wurde
+// im Sicherheits-Review wieder ENTFERNT (siehe Kopfkommentar bei
+// triggerProtocolOpen + DECISIONS #79 "Review-Nachbesserung 2") – er lief
+// nicht NUR bei einem gescheiterten Iframe-Versuch, sondern IMMER parallel
+// dazu (doppelter Protokollstart bei installiertem Handler im Happy Path,
+// reaktivierter sichtbarer Fehlerdialog ohne installierten Handler). Nur
+// noch das Iframe wird hier getestet. jsdom kann die Iframe-"Navigation" zu
+// einem fremden Schema nicht wirklich ausführen (das ist ohnehin allein
+// Windows'/des lokalen Handlers Aufgabe, siehe tools/notizbuch-open-
+// handler.ps1) – geprüft wird hier NUR, dass die App ein passendes,
+// unsichtbares Iframe mit der korrekten Ziel-URL erzeugt und wieder
+// entfernt, ohne die Seite zu verlassen (kein echtes window.open/keine
+// window.location-Änderung).
+describe("FileLink: Klick löst zusätzlich das notizbuch-open:-Protokoll aus (v7.35)", () => {
+  let container;
+  let root;
+
+  const mount = (md) => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <DocView text={md} collapsed={{}} onToggle={() => {}} imgMap={{}} onImgClick={() => {}} onToggleTask={() => {}} />
+      );
+    });
+  };
+
+  afterEach(() => {
+    if (root) act(() => root.unmount());
+    if (container) container.remove();
+    root = null;
+    container = null;
+    delete navigator.clipboard;
+    vi.useRealTimers();
+    // Iframe-Aufräumen läuft über den datei-weiten Hook oben (gilt für
+    // ALLE Tests dieser Datei, siehe Kommentar dort).
+  });
+
+  it("ein Klick auf einen Laufwerks-Pfad-Link erzeugt ein unsichtbares Iframe mit der notizbuch-open-Kontrakt-URL", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+
+    mount("# T\n\n## A\n\n[Bericht](file:///C:/Users/x/Mein%20Bericht.docx)");
+    const link = container.querySelector("a");
+    expect(document.querySelectorAll("iframe").length).toBe(0);
+
+    await act(async () => {
+      link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+
+    const iframes = document.querySelectorAll("iframe");
+    expect(iframes.length).toBe(1);
+    expect(iframes[0].getAttribute("src")).toBe(
+      "notizbuch-open:v1?path=C%3A%5CUsers%5Cx%5CMein%20Bericht.docx"
+    );
+    expect(iframes[0].style.display).toBe("none");
+    // Clipboard-Copy (v7.31) bleibt UNVERÄNDERT zusätzlich aktiv:
+    expect(writeText).toHaveBeenCalledWith("C:\\Users\\x\\Mein Bericht.docx");
+  });
+
+  it("das Iframe wird nach kurzer Zeit automatisch wieder entfernt (kein wachsendes verstecktes DOM)", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: vi.fn().mockResolvedValue(undefined) },
+      configurable: true,
+    });
+    vi.useFakeTimers();
+
+    mount("# T\n\n## A\n\n[Bericht](file:///C:/Users/x/Bericht.docx)");
+    const link = container.querySelector("a");
+
+    act(() => {
+      link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(document.querySelectorAll("iframe").length).toBe(1);
+
+    act(() => { vi.advanceTimersByTime(1000); });
+    expect(document.querySelectorAll("iframe").length).toBe(0);
+  });
+
+  it("ein UNC-Ziel löst KEIN Protokoll aus (buildProtocolUrl===null) – nur der bisherige Clipboard-Copy bleibt", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+
+    mount("# T\n\n## A\n\n[Datei](file://server/share/datei.md)");
+    const link = container.querySelector("a");
+
+    await act(async () => {
+      link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+
+    // buildProtocolUrl liefert null – triggerProtocolOpen wird für ein
+    // UNC-Ziel gar nicht erst aufgerufen, kein Iframe entsteht.
+    expect(document.querySelectorAll("iframe").length).toBe(0);
+    expect(writeText).toHaveBeenCalledWith("\\\\server\\share\\datei.md");
+  });
+
+  it("KEIN window.open (kein Popup-Blocker-Konflikt, kein neuer Tab)", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: vi.fn().mockResolvedValue(undefined) },
+      configurable: true,
+    });
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+
+    mount("# T\n\n## A\n\n[Bericht](file:///C:/Users/x/Bericht.docx)");
+    const link = container.querySelector("a");
+    await act(async () => {
+      link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+
+    expect(openSpy).not.toHaveBeenCalled();
+  });
+
+  it("mehrere Klicks hintereinander erzeugen mehrere unabhängige Iframes, alle werden wieder entfernt", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: vi.fn().mockResolvedValue(undefined) },
+      configurable: true,
+    });
+    vi.useFakeTimers();
+
+    mount("# T\n\n## A\n\n[Bericht](file:///C:/Users/x/Bericht.docx)");
+    const link = container.querySelector("a");
+
+    act(() => { link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); });
+    act(() => { vi.advanceTimersByTime(400); });
+    act(() => { link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); });
+    expect(document.querySelectorAll("iframe").length).toBe(2);
+
+    act(() => { vi.advanceTimersByTime(600); }); // t=1000 seit dem ERSTEN Klick
+    expect(document.querySelectorAll("iframe").length).toBe(1); // nur das erste ist weg
+
+    act(() => { vi.advanceTimersByTime(400); }); // t=1000 seit dem ZWEITEN Klick
+    expect(document.querySelectorAll("iframe").length).toBe(0);
   });
 });

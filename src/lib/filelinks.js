@@ -38,13 +38,34 @@ import { splitFenceSegments } from "./code.jsx";
 //    file:///C:/Users/x/Bericht.docx
 //  - UNC-Freigabe:       "file://" + "server" + "/share/…", z. B.
 //    file://server/share/datei.md
-// Längen-Cap {0,300} je Alternative (analog LINK_URL_RE/INLINE_TOKEN_RE in
+// Längen-Cap je Alternative (analog LINK_URL_RE/INLINE_TOKEN_RE in
 // markdown.jsx, dortiger Kommentar "Nachbesserung v7.8, Finding 3"):
 // ein UNGECAPPTES "[^\s]*" ließe die Regex-Engine bei jedem Startindex den
 // kompletten Rest der Zeile durchprobieren, bevor sie aufgibt (quadratisches
 // Backtracking bei langen, dot-losen Zeichenketten ohne Whitespace) – der
-// Cap begrenzt das auf eine Konstante pro Startposition. 300 Zeichen sind
-// für einen realen Dateipfad (Windows MAX_PATH liegt bei 260) reichlich.
+// Cap begrenzt JEDEN EINZELNEN Versuch auf eine Konstante. WICHTIG (Review-
+// Fix, Sicherheits-Review Runde 4 – der ursprüngliche Kommentar hier war
+// FALSCH): Dieser Cap wirkt auf die bereits PROZENT-KODIERTE URL, NICHT auf
+// den rohen Windows-Pfad – "Windows MAX_PATH liegt bei 260, 300 ist
+// reichlich" vergleicht damit zwei verschiedene Längen-Domänen. Kodierung
+// EXPANDIERT: ein Leerzeichen wird zu "%20" (Faktor 3), ein mehrbytiges
+// UTF-8-Zeichen (z. B. ein Umlaut) zu bis zu drei "%XX"-Gruppen (Faktor 6).
+// Gemessen an der echten, gebündelten Implementierung: mit Leerzeichen im
+// Pfad brach das alte {0,300}-Cap bereits ab 229 Rohzeichen (~297 kodierte
+// Zeichen) und erkannte ab 244 Rohzeichen GAR KEINEN Treffer mehr – ein
+// uralter MAX_PATH-Pfad mit Leerzeichen wäre damit NICHT mehr als Link
+// erkannt worden. Cap deshalb auf 1000 angehoben – deckt einen vollen
+// MAX_PATH-Pfad (260 Zeichen) auch bei durchgehender Leerzeichen-Kodierung
+// (260×3=780) UND die in der Praxis übliche Mischung aus ASCII/Leerzeichen/
+// vereinzelten Umlauten komfortabel ab (ein rein aus mehrbytigen Umlauten
+// bestehender 260-Zeichen-Pfad – ein unrealistisches Extrem – würde
+// theoretisch immer noch nicht vollständig passen; das wird bewusst in Kauf
+// genommen, siehe Restrisiko in docs/TESTFAELLE.md D14b). Der Faktor 3,3
+// gegenüber 300 ändert NICHTS an der Backtracking-KOMPLEXITÄTSKLASSE: das
+// Muster ist eine EINZELNE, flache, quantifizierte Zeichenklasse ohne
+// verschachtelte/mehrdeutige Wiederholungen – ein größerer, aber weiterhin
+// KONSTANTER Cap bedeutet nur einen größeren konstanten Faktor (linear in
+// Zeilenlänge × Cap), kein katastrophales (exponentielles) Backtracking.
 // Negativer Lookahead "(?![A-Za-z]:\/)" vor der UNC-Alternative: OHNE ihn
 // würde z. B. das kaputte/unvollständige "file://C:/a.txt" (nur ZWEI Slashes
 // vor dem Laufwerksbuchstaben statt der geforderten drei) fälschlich als
@@ -53,9 +74,12 @@ import { splitFenceSegments } from "./code.jsx";
 // Servername zu). Der Lookahead schließt GENAU dieses eine Zwei-Punkt-Muster
 // (ein Buchstabe + Doppelpunkt + Slash direkt nach "file://") aus der
 // UNC-Alternative aus – ein Laufwerksbuchstabe ist NUR über die strikte
-// Drei-Slash-Form (erste Alternative) gültig.
+// Drei-Slash-Form (erste Alternative) gültig. Der Servername-Cap
+// ({1,300}, VOR dem ersten "/" der UNC-Form) bleibt bewusst bei 300 – ein
+// Hostname ist keine kodierte URL-Domäne und wird durch DNS ohnehin auf
+// 255 Oktette begrenzt, 300 ist dafür weiterhin reichlich.
 export const FILE_URL_SRC =
-  "file:\\/\\/(?:\\/[A-Za-z]:\\/[^\\s]{0,300}|(?![A-Za-z]:\\/)[^\\s\\/]{1,300}\\/[^\\s]{0,300})";
+  "file:\\/\\/(?:\\/[A-Za-z]:\\/[^\\s]{0,1000}|(?![A-Za-z]:\\/)[^\\s\\/]{1,300}\\/[^\\s]{0,1000})";
 export const FILE_URL_RE = new RegExp(FILE_URL_SRC);
 // Anker-Variante für "ist dieser GANZE String eine file:-URL" – wie
 // LINK_URL_FULL_RE in DocEditor.jsx (dort per "^" + LINK_URL_RE.source + "$"
@@ -153,6 +177,43 @@ export function fileUrlToWinPath(fileUrl) {
   }
 
   return u;
+}
+
+/* ---------------- buildProtocolUrl: notizbuch-open:-Kontrakt ---------------- */
+
+// v7.35: Browser dürfen aus https (GitHub Pages) NICHT direkt zu file://
+// navigieren (siehe Kopfkommentar oben) – ein eigenes, lokal registriertes
+// URL-Protokoll "notizbuch-open:" umgeht das (tools/notizbuch-open-setup.ps1
+// registriert es NUR in HKCU, siehe Kopfkommentar dort für das vollständige
+// Bedrohungsmodell/den Kontrakt). buildProtocolUrl baut aus einer file:-URL
+// GENAU die Kontrakt-URL, die der lokale Handler
+// (tools/notizbuch-open-handler.ps1) erwartet:
+//   "notizbuch-open:v1?path=" + encodeURIComponent(<Windows-Pfad, Backslash>)
+// Beispiel: "file:///C:/Users/x/Mein%20Bericht.docx"
+//        -> "notizbuch-open:v1?path=C%3A%5CUsers%5Cx%5CMein%20Bericht.docx"
+//
+// Nutzt fileUrlToWinPath (dieselbe Umwandlung, die FileLink/markdown.jsx
+// bereits für die Zwischenablage verwendet) statt einer zweiten, potenziell
+// abweichenden Pfad-Herleitung – EIN Backslash-Pfad-Format für beide
+// Mechanismen.
+//
+// UNC-Ziele (file://server/share/…) liefern bewusst null: fileUrlToWinPath
+// liefert dafür ein "\\server\…"-Ergebnis, das NICHT dem Muster
+// "^[A-Za-z]:\\" entspricht – der Handler lehnt UNC-Pfade GRUNDSÄTZLICH ab
+// (SMB-Credential-Leak-Risiko, siehe dessen Kopfkommentar). Die App bietet
+// das Protokoll für solche Links deshalb gar nicht erst an (FileLink löst
+// dann NUR noch den bisherigen Clipboard-Copy aus, siehe markdown.jsx),
+// statt einen Klick anzubieten, der beim Handler ohnehin nur mit einer
+// Ablehnungs-MessageBox endet – beidseitiges UNC-Verbot, konsistent.
+//
+// Dieselbe Prüfung fängt zusätzlich defensiv den Fall ab, dass
+// fileUrlToWinPath eine NICHT erkannte URL unverändert zurückgibt (siehe
+// Kommentar dort) – auch das ist kein gültiger Windows-Laufwerkspfad und
+// liefert hier konsequent null statt einer kaputten Kontrakt-URL.
+export function buildProtocolUrl(fileUrl) {
+  const winPath = fileUrlToWinPath(fileUrl);
+  if (!/^[A-Za-z]:\\/.test(winPath)) return null;
+  return "notizbuch-open:v1?path=" + encodeURIComponent(winPath);
 }
 
 /* ---------------- linkifyFilePaths: nackte Pfade/URLs -> Links ---------------- */

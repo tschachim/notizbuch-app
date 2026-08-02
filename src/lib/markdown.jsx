@@ -14,7 +14,7 @@ import {
 } from "./math.jsx";
 import { FENCE_OPEN_RE, matchFenceBlock, splitFenceSegments, CodeBlockView, computeFenceLineMask } from "./code.jsx";
 import { providerFor, getLinkProviders, ProviderIcon, trimBareUrl } from "./linkProviders.jsx";
-import { FILE_URL_RE, fileUrlToWinPath } from "./filelinks.js";
+import { FILE_URL_RE, fileUrlToWinPath, buildProtocolUrl } from "./filelinks.js";
 
 export const IMG_LINE_RE = /^!\[([^\]]*)\]\(img:([a-zA-Z0-9]+)\)$/;
 export const IMG_REF_RE = /!\[[^\]]*\]\(img:([a-zA-Z0-9]+)\)/g;
@@ -465,16 +465,68 @@ function ProviderLinkIcon({ url }) {
 // jedem Aufruf neu (wie TASK_RE/OL_RE oben).
 const GENERIC_LINK_TOKEN_RE = new RegExp("^\\[([^\\]\\n]{1,300})\\]\\((" + LINK_OR_FILE_URL_SRC + ")\\)$");
 
-// file:-Link-Komponente (v7.31): Browser blockieren die Navigation von einer
-// https-Seite (GitHub Pages) zu file:// aus Sicherheitsgründen – ein Klick
-// tut dort meist NICHTS Sichtbares (nur eine lokal geöffnete App oder eine
-// Browser-Extension navigiert wirklich). Deshalb kopiert der Klick
-// ZUSÄTZLICH den Windows-Pfad (Backslash-Form, fileUrlToWinPath aus
-// filelinks.js) in die Zwischenablage, mit kurzem Inline-Feedback. KEIN
-// preventDefault: erlaubt der Browser/eine Extension die Navigation doch,
-// soll sie ganz normal stattfinden – der Klick tut NUR zusätzlich etwas,
-// verhindert nichts. Kein Provider-Icon (file:-Ziele haben keinen Provider,
-// providerFor prüft ohnehin nur http(s), siehe linkProviders.jsx).
+// file:-Link-Komponente (v7.31, Protokoll-Trigger v7.35): Browser blockieren
+// die Navigation von einer https-Seite (GitHub Pages) zu file:// aus
+// Sicherheitsgründen – ein Klick tut dort meist NICHTS Sichtbares (nur eine
+// lokal geöffnete App oder eine Browser-Extension navigiert wirklich).
+// Deshalb kopiert der Klick ZUSÄTZLICH den Windows-Pfad (Backslash-Form,
+// fileUrlToWinPath aus filelinks.js) in die Zwischenablage, mit kurzem
+// Inline-Feedback. KEIN preventDefault: erlaubt der Browser/eine Extension
+// die Navigation doch, soll sie ganz normal stattfinden – der Klick tut NUR
+// zusätzlich etwas, verhindert nichts. Kein Provider-Icon (file:-Ziele haben
+// keinen Provider, providerFor prüft ohnehin nur http(s), siehe
+// linkProviders.jsx).
+//
+// v7.35: ZUSÄTZLICH zum Clipboard-Copy löst der Klick jetzt das eigene
+// "notizbuch-open:"-Protokoll aus (buildProtocolUrl, filelinks.js) – ein
+// lokal registrierter Handler (tools/notizbuch-open-*.ps1) öffnet die Datei
+// dann im dafür registrierten Windows-Programm, wie ein Explorer-
+// Doppelklick (siehe DECISIONS). buildProtocolUrl liefert null für
+// UNC-Ziele (der Handler lehnt UNC grundsätzlich ab, SMB-Credential-Leak-
+// Risiko) – in dem Fall bleibt es beim reinen Clipboard-Copy, unverändert
+// zu v7.31.
+//
+// BEWUSST NUR das Iframe, KEIN location.href-Fallback (Review-Runde
+// Sicherheits-Review v7.35, siehe DECISIONS #79 "Review-Nachbesserung 2"):
+// ein zusätzlicher direkter location.href-Versuch wurde testweise ergänzt
+// und wieder ENTFERNT, weil er kein Fallback im eigentlichen Sinn war,
+// sondern IMMER parallel zum Iframe lief – bei installiertem Handler wird
+// das Protokoll dann bei JEDEM Klick zweimal ausgelöst (Happy Path, nicht
+// "im schlimmsten Fall"), bei nicht installiertem Handler (der Zustand der
+// meisten Nutzer, Opt-in-Setup) reaktiviert die Top-Level-Zuweisung genau
+// das sichtbare Fehlerdialog-Problem, dessentwegen darüber bereits das
+// Iframe gewählt wurde – gegen einen unbelegten Nutzen (Hypothese
+// "Chromium blockiert Iframe-Protokollstarts", nie verifiziert). Als
+// GEPLANTE Option in DECISIONS #79 dokumentiert: erst aktivieren, falls der
+// manuelle Testfall D14b (docs/TESTFAELLE.md, [MANUELL]) zeigt, dass das
+// Iframe den Protokollstart im echten Browser NICHT auslöst – dann mit
+// einer blur/visibilitychange-Erkennung (nur auslösen, wenn das Iframe
+// NACHWEISLICH nichts bewirkt hat), nicht unbedingt parallel.
+function triggerProtocolOpen(url) {
+  // Unsichtbares <iframe> statt einer direkten location-Zuweisung: Setzt
+  // man window.location/location.href DIREKT auf ein (beim Nutzer evtl.
+  // noch NICHT registriertes) fremdes Protokoll, zeigen manche Browser im
+  // SICHTBAREN Dokument kurz eine Fehlerseite ("Diese Seite ist nicht
+  // erreichbar" o. Ä.), obwohl die App-Seite dabei gar nicht wirklich
+  // verlassen wird. Ein Navigationsversuch in einem KIND-Frame scheitert
+  // bei einem unbekannten/nicht erlaubten Schema dagegen still, ohne dass
+  // irgendetwas im sichtbaren Dokument passiert – kein Entladen der Seite,
+  // kein Popup-Blocker-Konflikt (anders als window.open, das zudem einen
+  // echten neuen Tab/ein Fenster öffnen würde). Das Iframe wird nach
+  // kurzer Zeit wieder entfernt (kein dauerhaft wachsendes verstecktes DOM
+  // bei wiederholten Klicks).
+  try {
+    const iframe = document.createElement("iframe");
+    iframe.style.display = "none";
+    iframe.src = url;
+    document.body.appendChild(iframe);
+    setTimeout(() => { iframe.remove(); }, 1000);
+  } catch (e) {
+    // Kein document/DOM verfügbar (z. B. SSR) – der Klick bleibt über das
+    // normale <a href>/den Clipboard-Copy trotzdem funktionsfähig.
+  }
+}
+
 function FileLink({ url, title }) {
   const [copied, setCopied] = useState(false);
   const winPath = fileUrlToWinPath(url);
@@ -487,6 +539,9 @@ function FileLink({ url, title }) {
   const timerRef = useRef(null);
   useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
   const handleClick = () => {
+    const protoUrl = buildProtocolUrl(url);
+    if (protoUrl) triggerProtocolOpen(protoUrl);
+
     const clipboard = typeof navigator !== "undefined" ? navigator.clipboard : null;
     if (!clipboard || typeof clipboard.writeText !== "function") return; // kein Crash ohne Clipboard-API
     clipboard.writeText(winPath).then(

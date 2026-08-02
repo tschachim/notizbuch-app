@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { pathToFileUrl, fileUrlToWinPath, linkifyFilePaths, FILE_URL_RE } from "../src/lib/filelinks.js";
+import {
+  pathToFileUrl, fileUrlToWinPath, linkifyFilePaths, FILE_URL_RE, buildProtocolUrl,
+} from "../src/lib/filelinks.js";
 
 describe("pathToFileUrl", () => {
   it("wandelt einen einfachen Laufwerks-Pfad um", () => {
@@ -112,6 +114,72 @@ describe("fileUrlToWinPath", () => {
   });
 });
 
+// v7.35: buildProtocolUrl baut aus einer file:-URL die Kontrakt-URL für den
+// lokalen Handler (tools/notizbuch-open-handler.ps1) – siehe Kopfkommentar
+// dort für den vollständigen Kontrakt/Bedrohungsmodell. Die Tests spiegeln
+// die -Validate-Probe-Aufrufe aus dem Abschlussbericht (Roundtrip-Fälle).
+describe("buildProtocolUrl", () => {
+  it("baut die Kontrakt-URL aus dem Beispiel im Auftrag (Backslash-Encoding)", () => {
+    expect(buildProtocolUrl("file:///C:/Users/x/Mein%20Bericht.docx")).toBe(
+      "notizbuch-open:v1?path=C%3A%5CUsers%5Cx%5CMein%20Bericht.docx"
+    );
+  });
+
+  it("kodiert Umlaute im Pfad korrekt (UTF-8-Prozent-Encoding)", () => {
+    expect(buildProtocolUrl("file:///C:/Users/x/%C3%9Cbersicht.docx")).toBe(
+      "notizbuch-open:v1?path=" + encodeURIComponent("C:\\Users\\x\\Übersicht.docx")
+    );
+    // Explizit ausgeschrieben, damit ein künftiger Encoding-Regressionsfehler
+    // nicht durch einen zirkulären Vergleich (encodeURIComponent gegen sich
+    // selbst) verdeckt wird:
+    expect(buildProtocolUrl("file:///C:/Users/x/%C3%9Cbersicht.docx")).toBe(
+      "notizbuch-open:v1?path=C%3A%5CUsers%5Cx%5C%C3%9Cbersicht.docx"
+    );
+  });
+
+  it("kodiert '#' und '%' im Dateinamen", () => {
+    expect(buildProtocolUrl("file:///C:/Users/x/Fr%23age%25wert.txt")).toBe(
+      "notizbuch-open:v1?path=C%3A%5CUsers%5Cx%5CFr%23age%25wert.txt"
+    );
+  });
+
+  it("liefert null für ein UNC-Ziel (Handler lehnt UNC grundsätzlich ab)", () => {
+    expect(buildProtocolUrl("file://server/share/datei.md")).toBeNull();
+    expect(buildProtocolUrl("file://server/Freigabe%20Ordner/datei.md")).toBeNull();
+  });
+
+  it("liefert null für eine fremde/nicht erkannte URL (http/https, kein file:-Ziel)", () => {
+    expect(buildProtocolUrl("https://example.org/a")).toBeNull();
+  });
+
+  it("liefert null für eine leere Eingabe", () => {
+    expect(buildProtocolUrl("")).toBeNull();
+  });
+
+  // Roundtrip zum Handler-Format: [Uri]::UnescapeDataString (PowerShell,
+  // siehe tools/notizbuch-open-handler.ps1) entspricht funktional
+  // decodeURIComponent – der Handler muss aus dem "path="-Teil GENAU den
+  // ursprünglichen Backslash-Pfad zurückgewinnen.
+  it("ist per decodeURIComponent zum ursprünglichen Backslash-Pfad umkehrbar (Roundtrip zum Handler-Kontrakt)", () => {
+    const winPath = "C:\\Users\\Max Mustermann\\Kopie (1) - Bericht #3 100%.docx";
+    const url = buildProtocolUrl(pathToFileUrl(winPath));
+    expect(url.startsWith("notizbuch-open:v1?path=")).toBe(true);
+    const encoded = url.slice("notizbuch-open:v1?path=".length);
+    expect(decodeURIComponent(encoded)).toBe(winPath);
+  });
+
+  it("kodiert einen Pfad mit runden Klammern (keine zusätzliche %28/%29-Sonderbehandlung wie bei pathToFileUrl nötig)", () => {
+    // Anders als pathToFileUrl (encSeg, siehe dort) baut buildProtocolUrl
+    // KEINE Markdown-Link-Syntax, in der eine rohe Klammer eine spätere
+    // Regex-Erkennung stören könnte – encodeURIComponent lässt "(" / ")"
+    // deshalb bewusst UNVERÄNDERT (Standardverhalten), der Handler dekodiert
+    // trotzdem korrekt zurück (siehe Roundtrip-Test oben).
+    expect(buildProtocolUrl("file:///C:/x/Kopie%20%281%29.docx")).toBe(
+      "notizbuch-open:v1?path=" + encodeURIComponent("C:\\x\\Kopie (1).docx")
+    );
+  });
+});
+
 describe("FILE_URL_RE", () => {
   it("matcht eine Laufwerks-URL und eine UNC-URL", () => {
     expect(FILE_URL_RE.test("file:///C:/Users/x/a.txt")).toBe(true);
@@ -126,6 +194,67 @@ describe("FILE_URL_RE", () => {
 
   it("matcht keine file:-URL mit rohem Leerzeichen", () => {
     expect(new RegExp("^" + FILE_URL_RE.source + "$").test("file:///C:/a b.txt")).toBe(false);
+  });
+});
+
+// Review-Fix (Sicherheits-Review Runde 4): Der Längen-Cap in FILE_URL_SRC
+// wirkt auf die bereits PROZENT-KODIERTE URL, nicht auf den rohen Windows-
+// Pfad - der alte Kommentar ("MAX_PATH 260, 300 ist reichlich") verglich
+// zwei verschiedene Längen-Domänen. Mit Leerzeichen im Pfad (Faktor-3-
+// Kodierung, "%20") brach das alte {0,300}-Cap bereits deutlich VOR einem
+// vollen MAX_PATH-Pfad (260 Zeichen) ab. Diese Tests pinnen, dass ein
+// realistischer MAX_PATH-langer Pfad mit Leerzeichen/Umlauten jetzt (Cap
+// 1000) vollständig erkannt wird.
+describe("FILE_URL_RE: Längen-Cap deckt einen vollen MAX_PATH-Pfad (Review-Fix Runde 4)", () => {
+  // Deterministischer, exakt "rawLen" Zeichen langer Windows-Pfad, aus
+  // einem sich wiederholenden Segment mit Leerzeichen aufgebaut (reali-
+  // stischer Fall: "Eigene Dateien", "Meine Dokumente Q3" usw.) - repro-
+  // duzierbar statt zufällig.
+  function buildLongWinPath(rawLen, segment) {
+    const prefix = "C:\\Users\\x\\";
+    const suffix = ".docx";
+    let body = "";
+    while (prefix.length + body.length + suffix.length < rawLen) {
+      body += segment;
+    }
+    body = body.slice(0, rawLen - prefix.length - suffix.length);
+    return prefix + body + suffix;
+  }
+
+  it("ein MAX_PATH-langer Pfad (260 Zeichen) mit vielen Leerzeichen wird als gültige file:-URL erkannt", () => {
+    const winPath = buildLongWinPath(260, "Ordner mit Leerzeichen und Text ");
+    expect(winPath.length).toBe(260);
+    const url = pathToFileUrl(winPath);
+    expect(FILE_URL_RE.test(url)).toBe(true);
+  });
+
+  it("ein MAX_PATH-langer Pfad (260 Zeichen) mit Umlauten wird als gültige file:-URL erkannt", () => {
+    const winPath = buildLongWinPath(260, "Übersicht Änderungen Größe ");
+    expect(winPath.length).toBe(260);
+    const url = pathToFileUrl(winPath);
+    expect(FILE_URL_RE.test(url)).toBe(true);
+  });
+
+  it("linkifyFilePaths erkennt eine bereits kodierte, MAX_PATH-lange bare file:-URL im Fließtext (mit Leerzeichen im Ursprungspfad)", () => {
+    const winPath = buildLongWinPath(260, "Ordner mit Leerzeichen und Text ");
+    const url = pathToFileUrl(winPath);
+    const md = "Siehe " + url + " bitte.";
+    const result = linkifyFilePaths(md);
+    expect(result).not.toBe(md); // wurde tatsächlich verlinkt
+    expect(result).toMatch(/^Siehe \[.+\]\(file:\/\/\/C:\/Users\/x\/.+\) bitte\.$/);
+  });
+
+  it("ein weit über MAX_PATH hinausgehender Pfad (deutlich > 1000 kodierte Zeichen) matcht als GANZES nicht mehr vollständig (Cap ist endlich, kein Backtracking-Risiko)", () => {
+    const winPath = buildLongWinPath(2000, "Ordner mit sehr viel Leerzeichen und langem Text ");
+    const url = pathToFileUrl(winPath);
+    expect(url.length).toBeGreaterThan(1000); // Kontrolle: die KODIERTE URL überschreitet den Cap tatsächlich
+    // FILE_URL_RE ist unverankert (kein "^"/"$") - .test() fände sonst
+    // einfach die ERSTEN 1000 Zeichen als gültiges Teilstück und meldete
+    // "true", obwohl der Rest der URL gar nicht mehr erfasst ist. Die
+    // GANZE-STRING-Variante (wie in den bestehenden Tests oben, z. B.
+    // "matcht KEIN javascript:/...") zeigt den Cap-Effekt korrekt.
+    const FULL = new RegExp("^" + FILE_URL_RE.source + "$");
+    expect(FULL.test(url)).toBe(false);
   });
 });
 

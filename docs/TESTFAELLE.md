@@ -15,6 +15,13 @@ Markierungen:
   sonst Testfall als ÜBERSPRUNGEN melden).
 - **[API]** – löst zusätzlich bezahlte Modell-Aufrufe aus (sparsam nutzen:
   pro Lauf höchstens die angegebenen Prompts).
+- **[MANUELL]** – NICHT durch den Tester-Agenten ausführbar (braucht einen
+  echten, vom Nutzer lokal auf seinem Windows-Rechner installierten
+  Bestandteil außerhalb der Browser-Sandbox, z. B. einen registrierten
+  URL-Protokoll-Handler, und/oder einen browsereigenen Erlaubnis-Prompt,
+  der sich nicht per Browser-Fernsteuerung bestätigen lässt). Wird vom
+  Tester immer als ÜBERSPRUNGEN gemeldet, nie als Fehlschlag – Verifikation
+  bleibt dem Nutzer selbst überlassen.
 
 Datentopf: Der Tester stellt vor dem ersten schreibenden Fall fest,
 welches Daten-Repo verbunden ist (Einstellungs-Dialog, nur Repo-Name
@@ -840,6 +847,37 @@ erneut öffnen: Der Link bleibt als echter, klickbarer Link erhalten
 Link-Knopf (Cursor hineinsetzen, Kettensymbol) als
 „file:///C:/Users/test/QA-Beleg.docx“ im Popover ablesen. Danach die
 Testzeile wieder entfernen und speichern (Cleanup).
+
+**D14b [MANUELL] Protokoll-Klick öffnet die Datei im registrierten
+Programm (v7.35).** NICHT durch den Tester-Agenten ausführbar (siehe
+Markierungs-Legende oben) – Voraussetzung ist eine EINMALIGE, lokale
+Einrichtung durch den Nutzer selbst:
+`notizbuch-app/tools/notizbuch-open-setup.ps1` einmal per PowerShell auf
+dem Testrechner ausführen (registriert `notizbuch-open:` NUR unter
+HKCU, keine Adminrechte nötig; `-Uninstall` entfernt es wieder
+rückstandsfrei). Danach wie in D14 einen file:-Link mit einem TATSÄCHLICH
+existierenden Testpfad erzeugen (z. B. eine echte, harmlose Datei wie
+eine `.txt`) und anklicken. Erwartet: Der Browser fragt beim
+ALLERERSTEN Klick einmalig, ob „notizbuch-open“-Links geöffnet werden
+dürfen (Bestätigen); danach öffnet sich die Datei im dafür unter
+Windows registrierten Programm – genau wie ein Explorer-Doppelklick.
+Das bisherige Verhalten (Clipboard-Copy + „Pfad kopiert“-Hinweis, D14)
+bleibt dabei ZUSÄTZLICH bestehen. Der Handler öffnet automatisch NUR
+Dateitypen von einer festen Positivliste gängiger Dokument-/Medien-
+formate (u. a. `.pdf`, `.txt`, `.docx`, `.png`, `.mp3` – siehe
+`tools/notizbuch-open-handler.ps1` für die vollständige Liste); der
+Test-Pfad oben sollte deshalb bewusst eine `.txt`-Datei sein. Ein Link
+auf eine NICHT existierende Datei oder mit einer NICHT auf dieser Liste
+stehenden Endung (z. B. `.exe`, aber auch harmlos wirkende, nur noch
+nicht gelistete Formate) zeigt stattdessen eine kleine Windows-Meldung
+mit dem Ablehnungsgrund – kein stilles Nichtstun. Bekannte Grenze (KEIN
+Fehler, falls beobachtet): Ein sehr langer Pfad (deutlich über der
+Windows-`MAX_PATH`-Grenze von 260 Zeichen, insbesondere mit vielen
+Leerzeichen/Umlauten) wird ab einer bestimmten Länge NICHT mehr als
+file:-Link erkannt (Cap in `FILE_URL_SRC`, `src/lib/filelinks.js`,
+Begründung dort) – für normale Testpfade ohne extreme Länge irrelevant.
+Danach `-Uninstall` ausführen, falls die Einrichtung nur für diesen
+Testlauf vorgenommen wurde (Cleanup, sonst bleibt sie bestehen).
 
 ## E. Schnellnotizen
 
