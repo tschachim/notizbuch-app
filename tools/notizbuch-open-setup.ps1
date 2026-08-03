@@ -1,12 +1,12 @@
 <#
 ====================================================================
-notizbuch-open-setup.ps1  (Notizbuch-App v7.37)
+notizbuch-open-setup.ps1  (Notizbuch-App v7.38)
 ====================================================================
 ZWECK
   Einmalige Einrichtung PRO WINDOWS-BENUTZERKONTO des eigenen
   URL-Protokolls "notizbuch-open:" (Kontrakt v1, siehe Kopfkommentar von
-  notizbuch-open-handler.ps1). Danach oeffnet ein Klick auf einen
-  file:-Link im Dokument-Viewer der App die Datei im dafuer registrierten
+  notizbuch-open.js). Danach oeffnet ein Klick auf einen file:-Link im
+  Dokument-Viewer der App die Datei im dafuer registrierten
   Windows-Programm (wie ein Explorer-Doppelklick).
 
   NUR HKCU (Software\Classes), KEINE Adminrechte noetig - HKCU\Software\
@@ -17,47 +17,74 @@ ZWECK
   Rechte zu benoetigen - genau richtig fuer ein Ein-Nutzer-Tool wie
   dieses.
 
-  Die Registry zeigt NICHT (mehr) direkt auf powershell.exe, sondern auf
-  einen eigenen, schlanken Launcher (NotizbuchOpenLauncher.cs, wird HIER
-  bei der Einrichtung MIT dem im System vorhandenen csc.exe kompiliert -
-  siehe Schritt 2 unten). LIVE-BEFUND (v7.37, siehe DECISIONS.md #79 fuer
-  die vollstaendige Fassung): Chrome blockiert einen Protokoll-Handler,
-  dessen Ziel-Executable ein SKRIPT-INTERPRETER ist (powershell.exe,
-  cmd.exe, ...) - ein Klick loeste zwar "beforeunload" aus (Chrome begann
-  die Navigation), aber NIE einen Handler-Aufruf, obwohl Windows selbst
-  das Protokoll nachweislich korrekt aufloeste (Start-Process/
-  AssocQueryString funktionierten). Ein "normales" Programm (getestet mit
-  notepad.exe) als Ziel loeste dagegen sofort den erwarteten Browser-
-  Erlaubnis-Dialog aus. Der Launcher ist fuer Chrome ein "normales"
-  Programm, tut selbst aber NICHTS ausser den bestehenden PowerShell-
-  Handler unveraendert weiterzureichen (siehe Kopfkommentar der .cs-Datei)
-  - die GESAMTE Sicherheitspruefung bleibt ausschliesslich im Handler.
+  ARCHITEKTUR-WECHSEL v7.38 (vollstaendiger Beleg in DECISIONS.md #79):
+  Die Registry zeigt jetzt DIREKT auf node.exe mit notizbuch-open.js als
+  Argument - KEIN PowerShell-Handler, KEIN eigens kompilierter C#-
+  Launcher mehr. Kurze Chronik (Details/Kontrollmessungen siehe
+  DECISIONS.md #79):
+    1. v7.35/v7.36: Registry -> powershell.exe direkt. Windows loeste das
+       Protokoll korrekt auf, ein Klick in Chrome tat aber NICHTS.
+    2. v7.37: Kontrollmessungen zeigten, dass Chrome ein Ziel-Executable
+       ablehnt, das ein SKRIPT-INTERPRETER ist (powershell.exe, cmd.exe,
+       ...) - Fix war ein eigener, kompilierter C#-Launcher als
+       "normales" Zwischen-Executable.
+    3. v7.37 (nach echter Installation beim Nutzer - fruehere
+       Installationsversuche liefen technisch bedingt nie wirklich vor
+       Chromes Augen, siehe DECISIONS.md #79 fuer die ehrliche
+       Fehleinschaetzung): Der Launcher funktionierte per Doppelklick UND
+       direktem PowerShell-Aufruf zuverlaessig, aber IMMER NOCH nicht aus
+       Chrome heraus - selbst mit gueltiger Code-Signatur.
+    4. Entscheidende Kontrollmessung: ein Schema mit Ziel notepad.exe
+       startet aus Chrome sofort, ein Schema mit Ziel "node.exe -e ..."
+       EBENFALLS - der selbst kompilierte/signierte Launcher NIE.
+       SCHLUSSFOLGERUNG: nicht "Interpreter ja/nein" ist die Huerde,
+       sondern vermutlich Etabliertheit/Vertrauen des konkreten Binaries
+       aus Sicht des Endpoint-Schutzes. node.exe (beim Nutzer bereits
+       installiert) wird akzeptiert - der eigene Launcher entfaellt
+       ersatzlos.
+  GENAU EINE Implementierung der Sicherheitspruefung
+  (validateProtocolUrl in notizbuch-open.js) statt drei parallele
+  Fassungen (PowerShell-Handler + C#-Launcher + diese hier), die
+  auseinanderlaufen koennten - notizbuch-open-handler.ps1 und
+  NotizbuchOpenLauncher.cs wurden deshalb ERSATZLOS ENTFERNT (siehe
+  Deinstallations-Hinweis unten fuer Alt-Installationen).
 
-  Handler-Skript UND kompilierter Launcher werden gemeinsam nach
-  "%LOCALAPPDATA%\NotizbuchOpen\" KOPIERT/geschrieben (statt die Registry
-  direkt auf Pfade in diesem Repo zeigen zu lassen): LOCALAPPDATA ist ein
-  STABILER, vom jeweiligen Repo-Klon-Pfad unabhaengiger Ort - verschiebt/
-  loescht der Nutzer sein Repo-Verzeichnis spaeter (z. B. beim
-  Umbenennen/Neu-Klonen), bliebe ein direkt auf das Repo zeigender
-  Registry-Eintrag sonst kaputt, ohne dass das fuer den Nutzer beim
-  naechsten Link-Klick ersichtlich waere.
+  notizbuch-open.js UND eine winzige eigene package.json (deklariert
+  "type":"module" fuer den installierten Ordner, siehe Kopfkommentar der
+  .js-Datei "MODUL-FORMAT") werden gemeinsam nach
+  "%LOCALAPPDATA%\NotizbuchOpen\" KOPIERT (statt die Registry direkt auf
+  Pfade in diesem Repo zeigen zu lassen): LOCALAPPDATA ist ein STABILER,
+  vom jeweiligen Repo-Klon-Pfad unabhaengiger Ort - verschiebt/loescht
+  der Nutzer sein Repo-Verzeichnis spaeter, bliebe ein direkt auf das
+  Repo zeigender Registry-Eintrag sonst kaputt.
 
   Dieses Skript veraendert AUSSCHLIESSLICH die eine Registry-Struktur
   HKCU:\Software\Classes\notizbuch-open (samt Unterschluesseln) und den
   eigenen Ordner "%LOCALAPPDATA%\NotizbuchOpen\" - sonst NICHTS. Es
-  installiert KEINEN Compiler - csc.exe ist Teil jeder Standard-Windows-
-  Installation mit .NET Framework (kein zusaetzliches SDK noetig), wird
-  hier nur AUFGERUFEN, nicht veraendert/installiert.
+  installiert KEIN Node.js - node.exe muss beim Nutzer bereits vorhanden
+  sein (wird hier nur AUFGELOEST/VERIFIZIERT, nicht installiert).
 
 PARAMETER
-  -Uninstall   Entfernt Registry-Schluessel + kopierten Ordner (Handler-
-               Skript UND kompilierter Launcher) wieder rueckstandsfrei
+  -Uninstall   Entfernt Registry-Schluessel + kopierten Ordner
+               (notizbuch-open.js, package.json, Log-Dateien UND jeden
+               Altbestand einer fruegeren Installation - NotizbuchOpen-
+               Launcher.exe, notizbuch-open-handler.ps1, deren Logs -
+               siehe Begruendung unten) wieder rueckstandsfrei
                (idempotent, auch wenn nichts installiert war).
 
 AUFRUF
   Installieren:   powershell -ExecutionPolicy Bypass -File notizbuch-open-setup.ps1
   Deinstallieren: powershell -ExecutionPolicy Bypass -File notizbuch-open-setup.ps1 -Uninstall
-  Mehrfacher Aufruf ist idempotent (kompiliert/kopiert/erstellt einfach neu).
+  Mehrfacher Aufruf ist idempotent (kopiert/erstellt einfach neu).
+
+  WICHTIG FUER BESTEHENDE INSTALLATIONEN (v7.35/v7.36/fruehes v7.37):
+  Dieses Skript MUSS erneut ausgefuehrt werden, damit die Registry auf
+  node.exe statt auf den alten Launcher/PowerShell-Handler zeigt - eine
+  bestehende Installation wird dabei automatisch mit-aktualisiert
+  (idempotent), Altdateien (NotizbuchOpenLauncher.exe, notizbuch-open-
+  handler.ps1, deren *.log[.old]) werden dabei aus dem Installations-
+  ordner ENTFERNT (siehe Schritt 1 unten) - kein manueller Zwischenschritt
+  noetig.
 ====================================================================
 #>
 param(
@@ -68,12 +95,40 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $InstallDir = Join-Path $env:LOCALAPPDATA 'NotizbuchOpen'
-$InstalledHandlerPath = Join-Path $InstallDir 'notizbuch-open-handler.ps1'
-$InstalledLauncherPath = Join-Path $InstallDir 'notizbuch-open.exe'
-$SourceHandlerPath = Join-Path $PSScriptRoot 'notizbuch-open-handler.ps1'
-$SourceLauncherPath = Join-Path $PSScriptRoot 'NotizbuchOpenLauncher.cs'
+$InstalledScriptPath = Join-Path $InstallDir 'notizbuch-open.js'
+$InstalledPackageJsonPath = Join-Path $InstallDir 'package.json'
+$SourceScriptPath = Join-Path $PSScriptRoot 'notizbuch-open.js'
+$SourcePackageJsonPath = Join-Path $PSScriptRoot 'package.json'
 $RegKeyPath = 'HKCU:\Software\Classes\notizbuch-open'
 $RegCommandKeyPath = Join-Path $RegKeyPath 'shell\open\command'
+
+# Dateinamen einer VORHERIGEN Installation (v7.35/v7.36/fruehes v7.37) -
+# werden bei JEDEM Lauf (Install UND -Uninstall) aus dem Installations-
+# ordner entfernt, falls vorhanden (siehe Kopfkommentar "GENAU EINE
+# Implementierung" - drei parallele Validierungs-Fassungen im selben
+# Ordner waeren genau die Divergenzfalle, die vermieden werden soll).
+# Ein STILLER Uebergangszustand - der alte Launcher liegt zwar noch
+# nutzlos herum, wird aber von der NEUEN Registry-Eintragung ohnehin
+# nicht mehr referenziert - waere unnoetig verwirrend fuer jeden, der den
+# Ordner spaeter inspiziert.
+$LegacyFileNames = @(
+    'notizbuch-open.exe',
+    'notizbuch-open-handler.ps1',
+    'notizbuch-open-handler.log',
+    'notizbuch-open-handler.log.old',
+    'notizbuch-open-launcher.log',
+    'notizbuch-open-launcher.log.old'
+)
+
+function Remove-LegacyInstallFiles {
+    foreach ($name in $LegacyFileNames) {
+        $legacyPath = Join-Path $InstallDir $name
+        if (Test-Path -LiteralPath $legacyPath) {
+            Remove-Item -LiteralPath $legacyPath -Force -ErrorAction SilentlyContinue
+            Write-Host "  [OK] Altbestand entfernt: $legacyPath"
+        }
+    }
+}
 
 if ($Uninstall) {
     Write-Host 'Entferne notizbuch-open Protokoll-Registrierung ...'
@@ -86,11 +141,13 @@ if ($Uninstall) {
     }
 
     if (Test-Path -LiteralPath $InstallDir) {
-        # Entfernt den GESAMTEN Installationsordner (Handler-Skript UND
-        # kompilierten Launcher gemeinsam, siehe Kopfkommentar) - keine
-        # separate Pruefung je Datei noetig, "-Recurse" erfasst beide.
+        # Entfernt den GESAMTEN Installationsordner (notizbuch-open.js,
+        # package.json, Logs UND jeden Altbestand aus fruegeren Versionen
+        # in EINEM Schritt, unabhaengig vom konkreten Dateinamen) - kein
+        # separates Aufzaehlen einzelner Dateien noetig, "-Recurse"
+        # erfasst alles, was jemals in diesem Ordner gelandet ist.
         Remove-Item -LiteralPath $InstallDir -Recurse -Force
-        Write-Host "  [OK] Installationsordner (Handler + Launcher) entfernt: $InstallDir"
+        Write-Host "  [OK] Installationsordner (inkl. jedem Altbestand) entfernt: $InstallDir"
     } else {
         Write-Host "  [--] Installationsordner war nicht vorhanden: $InstallDir"
     }
@@ -99,70 +156,64 @@ if ($Uninstall) {
     exit 0
 }
 
-if (-not (Test-Path -LiteralPath $SourceHandlerPath)) {
-    throw "Handler-Skript nicht gefunden: $SourceHandlerPath (dieses Setup-Skript muss im selben Ordner wie notizbuch-open-handler.ps1 liegen, z. B. tools/)"
+if (-not (Test-Path -LiteralPath $SourceScriptPath)) {
+    throw "Handler-Skript nicht gefunden: $SourceScriptPath (dieses Setup-Skript muss im selben Ordner wie notizbuch-open.js liegen, z. B. tools/)"
 }
-if (-not (Test-Path -LiteralPath $SourceLauncherPath)) {
-    throw "Launcher-Quelltext nicht gefunden: $SourceLauncherPath (dieses Setup-Skript muss im selben Ordner wie NotizbuchOpenLauncher.cs liegen, z. B. tools/)"
-}
-
-# --- Schritt 0: Interpreter/Compiler AUFLOESEN UND VERIFIZIEREN - VOR
-#     JEDEM SCHREIBZUGRIFF (Review-Fix, Sicherheits-Review Runde 4: eine
-#     fruehere Fassung legte bereits den Installationsordner an, kopierte
-#     den Handler UND schrieb den kompletten Registry-Schluessel samt
-#     "URL Protocol"-Marker, BEVOR diese Pruefung ueberhaupt lief - bei
-#     fehlendem powershell.exe waere ein HALB registriertes Protokoll
-#     zuruckgeblieben: der Browser haette es bereits als installiert
-#     angeboten (der "URL Protocol"-Marker stand ja schon), ein Klick
-#     haette aber NICHTS getan, weil der command-Registry-Wert auf eine
-#     nicht existierende Datei gezeigt haette. Jetzt: ERST pruefen, DANN
-#     erst irgendetwas auf die Platte/in die Registry schreiben - schlaegt
-#     eine Pruefung fehl, bricht das Skript HIER ab, ohne auch nur EINEN
-#     Schreibzugriff versucht zu haben. -----------------------------
-# Windows PowerShell 5.1 EXPLIZIT ueber $env:SystemRoot aufloesen, NICHT
-# ueber $PSHOME: $PSHOME ist der Installationsordner der GERADE
-# AUSFUEHRENDEN PowerShell-Engine, NICHT zwingend der von Windows
-# PowerShell 5.1. Fuehrt ein Nutzer dieses Setup-Skript unter PowerShell 7
-# aus (haeufige Standard-Shell, z. B. Version 7.6.x), zeigt $PSHOME auf
-# "C:\Program Files\PowerShell\7" - DORT liegt keine "powershell.exe" (die
-# 7er-Engine heisst "pwsh.exe"). Handler.ps1 ist bewusst gegen Windows
-# PowerShell 5.1 geschrieben (u. a. WinForms-MessageBox im STA-Standard-
-# Apartment, siehe dessen Kopfkommentar) - deshalb wird hier IMMER die
-# 64-Bit-System32-Variante von Windows PowerShell 5.1 verwendet,
-# unabhaengig davon, unter welcher Engine dieses Setup-Skript selbst laeuft.
-# Diese Pruefung bleibt bestehen, OBWOHL der Launcher powershell.exe zur
-# LAUFZEIT selbst nochmal aufloest (siehe NotizbuchOpenLauncher.cs) - ein
-# frueher, klarer Setup-Fehler ist besser als ein spaeterer, stiller
-# Laufzeit-Fehlschlag beim ersten Link-Klick.
-$powershellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-if (-not (Test-Path -LiteralPath $powershellExe)) {
-    throw "Windows PowerShell 5.1 wurde nicht gefunden unter '$powershellExe' - Einrichtung ABGEBROCHEN, BEVOR irgendetwas geschrieben wurde (kein Installationsordner angelegt, kein Registry-Eintrag gesetzt). Der Handler (notizbuch-open-handler.ps1) braucht diese Engine (siehe deren Kopfkommentar); ohne sie kann das Protokoll nicht funktionieren."
+if (-not (Test-Path -LiteralPath $SourcePackageJsonPath)) {
+    throw "package.json nicht gefunden: $SourcePackageJsonPath (dieses Setup-Skript muss im selben Ordner wie tools/package.json liegen - noetig, damit node.exe notizbuch-open.js im installierten Ordner als ES-Modul erkennt, siehe deren Kopfkommentar 'MODUL-FORMAT')"
 }
 
-# C#-Compiler (csc.exe) fuer den Launcher (siehe Kopfkommentar/
-# NotizbuchOpenLauncher.cs fuer das WARUM) - Teil jeder Standard-Windows-
-# Installation mit .NET Framework, KEIN zusaetzliches SDK noetig. 64-Bit-
-# Variante bevorzugt, 32-Bit als Fallback (beide erzeugen ein identisch
-# funktionierendes, plattformneutrales "AnyCPU"-Kompilat - der Unterschied
-# ist nur, WELCHER Compiler-Prozess selbst laeuft).
-$cscCandidates = @(
-    (Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'),
-    (Join-Path $env:SystemRoot 'Microsoft.NET\Framework\v4.0.30319\csc.exe')
-)
-$cscExe = $cscCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-if (-not $cscExe) {
-    throw "Kein C#-Compiler gefunden - geprueft:`n  " + ($cscCandidates -join "`n  ") + "`nEinrichtung ABGEBROCHEN, BEVOR irgendetwas geschrieben wurde. Der Launcher (NotizbuchOpenLauncher.cs) kann ohne csc.exe nicht kompiliert werden."
+# --- Schritt 0: node.exe AUFLOESEN UND VERIFIZIEREN - VOR JEDEM
+#     SCHREIBZUGRIFF (dieselbe Lektion wie beim vorherigen powershell.exe-
+#     Check, siehe Review-Fix Sicherheits-Review Runde 4: eine fruehere
+#     Fassung dieses Skripts legte bereits Ordner/Registry an, BEVOR die
+#     Interpreter-Pruefung ueberhaupt lief - bei fehlendem Interpreter
+#     waere ein HALB registriertes Protokoll zurueckgeblieben, das der
+#     Browser bereits als installiert anbietet, aber bei jedem Klick nur
+#     scheitert). Reihenfolge bewusst: ERST pruefen, DANN erst
+#     irgendetwas auf die Platte/in die Registry schreiben.
+# Reihenfolge der Kandidaten:
+#   1. "Get-Command node" - respektiert PATH, deckt damit automatisch
+#      auch nvm-windows/Chocolatey/winget/benutzerdefinierte Installationen
+#      ab, die PATH bereits korrekt gesetzt haben (der haeufigste Fall).
+#      "-Select-Object -First 1" ist hier bewusst gesetzt: Get-Command
+#      liefert bei MEHREREN node.exe im PATH (z. B. ein alter Rest-Eintrag
+#      neben einer aktuellen nvm-windows-Installation) ein ARRAY von
+#      Treffern zurueck - ohne die Begrenzung wuerde ".Source" darauf ein
+#      eigenes Array liefern (PowerShell-Member-Enumeration), das sich in
+#      der spaeteren Pfad-/Registry-String-Verkettung nicht sauber wie ein
+#      einzelner Pfad verhaelt. GENAU EIN Treffer (der laut PATH-Reihenfolge
+#      zuerst gefundene, exakt wie ein manueller "node"-Aufruf in einer
+#      normalen Shell ihn auch verwenden wuerde) wird verwendet.
+$nodeExe = $null
+$nodeCommand = Get-Command 'node.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($nodeCommand) {
+    $nodeExe = $nodeCommand.Source
+} else {
+    $nodeCandidates = @(
+        (Join-Path $env:ProgramFiles 'nodejs\node.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'nodejs\node.exe')
+    )
+    $nodeExe = $nodeCandidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+}
+if (-not $nodeExe -or -not (Test-Path -LiteralPath $nodeExe)) {
+    throw "node.exe wurde nicht gefunden (weder ueber PATH noch unter den " +
+        "Standard-Installationspfaden) - Einrichtung ABGEBROCHEN, BEVOR " +
+        "irgendetwas geschrieben wurde. Node.js wird fuer den notizbuch-" +
+        "open-Handler benoetigt (siehe DECISIONS.md #79 fuer den Grund: " +
+        "Chrome akzeptiert node.exe als Protokoll-Ziel, einen selbst " +
+        "kompilierten Launcher dagegen nicht) - bitte Node.js von " +
+        "https://nodejs.org installieren und dieses Setup erneut ausfuehren."
 }
 
-# Registry-Befehl zeigt auf den LAUNCHER (NICHT mehr direkt auf
-# powershell.exe, siehe Kopfkommentar "Live-Befund") - der Launcher reicht
-# die geklickte URL unveraendert an genau denselben powershell.exe-Aufruf
-# weiter, den fruehere Versionen direkt in die Registry geschrieben haben.
-$command = '"' + $InstalledLauncherPath + '" "%1"'
+# Registry-Befehl zeigt DIREKT auf node.exe (siehe Kopfkommentar
+# "ARCHITEKTUR-WECHSEL v7.38") - node.exe bekommt notizbuch-open.js als
+# ERSTES Argument, die geklickte URL als "%1" (von Windows eingesetzt)
+# als ZWEITES.
+$command = '"' + $nodeExe + '" "' + $InstalledScriptPath + '" "%1"'
 
 Write-Host 'Richte das notizbuch-open Protokoll ein ...'
-Write-Host "  [OK] powershell.exe verifiziert unter: $powershellExe"
-Write-Host "  [OK] C#-Compiler verifiziert unter: $cscExe"
+Write-Host "  [OK] node.exe verifiziert unter: $nodeExe"
 
 # Merkt sich, was VOR diesem Lauf bereits existierte - ein Fehlschlag
 # mittendrin rollt NUR das zurueck, was DIESER Lauf neu angelegt hat,
@@ -172,37 +223,19 @@ $installDirExistedBefore = Test-Path -LiteralPath $InstallDir
 $regKeyExistedBefore = Test-Path -LiteralPath $RegKeyPath
 
 try {
-    # 1. Handler-Datei nach LOCALAPPDATA kopieren (siehe Kopfkommentar,
-    #    "warum LOCALAPPDATA statt Repo-Pfad"). -Force macht den
+    # 1. Installationsordner anlegen, ALTBESTAND aus fruegeren Versionen
+    #    entfernen (siehe Kopfkommentar/Remove-LegacyInstallFiles), dann
+    #    notizbuch-open.js + package.json kopieren. -Force macht den
     #    Kopiervorgang idempotent (ueberschreibt eine vorhandene aeltere
     #    Kopie anstandslos).
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    Copy-Item -LiteralPath $SourceHandlerPath -Destination $InstalledHandlerPath -Force
-    Write-Host "  [OK] Handler kopiert nach: $InstalledHandlerPath"
+    Remove-LegacyInstallFiles
+    Copy-Item -LiteralPath $SourceScriptPath -Destination $InstalledScriptPath -Force
+    Write-Host "  [OK] Handler-Skript kopiert nach: $InstalledScriptPath"
+    Copy-Item -LiteralPath $SourcePackageJsonPath -Destination $InstalledPackageJsonPath -Force
+    Write-Host "  [OK] package.json kopiert nach: $InstalledPackageJsonPath"
 
-    # 2. Launcher-.exe kompilieren. "/target:winexe" verhindert ein
-    #    Konsolenfenster (siehe Kopfkommentar der .cs-Datei), "/out"
-    #    schreibt/UEBERSCHREIBT direkt an den Zielort - idempotent bei
-    #    wiederholtem Setup. csc.exe meldet Fehler ueber den Exit-Code
-    #    (NICHT ueber eine PowerShell-Exception) - deshalb wird der
-    #    explizit geprueft; eine evtl. GERADE LAUFENDE alte Launcher-
-    #    Instanz koennte die Zieldatei kurzzeitig sperren, das Kompilat
-    #    ist aber ein kurzlebiger Fire-and-Forget-Prozess (beendet sich
-    #    selbst nach dem Start des Handlers), ein Fehlschlag hier waere
-    #    also die seltene Ausnahme, nicht der Normalfall.
-    $cscArgs = @(
-        '/nologo', '/target:winexe',
-        ('/out:' + $InstalledLauncherPath),
-        '/reference:System.dll', '/reference:System.Windows.Forms.dll',
-        $SourceLauncherPath
-    )
-    $cscOutput = & $cscExe @cscArgs 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Kompilieren des Launchers fehlgeschlagen (csc.exe Exit-Code $LASTEXITCODE):`n$($cscOutput -join [Environment]::NewLine)"
-    }
-    Write-Host "  [OK] Launcher kompiliert nach: $InstalledLauncherPath"
-
-    # 3. Registry-Eintrag NUR unter HKCU (keine Adminrechte, siehe
+    # 2. Registry-Eintrag NUR unter HKCU (keine Adminrechte, siehe
     #    Kopfkommentar). "URL Protocol" (leerer String-Wert) ist der von
     #    Windows verlangte Marker, der einen Klassen-Schluessel ueberhaupt
     #    erst als Protokoll-Handler kennzeichnet (ohne ihn wird der

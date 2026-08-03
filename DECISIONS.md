@@ -6677,3 +6677,359 @@ aus `referenz-app.jsx` übernommen.
       Handlers) könnte die Zieldatei kurzzeitig gesperrt sein; das Setup
       meldet das dann über die reguläre Fehlerbehandlung (csc.exe-Exit-
       Code samt Compiler-Meldung) statt stillschweigend zu scheitern.
+    - **Architektur-Wechsel v7.38 (Node.js ersetzt PowerShell-Handler +
+      C#-Launcher, LIVE-Befund NACH echter Installation beim Nutzer).**
+      Der C#-Launcher aus v7.37 (Restrisiko (10) oben) wurde beim Nutzer
+      TATSÄCHLICH installiert – und offenbarte damit, dass die
+      Launcher-Architektur SELBST das Grundproblem nicht löste.
+      - **Ehrliche Einordnung des Diagnose-Umwegs:** Frühere
+        Installationsversuche IM SELBEN Zeitraum liefen technisch
+        bedingt in einer Sandbox-Schicht und existierten für Chrome NIE
+        wirklich – jede darauf aufbauende Diagnose (u. a. eine vermutete
+        Sperrliste für Interpreter-Ziele, siehe „Launcher-Architektur“
+        oben) war dadurch wertlos, ohne dass das zum jeweiligen
+        Zeitpunkt erkennbar war. Nach einer ECHTEN Installation zeigte
+        sich ein KLAR ANDERES Bild: `notizbuch-open.exe` lief per
+        Doppelklick zuverlässig (korrekte „Argument fehlt“-MessageBox)
+        UND der Launcher rief bei einem direkten PowerShell-Testaufruf
+        mit echter URL den Handler zuverlässig auf (Editor öffnete sich,
+        Handler-Log-Eintrag entstand) – die Kette selbst war also
+        FUNKTIONSFÄHIG. Aus Chrome heraus dagegen: Bestätigungsdialog
+        erscheint, Nutzer bestätigt, Chrome meldet „Launched external
+        handler“ – aber die `.exe` läuft NICHT an, nicht einmal die
+        ALLERERSTE Zeile der eigens ergänzten Start-Instrumentierung
+        (siehe unten) entsteht. Auch mit einer gültigen (selbst
+        erzeugten) Code-Signatur UND einem frisch registrierten Schema
+        keine Änderung.
+      - **Instrumentierung VOR der endgültigen Diagnose (kurzlebiger
+        Zwischenschritt, hier dokumentiert, weil er die Beweisführung
+        trägt):** `NotizbuchOpenLauncher.cs` bekam eine Start-
+        Protokollierung (Zeitstempel, `argc`, jedes Argument einzeln,
+        `CurrentDirectory`/`BaseDirectory`/`Assembly.Location`,
+        Benutzername, Prozessbitness) GANZ am Anfang von `Main`, in
+        einem einzigen umschließenden `try`/`catch` um die komplette
+        Logik – jede Ausnahme wurde geloggt UND per MessageBox sichtbar
+        gemacht, ein Log-Schreibfehler selbst löste (einmalig pro
+        Prozess) eine eigene MessageBox aus, statt den Hauptablauf zu
+        stören. Ergebnis: selbst diese ALLERERSTE, praktisch
+        fehlerfreie Log-Zeile entstand beim Chrome-Start NIE – ein
+        starkes Signal, dass der Prozess entweder gar nicht wirklich
+        gestartet oder sofort wieder beendet wurde, BEVOR eigener Code
+        überhaupt lief (aus dem Launcher selbst heraus nicht weiter
+        diagnostizierbar).
+      - **Entscheidende Kontrollmessungen (alle im echten Chrome):**
+        Ein Schema mit Ziel `notepad.exe` startet SOFORT (Editor öffnet
+        sich). Ein Schema mit Ziel `node.exe -e "<Einzeiler>"` startet
+        EBENFALLS zuverlässig (schreibt seine eigene Probe-Datei). Der
+        selbst kompilierte, sogar signierte Launcher dagegen NIE.
+        **Schlussfolgerung: Die ursprüngliche v7.37-Hypothese („Chrome
+        blockiert Skript-INTERPRETER als Protokoll-Ziel“) ist damit
+        WIDERLEGT** – `node.exe` ist im weiteren Sinn ebenfalls ein
+        Interpreter (nimmt beliebigen Code über `-e` entgegen) und wird
+        trotzdem akzeptiert. Ebenso widerlegt: eine reine
+        Signaturpflicht (der selbst signierte Launcher wurde trotzdem
+        abgelehnt) und eine reine Herkunfts-/Registrierungs-Blockade
+        (ein frisch registriertes Schema auf `node.exe` funktionierte
+        sofort). Die tatsächliche Unterscheidung lässt sich von hier aus
+        nicht abschließend beweisen, plausibelste Deutung: der
+        Endpoint-/Reputationsschutz des konkreten Rechners akzeptiert
+        ETABLIERTE, weit verbreitete, bereits vorher vorhandene Binaries
+        (`notepad.exe`, `node.exe`) als Ziel eines externen Protokoll-
+        Starts, lehnt eine FRISCH SELBST KOMPILIERTE, bis dahin auf dem
+        Rechner unbekannte `.exe` dagegen ab – unabhängig von einer
+        eigenen Signatur.
+      - **Fix: kein eigener Launcher mehr.** Die Registry zeigt jetzt
+        DIREKT auf `node.exe` (beim Nutzer bereits vorhanden, von Chrome
+        laut Kontrollmessung akzeptiert) mit `notizbuch-open.js`
+        (`tools/`) als Argument. `notizbuch-open-handler.ps1` UND
+        `NotizbuchOpenLauncher.cs` wurden ERSATZLOS ENTFERNT (inkl.
+        aller Verweise in `notizbuch-open-setup.ps1`) – **GENAU EINE**
+        Implementierung der Sicherheitsprüfung
+        (`validateProtocolUrl`, `tools/notizbuch-open.js`) statt drei
+        parallele Fassungen, die im Lauf mehrerer Runden hätten
+        auseinanderlaufen können (dieselbe Divergenz-Vermeidung wie an
+        anderer Stelle in diesem Dokument für andere Teile der App).
+        Die Validierungs-REIHENFOLGE UND -SEMANTIK (Schritte 1-4, siehe
+        oben) wurde 1:1 aus dem PowerShell-Handler übernommen – siehe
+        eigener Abschnitt unten für die wenigen, bewusst dokumentierten
+        Node-spezifischen Unterschiede.
+      - **Warum `explorer.exe` zum Öffnen (nicht `cmd.exe`/„start“,
+        obwohl als Kandidat erwogen):** `cmd.exe` ist selbst ein
+        Skript-Interpreter – GENAU die Kategorie, deren direkte
+        Ansteuerung durch Chrome laut obiger Diagnose blockiert wird.
+        Zwar würde `cmd.exe` hier nicht von Chrome direkt gestartet
+        (sondern als Kindprozess von `node.exe`, das Chrome bereits
+        akzeptiert hat) – ob ein Endpoint-Schutz auch bei einer
+        Kindprozess-Kette „akzeptiertes `node.exe` startet `cmd.exe`
+        startet Ziel“ eingreift, ist UNGETESTET und würde exakt das
+        Angriffsmuster (ein durch Web-Content beeinflusstes Argument an
+        einen Interpreter) reproduzieren, das diese ganze Architektur
+        vermeiden soll. `explorer.exe` ist dagegen ein signiertes,
+        etabliertes Windows-System-Binary OHNE Interpreter-Charakter
+        (dieselbe Kategorie wie `notepad.exe`/`node.exe` in der
+        Kontrollmessung oben) – EMPIRISCH bestätigt (eigener Testlauf,
+        nicht auf dem betroffenen Firmenrechner, sondern lokal): `execFile
+        ("explorer.exe", [Dateipfad])` öffnet eine Datei zuverlässig im
+        dafür REGISTRIERTEN Programm (nicht nur eine Ordneransicht,
+        per Fenstertitel-Vergleich nachgewiesen), `execFile("explorer.exe",
+        [Ordnerpfad])` öffnet ein Explorer-Fenster (per Prozesszahl-
+        Vergleich vor/nach nachgewiesen) – exakt die bisherige
+        `Invoke-Item`-Semantik. `explorer.exe` liefert dabei so gut wie
+        IMMER Exit-Code 1 zurück, UNABHÄNGIG vom tatsächlichen Erfolg
+        (bekannte, empirisch bestätigte Eigenheit) – `notizbuch-open.js`
+        behandelt deshalb NUR einen STRING-Fehlercode (z. B. `ENOENT`,
+        „Programm nicht gefunden“) als echten Fehler, einen rein
+        NUMERISCHEN Exit-Code dagegen nicht. `execFile()` (anders als
+        `exec()`) startet zudem grundsätzlich OHNE eigene Shell – es
+        wird also so oder so nie `cmd.exe` dazwischengeschaltet.
+      - **Nutzer-Feedback bei Ablehnung: bewusst KEINE MessageBox mehr
+        (Regression ggü. dem PowerShell-Handler, benannt statt
+        stillschweigend hingenommen).** Eine gleichwertige, garantiert
+        zuverlässige Benachrichtigung ohne Skript-Interpreter-Start ist
+        aus Node ohne zusätzliche Abhängigkeit nicht sauber erreichbar.
+        `msg.exe` (Windows-Bordmittel, kein Interpreter) wurde erwogen
+        UND PRAKTISCH GEPRÜFT: Es benötigt den Dienst „TermService“
+        (Remote Desktop Services), der auf einem gewöhnlichen Windows-
+        Client-Testrechner STANDARDMÄSSIG deaktiviert war (`Manual`/
+        `Stopped`) – ein Testaufruf schlug entsprechend fehl
+        („Verbindung ist getrennt“). Eine UNZUVERLÄSSIGE Benachrichtigung
+        wäre schlechter als GAR keine (der Nutzer würde sich im
+        Einzelfall darauf verlassen, ohne zu wissen, wann sie
+        tatsächlich funktioniert) – deshalb bewusst KEIN Versuch über
+        `msg.exe` im Produktivpfad. Bei einer Ablehnung entsteht NUR ein
+        Log-Eintrag (`notizbuch-open.log`, siehe unten); der bestehende
+        Rückfallweg bleibt bestehen: Die App kopiert den Windows-Pfad
+        bei JEDEM Klick ohnehin schon in die Zwischenablage,
+        unabhängig vom Ausgang dieses Handlers.
+      - **GROSSER GEWINN: die Validierung ist jetzt testbar.** Der
+        PowerShell-Handler war NIE automatisiert testbar (Vitest kann
+        kein PowerShell ausführen, siehe Restrisiko (5) oben) – die
+        Absicherung lief ausschließlich über manuelle `-Validate`-Läufe.
+        `validateProtocolUrl(rawUrl, deps)` (`tools/notizbuch-open.js`)
+        ist eine REINE, seiteneffektfreie Funktion (kein Log, kein
+        Öffnen) und wird jetzt direkt aus Vitest getestet
+        (`tests/notizbuchOpen.test.js`, 181 Tests): alle 49
+        Positivlisten-Endungen (angenommen, inkl. Groß-/Kleinschreibungs-
+        Varianten), 87 bekannte gefährliche Endungen (Reject) – direkt
+        aus dem 94-Endungen-Probelauf oben zitiert PLUS zusätzliche,
+        allgemein bekannte gefährliche Windows-Formate (kein Anspruch,
+        byte-identisch mit dem nicht mehr rekonstruierbaren historischen
+        94er-Rohdatensatz zu sein, aber vollständig aus benannten,
+        nachvollziehbaren Quellen), Traversal mit `\` UND `/`, ADS
+        (inkl. `::$DATA`-Suffix), Trailing-Space/-Punkt, `.{GUID}`-
+        Segment (auch als ZWISCHEN-Segment), UNC, `%APPDATA%`/`$env:`
+        (inkl. Groß-/Kleinschreibung), ein legitimer Dateiname mit ZWEI
+        Prozentzeichen, Präfix-Mismatch (inkl. Groß-/Kleinschreibung),
+        Trailing-Slash-Toleranz, Existenz-Prüfung (Datei fehlt, Ordner
+        erlaubt), Datei ohne Endung (inkl. „nur ein führender Punkt“-
+        Fall), Nicht-ASCII-Endung (Kelvin-Zeichen als optisches
+        `mkv`-Double), legitime Sonderzeichen (Klammern, Umlaute,
+        mehrere Leerzeichen, mehrere Punkte im Namen), zwei injizierte
+        Fehlerpfade (Existenz-/Auflösungs-Exception). Ganz überwiegend
+        mit ECHTEN Temp-Dateien (kein fs-Mock) – Kanonisierungs-
+        Eigenheiten von Windows sind ECHTES Betriebssystemverhalten, das
+        ein Mock unbemerkt falsch nachbilden könnte (siehe nächster
+        Punkt); ein injizierbares `deps`-Interface
+        (`exists`/`resolveCanonical`) wird NUR für die große
+        Endungs-Matrix (Dateisystem-Overhead ohne zusätzlichen
+        Erkenntnisgewinn) und die zwei Fehlerpfad-Tests genutzt, die mit
+        echten Dateien praktisch nicht auslösbar sind.
+      - **8.3-Kurzname-Auflösung, Node-spezifisch (per echtem Test
+        bestätigt, DIESELBE Prämisse wie beim PowerShell-`Get-Item
+        -Force` oben, aber ein ANDERER API-Aufruf):** `fs.realpathSync()`
+        (die reine JS-Implementierung, KEIN systemnaher Aufruf) löst
+        einen echten, von Windows generierten 8.3-Kurznamen NICHT auf –
+        der Kurzname blieb im Test unverändert stehen. `fs.realpathSync.
+        native()` (ruft die Betriebssystem-API auf) löst ihn dagegen
+        ZUVERLÄSSIG zur kanonischen, LANGEN Form auf – an einer eigens
+        angelegten Datei „ThisIsAVeryLongFileName.application“ über
+        ihren von Windows generierten Kurznamen „THISIS~1.APP“ verifiziert
+        (`extname` lieferte danach korrekt „.application“, nicht „.APP“).
+        `notizbuch-open.js` verwendet deshalb ausschließlich die
+        `.native`-Variante (`defaultResolveCanonical`) – mit der reinen
+        JS-Variante wäre exakt die Umgehung wieder möglich gewesen, die
+        beim PowerShell-Handler den Wechsel zu `Get-Item -Force`
+        auslöste.
+      - **Unicode-/Groß-Kleinschreibungs-Falle: in JS strukturell NICHT
+        vorhanden (Kontext für künftige Änderungen).** Der PowerShell-
+        Handler musste an mehreren Stellen explizit `-cmatch`/ein
+        `HashSet` mit `OrdinalIgnoreCase` verwenden, weil .NETs case-
+        insensitiver Regex-Modus UND PowerShells `-contains` das
+        KELVIN-ZEICHEN (U+212A) fälschlich als Groß-/Kleinschreibungs-
+        äquivalent zu „K“/„k“ behandelten (siehe „Review-Nachbesserung
+        4“ oben). Per Test bestätigt: JS-Regex OHNE `i`-Flag ist bereits
+        ordinal/case-sensitiv (Standardverhalten), UND selbst JS-Regex
+        MIT `i`-Flag faltet das Kelvin-Zeichen NICHT zu „k“. `Set.has()`
+        (SameValueZero-Vergleich) ist ebenfalls bereits ordinal, kein
+        Äquivalent zum PowerShell-„-contains“-Problem. Die explizite
+        Nicht-ASCII-Ablehnung der Endung (Schritt 4) bleibt TROTZDEM als
+        Verteidigung-in-der-Tiefe erhalten – jeder Positivlisten-Eintrag
+        ist ohnehin reines ASCII, eine „erlaubte“ Endung kann also nie
+        ein Nicht-ASCII-Zeichen enthalten, unabhängig davon, ob JS die
+        Falt-Schwäche hätte oder nicht.
+      - **ECHTER, per Test gefundener, bewusst NICHT gefixter
+        Verhaltensunterschied ggü. dem PowerShell-Handler (per
+        Regressionstest gepinnt, `tests/notizbuchOpen.test.js`):** Bei
+        ZWEI (statt dem vom Kontrakt/Chrome-Quirk erwarteten EINEN)
+        angehängten Trailing-Slashes liefert der PowerShell-Handler
+        `Reject: Pfad/Datei existiert nicht` (`Test-Path` toleriert
+        einen trailing `/` auf einer DATEI nicht), der Node-Handler
+        dagegen `Ok` (`fs.existsSync()`/`fs.realpathSync.native()`
+        ignorieren einen überzähligen trailing `/` auf einer bereits
+        existierenden Datei und lösen trotzdem korrekt zur SELBEN Datei
+        auf). Sicherheitseinschätzung: KEIN neuer Bypass, weil (a)
+        dieser Fall nur bei ZWEI ODER MEHR Slashes eintritt – weder
+        Chrome (hängt nachweislich GENAU EINEN an) noch
+        `buildProtocolUrl` (kodiert immer vollständig, endet nie roh auf
+        `/`) erzeugen das je –, und (b) die aufgelöste Datei exakt
+        DIESELBE bleibt wie ohne den überzähligen Slash – weder
+        Traversal- noch Endungs-/ADS-/Namespace-Prüfung werden dadurch
+        umgangen. Bewusst als dokumentierter, ungefährlicher
+        Plattformunterschied stehen gelassen statt mit zusätzlicher
+        Logik für einen praktisch nie auftretenden Fall „gefixt“.
+      - **Modul-Format (`tools/package.json`):** `notizbuch-open.js`
+        nutzt ES-Module-Syntax (`import`/`export`), wie der Rest des
+        Repos. `notizbuch-open-setup.ps1` kopiert die Datei aber aus dem
+        Repo HERAUS nach `%LOCALAPPDATA%\NotizbuchOpen\` (ein Ordner
+        ohne jede `package.json` im Elternpfad). Neuere Node-Versionen
+        erkennen ES-Module-Syntax zwar automatisch auch ohne
+        `"type":"module"` (per Test bestätigt: Node v24 auf dem
+        Entwicklungsrechner) – verlässlich ist das nur ab einer
+        bestimmten Mindestversion, der Node-Stand beim Nutzer ist nicht
+        garantiert so aktuell. Deshalb kopiert das Setup zusätzlich eine
+        winzige eigene `package.json` (Inhalt: `{"type":"module"}`) in
+        denselben Zielordner – das Modul-Format „reist“ dadurch explizit
+        und versionsunabhängig mit.
+      - **`notizbuch-open-setup.ps1`:** `powershell.exe`-/`csc.exe`-
+        Auflösung entfernt, stattdessen `node.exe`-Auflösung (zuerst
+        `Get-Command node.exe` – deckt PATH-basierte Installationen wie
+        nvm-windows/Chocolatey/winget automatisch ab –, dann zwei
+        Standard-Installationspfade als Fallback), Prüfung weiterhin VOR
+        jedem Schreibzugriff (dieselbe Lektion wie „Blocker 2“ oben).
+        `-Uninstall` UND ein normaler (Re-)Install-Lauf entfernen jetzt
+        zusätzlich BENANNTE Altdateien aus früheren Versionen
+        (`notizbuch-open.exe`, `notizbuch-open-handler.ps1` samt Logs)
+        aus dem Installationsordner, falls vorhanden – verhindert, dass
+        nach einem Umstieg nutzlose, nicht mehr referenzierte Dateien im
+        Ordner liegen bleiben. Kompletter Lebenszyklus (Install,
+        idempotenter Re-Install MIT Alt-Datei-Bereinigung, Registry-
+        ausgelöster Aufruf über `Start-Process`, Uninstall) wurde vor
+        dem Commit gegen SANDBOXIERTE Test-Pfade durchlaufen (eigener,
+        temporärer `$InstallDir`/`$RegKeyPath` – NICHT die echte,
+        bereits laufende Installation des Nutzers), um die reale,
+        bestehende Installation nicht zu gefährden.
+      - **Restrisiken, DIESE Architektur betreffend (ergänzt die Liste
+        oben – die Punkte (1)-(4) und (6)-(9) dort beschreiben die
+        Validierungs-LOGIK selbst und gelten unverändert fort, da 1:1
+        portiert; Punkt (5) ist durch die neue Testbarkeit ÜBERHOLT
+        (siehe oben), Punkt (10) ist GEGENSTANDSLOS, da kein Launcher
+        mehr existiert):**
+        (11) Node.js muss auf dem Rechner INSTALLIERT BLEIBEN – ohne
+        Node.js funktioniert das Protokoll nicht mehr (anders als beim
+        PowerShell-Handler, der Teil jeder Windows-Installation ist).
+        Das Setup bricht in diesem Fall mit einer klaren Fehlermeldung
+        ab, BEVOR irgendetwas geschrieben wird.
+        (12) Aktualisiert der Nutzer Node.js auf eine Weise, die den
+        `node.exe`-Pfad ändert (z. B. Wechsel der Installationsmethode),
+        bricht der Registry-Eintrag still (zeigt auf eine nicht mehr
+        existierende Datei) – erkennbar am selben Symptom wie ein nicht
+        installierter Handler (Klick tut nichts/Browser-Fehlermeldung).
+        Betroffene Nutzer müssen `notizbuch-open-setup.ps1` erneut
+        ausführen; kein automatischer Erkennungsmechanismus für diesen
+        Fall vorgesehen (bewusst nicht Teil dieses Umfangs).
+        (13) Keine MessageBox mehr bei Ablehnung (siehe oben) – ein
+        Nutzer, dessen Klick abgelehnt wird, sieht dafür KEIN sofortiges
+        visuelles Feedback mehr (nur die weiterhin bestehende
+        Zwischenablage-Kopie plus einen Log-Eintrag, den nur ein
+        technisch versierter Nutzer nachschlagen würde).
+      - **Review-Nachbesserung 6 (letzte Prüfung VOR der dauerhaften
+        Registrierung beim Nutzer, VOR dem Commit gemeldet, EIN Pflicht-
+        Fund):**
+        - **🟡 Pflicht-Fund – Struktur-Prüfungen (UNC/ADS/Trailing-
+          Space-Punkt/Shell-Namespace) liefen NUR auf `decoded` (dem
+          ROHEN String), GEÖFFNET wird aber `canonical.fullPath` aus
+          `fs.realpathSync.native` – und DAS löst Junctions/Symlinks/
+          Reparse-Points zu ihrem ZIEL auf.** Vom Reviewer per EIGENS
+          angelegter NTFS-Verzeichnis-Junction (`mklink /J`, funktioniert
+          OHNE Adminrechte) empirisch belegt und vom Entwickler
+          reproduziert: ein Alias-Ordner OHNE `.{` im eigenen Namen,
+          dessen Junction-Ziel auf einen Shell-Namespace-Ordner
+          (`.{<GUID>}`) zeigt, lieferte VOR dem Fix `Ok` statt `Reject` –
+          die Endung war davon nicht betroffen (sie wurde bereits vorher
+          korrekt vom kanonischen Pfad abgeleitet), die STRUKTUR-Prüfung
+          dagegen schon. Dieselbe Lücke gilt strukturell auch für UNC-
+          Ziele (SMB-/NTLM-Credential-Leak, siehe Schritt 1) – eine ECHTE
+          UNC-Freigabe war ohne Netzwerk-/Adminrechte in der
+          Entwicklungsumgebung nicht verfügbar, die Korrektheit des Fixes
+          für diesen Fall wurde deshalb per injizierten `deps`
+          (`resolveCanonical` liefert direkt ein UNC-`fullPath`) verifiziert
+          statt mit einer echten Freigabe. **Fix:** direkt NACH
+          `resolveCanonical` (VOR der Endungsprüfung/`Ok`) werden
+          dieselben vier Struktur-Signale ERNEUT gegen `canonical.
+          fullPath` geprüft (UNC-Präfix, ADS, `.{`-Segmente, Trailing-
+          Space/Punkt) – Traversal-/Umgebungsvariablen-Muster sind hier
+          bewusst NICHT dupliziert, weil `fs.realpathSync.native` bereits
+          einen vollständig aufgelösten, normalisierten Pfad ohne
+          `..`-Segmente oder rohe `%NAME%`/`$env:`-Zeichenketten liefert.
+          Per Test verifiziert, dass KEIN legitimer Fall bricht: eine
+          GANZ NORMALE Junction auf einen harmlosen Ordner mit einer
+          erlaubten Datei bleibt `Ok` (Pfad ist der aufgelöste
+          Zielpfad), dieselbe Junction auf eine NICHT erlaubte Endung im
+          selben Zielordner bleibt korrekt `Reject` (wegen der Endung,
+          nicht wegen des neuen Struktur-Rechecks), der Junction-Alias-
+          ORDNER selbst bleibt öffenbar, und der bloße Laufwerks-
+          Wurzelpfad `C:\` löst KEINEN falschen ADS-Treffer aus (`slice(2)`
+          liefert dort nur `"\"`, kein `":"`).
+        - **🟡 Testbarkeits-Fund – der 8.3-Kurzname-Integrationstest kann
+          VACUOUSLY GREEN laufen:** Er überspringt sich still, sobald
+          8.3-Kurznamen auf dem jeweiligen Volume deaktiviert sind (auf
+          vielen Firmen-Volumes der Fall) – dann prüft er in Wahrheit
+          NICHTS. **Fix:** Ein zusätzlicher, DETERMINISTISCHER Real-File-
+          Test über dieselbe Junction-Infrastruktur (NICHT von einer
+          Volume-Einstellung abhängig): eine Datei `ziel.exe` im
+          Zielordner, per Alias `alias\ziel.exe` angesprochen, liefert
+          `Reject` wegen `.exe`; dieselbe Junction auf `alias\ziel.txt`
+          liefert `Ok` mit dem AUFGELÖSTEN Zielpfad. Schlägt die
+          Junction-Erstellung auf einem Testsystem ausnahmsweise fehl
+          (z. B. per Gruppenrichtlinie eingeschränkt), werden die
+          betroffenen Tests über `it.skipIf(...)` EXPLIZIT als „skipped“
+          im Testbericht geführt (sichtbar unterschieden von „passed“)
+          statt still grün durchzulaufen – zusätzlich eine `console.warn`-
+          Zeile beim Testlauf. Die Junction-Einrichtung läuft dafür
+          bewusst auf MODUL-Ebene (synchron, vor jedem `describe`/`it`),
+          nicht in `beforeAll()` – `it.skipIf(...)` wertet seine
+          Bedingung bereits zur Collection-Zeit aus.
+        - **🔵 Tote Verweise auf die gelöschte `notizbuch-open-handler.
+          ps1`** in `src/lib/filelinks.js` (zwei Kommentare) und
+          `tests/filelinks.test.js` (zwei Kommentare) auf
+          `tools/notizbuch-open.js`/`validateProtocolUrl` umgebogen.
+        - **🔵 `.gitignore`:** `tools/*.log` → `tools/*.log*` – die
+          rotierte Historie-Datei (`notizbuch-open.log.old`, siehe
+          `appendLog`) wurde vom alten Muster NICHT erfasst.
+        - **🔵 Entscheidung (optional, bewusst NICHT verkleinert): die
+          87-Endungen-Gefahren-Matrix bleibt in voller Länge.** Der
+          Overlap-Test (Positivliste ∩ Gefahren-Liste = ∅) allein sagt
+          nichts darüber aus, ob eine KÜNFTIG versehentlich zur
+          Positivliste hinzugefügte Endung eine der NAMENTLICH bekannten
+          gefährlichen ist – nur die exhaustive, namentliche Matrix
+          würde eine solche Regression sofort mit genau DIESEM Namen
+          aufzeigen. Laufzeitkosten sind vernachlässigbar (die Matrix
+          nutzt injizierte `deps`, kein Dateisystem-I/O, Größenordnung
+          Millisekunden für alle 87 Fälle zusammen) – der Kompromiss
+          (Testdatei-Länge vs. namentliche Regressionsabdeckung)
+          entscheidet sich damit klar zugunsten der vollen Liste.
+        - **🔵 Benannte Divergenz (nur zur Kenntnis, KEIN Fix nötig,
+          Richtung ist sicherer): eine Datei, die EXAKT `.txt` heißt
+          (führender Punkt, keine weitere Endung – dieselbe Konvention
+          wie z. B. `.gitignore`), wird vom Node-Handler ABGELEHNT**
+          (`path.extname('.txt') === ''`, Node behandelt einen
+          FÜHRENDEN Punkt ohne weiteren Punkt im Basisnamen als „keine
+          Endung“ – per Test bestätigt), während der frühere PowerShell-
+          Handler sie GEÖFFNET hätte (`Get-Item`s `.Extension`-Eigenschaft
+          liefert für eine Datei namens `.txt` `.txt`, nicht leer – per
+          Test an einer echten, so benannten Datei bestätigt). Die neue
+          Richtung ist STRENGER/sicherer (lehnt einen seltenen Grenzfall
+          zusätzlich ab, öffnet nie mehr als vorher) – bewusst NICHT
+          behoben, bereits durch den bestehenden Test „Datei, deren Name
+          NUR aus einem führenden Punkt besteht“ (`tests/
+          notizbuchOpen.test.js`) abgedeckt.

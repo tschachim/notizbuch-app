@@ -3,4 +3,4 @@ dist
 *.local
 .DS_Store
 docs/reviews/
-tools/*.log
+tools/*.log*

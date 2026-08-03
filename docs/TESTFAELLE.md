@@ -883,8 +883,8 @@ schadet aber nicht, das hier nochmal mitzuprüfen). Danach die Testzeile(n)
 wieder entfernen und speichern (Cleanup).
 
 **D14b [MANUELL] Protokoll-Klick öffnet die Datei im registrierten
-Programm (v7.35, Mechanismus überarbeitet in v7.36 UND v7.37).** NICHT
-durch den Tester-Agenten ausführbar UND NICHT im eingebetteten
+Programm (v7.35, Mechanismus überarbeitet in v7.36, v7.37 UND v7.38).**
+NICHT durch den Tester-Agenten ausführbar UND NICHT im eingebetteten
 Browser-Pane dieses Testlaufs überprüfbar (siehe Markierungs-Legende
 oben) – ein Klick auf eine `notizbuch-open:…`-Protokoll-URL löst dort
 GRUNDSÄTZLICH nichts aus (Custom-Protocol-Navigation aus eingebetteten/
@@ -894,31 +894,42 @@ auf einen Fehler. Dieser Testfall gilt AUSSCHLIESSLICH im echten,
 eigenständig geöffneten Browser des Nutzers (z. B. ein normales
 Edge-/Chrome-Fenster, NICHT das Browser-Pane dieses Tools).
 **DIAGNOSE-HINWEIS für künftige, ähnliche Fälle:** Ein Protokoll-Ziel,
-dessen Registry-Befehl auf einen SKRIPT-INTERPRETER zeigt (powershell.exe,
-cmd.exe, wscript.exe, …), wird von Chrome nachweislich still verworfen
-(kein Dialog, kein Aufruf), OBWOHL Windows selbst das Protokoll korrekt
-auflöst – siehe DECISIONS #79 „Launcher-Architektur“ für die vollständigen
-Kontrollmessungen. Seit v7.37 zeigt die Registry deshalb auf eine eigene,
-kompilierte `notizbuch-open.exe` (Launcher), NICHT mehr auf
-`powershell.exe` direkt.
+dessen Registry-Befehl auf eine FRISCH SELBST KOMPILIERTE, dem Rechner
+bis dahin unbekannte `.exe` zeigt, wurde auf einem Firmenrechner
+nachweislich vom Endpoint-/Reputationsschutz still verworfen (kein
+Dialog, kein Aufruf – selbst mit gültiger Signatur), obwohl ETABLIERTE
+Binaries (`notepad.exe`, `node.exe`) als Ziel desselben Mechanismus
+zuverlässig funktionierten – siehe DECISIONS #79 „Architektur-Wechsel
+v7.38“ für die vollständigen Kontrollmessungen (inkl. der zwischenzeitlich
+widerlegten Hypothese „Chrome blockiert Skript-Interpreter“). Seit v7.38
+zeigt die Registry deshalb DIREKT auf `node.exe` (beim Nutzer bereits
+vorhanden) mit `notizbuch-open.js` als Argument – KEIN eigens
+kompilierter Launcher, KEIN PowerShell-Handler mehr.
 Voraussetzung ist eine EINMALIGE, lokale Einrichtung durch den Nutzer
 selbst: `notizbuch-app/tools/notizbuch-open-setup.ps1` einmal per
-PowerShell auf dem Testrechner ausführen (kompiliert dabei den Launcher
-MIT dem im System vorhandenen `csc.exe` – kein zusätzliches SDK nötig;
-registriert `notizbuch-open:` NUR unter HKCU, keine Adminrechte nötig;
-`-Uninstall` entfernt Launcher + Handler wieder rückstandsfrei). Danach
-wie in D14 einen file:-Link mit einem TATSÄCHLICH existierenden Testpfad
-erzeugen (z. B. eine echte, harmlose Datei wie eine `.txt`) und im echten
-Browser anklicken. Erwartet (Mechanismus seit v7.36/v7.37: der gerenderte
-Link-Href IST direkt die `notizbuch-open:v1?path=…`-Protokoll-URL, ein
-normaler Linkklick navigiert also direkt dorthin; Windows ruft dafür den
-kompilierten Launcher auf, der unveraendert an den PowerShell-Handler
-weiterreicht): Der Browser fragt beim ALLERERSTEN Klick einmalig, ob
-„notizbuch-open“-Links geöffnet werden dürfen (Bestätigen); danach öffnet
-sich die Datei im dafür unter Windows registrierten Programm – genau wie
-ein Explorer-Doppelklick. Das bisherige Clipboard-Copy-Verhalten („Pfad
-kopiert“-Hinweis, D14) bleibt dabei ZUSÄTZLICH bestehen (unabhängig vom
-Ausgang der Navigation).
+PowerShell auf dem Testrechner ausführen (Node.js muss dafür bereits
+installiert sein – das Setup löst `node.exe` über PATH bzw. Standard-
+Installationspfade auf und bricht mit einer klaren Meldung ab, falls
+nichts gefunden wird, BEVOR irgendetwas geschrieben wird; registriert
+`notizbuch-open:` NUR unter HKCU, keine Adminrechte nötig; `-Uninstall`
+entfernt die Installation UND jeden Altbestand einer früheren v7.35-
+v7.37-Installation wieder rückstandsfrei). **Wer bereits eine ÄLTERE
+Version installiert hatte, MUSS das Setup erneut ausführen** – sonst
+zeigt die Registry weiterhin auf den nicht mehr gepflegten alten
+Launcher/Handler.
+Danach wie in D14 einen file:-Link mit einem TATSÄCHLICH existierenden
+Testpfad erzeugen (z. B. eine echte, harmlose Datei wie eine `.txt`) und
+im echten Browser anklicken. Erwartet (Mechanismus seit v7.36: der
+gerenderte Link-Href IST direkt die `notizbuch-open:v1?path=…`-Protokoll-
+URL, ein normaler Linkklick navigiert also direkt dorthin; Windows ruft
+dafür `node.exe notizbuch-open.js "<URL>"` auf, das Skript öffnet die
+Datei anschließend selbst über `explorer.exe` – dieselbe Doppelklick-
+Semantik wie zuvor `Invoke-Item`): Der Browser fragt beim ALLERERSTEN
+Klick einmalig, ob „notizbuch-open“-Links geöffnet werden dürfen
+(Bestätigen); danach öffnet sich die Datei im dafür unter Windows
+registrierten Programm – genau wie ein Explorer-Doppelklick. Das
+bisherige Clipboard-Copy-Verhalten („Pfad kopiert“-Hinweis, D14) bleibt
+dabei ZUSÄTZLICH bestehen (unabhängig vom Ausgang der Navigation).
 **Ohne installierten Handler** (nicht Teil dieses Testfalls, aber gut zu
 kennen): der Browser zeigt jetzt eine EIGENE Fehlermeldung („Für dieses
 Protokoll ist keine Anwendung verknüpft“ o. Ä.) statt still nichts zu
@@ -926,16 +937,20 @@ tun – bewusst in Kauf genommen (siehe DECISIONS #79), der Pfad landet
 trotzdem in der Zwischenablage. Der Handler öffnet automatisch NUR
 Dateitypen von einer festen Positivliste gängiger Dokument-/Medien-
 formate (u. a. `.pdf`, `.txt`, `.docx`, `.png`, `.mp3` – siehe
-`tools/notizbuch-open-handler.ps1` für die vollständige Liste); der
-Test-Pfad oben sollte deshalb bewusst eine `.txt`-Datei sein. Ein Link
-auf eine NICHT existierende Datei oder mit einer NICHT auf dieser Liste
-stehenden Endung (z. B. `.exe`, aber auch harmlos wirkende, nur noch
-nicht gelistete Formate) zeigt stattdessen eine kleine Windows-Meldung
-mit dem Ablehnungsgrund – kein stilles Nichtstun. Bekannte Grenze (KEIN
-Fehler, falls beobachtet): Ein sehr langer Pfad (deutlich über der
-Windows-`MAX_PATH`-Grenze von 260 Zeichen, insbesondere mit vielen
-Leerzeichen/Umlauten) wird ab einer bestimmten Länge NICHT mehr als
-file:-Link erkannt (Cap in `FILE_URL_SRC`, `src/lib/filelinks.js`,
+`tools/notizbuch-open.js`, `ALLOWED_EXTENSIONS`, für die vollständige
+Liste); der Test-Pfad oben sollte deshalb bewusst eine `.txt`-Datei sein.
+Ein Link auf eine NICHT existierende Datei oder mit einer NICHT auf
+dieser Liste stehenden Endung (z. B. `.exe`, aber auch harmlos wirkende,
+nur noch nicht gelistete Formate) wird OHNE sichtbares Feedback
+abgelehnt (seit v7.38 KEINE MessageBox mehr, nur ein Log-Eintrag in
+`%LOCALAPPDATA%\NotizbuchOpen\notizbuch-open.log` – bewusste
+Einschränkung, siehe DECISIONS #79; für den Testfall selbst bedeutet
+das: „nichts passiert außer der Zwischenablage-Kopie“ ist bei einer
+ABGELEHNTEN Datei jetzt das ERWARTETE Verhalten, kein Fehlerbild). Bekannte
+Grenze (KEIN Fehler, falls beobachtet): Ein sehr langer Pfad (deutlich
+über der Windows-`MAX_PATH`-Grenze von 260 Zeichen, insbesondere mit
+vielen Leerzeichen/Umlauten) wird ab einer bestimmten Länge NICHT mehr
+als file:-Link erkannt (Cap in `FILE_URL_SRC`, `src/lib/filelinks.js`,
 Begründung dort) – für normale Testpfade ohne extreme Länge irrelevant.
 Danach `-Uninstall` ausführen, falls die Einrichtung nur für diesen
 Testlauf vorgenommen wurde (Cleanup, sonst bleibt sie bestehen).

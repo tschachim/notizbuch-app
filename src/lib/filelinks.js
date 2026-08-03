@@ -187,7 +187,9 @@ export function fileUrlToWinPath(fileUrl) {
 // registriert es NUR in HKCU, siehe Kopfkommentar dort für das vollständige
 // Bedrohungsmodell/den Kontrakt). buildProtocolUrl baut aus einer file:-URL
 // GENAU die Kontrakt-URL, die der lokale Handler
-// (tools/notizbuch-open-handler.ps1) erwartet:
+// (tools/notizbuch-open.js, seit v7.38 – siehe DECISIONS.md #79
+// "Architektur-Wechsel v7.38" für den Grund des Wechsels von PowerShell
+// auf Node.js) erwartet:
 //   "notizbuch-open:v1?path=" + encodeURIComponent(<Windows-Pfad, Backslash>)
 // Beispiel: "file:///C:/Users/x/Mein%20Bericht.docx"
 //        -> "notizbuch-open:v1?path=C%3A%5CUsers%5Cx%5CMein%20Bericht.docx"
@@ -343,7 +345,7 @@ const WORDS_PER_SEGMENT_CAP = 5;
 // Regel c/d): ein zitierter ORDNER-Pfad ist genauso eindeutig abgegrenzt wie
 // ein zitierter Datei-Pfad (die Anführungszeichen allein reichen als
 // Begrenzung, nicht die Endung) – und der Handler
-// (tools/notizbuch-open-handler.ps1) öffnet Ordner ausdrücklich.
+// (tools/notizbuch-open.js, seit v7.38) öffnet Ordner ausdrücklich.
 //
 // Die Anführungszeichen werden beim Ersetzen ENTFERNT (nicht um den
 // fertigen Link herum stehen gelassen): '"[Bericht](file:///…)"' sähe mit

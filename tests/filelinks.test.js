@@ -115,9 +115,11 @@ describe("fileUrlToWinPath", () => {
 });
 
 // v7.35: buildProtocolUrl baut aus einer file:-URL die Kontrakt-URL für den
-// lokalen Handler (tools/notizbuch-open-handler.ps1) – siehe Kopfkommentar
-// dort für den vollständigen Kontrakt/Bedrohungsmodell. Die Tests spiegeln
-// die -Validate-Probe-Aufrufe aus dem Abschlussbericht (Roundtrip-Fälle).
+// lokalen Handler (tools/notizbuch-open.js, seit v7.38 – siehe
+// DECISIONS.md #79 "Architektur-Wechsel v7.38") – siehe Kopfkommentar dort
+// für den vollständigen Kontrakt/Bedrohungsmodell. Die Tests spiegeln die
+// -Validate-/validateProtocolUrl-Probe-Aufrufe aus dem Abschlussbericht
+// (Roundtrip-Fälle).
 describe("buildProtocolUrl", () => {
   it("baut die Kontrakt-URL aus dem Beispiel im Auftrag (Backslash-Encoding)", () => {
     expect(buildProtocolUrl("file:///C:/Users/x/Mein%20Bericht.docx")).toBe(
@@ -156,9 +158,10 @@ describe("buildProtocolUrl", () => {
     expect(buildProtocolUrl("")).toBeNull();
   });
 
-  // Roundtrip zum Handler-Format: [Uri]::UnescapeDataString (PowerShell,
-  // siehe tools/notizbuch-open-handler.ps1) entspricht funktional
-  // decodeURIComponent – der Handler muss aus dem "path="-Teil GENAU den
+  // Roundtrip zum Handler-Format: der Handler (tools/notizbuch-open.js,
+  // seit v7.38) dekodiert den "path="-Teil per decodeURIComponent (JS) –
+  // vor v7.38 war das [Uri]::UnescapeDataString (PowerShell), funktional
+  // äquivalent. Der Handler muss aus dem "path="-Teil GENAU den
   // ursprünglichen Backslash-Pfad zurückgewinnen.
   it("ist per decodeURIComponent zum ursprünglichen Backslash-Pfad umkehrbar (Roundtrip zum Handler-Kontrakt)", () => {
     const winPath = "C:\\Users\\Max Mustermann\\Kopie (1) - Bericht #3 100%.docx";
