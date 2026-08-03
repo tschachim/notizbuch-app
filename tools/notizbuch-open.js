@@ -93,10 +93,20 @@
 //   getrennt"). Da eine unzuverlaessige Benachrichtigung schlechter waere
 //   als GAR keine (der Nutzer wuerde sich auf sie verlassen), wird bei
 //   einer Ablehnung NUR geloggt (siehe unten), KEINE MessageBox gezeigt.
-//   Der bestehende Rueckfallweg bleibt bestehen: Die App (FileLink,
-//   markdown.jsx) kopiert den Windows-Pfad bei JEDEM Klick ohnehin schon
-//   in die Zwischenablage, unabhaengig vom Ausgang dieses Handlers -
-//   siehe Restrisiko in DECISIONS.md #79.
+//   FRUEHERER Rueckfallweg ENTFALLEN (v7.39, Nutzer-Feedback nach Live-
+//   Test): Bis v7.38 kopierte die App (FileLink, markdown.jsx) den
+//   Windows-Pfad bei JEDEM Klick zusaetzlich in die Zwischenablage,
+//   unabhaengig vom Ausgang dieses Handlers - das war selbst ein
+//   Rueckfallweg aus der Zeit, in der der Protokollstart noch nicht
+//   zuverlaessig funktionierte. Seit der Protokollstart LIVE bestaetigt
+//   funktioniert, wurde die Kopie ERSATZLOS entfernt (sie ueberschrieb
+//   sonst ungefragt den Zwischenablage-Inhalt des Nutzers) - eine
+//   Ablehnung ist fuer den Nutzer jetzt NUR noch im Log sichtbar, ohne
+//   jeden Rueckfallweg in der App selbst. Bewusst hingenommen (siehe
+//   Restrisiko in DECISIONS.md #79) - Alternative waere ein erneuter
+//   Griff zur MessageBox (siehe oben, verworfen) oder ein neuer,
+//   eigenstaendiger Zwischenablage-Mechanismus NUR fuer den Ablehnungsfall
+//   (Overengineering fuer einen seltenen Pfad, nicht umgesetzt).
 //
 // BEDROHUNGSMODELL (SICHERHEITSKRITISCH - bitte vor Aenderungen lesen,
 //   UNVERAENDERT ggue. dem bisherigen PowerShell-Handler)
@@ -508,8 +518,7 @@ export function validateProtocolUrl(rawUrl, deps = {}) {
     if (!extRaw) {
       return {
         status: "Reject",
-        reason:
-          "Dateien ohne erkennbare Endung werden aus Sicherheitsgruenden nicht geoeffnet. Der Pfad wurde - sofern der Browser das zulaesst - in die Zwischenablage kopiert.",
+        reason: "Dateien ohne erkennbare Endung werden aus Sicherheitsgruenden nicht geoeffnet.",
         path: decoded,
         rawUrl,
       };
@@ -523,7 +532,7 @@ export function validateProtocolUrl(rawUrl, deps = {}) {
       return {
         status: "Reject",
         reason:
-          "Dateityp enthaelt Nicht-ASCII-Zeichen (moeglicher Unicode-Bypass-Versuch) und wird aus Sicherheitsgruenden nicht geoeffnet. Der Pfad wurde - sofern der Browser das zulaesst - in die Zwischenablage kopiert.",
+          "Dateityp enthaelt Nicht-ASCII-Zeichen (moeglicher Unicode-Bypass-Versuch) und wird aus Sicherheitsgruenden nicht geoeffnet.",
         path: decoded,
         rawUrl,
       };
@@ -532,7 +541,7 @@ export function validateProtocolUrl(rawUrl, deps = {}) {
     if (!ALLOWED_EXTENSION_SET.has(extLower)) {
       return {
         status: "Reject",
-        reason: `Dateityp '.${extLower}' wird aus Sicherheitsgruenden nicht geoeffnet. Der Pfad wurde - sofern der Browser das zulaesst - in die Zwischenablage kopiert.`,
+        reason: `Dateityp '.${extLower}' wird aus Sicherheitsgruenden nicht geoeffnet.`,
         path: decoded,
         rawUrl,
       };

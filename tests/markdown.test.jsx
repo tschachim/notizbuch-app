@@ -5,6 +5,18 @@
 // (weiter unten, restliche Tests dieser Datei) läuft unverändert auch unter
 // jsdom, per-Datei-Override wie in tests/docEditorLinks.test.jsx.
 import { describe, it, expect, afterEach, vi } from "vitest";
+// v7.39, beim Testschreiben gefunden: seit die FileLink-Klick-Tests (siehe
+// FileLink-Blöcke unten) den Klick-Dispatch SYNCHRON statt wie zuvor über
+// "await act(async () => { …; await Promise.resolve(); })" auslösen (nötig
+// wurde, weil der Klick keine asynchrone Zwischenablage-Promise mehr anstößt,
+// siehe markdown.jsx#FileLink), warnt React bei JEDEM act()-Aufruf "The
+// current testing environment is not configured to support act(...)" -
+// dieses Projekt nutzt "act" direkt aus "react" (kein @testing-library/
+// react, das dieses Flag intern selbst setzt), ohne das von React dafür
+// vorgesehene globale Flag zu setzen. FUNKTIONAL harmlos (act() flusht
+// Effekte/State-Updates trotzdem korrekt), aber unnötiger Konsolen-Lärm bei
+// JEDEM Testlauf - mit dem offiziell empfohlenen Flag behoben.
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -1288,10 +1300,11 @@ describe("renumberCitations: Fenced-Codeblöcke bleiben unangetastet (v7.7)", ()
 
 // v7.31 (Nutzer-Befund Live + Nutzerwunsch): "[Titel](file:///…)" wird als
 // generischer Link gerendert (nicht als Klartext, siehe Auftrag) – eigene
-// Komponente FileLink (Klick kopiert den Windows-Pfad in die Zwischenablage,
-// siehe zweiter describe-Block unten). CITE_LINK_RE/renumberCitations bleiben
-// dabei UNANGETASTET (siehe Block oben) – ein file:-Link mit numerischem
-// Titel bleibt deshalb IMMER ein normaler Link, nie eine <sup>-Fußnote.
+// Komponente FileLink (Klick zeigt seit v7.39 nur noch ein kurzes "wird
+// geöffnet …"-Feedback, KEINE Zwischenablage-Kopie mehr, siehe zweiter
+// describe-Block unten). CITE_LINK_RE/renumberCitations bleiben dabei
+// UNANGETASTET (siehe Block oben) – ein file:-Link mit numerischem Titel
+// bleibt deshalb IMMER ein normaler Link, nie eine <sup>-Fußnote.
 describe("DocView: file:-Links (v7.31, href = Protokoll-URL seit v7.36)", () => {
   it("[Titel](file:///C:/…) wird zu einem klickbaren Link, href ist die notizbuch-open-Protokoll-URL, title bleibt der Backslash-Pfad, kein <sup>", () => {
     const html = render("# T\n\n## A\n\n- Siehe [Bericht](file:///C:/Users/x/Bericht.docx) dazu.");
@@ -1354,10 +1367,18 @@ describe("DocView: file:-Links (v7.31, href = Protokoll-URL seit v7.36)", () => 
   });
 });
 
-// Klick-Feedback + Zwischenablage (v7.31): braucht ein ECHTES DOM (createRoot/
-// act statt renderToStaticMarkup, siehe Datei-Kopf) – navigator.clipboard
-// existiert in jsdom NICHT von Haus aus und wird hier je Test gemockt.
-describe("FileLink: Klick kopiert den Windows-Pfad in die Zwischenablage (v7.31)", () => {
+// Klick-Feedback OHNE Zwischenablage (v7.39, Nutzer-Feedback nach
+// erfolgreichem Live-Test): braucht ein ECHTES DOM (createRoot/act statt
+// renderToStaticMarkup, siehe Datei-Kopf). Bis v7.38 kopierte JEDER Klick
+// zusätzlich den Windows-Pfad in die Zwischenablage – seit der
+// Protokollstart LIVE bestätigt zuverlässig funktioniert, ist das ERSATZLOS
+// entfernt (siehe markdown.jsx#FileLink, Kopfkommentar "KEINE
+// Zwischenablage-Kopie mehr"): die Kopie überschrieb sonst ungefragt den
+// bisherigen Zwischenablage-Inhalt des Nutzers, ohne noch einen Zweck zu
+// erfüllen. Mehrere Tests unten setzen navigator.clipboard bewusst MIT
+// einem Spy, nur um AKTIV zu pinnen, dass er NIE aufgerufen wird (Schutz
+// gegen eine versehentliche Rückkehr der Kopie).
+describe("FileLink: Klick zeigt kurz 'wird geöffnet …' an, OHNE die Zwischenablage anzufassen (v7.39)", () => {
   let container;
   let root;
 
@@ -1381,43 +1402,52 @@ describe("FileLink: Klick kopiert den Windows-Pfad in die Zwischenablage (v7.31)
     vi.useRealTimers();
   });
 
-  it("ein Klick kopiert den Backslash-Pfad und zeigt kurz 'Pfad kopiert' an, das nach ~1,5 s wieder verschwindet", async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+  it("ein Klick zeigt kurz 'wird geöffnet …' an, das nach ~1 s wieder verschwindet", () => {
     vi.useFakeTimers();
 
     mount("# T\n\n## A\n\n[Bericht](file:///C:/Users/x/Mein%20Bericht.docx)");
     const link = container.querySelector("a");
     expect(link).toBeTruthy();
-    expect(container.textContent).not.toContain("Pfad kopiert");
+    expect(container.textContent).not.toContain("wird geöffnet");
 
-    await act(async () => {
+    act(() => {
       link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-      await Promise.resolve(); // Microtask: clipboard.writeText().then(...)
     });
-    expect(writeText).toHaveBeenCalledWith("C:\\Users\\x\\Mein Bericht.docx");
-    expect(container.textContent).toContain("Pfad kopiert");
+    expect(container.textContent).toContain("wird geöffnet …");
 
-    act(() => { vi.advanceTimersByTime(1500); });
-    expect(container.textContent).not.toContain("Pfad kopiert");
+    act(() => { vi.advanceTimersByTime(1000); });
+    expect(container.textContent).not.toContain("wird geöffnet");
   });
 
-  it("KEIN preventDefault: die Standard-Navigation des <a>-Elements wird nicht unterbunden", async () => {
+  // Aktiv gepinnt (Auftrag Punkt 4: "es darf NICHT mehr kopiert werden"):
+  // navigator.clipboard ist vorhanden UND funktionsfähig, wird aber bei
+  // KEINEM Klick mehr aufgerufen – Regressionsschutz gegen eine
+  // versehentliche Rückkehr der v7.31-v7.38-Kopie.
+  it("navigator.clipboard.writeText wird NIE aufgerufen, auch wenn die Clipboard-API vorhanden ist", () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
 
+    mount("# T\n\n## A\n\n[Bericht](file:///C:/Users/x/Mein%20Bericht.docx)");
+    const link = container.querySelector("a");
+    act(() => {
+      link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it("KEIN preventDefault: die Standard-Navigation des <a>-Elements wird nicht unterbunden", () => {
     mount("# T\n\n## A\n\n[Bericht](file:///C:/Users/x/Bericht.docx)");
     const link = container.querySelector("a");
     const evt = new MouseEvent("click", { bubbles: true, cancelable: true });
-    await act(async () => {
+    act(() => {
       link.dispatchEvent(evt);
-      await Promise.resolve();
     });
     expect(evt.defaultPrevented).toBe(false);
   });
 
-  it("ohne navigator.clipboard passiert nichts, kein Crash, kein Feedback", async () => {
-    delete navigator.clipboard; // Umgebung ohne Clipboard-API (ältere Browser)
+  it("ohne navigator.clipboard (ältere Browser/kein sicherer Kontext) funktioniert der Klick trotzdem, kein Crash", () => {
+    delete navigator.clipboard; // Umgebung ohne Clipboard-API
     mount("# T\n\n## A\n\n[Bericht](file:///C:/Users/x/Bericht.docx)");
     const link = container.querySelector("a");
     expect(() => {
@@ -1425,64 +1455,59 @@ describe("FileLink: Klick kopiert den Windows-Pfad in die Zwischenablage (v7.31)
         link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
       });
     }).not.toThrow();
-    expect(container.textContent).not.toContain("Pfad kopiert");
+    expect(container.textContent).toContain("wird geöffnet …");
   });
 
-  // Review-Fix 🔵 Finding 4 (mitgenommen): ein zweiter Klick VOR Ablauf der
-  // ersten 1,5 s muss den bereits laufenden Ausblend-Timer zurücksetzen
-  // (clearTimeout, timerRef in FileLink) – sonst blendet der ERSTE Timer das
-  // Feedback verfrüht aus, obwohl der ZWEITE Klick es gerade erst wieder
-  // eingeblendet hat.
-  it("ein zweiter Klick VOR Ablauf der ersten 1,5 s setzt den Ausblend-Timer zurück (kein verfrühtes Verschwinden)", async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+  // Review-Fix 🔵 Finding 4 (v7.31, Logik unverändert beibehalten, siehe
+  // Auftrag Punkt 2): ein zweiter Klick VOR Ablauf des ersten Timers muss
+  // den bereits laufenden Ausblend-Timer zurücksetzen (clearTimeout,
+  // timerRef in FileLink) – sonst blendet der ERSTE Timer das Feedback
+  // verfrüht aus, obwohl der ZWEITE Klick es gerade erst wieder
+  // eingeblendet hat. Zeiten an die neue 1-s-Anzeigedauer angepasst.
+  it("ein zweiter Klick VOR Ablauf des ersten Timers setzt den Ausblend-Timer zurück (kein verfrühtes Verschwinden)", () => {
     vi.useFakeTimers();
 
     mount("# T\n\n## A\n\n[Bericht](file:///C:/Users/x/Bericht.docx)");
     const link = container.querySelector("a");
 
-    await act(async () => {
+    act(() => {
       link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-      await Promise.resolve();
     });
-    expect(container.textContent).toContain("Pfad kopiert");
+    expect(container.textContent).toContain("wird geöffnet …");
 
-    act(() => { vi.advanceTimersByTime(1000); }); // noch VOR den ursprünglichen 1500 ms
-    expect(container.textContent).toContain("Pfad kopiert");
+    act(() => { vi.advanceTimersByTime(600); }); // noch VOR den ursprünglichen 1000 ms
+    expect(container.textContent).toContain("wird geöffnet …");
 
-    // Zweiter Klick bei t=1000: OHNE den Fix würde der vom ERSTEN Klick
-    // gestartete Timer trotzdem bei t=1500 feuern und das Feedback
+    // Zweiter Klick bei t=600: OHNE den Fix würde der vom ERSTEN Klick
+    // gestartete Timer trotzdem bei t=1000 feuern und das Feedback
     // ausblenden, obwohl der zweite Klick es gerade erneuert hat.
-    await act(async () => {
+    act(() => {
       link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-      await Promise.resolve();
     });
-    expect(writeText).toHaveBeenCalledTimes(2);
 
-    // t=1000+600=1600 – NACH dem ursprünglichen 1500-ms-Zeitpunkt des ERSTEN
-    // Timers, aber VOR dem neuen (bei 1000+1500=2500): bleibt sichtbar NUR,
+    // t=600+500=1100 – NACH dem ursprünglichen 1000-ms-Zeitpunkt des ERSTEN
+    // Timers, aber VOR dem neuen (bei 600+1000=1600): bleibt sichtbar NUR,
     // wenn der alte Timer korrekt gecleart wurde.
-    act(() => { vi.advanceTimersByTime(600); });
-    expect(container.textContent).toContain("Pfad kopiert");
+    act(() => { vi.advanceTimersByTime(500); });
+    expect(container.textContent).toContain("wird geöffnet …");
 
-    // Restliche Zeit bis zum NEUEN Timer (900 ms mehr = insgesamt 1500 ms
+    // Restliche Zeit bis zum NEUEN Timer (500 ms mehr = insgesamt 1000 ms
     // nach dem zweiten Klick) – jetzt verschwindet das Feedback.
-    act(() => { vi.advanceTimersByTime(900); });
-    expect(container.textContent).not.toContain("Pfad kopiert");
+    act(() => { vi.advanceTimersByTime(500); });
+    expect(container.textContent).not.toContain("wird geöffnet");
   });
 
-  it("eine abgelehnte Zwischenablage (Berechtigung verweigert) scheitert still, kein Crash, kein Feedback", async () => {
-    const writeText = vi.fn().mockRejectedValue(new Error("denied"));
-    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
-
-    mount("# T\n\n## A\n\n[Bericht](file:///C:/Users/x/Bericht.docx)");
+  // v7.39, Auftrag Punkt 3: bei einem UNC-Ziel liefert buildProtocolUrl
+  // null, href bleibt die file:-URL, ein Klick öffnet aus dem https-Kontext
+  // heraus NACHWEISLICH nichts – "wird geöffnet …" wäre hier eine
+  // Falschaussage und bleibt deshalb unterdrückt.
+  it("bei einem UNC-Ziel (buildProtocolUrl liefert null) wird KEIN Feedback angezeigt – es öffnet sich nachweislich nichts", () => {
+    mount("# T\n\n## A\n\n[Datei](file://server/share/datei.md)");
     const link = container.querySelector("a");
-    await act(async () => {
+    act(() => {
       link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-      await Promise.resolve().then(() => {}).catch(() => {});
-      await new Promise((r) => setTimeout(r, 0));
     });
-    expect(container.textContent).not.toContain("Pfad kopiert");
+    expect(container.textContent).not.toContain("wird geöffnet");
   });
 });
 
@@ -1497,8 +1522,9 @@ describe("FileLink: Klick kopiert den Windows-Pfad in die Zwischenablage (v7.31)
 // file:-Links" oben (renderToStaticMarkup deckt das ab, keine echte
 // Interaktion nötig) – hier zusätzlich per ECHTEM DOM/Klick verifiziert,
 // dass genau dieselbe href auch im interaktiv gemounteten Baum ankommt und
-// die Klick-Mechanik (Clipboard-Copy, kein preventDefault) dabei
-// unverändert funktioniert.
+// die Klick-Mechanik (kein preventDefault, kein window.open) dabei
+// unverändert funktioniert. Clipboard-Assertions (v7.31-v7.38) entfernt,
+// siehe Block oben für die aktive Pin-Gegenprobe.
 describe("FileLink: href ist die Protokoll-URL, Klick navigiert direkt (v7.36)", () => {
   let container;
   let root;
@@ -1519,14 +1545,10 @@ describe("FileLink: href ist die Protokoll-URL, Klick navigiert direkt (v7.36)",
     if (container) container.remove();
     root = null;
     container = null;
-    delete navigator.clipboard;
     vi.useRealTimers();
   });
 
-  it("ein Laufwerks-Pfad-Link hat als href direkt die notizbuch-open-Kontrakt-URL (kein Iframe/JS-Trigger nötig)", async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
-
+  it("ein Laufwerks-Pfad-Link hat als href direkt die notizbuch-open-Kontrakt-URL (kein Iframe/JS-Trigger nötig)", () => {
     mount("# T\n\n## A\n\n[Bericht](file:///C:/Users/x/Mein%20Bericht.docx)");
     const link = container.querySelector("a");
     expect(link.getAttribute("href")).toBe(
@@ -1535,59 +1557,36 @@ describe("FileLink: href ist die Protokoll-URL, Klick navigiert direkt (v7.36)",
     // title bleibt der lesbare Backslash-Pfad (der href ist es nicht mehr):
     expect(link.getAttribute("title")).toBe("C:\\Users\\x\\Mein Bericht.docx");
 
-    await act(async () => {
+    act(() => {
       link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-      await Promise.resolve();
     });
-    // Clipboard-Copy (v7.31) bleibt bei jedem Klick UNVERÄNDERT aktiv:
-    expect(writeText).toHaveBeenCalledWith("C:\\Users\\x\\Mein Bericht.docx");
     // Keine Iframe-Mechanik mehr vorhanden:
     expect(document.querySelectorAll("iframe").length).toBe(0);
   });
 
-  it("ein UNC-Ziel behält href als file:-URL (buildProtocolUrl liefert null) – Clipboard-Copy bleibt trotzdem aktiv", async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
-
+  it("ein UNC-Ziel behält href als file:-URL (buildProtocolUrl liefert null)", () => {
     mount("# T\n\n## A\n\n[Datei](file://server/share/datei.md)");
     const link = container.querySelector("a");
     expect(link.getAttribute("href")).toBe("file://server/share/datei.md");
-
-    await act(async () => {
-      link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-      await Promise.resolve();
-    });
-    expect(writeText).toHaveBeenCalledWith("\\\\server\\share\\datei.md");
   });
 
-  it("KEIN preventDefault bei einem Laufwerks-Pfad-Link: die Navigation zur Protokoll-URL wird nicht unterbunden", async () => {
-    Object.defineProperty(navigator, "clipboard", {
-      value: { writeText: vi.fn().mockResolvedValue(undefined) },
-      configurable: true,
-    });
-
+  it("KEIN preventDefault bei einem Laufwerks-Pfad-Link: die Navigation zur Protokoll-URL wird nicht unterbunden", () => {
     mount("# T\n\n## A\n\n[Bericht](file:///C:/Users/x/Bericht.docx)");
     const link = container.querySelector("a");
     const evt = new MouseEvent("click", { bubbles: true, cancelable: true });
-    await act(async () => {
+    act(() => {
       link.dispatchEvent(evt);
-      await Promise.resolve();
     });
     expect(evt.defaultPrevented).toBe(false);
   });
 
-  it("KEIN window.open (kein Popup-Blocker-Konflikt, kein neuer Tab) – der Klick löst nur die normale <a>-Navigation aus", async () => {
-    Object.defineProperty(navigator, "clipboard", {
-      value: { writeText: vi.fn().mockResolvedValue(undefined) },
-      configurable: true,
-    });
+  it("KEIN window.open (kein Popup-Blocker-Konflikt, kein neuer Tab) – der Klick löst nur die normale <a>-Navigation aus", () => {
     const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
 
     mount("# T\n\n## A\n\n[Bericht](file:///C:/Users/x/Bericht.docx)");
     const link = container.querySelector("a");
-    await act(async () => {
+    act(() => {
       link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-      await Promise.resolve();
     });
 
     expect(openSpy).not.toHaveBeenCalled();

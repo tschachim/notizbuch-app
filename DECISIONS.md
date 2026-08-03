@@ -4656,12 +4656,16 @@ aus `referenz-app.jsx` übernommen.
       blockieren die Navigation von einer https-Seite (GitHub Pages) zu
       `file://` aus Sicherheitsgründen – ein Klick tut dort meist NICHTS
       Sichtbares (nur lokal geöffnet oder mit einer Browser-Extension
-      navigiert er wirklich). Deshalb kopiert `onClick` ZUSÄTZLICH den
+      navigiert er wirklich). Deshalb kopierte `onClick` ZUSÄTZLICH den
       Windows-Pfad per `navigator.clipboard.writeText` in die
-      Zwischenablage (Fehler/fehlende API werden still geschluckt, kein
-      Crash) und zeigt ~1,5 s ein Inline-Feedback "Pfad kopiert" –
+      Zwischenablage (Fehler/fehlende API wurden still geschluckt, kein
+      Crash) und zeigte ~1,5 s ein Inline-Feedback "Pfad kopiert" –
       ausdrücklich KEIN `preventDefault`, damit eine erlaubte Navigation
-      (lokale App/Extension) trotzdem stattfindet.
+      (lokale App/Extension) trotzdem stattfindet. **Nachtrag v7.39:** Die
+      Zwischenablage-Kopie ist ERSATZLOS entfernt, das Inline-Feedback
+      heißt jetzt "wird geöffnet …" – siehe DECISIONS #79, Eintrag
+      "Zwischenablage-Kopie entfernt (v7.39)" für die vollständige
+      Begründung.
     - **Editor-Roundtrip (`src/components/DocEditor.jsx`), empirisch
       ermittelt:** markdown-it (unter tiptap-markdown) blockt `file:` per
       `validateLink` standardmäßig (`BAD_PROTO_RE` in
@@ -4842,7 +4846,13 @@ aus `referenz-app.jsx` übernommen.
       beeinflussbar) – das Kopieren-in-die-Zwischenablage ist ein
       bewusster Kompromiss, kein Ersatz für echte Navigation, und liefert
       dem Nutzer keine Rückmeldung, WOHIN genau (außer dem Tooltip) er den
-      Pfad einfügen soll. (4) Der Prosa-Schutz-Guard (c) aus Finding 1
+      Pfad einfügen soll. **Weitgehend ÜBERHOLT seit v7.35-v7.38** (eigenes
+      `notizbuch-open:`-Protokoll, siehe Eintrag #79 – ein Klick öffnet die
+      Datei bei installiertem Handler jetzt wirklich) **und die
+      Zwischenablage-Kopie selbst seit v7.39 ENTFERNT** (siehe #79,
+      "Zwischenablage-Kopie entfernt (v7.39)") – nur für ein UNC-Ziel bzw.
+      ohne installierten Handler bleibt ein Klick weiterhin ohne
+      Rückfallweg (siehe dort). (4) Der Prosa-Schutz-Guard (c) aus Finding 1
       (Wortzahl-Obergrenze je Segment) ist selbst wieder eine Heuristik mit
       einer harten Zahl (5) – ein echter, aber sehr wortreicher Dateiname
       in einem einzelnen Segment bleibt dadurch Klartext (False Negative,
@@ -5902,13 +5912,15 @@ aus `referenz-app.jsx` übernommen.
       sichtbare Fehlerseite beim Klick“) ist durch den Live-Befund
       überholt: Das Iframe verhinderte die Fehlerseite nur, weil es
       GENERELL nichts auslöste, auch nicht bei installiertem Handler
-      (siehe „Review-Nachbesserung 5“). Der Pfad landet trotzdem in der
-      Zwischenablage (Clipboard-Copy läuft unverändert bei JEDEM Klick) –
-      ein funktionierender Klick für Nutzer MIT Handler war die
-      ausdrückliche Priorität, eine zusätzliche Browser-Fehlermeldung für
-      Nutzer OHNE Handler der bewusst akzeptierte Preis dafür (ähnlich
-      wie ein Klick auf einen `vscode://…`-Link ohne installiertes VS
-      Code ebenfalls eine Fehlermeldung zeigt statt still zu scheitern).
+      (siehe „Review-Nachbesserung 5“). Der Pfad landete damals trotzdem in
+      der Zwischenablage (Clipboard-Copy lief zu diesem Zeitpunkt noch bei
+      JEDEM Klick, **seit v7.39 ENTFERNT, siehe #79 „Zwischenablage-Kopie
+      entfernt (v7.39)“**) – ein funktionierender Klick für Nutzer MIT
+      Handler war die ausdrückliche Priorität, eine zusätzliche Browser-
+      Fehlermeldung für Nutzer OHNE Handler der bewusst akzeptierte Preis
+      dafür (ähnlich wie ein Klick auf einen `vscode://…`-Link ohne
+      installiertes VS Code ebenfalls eine Fehlermeldung zeigt statt still
+      zu scheitern).
     - **`-Validate`-Diagnosemodus (`notizbuch-open-handler.ps1`):**
       Vitest kann PowerShell nicht testen – der Handler bekam deshalb
       einen expliziten `-Validate <url>`-Schalter, der dieselbe
@@ -6565,8 +6577,11 @@ aus `referenz-app.jsx` übernommen.
       anzeige-orientierter Formate ab (siehe eigener Abschnitt oben) –
       ein Nutzer mit einem legitimen, aber nicht gelisteten Dateityp
       (z. B. eine CAD-Zeichnung, ein Nischenformat) bekommt bis zu einer
-      Erweiterung der Liste NUR die Zwischenablage-Kopie statt eines
-      automatischen Öffnens. Das ist eine bewusste, dokumentierte
+      Erweiterung der Liste KEIN automatisches Öffnen (bis v7.38 immerhin
+      NOCH die Zwischenablage-Kopie als Rückfallweg – seit v7.39 entfernt,
+      siehe „Zwischenablage-Kopie entfernt (v7.39)“ weiter unten – jetzt
+      bleibt in diesem Fall nur der Tooltip mit dem vollen Pfad). Das ist
+      eine bewusste, dokumentierte
       Design-Entscheidung (Sicherheit vor Bequemlichkeit für den
       selteneren Fall), keine vergessene Lücke – die Liste ist bei
       Bedarf erweiterbar, jede Erweiterung sollte aber dieselbe
@@ -6657,9 +6672,12 @@ aus `referenz-app.jsx` übernommen.
       installiertem Handler war die ausdrückliche Priorität, die
       zusätzliche (harmlose, rein informative) Browser-Fehlermeldung für
       Nutzer OHNE Handler der akzeptierte Preis dafür – der Windows-Pfad
-      landet in BEIDEN Fällen unverändert in der Zwischenablage. Dieselbe
-      Charakteristik zeigen andere etablierte Custom-Protocol-Links (z. B.
-      `vscode://…` ohne installiertes VS Code).
+      landete zu diesem Zeitpunkt in BEIDEN Fällen noch unverändert in der
+      Zwischenablage (**seit v7.39 ENTFERNT**, siehe „Zwischenablage-Kopie
+      entfernt (v7.39)“ – ein Nutzer OHNE installierten Handler hat seither
+      NUR noch den Tooltip als Anhaltspunkt). Dieselbe Charakteristik
+      zeigen andere etablierte Custom-Protocol-Links (z. B. `vscode://…`
+      ohne installiertes VS Code).
       (10) Seit v7.37 (Launcher-Architektur): Der lokal kompilierte
       Launcher ist eine UNSIGNIERTE .exe – Windows SmartScreen/ein
       Virenscanner könnte beim ALLERERSTEN Start eine zusätzliche
@@ -6797,10 +6815,13 @@ aus `referenz-app.jsx` übernommen.
         Einzelfall darauf verlassen, ohne zu wissen, wann sie
         tatsächlich funktioniert) – deshalb bewusst KEIN Versuch über
         `msg.exe` im Produktivpfad. Bei einer Ablehnung entsteht NUR ein
-        Log-Eintrag (`notizbuch-open.log`, siehe unten); der bestehende
-        Rückfallweg bleibt bestehen: Die App kopiert den Windows-Pfad
-        bei JEDEM Klick ohnehin schon in die Zwischenablage,
-        unabhängig vom Ausgang dieses Handlers.
+        Log-Eintrag (`notizbuch-open.log`, siehe unten); zum Zeitpunkt
+        dieses Architektur-Wechsels (v7.38) kopierte die App den
+        Windows-Pfad bei JEDEM Klick noch zusätzlich in die Zwischenablage,
+        unabhängig vom Ausgang dieses Handlers – **dieser Rückfallweg ist
+        seit v7.39 ENTFERNT** (siehe „Zwischenablage-Kopie entfernt
+        (v7.39)“ unten): eine Ablehnung ist seither NUR NOCH im Log
+        sichtbar, ohne jeden Rückfallweg in der App selbst.
       - **GROSSER GEWINN: die Validierung ist jetzt testbar.** Der
         PowerShell-Handler war NIE automatisiert testbar (Vitest kann
         kein PowerShell ausführen, siehe Restrisiko (5) oben) – die
@@ -6939,9 +6960,11 @@ aus `referenz-app.jsx` übernommen.
         Fall vorgesehen (bewusst nicht Teil dieses Umfangs).
         (13) Keine MessageBox mehr bei Ablehnung (siehe oben) – ein
         Nutzer, dessen Klick abgelehnt wird, sieht dafür KEIN sofortiges
-        visuelles Feedback mehr (nur die weiterhin bestehende
-        Zwischenablage-Kopie plus einen Log-Eintrag, den nur ein
-        technisch versierter Nutzer nachschlagen würde).
+        visuelles Feedback mehr (zum Zeitpunkt dieses Architektur-Wechsels
+        noch die Zwischenablage-Kopie als Rückfallweg, **seit v7.39
+        ENTFERNT** – siehe „Zwischenablage-Kopie entfernt (v7.39)“ – seither
+        NUR NOCH ein Log-Eintrag, den nur ein technisch versierter Nutzer
+        nachschlagen würde).
       - **Review-Nachbesserung 6 (letzte Prüfung VOR der dauerhaften
         Registrierung beim Nutzer, VOR dem Commit gemeldet, EIN Pflicht-
         Fund):**
@@ -7033,3 +7056,85 @@ aus `referenz-app.jsx` übernommen.
           behoben, bereits durch den bestehenden Test „Datei, deren Name
           NUR aus einem führenden Punkt besteht“ (`tests/
           notizbuchOpen.test.js`) abgedeckt.
+      - **Zwischenablage-Kopie entfernt (v7.39, Nutzer-Feedback NACH
+        erfolgreichem Live-Test).** Der Protokoll-Klick funktioniert jetzt
+        live zuverlässig (auch mit Leerzeichen im Pfad) – die bisherige
+        Zwischenablage-Kopie war der Rückfallweg aus der Zeit, in der der
+        Protokollstart selbst noch nicht funktionierte (v7.31-v7.38, siehe
+        „Architektur-Chronik“ oben). Mit funktionierendem Protokollstart
+        wurde sie zu reinem Schaden: Nutzer wörtlich: „zum ersten soll der
+        Pfad nicht kopiert werden, weil das entfernt den aktuellen
+        Zwischenablage Inhalt, zum anderen irritiert der Text“.
+        - **Fix (`src/lib/markdown.jsx#FileLink`):** `navigator.clipboard.
+          writeText(...)`-Aufruf samt zugehöriger Promise-Verarbeitung
+          ERSATZLOS entfernt – kein anderer Code-Pfad brauchte den daraus
+          abgeleiteten Wert, `winPath` (`fileUrlToWinPath(url)`) wird
+          weiterhin NUR für den Tooltip (`title`-Attribut) gebraucht.
+        - **Inline-Feedback bleibt, Text geändert:** „Pfad kopiert“ →
+          „wird geöffnet …“ (exakte, vom Nutzer vorgeschlagene Formulierung).
+          Die Timer-Logik (`useRef`/`clearTimeout`/Unmount-Cleanup, Review-
+          Fix 🔵 Finding 4 aus v7.31) bleibt UNVERÄNDERT bestehen – nur die
+          Anzeigedauer wurde bewusst von 1,5 s auf 1 s VERKÜRZT: 1,5 s war
+          auf „Pfad kopiert“ zugeschnitten (ein Hinweis, den man sich kurz
+          merken musste, um ihn danach aktiv zu NUTZEN – Einfügen aus der
+          Zwischenablage); „wird geöffnet …“ ist dagegen eine rein
+          transiente Status-Info OHNE eigene Folgehandlung des Nutzers – 1 s
+          reicht, um den Klick als registriert wahrzunehmen, während
+          Windows parallel sichtbar das externe Programm startet.
+        - **Randfall UNC (Auftrag Punkt 3, begründete Entscheidung):** Bei
+          einem UNC-Ziel liefert `buildProtocolUrl` weiterhin `null`, `href`
+          bleibt die unveränderte `file:///…`-URL, ein Klick navigiert
+          dorthin, öffnet aus dem https-Kontext heraus aber NACHWEISLICH
+          nichts (Browser dürfen nicht von https zu `file://` navigieren,
+          siehe Kopfkommentar `filelinks.js`). Bis v7.38 gab es wenigstens
+          die Zwischenablage-Kopie als Trostpflaster – seit deren Entfernung
+          würde „wird geöffnet …“ hier eine FALSCHAUSSAGE sein (der Auftrag
+          verbietet das explizit). Entscheidung: `handleClick` prüft
+          `buildProtocolUrl(url)` VOR dem Setzen des Feedback-Status und
+          zeigt bei `null` (UNC) GAR KEIN Feedback – kein abweichender
+          Hinweistext (bewusst kein Over-Engineering für einen seltenen
+          Randfall, der ohnehin schon durch Restrisiko (1) in Eintrag #79
+          dokumentiert ist: UNC-Ziele werden von der Positivliste/vom
+          Protokoll grundsätzlich nicht unterstützt). Die Datei bleibt
+          trotzdem klickbar/per Tooltip (`title`) erkennbar, nur ohne das
+          kurze Erfolgs-Feedback.
+        - **`tools/notizbuch-open.js`:** Die drei Reject-Reason-Texte, die
+          bei einer abgelehnten Endung auf die Zwischenablage verwiesen
+          („… Der Pfad wurde - sofern der Browser das zulässt - in die
+          Zwischenablage kopiert.“), waren seit der Entfernung sachlich
+          falsch (sie landen ohnehin NUR im Log, siehe „Nutzer-Feedback bei
+          Ablehnung“ oben) – auf die reine Ablehnungsbegründung gekürzt.
+          Kopfkommentar-Abschnitt „NUTZER-FEEDBACK BEI ABLEHNUNG“
+          entsprechend aktualisiert: der frühere Rückfallweg wird als
+          ENTFALLEN benannt, keine neue Kompensation eingeführt (dieselbe
+          Abwägung wie beim ursprünglichen Verzicht auf `msg.exe`, siehe
+          oben – ein neuer, eigenständiger Zwischenablage-Mechanismus NUR
+          für den Ablehnungsfall wäre Overengineering für einen seltenen
+          Pfad).
+        - **Tests (`tests/markdown.test.jsx`):** Die beiden FileLink-
+          describe-Blöcke umbenannt/umgeschrieben – Clipboard-Assertions
+          entfernt, DAFÜR aktiv gepinnt, dass `navigator.clipboard.
+          writeText` bei KEINEM Klick mehr aufgerufen wird (Regressionsschutz
+          gegen eine versehentliche Rückkehr der Kopie), Feedback-Text-
+          Assertions auf „wird geöffnet …“ umgestellt, Timer-/Mehrfachklick-
+          Test (Review-Fix 🔵 Finding 4) mit auf 1 s angepassten Zeiten
+          beibehalten, neuer Test für den UNC-Randfall (kein Feedback).
+          Beim Umschreiben gefunden (Test-Infrastruktur, kein Produktcode-
+          Bug): Seit der Klick-Dispatch SYNCHRON statt wie zuvor über
+          `await act(async () => { …; await Promise.resolve(); })`
+          ausgelöst wird (keine asynchrone Clipboard-Promise mehr
+          anzustoßen), warnte React bei jedem `act()`-Aufruf „The current
+          testing environment is not configured to support act(...)“ –
+          harmlos (Effekte/State-Updates wurden trotzdem korrekt
+          geflusht), aber unnötiger Konsolen-Lärm; behoben über das von
+          React offiziell empfohlene `globalThis.IS_REACT_ACT_ENVIRONMENT
+          = true` am Dateianfang (dieses Projekt nutzt `act` direkt aus
+          `"react"`, nicht `@testing-library/react`, das dieses Flag
+          intern selbst setzt).
+        - **Restrisiko:** Ohne installierten Handler UND bei einem UNC-Ziel
+          hat ein Nutzer jetzt GAR KEINEN Rückfallweg mehr in der App
+          selbst (nur noch den Tooltip mit dem vollen Pfad) – bewusst in
+          Kauf genommen, siehe Nutzer-Zitat oben: der frühere Rückfallweg
+          verursachte in der weit überwiegenden Mehrheit der Fälle
+          (funktionierender Handler) mehr Schaden (überschriebene
+          Zwischenablage) als Nutzen (seltener Rückfallweg).

@@ -834,19 +834,25 @@ bleibt wie bisher (D10) ausgeblendet – kein Drag&Drop dort zu erwarten
 (kein Bug).
 
 **D14 [OFFEN] Absoluter Windows-Pfad wird automatisch zu einem
-file:-Link (v7.31, Nutzer-Befund Live + Nutzerwunsch).** Editor öffnen
-(Stift-Knopf, im QA-Notizbuch), in einen Absatz eine Testzeile mit einem
-erfundenen absoluten Windows-Pfad OHNE bestehenden Link tippen, z. B.
-„Beleg: C:\Users\test\QA-Beleg.docx im Ordner.“ Speichern. Erwartet: In
-der Dokument-Ansicht erscheint „QA-Beleg“ als unterstrichener, blauer
-Link genau an der Stelle des Pfads (Linktext = Dateiname OHNE Endung),
-der übrige Satz bleibt unverändert; KEIN hochgestelltes Fußnoten-Symbol.
+file:-Link (v7.31, Nutzer-Befund Live + Nutzerwunsch; Klick-Feedback
+überarbeitet in v7.39).** Editor öffnen (Stift-Knopf, im QA-Notizbuch),
+in einen Absatz eine Testzeile mit einem erfundenen absoluten
+Windows-Pfad OHNE bestehenden Link tippen, z. B. „Beleg:
+C:\Users\test\QA-Beleg.docx im Ordner.“ Speichern. Erwartet: In der
+Dokument-Ansicht erscheint „QA-Beleg“ als unterstrichener, blauer Link
+genau an der Stelle des Pfads (Linktext = Dateiname OHNE Endung), der
+übrige Satz bleibt unverändert; KEIN hochgestelltes Fußnoten-Symbol.
 Mit der Maus über den Link fahren: Tooltip zeigt den vollen Windows-Pfad
 (Backslash-Form) an (der eigentliche Link-Href ist seit v7.36 NICHT mehr
 menschenlesbar, siehe unten). Auf den Link klicken: erwartet erscheint
-kurz ein Hinweis „Pfad kopiert“ direkt neben dem Link (verschwindet nach
-~1,5 s von selbst) – das gilt IMMER, unabhängig vom Rest dieses Absatzes.
-Was der Klick DARÜBER HINAUS auslöst, hängt seit v7.36 vom Testkanal ab:
+kurz ein Hinweis „wird geöffnet …“ direkt neben dem Link (verschwindet
+nach ~1 s von selbst) – das gilt für einen Laufwerkspfad wie in diesem
+Testfall IMMER, unabhängig vom Rest dieses Absatzes. **WICHTIG (v7.39):**
+Es wird NICHTS mehr in die Zwischenablage kopiert – bis v7.38 kopierte
+JEDER Klick zusätzlich den Windows-Pfad dorthin, das ist bewusst
+ERSATZLOS entfernt (überschrieb sonst ungefragt den bisherigen
+Zwischenablage-Inhalt des Nutzers), NICHT mehr prüfen/erwarten. Was der
+Klick DARÜBER HINAUS auslöst, hängt seit v7.36 vom Testkanal ab:
 - **Im eingebetteten Browser-Pane dieses Testlaufs:** Custom-Protocol-
   Navigation (`notizbuch-open:…`) löst dort grundsätzlich NICHTS aus,
   unabhängig vom Mechanismus – das ist KEIN Fehler und wird nicht als
@@ -856,13 +862,13 @@ Was der Klick DARÜBER HINAUS auslöst, hängt seit v7.36 vom Testkanal ab:
   `notizbuch-open:v1?path=…`-Protokoll-URL – mit installiertem Handler
   öffnet sich die Datei im registrierten Programm, ohne installierten
   Handler zeigt der Browser eine eigene Fehlermeldung („keine App für
-  dieses Protokoll“ o. Ä.), der Pfad bleibt aber trotzdem kopiert.
-Direkt danach den Inhalt der Zwischenablage prüfen (z. B. in das
-Chat-Eingabefeld einfügen und wieder löschen): erwartet steht dort der
-Windows-Pfad in Backslash-Form („C:\Users\test\QA-Beleg.docx“). Editor
-erneut öffnen: Der Link bleibt als echter, klickbarer Link erhalten
-(kein Zerfall in eckige Klammern/Klartext) und lässt sich über den
-Link-Knopf (Cursor hineinsetzen, Kettensymbol) als
+  dieses Protokoll“ o. Ä.); das „wird geöffnet …“-Feedback erscheint in
+  BEIDEN Fällen (die App weiß clientseitig nicht, ob ein Handler
+  installiert ist), es ist also KEIN verlässlicher Beleg für ein
+  tatsächliches Öffnen.
+Editor erneut öffnen: Der Link bleibt als echter, klickbarer Link
+erhalten (kein Zerfall in eckige Klammern/Klartext) und lässt sich über
+den Link-Knopf (Cursor hineinsetzen, Kettensymbol) als
 „file:///C:/Users/test/QA-Beleg.docx“ im Popover ablesen (die im
 Dokument gespeicherte Markdown-Syntax bleibt unverändert file:-basiert –
 nur der beim Anzeigen gerenderte Link-Href wird zur Protokoll-URL
@@ -934,14 +940,18 @@ Datei anschließend selbst über `explorer.exe` – dieselbe Doppelklick-
 Semantik wie zuvor `Invoke-Item`): Der Browser fragt beim ALLERERSTEN
 Klick einmalig, ob „notizbuch-open“-Links geöffnet werden dürfen
 (Bestätigen); danach öffnet sich die Datei im dafür unter Windows
-registrierten Programm – genau wie ein Explorer-Doppelklick. Das
-bisherige Clipboard-Copy-Verhalten („Pfad kopiert“-Hinweis, D14) bleibt
-dabei ZUSÄTZLICH bestehen (unabhängig vom Ausgang der Navigation).
+registrierten Programm – genau wie ein Explorer-Doppelklick. **Seit
+v7.39 GEÄNDERT:** Es wird NICHTS mehr in die Zwischenablage kopiert (das
+frühere Clipboard-Copy-Verhalten war der Rückfallweg aus der Zeit, in
+der der Protokollstart noch nicht funktionierte – ERSATZLOS entfernt,
+siehe DECISIONS #79 „Zwischenablage-Kopie entfernt (v7.39)“); NICHT mehr
+prüfen/erwarten.
 **Ohne installierten Handler** (nicht Teil dieses Testfalls, aber gut zu
 kennen): der Browser zeigt jetzt eine EIGENE Fehlermeldung („Für dieses
 Protokoll ist keine Anwendung verknüpft“ o. Ä.) statt still nichts zu
-tun – bewusst in Kauf genommen (siehe DECISIONS #79), der Pfad landet
-trotzdem in der Zwischenablage. Der Handler öffnet automatisch NUR
+tun – bewusst in Kauf genommen (siehe DECISIONS #79); seit v7.39 gibt es
+in diesem Fall KEINEN Rückfallweg mehr in der App selbst (nur noch der
+Tooltip mit dem vollen Pfad). Der Handler öffnet automatisch NUR
 Dateitypen von einer festen Positivliste gängiger Dokument-/Medien-
 formate (u. a. `.pdf`, `.txt`, `.docx`, `.png`, `.mp3` – siehe
 `tools/notizbuch-open.js`, `ALLOWED_EXTENSIONS`, für die vollständige
@@ -952,13 +962,14 @@ nur noch nicht gelistete Formate) wird OHNE sichtbares Feedback
 abgelehnt (seit v7.38 KEINE MessageBox mehr, nur ein Log-Eintrag in
 `%LOCALAPPDATA%\NotizbuchOpen\notizbuch-open.log` – bewusste
 Einschränkung, siehe DECISIONS #79; für den Testfall selbst bedeutet
-das: „nichts passiert außer der Zwischenablage-Kopie“ ist bei einer
-ABGELEHNTEN Datei jetzt das ERWARTETE Verhalten, kein Fehlerbild). Bekannte
-Grenze (KEIN Fehler, falls beobachtet): Ein sehr langer Pfad (deutlich
-über der Windows-`MAX_PATH`-Grenze von 260 Zeichen, insbesondere mit
-vielen Leerzeichen/Umlauten) wird ab einer bestimmten Länge NICHT mehr
-als file:-Link erkannt (Cap in `FILE_URL_SRC`, `src/lib/filelinks.js`,
-Begründung dort) – für normale Testpfade ohne extreme Länge irrelevant.
+das: „gar nichts passiert“ ist bei einer ABGELEHNTEN Datei jetzt das
+ERWARTETE Verhalten, kein Fehlerbild – seit v7.39 KEIN Zwischenablage-
+Trost mehr). Bekannte Grenze (KEIN Fehler, falls beobachtet): Ein sehr
+langer Pfad (deutlich über der Windows-`MAX_PATH`-Grenze von 260
+Zeichen, insbesondere mit vielen Leerzeichen/Umlauten) wird ab einer
+bestimmten Länge NICHT mehr als file:-Link erkannt (Cap in
+`FILE_URL_SRC`, `src/lib/filelinks.js`, Begründung dort) – für normale
+Testpfade ohne extreme Länge irrelevant.
 Danach `-Uninstall` ausführen, falls die Einrichtung nur für diesen
 Testlauf vorgenommen wurde (Cleanup, sonst bleibt sie bestehen).
 

@@ -502,15 +502,13 @@ const GENERIC_LINK_TOKEN_RE = new RegExp("^\\[([^\\]\\n]{1,300})\\]\\((" + LINK_
 // Bewusst in Kauf genommen (siehe DECISIONS #79): Auf einem Rechner OHNE
 // installierten Handler (Opt-in-Setup, siehe tools/notizbuch-open-setup.ps1)
 // zeigt der Klick jetzt eine browsereigene Fehlermeldung ("Für dieses
-// Protokoll ist keine App verknüpft" o. Ä.) statt still nur zu kopieren –
+// Protokoll ist keine App verknüpft" o. Ä.) statt still nichts zu tun –
 // die frühere v7.35-Begründung für das Iframe ("keine sichtbare Fehlerseite
 // beim Klick") ist durch den Live-Befund überholt: das Iframe verhinderte
 // die Fehlerseite nur, weil es GENERELL nichts auslöste, auch nicht bei
-// installiertem Handler. Der Pfad landet trotzdem in der Zwischenablage
-// (Clipboard-Copy läuft unverändert bei JEDEM Klick) – ein funktionierender
-// Klick für Nutzer MIT Handler war die ausdrückliche Priorität, eine
-// zusätzliche Fehlermeldung für Nutzer OHNE Handler der bewusst akzeptierte
-// Preis dafür.
+// installiertem Handler. Ein funktionierender Klick für Nutzer MIT Handler
+// war die ausdrückliche Priorität, eine zusätzliche Fehlermeldung für
+// Nutzer OHNE Handler der bewusst akzeptierte Preis dafür.
 //
 // KEIN target="_blank": Bei einem Klick auf einen Custom-Scheme-Link in
 // einem NEUEN Tab (target="_blank") bliebe dieser neue, leere Tab nach dem
@@ -518,54 +516,71 @@ const GENERIC_LINK_TOKEN_RE = new RegExp("^\\[([^\\]\\n]{1,300})\\]\\((" + LINK_
 // wieder schließen) – ein sichtbarer, verwirrender Nebeneffekt. Ohne
 // target bleibt es bei genau der aktuellen Seite/demselben Tab (siehe auch
 // bestehenden Test "KEIN target=_blank/rel-Attribut" unten).
+//
+// KEINE Zwischenablage-Kopie mehr (v7.39, Live-Befund + Nutzerwunsch nach
+// erfolgreichem Live-Test): Bis v7.38 kopierte JEDER Klick zusätzlich den
+// Windows-Pfad in die Zwischenablage (navigator.clipboard.writeText) – ein
+// Rückfallweg aus der Zeit, in der der Protokollstart selbst noch nicht
+// zuverlässig funktionierte (siehe DECISIONS #79, "Architektur-Wechsel
+// v7.38"). Seit der Protokollstart LIVE bestätigt funktioniert (auch mit
+// Leerzeichen im Pfad), ist die Kopie nicht mehr Rückfallweg, sondern reiner
+// Schaden: sie überschreibt ungefragt den bisherigen Zwischenablage-Inhalt
+// des Nutzers UND der Hinweistext "Pfad kopiert" irritiert, weil gar nichts
+// mehr kopiert wird. Ersatzlos entfernt – kein anderer Code-Pfad in der App
+// braucht den bisher aus winPath abgeleiteten Zwischenablage-Wert (winPath
+// wird unten NUR NOCH für den Tooltip/title gebraucht, siehe dort).
 function FileLink({ url, title }) {
-  const [copied, setCopied] = useState(false);
   const winPath = fileUrlToWinPath(url);
-  // href: die Protokoll-URL (Laufwerkspfad) oder unverändert die file:-URL
-  // (UNC-Ziel, buildProtocolUrl liefert dafür null) – NICHT mehr
-  // menschenlesbar, deshalb bleibt "title" explizit der Backslash-Pfad
-  // (siehe unten), damit der Tooltip weiterhin aussagekräftig ist.
-  const href = buildProtocolUrl(url) ?? url;
-  // Timer-ID in einem Ref (Review-Fix 🔵 Finding 4): ein zweiter Klick
-  // VOR Ablauf der ersten 1,5 s löschte bisher NICHT den bereits laufenden
-  // Timer – der ERSTE Timer blendete das Feedback dann verfrüht aus, obwohl
-  // der ZWEITE Klick es gerade erst wieder eingeblendet hatte. clearTimeout
-  // vor jedem neuen Start UND beim Unmount (useEffect-Cleanup unten, falls
-  // der Nutzer wegnavigiert/das Dokument neu rendert, bevor die 1,5 s um sind).
+  // protocolUrl ist null für ein UNC-Ziel (buildProtocolUrl lehnt UNC-Pfade
+  // bewusst ab, siehe SICHERHEIT-Kommentar in filelinks.js/SMB-Credential-
+  // Leak-Risiko) – href bleibt in diesem Fall unverändert die file:-URL.
+  // Ein Klick darauf navigiert zwar (kein preventDefault, siehe unten),
+  // öffnet aus dem https-Kontext dieser App heraus aber NACHWEISLICH NICHTS
+  // (Browser dürfen nicht von https zu file:// navigieren, siehe
+  // Kopfkommentar filelinks.js) – das Inline-Feedback unten wird deshalb
+  // NUR gezeigt, wenn tatsächlich ein Öffnen-Versuch stattfindet (v7.39,
+  // Auftrag Punkt 3: "wird geöffnet …" darf nicht erscheinen, wenn
+  // nachweislich nichts geöffnet wird). NICHT dieselbe Wortwahl wie unten,
+  // aber KEIN Over-Engineering (Auftrag): kein zusätzlicher abweichender
+  // Hinweistext für diesen seltenen Randfall – die Datei bleibt trotzdem
+  // klickbar/mit Tooltip erkennbar, nur eben ohne das kurze Erfolgs-Feedback.
+  const protocolUrl = buildProtocolUrl(url);
+  const href = protocolUrl ?? url;
+  const [opening, setOpening] = useState(false);
+  // Timer-ID in einem Ref (Review-Fix 🔵 Finding 4, v7.31 – Logik
+  // UNVERÄNDERT beibehalten, siehe Auftrag Punkt 2): ein zweiter Klick VOR
+  // Ablauf des Timers löschte bisher NICHT den bereits laufenden Timer –
+  // der ERSTE Timer blendete das Feedback dann verfrüht aus, obwohl der
+  // ZWEITE Klick es gerade erst wieder eingeblendet hatte. clearTimeout vor
+  // jedem neuen Start UND beim Unmount (useEffect-Cleanup unten, falls der
+  // Nutzer wegnavigiert/das Dokument neu rendert, bevor die Zeit um ist).
   const timerRef = useRef(null);
   useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
-  // NUR NOCH Clipboard-Copy + Feedback, KEIN preventDefault: die Navigation
-  // zu href (Protokoll-Start bzw. file:-URL) muss normal ablaufen. Reihen-
-  // folge bewusst so belassen: clipboard.writeText() wird HIER synchron
-  // ANGESTOSSEN (liefert sofort ein Promise zurück, der eigentliche Kopier-
-  // vorgang läuft asynchron), handleClick kehrt danach ohne preventDefault
-  // zurück – die Standard-Aktion des Klicks (Navigation) startet direkt im
-  // Anschluss. Eine Navigation zu einem REGISTRIERTEN Custom-Scheme entlädt
-  // die aktuelle Seite dabei NICHT (der Browser übergibt nur an die externe
-  // App/zeigt einen Erlaubnis-Prompt, das Dokument bleibt bestehen) – der
-  // asynchrone Clipboard-Vorgang wird also nicht durch die Navigation
-  // abgebrochen.
+  // Anzeigedauer AUF 1 S VERKÜRZT (v7.39, bewusste Entscheidung, Auftrag
+  // Punkt 2): Die bisherigen 1,5 s waren auf "Pfad kopiert" zugeschnitten –
+  // ein Hinweis, den man sich kurz merken musste, um ihn danach aktiv zu
+  // NUTZEN (Einfügen aus der Zwischenablage). "wird geöffnet …" ist dagegen
+  // eine rein transiente Status-Info OHNE eigene Folgehandlung des Nutzers –
+  // 1 s reicht, um den Klick als registriert wahrzunehmen, während Windows
+  // parallel sichtbar das externe Programm startet, ohne dass der Hinweis
+  // unnötig lange stehen bleibt.
   const handleClick = () => {
-    const clipboard = typeof navigator !== "undefined" ? navigator.clipboard : null;
-    if (!clipboard || typeof clipboard.writeText !== "function") return; // kein Crash ohne Clipboard-API
-    clipboard.writeText(winPath).then(
-      () => {
-        if (timerRef.current) clearTimeout(timerRef.current);
-        setCopied(true);
-        timerRef.current = setTimeout(() => {
-          setCopied(false);
-          timerRef.current = null;
-        }, 1500);
-      },
-      () => {} // Zwischenablage verweigert/nicht verfügbar: still scheitern.
-    );
+    // UNC-Ziel: siehe Kommentar bei protocolUrl oben – kein Feedback, weil
+    // nachweislich nichts geöffnet wird.
+    if (!protocolUrl) return;
+    if (timerRef.current) clearTimeout(timerRef.current);
+    setOpening(true);
+    timerRef.current = setTimeout(() => {
+      setOpening(false);
+      timerRef.current = null;
+    }, 1000);
   };
   return (
     <>
       <a href={href} title={winPath} className={DOC_LINK_CLASS} onClick={handleClick}>
         {renderInline(title)}
       </a>
-      {copied && <span className="ml-1 text-xs text-emerald-600 align-middle">Pfad kopiert</span>}
+      {opening && <span className="ml-1 text-xs text-emerald-600 align-middle">wird geöffnet …</span>}
     </>
   );
 }
