@@ -178,6 +178,25 @@
 //   abgelehnter Notizbuch-Link, sondern schlicht kein gueltiger Aufruf
 //   dieses Handlers - ebenfalls nur ein Log-Eintrag, kein Reject.
 //
+//   KONTRAKT: DIESES SKRIPT VERARBEITET AUSSCHLIESSLICH WINDOWS-PFADE
+//   (Review-Fund, VOR dem Commit gemeldet). Es laeuft IMMER unter echtem
+//   win32 (Registry-Aufruf durch Windows, siehe ZWECK oben) - trotzdem
+//   verwenden ALLE Pfad-Operationen hier bewusst EXPLIZIT die
+//   "path.win32"-Variante des Node-"path"-Moduls (extname/join/resolve/
+//   dirname), NICHT den plattformabhaengigen Default-Export "path.*".
+//   Grund: der DEFAULT-Export von "path" wechselt je nach
+//   "process.platform" zwischen win32- und posix-Semantik - das hat in
+//   der Praxis KEINE Auswirkung auf die Produktion (die laeuft immer
+//   unter win32), wohl aber auf Tests, die dieselbe Datei unter Linux-CI
+//   importieren (siehe DECISIONS.md #79, CI-Deploy-Fix): fuer einen
+//   Pfad wie "C:\Users\test\.geheim" liefert path.posix.extname()
+//   FAELSCHLICH ".geheim" (erkennt "\" nicht als Trenner, behandelt den
+//   kompletten String als EIN Segment), waehrend path.win32.extname()
+//   korrekt "" liefert (kein Extension-Zeichen VOR dem Basisnamen). Die
+//   explizite ".win32"-Variante beseitigt diese Klasse "CI-Semantik ungleich
+//   Produktions-Semantik" strukturell, unabhaengig davon, unter welchem
+//   Betriebssystem Vitest gerade laeuft.
+//
 // AUFRUF
 //   Normalbetrieb (durch die Registry, siehe notizbuch-open-setup.ps1):
 //     node.exe notizbuch-open.js "notizbuch-open:v1?path=..."
@@ -484,7 +503,7 @@ export function validateProtocolUrl(rawUrl, deps = {}) {
   if (!canonical.isDirectory) {
     // Datei: nur eine Endung aus der Positivliste wird geoeffnet. Eine
     // Datei OHNE erkennbare Endung wird ABGELEHNT (fail-closed).
-    const extWithDot = path.extname(canonical.fullPath);
+    const extWithDot = path.win32.extname(canonical.fullPath);
     const extRaw = extWithDot.startsWith(".") ? extWithDot.slice(1) : extWithDot;
     if (!extRaw) {
       return {
@@ -607,7 +626,7 @@ function openWithExplorer(canonicalPath, logPath) {
 }
 
 function resolveLogPath(scriptDir) {
-  return path.join(scriptDir, "notizbuch-open.log");
+  return path.win32.join(scriptDir, "notizbuch-open.log");
 }
 
 // CLI-Einstiegspunkt: unterstuetzt sowohl den Normalbetrieb (ein
@@ -647,9 +666,9 @@ export function runCli(argv, scriptDir) {
   openWithExplorer(result.path, logPath);
 }
 
-const isMainModule = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
+const isMainModule = process.argv[1] && fileURLToPath(import.meta.url) === path.win32.resolve(process.argv[1]);
 if (isMainModule) {
-  const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+  const scriptDir = path.win32.dirname(fileURLToPath(import.meta.url));
   try {
     // argv[0]=node, argv[1]=Skriptpfad, argv[2..]=eigentliche Argumente.
     runCli(process.argv.slice(2), scriptDir);
