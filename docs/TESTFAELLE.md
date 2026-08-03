@@ -484,8 +484,15 @@ einen Anhang wie „ miss=system_changed(~…tok)“ oder „ diag=inconclusive�
 zeigen (Beta-Feld `diagnostics` der Anthropic-API). Nach einem
 Notizbuch- oder Gedächtnis-Commit zwischen den beiden Nachrichten ist
 „miss=system_changed“ NORMAL und kein Fehler (der System-Prompt ändert
-sich dabei absichtlich). Nur melden, falls in der Konsole eine Warnung
-„[cache] tools_changed …“ erscheint – das wäre ein echter Befund.
+sich dabei absichtlich). Zu „[cache] tools_changed …“ (seit v7.33
+präzisiert, siehe DECISIONS): Die App unterscheidet selbst zwischen
+erwarteter und unerwarteter Änderung. Erscheint die Zeile als
+`console.debug` MIT der Erläuterung „erwartet, unsere Tool-Auswahl hat
+sich seit dem letzten Request bewusst geändert (Modus/Modell/
+Wissensbasis-Zustand), kein Bug-Verdacht“, ist das KEIN Befund – die
+Tool-Liste hängt legitim von mode/lookupEnabled/modelId ab. Nur eine
+echte `console.warn`-Warnung OHNE diese Erläuterung (Signatur unverändert
+und trotzdem tools_changed) ist ein Befund und zu melden.
 
 **C19 [VERBUNDEN][API] Ops-Zuverlässigkeit: Überführen-Muster + ⚠️-Warnung
 bei wirkungslosen Ops (v7.21, exaktes Nutzer-Szenario).** Im QA-Notizbuch
