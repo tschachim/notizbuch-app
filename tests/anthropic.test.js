@@ -531,7 +531,7 @@ describe("buildSystem", () => {
     it("nennt delete_chapter in der abschließenden op-Typen-Liste (OPS-ZUVERLÄSSIGKEIT)", () => {
       const sys = buildSystem(nbs, "Wissensbasis", null);
       expect(sys).toContain(
-        "Es gibt NUR diese op-Typen: append_to_section, replace_section, delete_section, delete_chapter, rewrite, memory_append, memory_replace."
+        "Es gibt NUR diese op-Typen: append_to_section, replace_section, delete_section, delete_chapter, append_to_chapter, rewrite, memory_append, memory_replace."
       );
     });
 
@@ -568,8 +568,106 @@ describe("buildSystem", () => {
     it("NOTEBOOK_TOOL-Schema: chapter-Beschreibung nennt delete_chapter bereits in der einleitenden Klammer (Review-Fix)", () => {
       const props = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties;
       expect(props.chapter.description).toMatch(
-        /\(als Eingrenzung bei append_to_section\/replace_section\/delete_section; bei delete_chapter Pflicht-Adressfeld; entfällt bei rewrite, memory_append und memory_replace\)/
+        /\(als Eingrenzung bei append_to_section\/replace_section\/delete_section; bei delete_chapter\/append_to_chapter Pflicht-Adressfeld; entfällt bei rewrite, memory_append und memory_replace\)/
       );
+    });
+  });
+
+  // v7.40 (append_to_chapter-Op, zwei Live-Befunde – siehe DECISIONS #80):
+  // Befund 1 ("neues H1 Kapitel 'KPIs' anlegen und Inbox-Items da rein
+  // schieben") erzeugte ein redundantes "## KPIs" unter "# KPIs", weil die
+  // Ops-Engine Stichpunkte bisher NUR in ##-Abschnitte schreiben konnte.
+  // Befund 2 ("X als Unterkapitel von Y" mit Y = #-Kapitel) legte
+  // fälschlich ein ###-Unterthema INNERHALB eines bestehenden ##-Abschnitts
+  // an, statt einen neuen ##-Abschnitt direkt im #-Kapitel.
+  describe("append_to_chapter-Op + Anti-Duplikat-/Ebenen-Regeln (v7.40, zwei Live-Befunde)", () => {
+    it("dokumentiert append_to_chapter in der Ops-Liste inkl. Anlage-Verhalten bei fehlendem Kapitel", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain('{"type":"append_to_chapter","chapter":"# Kapitel","content":"- Stichpunkt"}');
+      expect(sys).toContain("hängt content als KAPITEL-FREITEXT direkt unter die");
+      expect(sys).toContain("VOR dem ersten ##-Abschnitt");
+      expect(sys).toContain("wird es wie bei append_to_section/replace_section automatisch am Dokumentende angelegt");
+    });
+
+    it("Ops-Listen-Intro nennt append_to_chapter (mit delete_chapter) als Ausnahme, die #-Kapitel statt ##-Abschnitte adressiert", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain(
+        "append_to_section/replace_section/delete_section beziehen sich auf ##-Hauptabschnitte, append_to_chapter und delete_chapter dagegen auf ganze #-Kapitel"
+      );
+    });
+
+    it("verbietet Kapitelnamen-Duplikate: kein ##-Abschnitt, der nur den Namen seines #-Kapitels wiederholt (Live-Befund 1)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("Lege NIEMALS einen ##-Abschnitt an, der nur den Namen seines #-Kapitels wiederholt");
+      expect(sys).toContain('"## KPIs" unter "# KPIs"');
+      expect(sys).toContain("append_to_chapter (Freitext direkt im Kapitel) ODER einen inhaltlich sinnvoll benannten ##-Abschnitt");
+      // Steht im OPS-ZUVERLÄSSIGKEIT-Block.
+      const block = sys.slice(sys.indexOf("OPS-ZUVERLÄSSIGKEIT"), sys.indexOf("REINE FRAGEN"));
+      expect(block).toContain("Kein Kapitelnamen-Duplikat");
+    });
+
+    // v7.40 Nachschärfung (Nutzer-Klarstellung nach Auslieferung): Der
+    // Nutzer benutzt „Kapitel“/„Unterkapitel“/„Abschnitt“ NICHT als feste
+    // Markdown-Ebenen-Bezeichner, sondern austauschbar und ebenen-
+    // UNABHÄNGIG (ein „Kapitel“ kann bei ihm „Unterkapitel“ eines anderen
+    // „Kapitels“ sein, beliebig verschachtelt) – die Regel bildet dieses
+    // Sprachmodell jetzt explizit ab, statt nur die drei Wörter
+    // aufzuzählen.
+    it("übersetzt den ebenen-unabhängigen Kapitel-Sprachgebrauch korrekt: 'Y als Unterkapitel von X' bedeutet Y GENAU EINE Ebene unter X", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("Kapitel-Sprachgebrauch (ebenen-unabhängig)");
+      expect(sys).toContain('Der Nutzer benutzt „Kapitel“/„Unterkapitel“/„Abschnitt“ austauschbar und EBENEN-UNABHÄNGIG');
+      expect(sys).toContain("ein „Kapitel“ kann bei ihm „Unterkapitel“ eines anderen „Kapitels“ sein, beliebig verschachtelt");
+      expect(sys).toContain("ergibt sich NIE aus dem verwendeten Wort selbst, sondern aus dem genannten BEZUGSOBJEKT");
+      expect(sys).toContain('„Y als Unterkapitel von X“ bedeutet IMMER: Y liegt GENAU EINE Ebene UNTER X');
+      expect(sys).toContain('ist Y ein ##-Hauptabschnitt DIREKT in diesem Kapitel gemeint (append_to_section/replace_section mit chapter:"# X")');
+      expect(sys).toContain("NIEMALS ein ###-Unterthema innerhalb eines bereits bestehenden ##-Abschnitts dieses Kapitels");
+      expect(sys).toContain("Ist X dagegen ein ##-Abschnitt, ist Y ein ###-Unterthema in dessen content gemeint (replace_section des ##-Abschnitts)");
+    });
+
+    // Review-Fix 🔵 (v7.40, Code-Review): "ergibt sich NIE aus dem
+    // verwendeten Wort, sondern ALLEIN aus dem Bezugsobjekt" kollidierte mit
+    // expliziten Ebenen-Angaben des Nutzers (z. B. "neues H1-Kapitel KPIs")
+    // und mit dem späteren "Ebene dann aus dem Kontext der Anweisung" –
+    // Ausnahme ergänzt: eine explizite Ebenen-Angabe hat IMMER Vorrang.
+    it("räumt einer EXPLIZITEN Ebenen-Angabe des Nutzers (z. B. 'H1'/'H2'/'###') Vorrang vor der Bezugsobjekt-Ableitung ein (Review-Fix)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain('oder aus einer EXPLIZITEN Ebenen-Angabe des Nutzers (z. B. „H1“/„H2“/„###“), die IMMER Vorrang hat');
+    });
+
+    it("sucht ein 'Kapitel Y' OHNE Bezugsobjekt auf ALLEN Markdown-Ebenen (#/##/###), erst bei Nichtfund gilt ein NEUES Y als gemeint", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain('Nennt der Nutzer ein „Kapitel Y“ OHNE Bezugsobjekt, suche Y auf ALLEN Ebenen des Dokuments (#, ## UND ###) statt nur unter den #-Kapiteln');
+      expect(sys).toContain("erst wenn Y nirgends existiert, ist ein NEUES Y gemeint (Ebene dann aus dem Kontext der Anweisung, im Zweifel als #-Kapitel)");
+    });
+
+    it("verlangt bei mehrdeutigem X/Y auf mehreren Ebenen eine kurze Rückfrage statt Raten", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("Existiert X bzw. Y mehrdeutig auf mehreren Ebenen, frage in reply kurz nach, statt zu raten");
+    });
+
+    it("NOTEBOOK_TOOL-Schema: type-enum enthält append_to_chapter mit erklärender Beschreibung", () => {
+      const typeProp = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties.type;
+      expect(typeProp.enum).toContain("append_to_chapter");
+      expect(typeProp.description).toMatch(/append_to_chapter hängt 'content' als KAPITEL-FREITEXT direkt/);
+      expect(typeProp.description).toMatch(/erfinde dafür KEINEN ##-Abschnitt, der nur/);
+    });
+
+    it("NOTEBOOK_TOOL-Schema: heading-Beschreibung nennt append_to_chapter als Ausnahme", () => {
+      const props = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties;
+      expect(props.heading.description).toMatch(/rewrite, delete_chapter, append_to_chapter, memory_append und memory_replace/);
+    });
+
+    it("NOTEBOOK_TOOL-Schema: chapter-Beschreibung nennt append_to_chapter als Pflicht-Adressfeld für Kapitel-Freitext", () => {
+      const props = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties;
+      expect(props.chapter.description).toMatch(/Bei append_to_chapter ist 'chapter' ebenfalls das PFLICHT-Adressfeld/);
+      expect(props.chapter.description).toMatch(/KAPITEL-FREITEXT aus 'content'/);
+    });
+
+    it("content-description bleibt korrekt: entfällt weiterhin NUR bei delete_section/delete_chapter, nicht bei append_to_chapter", () => {
+      const props = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties;
+      expect(props.content.description).toContain("Entfällt bei delete_section und delete_chapter.");
+      expect(props.content.description).not.toMatch(/append_to_chapter/);
     });
   });
 
@@ -657,7 +755,7 @@ describe("buildSystem", () => {
       // Ausnahme prüfen, nicht den Vertrag duplizieren.
       expect(sys).toMatch(/GEDÄCHTNIS-Ops \("memory_append"\/"memory_replace"\) sind davon EBENFALLS ausgenommen/);
       expect(sys).toContain("Gedächtnispflege ist KEIN Notizbuch-Aufräumen");
-      expect(sys).toContain("ALLE Notizbuch-Ops (append_to_section/replace_section/delete_section/delete_chapter/rewrite) bleiben bei reinen Fragen dagegen unverändert verboten");
+      expect(sys).toContain("ALLE Notizbuch-Ops (append_to_section/replace_section/delete_section/delete_chapter/append_to_chapter/rewrite) bleiben bei reinen Fragen dagegen unverändert verboten");
     });
 
     it("NOTEBOOK_TOOL-Schema: type-enum enthält memory_append/memory_replace mit erklärender Beschreibung", () => {
@@ -792,7 +890,7 @@ describe("buildSystem", () => {
   it("GLIEDERUNGS-VORSCHLAG: 'ops':[] meint NOTIZBUCH-Ops, memory_append/memory_replace bleiben davon unberührt (Review-Fix)", () => {
     const sys = buildSystem(nbs, "Wissensbasis", null);
     expect(sys).toContain('"ops":[] bleibt dabei leer'); // bestehender Vertrag bleibt als Substring erhalten
-    expect(sys).toContain('Mit "ops":[] sind hier NOTIZBUCH-Ops gemeint (append_to_section/replace_section/delete_section/delete_chapter/rewrite)');
+    expect(sys).toContain('Mit "ops":[] sind hier NOTIZBUCH-Ops gemeint (append_to_section/replace_section/delete_section/delete_chapter/append_to_chapter/rewrite)');
     expect(sys).toContain("memory_append/memory_replace bleiben davon unberührt und auch beim reinen Struktur-Vorschlag erlaubt");
   });
 
@@ -814,7 +912,7 @@ describe("buildSystem", () => {
     it("nennt die exakte, abschließende Liste der op-Typen und verbietet erfundene Varianten", () => {
       const sys = buildSystem(nbs, "Wissensbasis", null);
       expect(sys).toContain(
-        "Es gibt NUR diese op-Typen: append_to_section, replace_section, delete_section, delete_chapter, rewrite, memory_append, memory_replace."
+        "Es gibt NUR diese op-Typen: append_to_section, replace_section, delete_section, delete_chapter, append_to_chapter, rewrite, memory_append, memory_replace."
       );
       expect(sys).toContain("Erfinde keine Varianten (z. B. memory_add)");
       expect(sys).toContain("unbekannte Typen werden verworfen und dir als ⚠️ gemeldet");

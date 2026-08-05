@@ -905,6 +905,214 @@ Freitext ohne Abschnitt.
   });
 });
 
+// v7.40 (append_to_chapter-Op, zwei Live-Befunde – siehe DECISIONS #80):
+// Befund 1 ("mach ein neues H1 Kapitel 'KPIs' und schiebe alle kpi inbox
+// items da rein"): die Ops-Engine konnte Stichpunkte bisher NUR in
+// ##-Abschnitte schreiben (append_to_section) – das Modell erzeugte
+// zwangsläufig einen ##-Abschnitt und duplizierte dabei den Kapitelnamen
+// ("# KPIs" mit redundantem "## KPIs" darin). append_to_chapter hängt
+// content stattdessen als KAPITEL-FREITEXT direkt unter die #-Kapitelzeile,
+// VOR dem ersten ##-Abschnitt.
+describe("applyOps: append_to_chapter (v7.40, Live-Befund 'Kapitel-Duplikat')", () => {
+  it("Kapitel MIT ##-Abschnitten: content landet in der Präambel VOR dem ersten ##-Abschnitt (kein Kapitelnamen-Duplikat als eigener ##-Abschnitt nötig)", () => {
+    const out = applyOps(DOC_CH, [
+      { type: "append_to_chapter", chapter: "Kapitel A", content: "- neu" },
+    ]);
+    // Direkt hinter der Kapitelzeile, VOR "## Eins" - KEIN "## Kapitel A"
+    // als redundanter Abschnitt (genau das Live-Befund-1-Duplikat).
+    expect(out).toContain("# Kapitel A\n- neu\n\n## Eins");
+    expect(out).not.toMatch(/^## Kapitel A$/m);
+    expect(out.indexOf("- neu")).toBeLessThan(out.indexOf("## Eins"));
+    expect(out).toContain("- alt"); // bestehender Abschnittsinhalt unangetastet
+    // Kapitel B bleibt komplett unangetastet.
+    expect(out).toContain("# Kapitel B");
+    expect(out).toContain("- b");
+  });
+
+  const DOC_CH_FREETEXT = [
+    "# Wissensbasis", "",
+    "# Kapitel C", "",
+    "Bestehender Freitext.", "",
+    "## Eins", "",
+    "- x", "",
+    "# Kapitel D", "",
+    "## Zwei", "",
+    "- y", "",
+  ].join("\n");
+
+  it("Kapitel MIT vorhandenem Präambel-Freitext: content wird NACH dem bestehenden Freitext angehängt, weiterhin VOR dem ersten ##-Abschnitt", () => {
+    const out = applyOps(DOC_CH_FREETEXT, [
+      { type: "append_to_chapter", chapter: "Kapitel C", content: "- neuer Punkt" },
+    ]);
+    expect(out).toContain("Bestehender Freitext.\n- neuer Punkt\n\n## Eins");
+    expect(out.indexOf("- neuer Punkt")).toBeLessThan(out.indexOf("## Eins"));
+    expect(out).toContain("- x");
+    expect(out).toContain("# Kapitel D");
+  });
+
+  const DOC_FREETEXT_NO_SECTION = [
+    "# Wissensbasis", "",
+    "# QA-Test Neu", "",
+    "Freitext ohne Abschnitt.", "",
+    "# Kapitel B", "",
+    "## Zwei", "",
+    "- b", "",
+  ].join("\n");
+
+  it("Kapitel OHNE ##-Abschnitte: content landet am Kapitelende, NACH dem Freitext, VOR dem nächsten #-Kapitel", () => {
+    const out = applyOps(DOC_FREETEXT_NO_SECTION, [
+      { type: "append_to_chapter", chapter: "QA-Test Neu", content: "- x" },
+    ]);
+    expect(out).toContain("Freitext ohne Abschnitt.\n- x\n\n# Kapitel B");
+    expect(out).toContain("## Zwei");
+    expect(out).toContain("- b");
+  });
+
+  it("Kapitel als LETZTE Dokumentzeile (kein Folge-Kapitel): content landet ganz am Dokumentende", () => {
+    const doc = "# Wissensbasis\n\n# Letztes Kapitel\n\nFreitext am Ende.\n";
+    const out = applyOps(doc, [
+      { type: "append_to_chapter", chapter: "Letztes Kapitel", content: "- Punkt" },
+    ]);
+    expect(out).toBe("# Wissensbasis\n\n# Letztes Kapitel\n\nFreitext am Ende.\n- Punkt\n");
+  });
+
+  it("fehlendes Kapitel wird am Dokumentende NEU ANGELEGT (mit Leerzeile zwischen Kapitelzeile und content, konsistent zu v7.23)", () => {
+    const out = applyOps(DOC, [
+      { type: "append_to_chapter", chapter: "Neues Kapitel", content: "- a" },
+    ]);
+    expect(out).toContain("# Neues Kapitel\n\n- a");
+    expect(out).toContain("- alter Eintrag"); // bestehender Inhalt unangetastet
+    expect(out).toContain("- [x] erledigt");
+  });
+
+  it("ZWEI aufeinanderfolgende append_to_chapter-Ops auf DASSELBE neue Kapitel landen im SELBEN Kapitel (Sequenz-Korrektheit, Ops laufen auf dem Zwischenstand)", () => {
+    const out = applyOps(DOC, [
+      { type: "append_to_chapter", chapter: "Neues Kapitel", content: "- a" },
+      { type: "append_to_chapter", chapter: "Neues Kapitel", content: "- b" },
+    ]);
+    expect(out.match(/^# Neues Kapitel$/gm)).toHaveLength(1);
+    const kapitelText = out.split("# Neues Kapitel")[1];
+    expect(kapitelText).toContain("- a");
+    expect(kapitelText).toContain("- b");
+    expect(kapitelText.indexOf("- a")).toBeLessThan(kapitelText.indexOf("- b"));
+  });
+
+  describe("Titelzeilen-Fall (analog zu delete_chapter, DECISIONS #74/#80)", () => {
+    it("Dokument-Titelzeile gleichnamig, KEIN echtes Kapitel -> neues Kapitel am Dokumentende, Dokument-Vorspann bleibt unangetastet", () => {
+      const doc = "# Projekte\n\n## Existierend\n\n- x\n";
+      const out = applyOps(doc, [
+        { type: "append_to_chapter", chapter: "Projekte", content: "- neu" },
+      ]);
+      const parts = out.split(/^# Projekte$/m);
+      // Genau ZWEI "# Projekte"-Zeilen: die Titelzeile UND das neu angelegte
+      // Kapitel am Ende - NICHT in den Vorspann zwischen Titel und
+      // "## Existierend" geschrieben.
+      expect(parts.length).toBe(3);
+      expect(parts[1]).toBe("\n\n## Existierend\n\n- x\n\n");
+      expect(parts[2]).toContain("- neu");
+    });
+
+    it("MIT gleichnamigem ECHTEN Kapitel weiter unten: dieses wird getroffen, kein drittes/neues Kapitel entsteht", () => {
+      const doc = [
+        "# Projekte", "",
+        "## Existierend", "", "- x", "",
+        "# Projekte", "", "## Eins", "", "- alt", "",
+      ].join("\n");
+      const out = applyOps(doc, [
+        { type: "append_to_chapter", chapter: "Projekte", content: "- neu" },
+      ]);
+      expect(out.match(/^# Projekte$/gm)).toHaveLength(2); // kein drittes Kapitel
+      expect(out).toContain("## Existierend");
+      expect(out).toContain("- x");
+      const secondChapter = out.split("# Projekte")[2];
+      expect(secondChapter).toContain("- neu");
+      expect(secondChapter.indexOf("- neu")).toBeLessThan(secondChapter.indexOf("## Eins"));
+      expect(secondChapter).toContain("- alt");
+    });
+  });
+
+  it("Fence-Aware: eine '## '-Zeile INNERHALB eines geschlossenen ```-Codeblocks in der Präambel zählt NICHT als Abschnittsgrenze", () => {
+    const doc = [
+      "# Wissensbasis", "",
+      "# Kapitel Fence", "",
+      "```", "## nicht real", "```", "",
+      "## Echt", "", "- x", "",
+    ].join("\n");
+    const out = applyOps(doc, [
+      { type: "append_to_chapter", chapter: "Kapitel Fence", content: "- neu" },
+    ]);
+    // Content landet VOR dem ECHTEN ersten Abschnitt "## Echt", NICHT vor
+    // der Phantom-"## "-Zeile im Codeblock.
+    expect(out.indexOf("- neu")).toBeLessThan(out.indexOf("## Echt"));
+    // Der Codeblock (inkl. der Phantom-Überschrift darin) bleibt byte-genau
+    // erhalten.
+    expect(out).toContain("```\n## nicht real\n```");
+    expect(out).toContain("- x");
+  });
+
+  // Review-Fix 🔵 (v7.40, Code-Review): normHead-Toleranz war für
+  // append_to_chapter bisher nur INDIREKT über findAddressableChapter/
+  // findChapter mitgetestet (dieselbe Funktion wie bei delete_chapter,
+  // siehe dessen eigener Test weiter oben) – ein direkter Pin für den
+  // NEUEN Op-Typ fehlte. Die kanonische Prompt-Form ("chapter":"# Kapitel")
+  // trägt das "#"-Präfix – normHead() muss das genauso wie die nackte Form
+  // ("Kapitel A") auf dasselbe Kapitel abbilden.
+  it("kanonische Prompt-Form 'chapter': \"# Kapitel A\" (mit #-Präfix) wirkt IDENTISCH zur nackten Form (normHead-Toleranz)", () => {
+    const outPrefixed = applyOps(DOC_CH, [
+      { type: "append_to_chapter", chapter: "# Kapitel A", content: "- neu" },
+    ]);
+    const outBare = applyOps(DOC_CH, [
+      { type: "append_to_chapter", chapter: "Kapitel A", content: "- neu" },
+    ]);
+    expect(outPrefixed).toBe(outBare);
+    expect(outPrefixed).toContain("# Kapitel A\n- neu\n\n## Eins");
+  });
+
+  it("heading-Fallback: fehlt 'chapter', wird 'heading' als Kapiteltitel akzeptiert (Modell-Varianz, wie bei delete_chapter)", () => {
+    const out = applyOps(DOC_CH, [
+      { type: "append_to_chapter", heading: "Kapitel A", content: "- neu" },
+    ]);
+    expect(out).toContain("# Kapitel A\n- neu\n\n## Eins");
+  });
+
+  it("ignoriert leeren content (No-op)", () => {
+    expect(applyOps(DOC_CH, [{ type: "append_to_chapter", chapter: "Kapitel A", content: "" }])).toBe(DOC_CH);
+  });
+});
+
+describe("applyOpsDetailed: append_to_chapter Skip-Gründe und Anzeige-Heading (v7.40)", () => {
+  it("leerer content: No-op mit Grund 'leerer content', heading-Anzeigefeld zeigt den Kapitelnamen", () => {
+    const { text, results } = applyOpsDetailed(DOC_CH, [
+      { type: "append_to_chapter", chapter: "Kapitel A", content: "" },
+    ]);
+    expect(text).toBe(DOC_CH);
+    expect(results[0]).toEqual({
+      index: 0, type: "append_to_chapter", heading: "Kapitel A", applied: false,
+      reason: "leerer content",
+    });
+  });
+
+  it("weder 'chapter' noch 'heading' gesetzt: No-op mit Grund 'fehlende Kapitel-Überschrift'", () => {
+    const { text, results } = applyOpsDetailed(DOC_CH, [
+      { type: "append_to_chapter", content: "- x" },
+    ]);
+    expect(text).toBe(DOC_CH);
+    expect(results[0]).toEqual({
+      index: 0, type: "append_to_chapter", heading: undefined, applied: false,
+      reason: "fehlende Kapitel-Überschrift",
+    });
+  });
+
+  it("applied:true zeigt den Kapitelnamen im heading-Anzeigefeld, ohne reason (Warn-Pillen-Konsistenz wie bei delete_chapter)", () => {
+    const { results } = applyOpsDetailed(DOC_CH, [
+      { type: "append_to_chapter", chapter: "Kapitel A", content: "- neu" },
+    ]);
+    expect(results[0]).toEqual({
+      index: 0, type: "append_to_chapter", heading: "Kapitel A", applied: true, reason: undefined,
+    });
+  });
+});
+
 // v7.21 (Ops-Zuverlässigkeit, Live-Befund – siehe DECISIONS #63): applyOps()
 // verschluckte wirkungslose Ops bisher kommentarlos. applyOpsDetailed()
 // liefert zusätzlich pro Op einen Grund; applyOps() bleibt ein reiner
@@ -1157,6 +1365,13 @@ describe("applyOps === applyOpsDetailed(...).text (Wrapper-Äquivalenz, Pin)", (
     [DOC_CH, [{ type: "delete_chapter", chapter: "Wissensbasis" }]],
     [DOC_CH, [{ type: "delete_chapter" }]],
     [DOC_CH, [{ type: "delete_chapter", heading: "Kapitel A" }]],
+    // v7.40 (append_to_chapter-Op): angewendete UND übersprungene Fälle
+    // (Kapitel gefunden, Kapitel fehlt/wird neu angelegt, leerer content,
+    // weder chapter noch heading gesetzt) mit in den Pin aufgenommen.
+    [DOC_CH, [{ type: "append_to_chapter", chapter: "Kapitel A", content: "- neu" }]],
+    [DOC_CH, [{ type: "append_to_chapter", chapter: "Kapitel A", content: "" }]],
+    [DOC_CH, [{ type: "append_to_chapter", chapter: "Kapitel X", content: "- neu" }]],
+    [DOC_CH, [{ type: "append_to_chapter" }]],
   ];
   for (const [doc, ops] of cases) {
     it("Fall: " + JSON.stringify(ops).slice(0, 60), () => {

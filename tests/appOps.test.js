@@ -210,6 +210,25 @@ describe("buildOpsWarning: Warn-Pillen-Text aus NICHT angewendeten Ops bauen", (
     );
   });
 
+  // v7.40 (append_to_chapter-Op, siehe DECISIONS #80): dieselbe
+  // Sonderbehandlung wie bei delete_chapter (chapterFieldFor statt
+  // op.heading fürs Anzeige-Feld) – dieser Test prüft den KOMPLETTEN Weg
+  // von applyOpsDetailed bis zur fertigen Pille für den einzig verbleibenden
+  // Skip-Grund (leerer content; ein fehlendes Kapitel legt append_to_chapter
+  // selbst an, landet also so gut wie nie hier).
+  it("append_to_chapter-Skip (leerer content) zeigt den Kapitelnamen in der Warn-Pille (End-zu-Ende über applyOpsDetailed)", () => {
+    const doc = "# Wissensbasis\n\n# KPIs\n\n## Bereich A\n\n- x\n";
+    const { results } = applyOpsDetailed(doc, [
+      { type: "append_to_chapter", chapter: "KPIs", content: "" },
+    ]);
+    const out = buildOpsWarning(
+      results.filter((r) => !r.applied).map((r) => ({ ...r, notebook: "QA-Test" }))
+    );
+    expect(out).toBe(
+      '⚠️ Nicht angewendet: append_to_chapter „KPIs“ in „QA-Test“ (leerer content)'
+    );
+  });
+
   it("MEHRERE nicht angewendete Ops werden in EINER Pille gebündelt (mehrzeilig, ein Eintrag pro Zeile)", () => {
     const out = buildOpsWarning([
       { type: "delete_section", heading: "Warenkunde", notebook: "QA-Test", reason: 'Abschnitt „Warenkunde“ nicht gefunden' },

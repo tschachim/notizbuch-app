@@ -551,6 +551,36 @@ hätte, das als 🔴 melden und den Vorzustand wiederherstellen). „QA-Test
 Kapitel“ ist durch die erste Löschung bereits weg – keine weitere
 Aufräumaktion nötig.
 
+**C21 [VERBUNDEN][API] Neues #-Kapitel mit Items befüllen, ohne
+Kapitelnamen-Duplikat (append_to_chapter, v7.40, Live-Befund).** Im
+QA-Notizbuch im Chat: „Lege ein neues Kapitel ‚QA-Test KPIs‘ an und trage
+dort die Stichpunkte ‚Umsatz +5%‘ und ‚Kosten -3%‘ ein.“ (1 API-Aufruf).
+Erwartet: Ein neues `#`-Kapitel „QA-Test KPIs“ entsteht mit BEIDEN
+Stichpunkten – entweder direkt als Kapitel-Freitext (kein eigener
+`##`-Abschnitt nötig) ODER in einem inhaltlich sinnvoll benannten
+`##`-Abschnitt (z. B. „## Kennzahlen“). Ein 🔴-Finding liegt genau dann
+vor, wenn stattdessen ein `##`-Abschnitt entsteht, der NUR den
+Kapitelnamen wiederholt (z. B. „## QA-Test KPIs“ unter „# QA-Test KPIs“ –
+genau das Live-Befund-Duplikat, das append_to_chapter vermeiden soll).
+Danach aufräumen: „Lösche das Kapitel QA-Test KPIs.“ (1 API-Aufruf, siehe
+C20).
+
+**C22 [VERBUNDEN][API] „Y als Unterkapitel von Kapitel X“ – korrekte
+Ebenen-Übersetzung (v7.40, Live-Befund).** Voraussetzung: Ein
+`#`-Kapitel „QA-Test Codex“ mit MINDESTENS EINEM bestehenden
+`##`-Abschnitt – bei Bedarf per Chat anlegen: „Lege im neuen Kapitel
+‚QA-Test Codex‘ den Abschnitt ‚Offene Handovers‘ mit einem Stichpunkt
+an.“ (1 API-Aufruf). Danach im Chat: „Trage Tickets als Unterkapitel von
+QA-Test Codex ein: Ticket 123, Ticket 456.“ (1 API-Aufruf). Erwartet: Ein
+NEUER `##`-Abschnitt „Tickets“ (oder sinngemäß benannt) entsteht DIREKT
+im Kapitel „QA-Test Codex“, auf derselben Ebene wie „## Offene
+Handovers“ – NICHT als `###`-Unterthema INNERHALB von „## Offene
+Handovers“ oder eines anderen bestehenden Abschnitts. Der bestehende
+Abschnitt „Offene Handovers“ bleibt inhaltlich unverändert. Ein
+🔴-Finding liegt vor, wenn die Tickets stattdessen als `###`-Unterthema
+in einem bestehenden `##`-Abschnitt landen. Danach aufräumen: „Lösche
+das Kapitel QA-Test Codex.“ (1 API-Aufruf).
+
 ## D. Manuelles Bearbeiten (WYSIWYG)
 
 **D1 [VERBUNDEN] Editor-Roundtrip.** Stift-Knopf → im QA-Notizbuch einen

@@ -22,6 +22,16 @@
 /* code.jsx, dieselbe Maske wie markdown.jsx#parseTree). Vorher konnte    */
 /* eine Op an einer solchen Phantom-Grenze im Code enden und den Rest     */
 /* des Codeblocks (falsch) stehen lassen bzw. löschen/ersetzen.           */
+/* v7.40 (append_to_chapter-Op, zwei Live-Befunde – siehe DECISIONS #80): */
+/* neuer Op-Typ, der content als KAPITEL-FREITEXT direkt unter eine       */
+/* #-Kapitelzeile hängt (vor dem ersten ##-Abschnitt des Kapitels) - die  */
+/* Ops-Engine konnte Stichpunkte bisher NUR in ##-Abschnitte schreiben    */
+/* (append_to_section), das Modell musste dafür zwangsläufig einen       */
+/* ##-Abschnitt erfinden und duplizierte dabei reflexartig den           */
+/* Kapitelnamen ("# KPIs" mit redundantem "## KPIs" darin). Nutzt         */
+/* dieselbe Titelzeilen-/Adressierungs-Logik wie delete_chapter - der     */
+/* bisherige Helfer findDeletableChapter() dient jetzt BEIDEN Op-Typen    */
+/* und heißt deshalb neutraler findAddressableChapter().                 */
 /* ------------------------------------------------------------------ */
 
 import { computeFenceLineMask } from "./code.jsx";
@@ -53,8 +63,8 @@ export const dispHead = (h) => String(h || "").replace(/^#+\s*/, "").trim();
 // wenn kein Kapitel mit diesem Titel existiert. "fromIdx" (optional, v7.32.1
 // Review-Fix 🟡): Startindex der Suche nach der ERSTEN passenden Zeile –
 // Default 0 (bisheriges Verhalten, unverändert für alle Aufrufer ohne
-// dritten Parameter). Wird von findDeletableChapter() unten genutzt, um NACH
-// einer bereits gefundenen Notizbuch-Titelzeile weiterzusuchen.
+// dritten Parameter). Wird von findAddressableChapter() unten genutzt, um
+// NACH einer bereits gefundenen Notizbuch-Titelzeile weiterzusuchen.
 // v7.33 (Finding A, DECISIONS #75): fence-aware – computeFenceLineMask wird
 // aus "lines" berechnet (derselbe Zeilenstand, den auch die Suche selbst
 // nutzt) und maskiert sowohl die START- als auch die END-Suche: eine
@@ -98,10 +108,11 @@ function titleLineIdx(lines) {
   return firstContentIdx !== -1 && CHAPTER_RE.test(lines[firstContentIdx]) ? firstContentIdx : -1;
 }
 
-// Liefert das für delete_chapter adressierte Kapitel-Feld (v7.32): bevorzugt
-// "chapter" (konsistent zum bestehenden chapter-Feld bei den anderen Ops),
-// fällt bei fehlendem/leerem "chapter" auf "heading" zurück – Robustheits-
-// Fallback gegen Modell-Varianz (manche Antworten könnten das allgemeinere
+// Liefert das für delete_chapter/append_to_chapter adressierte Kapitel-Feld
+// (v7.32, v7.40 um append_to_chapter erweitert): bevorzugt "chapter"
+// (konsistent zum bestehenden chapter-Feld bei den anderen Ops), fällt bei
+// fehlendem/leerem "chapter" auf "heading" zurück – Robustheits-Fallback
+// gegen Modell-Varianz (manche Antworten könnten das allgemeinere
 // heading-Feld statt des korrekten chapter-Felds benutzen). Von applyOne UND
 // explainSkip genutzt (nicht dupliziert), damit beide GARANTIERT denselben
 // Kapitel-String sehen – Grundprinzip dieser Datei, siehe explainSkip-
@@ -112,29 +123,36 @@ function chapterFieldFor(op) {
   return "";
 }
 
-// Sucht das für delete_chapter zu löschende Kapitel UNTER Berücksichtigung
-// der Titelzeilen-Ausnahme (v7.32.1, Review-Fix 🟡, Live-Befund-Nachbesserung):
-// Ein Kapitel mit dem GLEICHEN Namen wie die Notizbuch-Titelzeile (z. B.
-// Titel "# Projekte" UND weiter unten ein reguläres "# Projekte"-Kapitel –
-// laut parseTree/titleLineIdx ist JEDE "# "-Zeile außer der einen Titelzeile
-// ein normales Kapitel) wäre sonst per delete_chapter DAUERHAFT unlöschbar:
-// findChapter() liefert bei der globalen Suche IMMER zuerst die Titelzeile
-// (erster Treffer im Dokument), der reine Positionsvergleich in applyOne
-// hätte das als Titelzeilen-Skip gemeldet, obwohl weiter unten ein echtes,
-// löschbares Kapitel mit demselben Namen existiert. Trifft der erste Treffer
-// die Titelzeile, wird die Suche deshalb AB der Zeile DANACH fortgesetzt
-// (findChapter-"fromIdx"); nur wenn dort ebenfalls nichts gefunden wird,
-// bleibt es beim Titelzeilen-Skip. Ein bereits GEFUNDENES echtes Kapitel
-// unterhalb der Titelzeile ist niemals selbst wieder die Titelzeile (die
-// Suche startet ja erst NACH deren Index) – ein erneuter Titel-Vergleich
-// danach ist daher nicht nötig. Von applyOne UND explainSkip genutzt (kein
-// zweiter Schreibpfad), damit beide GARANTIERT dieselbe Entscheidung
-// treffen. Rückgabe: { range: [s,e]|null, titleBlocked: bool } –
-// titleBlocked ist nur bei range===null gesetzt und unterscheidet "gar kein
-// Kapitel dieses Namens" (false) von "nur als Titelzeile getroffen, sonst
-// nirgends" (true) – die beiden Fälle brauchen unterschiedliche
-// explainSkip-Meldungen.
-function findDeletableChapter(lines, chapterField) {
+// Sucht das für delete_chapter/append_to_chapter ADRESSIERTE Kapitel UNTER
+// Berücksichtigung der Titelzeilen-Ausnahme (v7.32.1, Review-Fix 🟡,
+// Live-Befund-Nachbesserung; v7.40: umbenannt von findDeletableChapter, da
+// jetzt auch append_to_chapter diesen Helfer nutzt – reine Namensänderung,
+// Verhalten unverändert): Ein Kapitel mit dem GLEICHEN Namen wie die
+// Notizbuch-Titelzeile (z. B. Titel "# Projekte" UND weiter unten ein
+// reguläres "# Projekte"-Kapitel – laut parseTree/titleLineIdx ist JEDE
+// "# "-Zeile außer der einen Titelzeile ein normales Kapitel) wäre sonst
+// per delete_chapter DAUERHAFT unlöschbar bzw. bei append_to_chapter würde
+// versehentlich in den Dokument-Vorspann statt in ein echtes Kapitel
+// geschrieben: findChapter() liefert bei der globalen Suche IMMER zuerst die
+// Titelzeile (erster Treffer im Dokument), der reine Positionsvergleich in
+// applyOne hätte das fälschlich als echtes Kapitel behandelt, obwohl weiter
+// unten ein echtes, gleichnamiges Kapitel existiert. Trifft der erste
+// Treffer die Titelzeile, wird die Suche deshalb AB der Zeile DANACH
+// fortgesetzt (findChapter-"fromIdx"); nur wenn dort ebenfalls nichts
+// gefunden wird, bleibt es beim Titelzeilen-Skip (delete_chapter) bzw. gilt
+// das Kapitel als NICHT vorhanden (append_to_chapter legt es dann neu an,
+// siehe applyOne). Ein bereits GEFUNDENES echtes Kapitel unterhalb der
+// Titelzeile ist niemals selbst wieder die Titelzeile (die Suche startet ja
+// erst NACH deren Index) – ein erneuter Titel-Vergleich danach ist daher
+// nicht nötig. Von applyOne UND explainSkip genutzt (kein zweiter
+// Schreibpfad), damit beide GARANTIERT dieselbe Entscheidung treffen.
+// Rückgabe: { range: [s,e]|null, titleBlocked: bool } – titleBlocked ist nur
+// bei range===null gesetzt und unterscheidet "gar kein Kapitel dieses
+// Namens" (false) von "nur als Titelzeile getroffen, sonst nirgends" (true)
+// – delete_chapter braucht dafür zwei unterschiedliche explainSkip-
+// Meldungen, append_to_chapter behandelt BEIDE Fälle gleich (Kapitel neu
+// anlegen, siehe applyOne).
+function findAddressableChapter(lines, chapterField) {
   const first = findChapter(lines, chapterField);
   if (!first) return { range: null, titleBlocked: false };
   const tIdx = titleLineIdx(lines);
@@ -165,6 +183,23 @@ function findSection(lines, heading, range) {
     if (!mask[j] && BOUNDARY_RE.test(lines[j])) { e = j; break; }
   }
   return [s, e];
+}
+
+// Sucht die Zeile des ERSTEN "## "-Abschnitts INNERHALB eines Kapitel-
+// Bereichs [s, e) (v7.40, append_to_chapter-Op, siehe DECISIONS #80) – wie
+// von findChapter/findAddressableChapter geliefert. Grenze der KAPITEL-
+// PRÄAMBEL: alles vor dieser Zeile (Kopfzeile selbst + evtl. Freitext)
+// gehört zum Kapitel, aber VOR jedem ##-Abschnitt – genau der Bereich, in
+// den append_to_chapter schreibt. Gibt es KEINEN ##-Abschnitt im Kapitel,
+// ist range[1] (Kapitelende) selbst die Einfüge-Grenze (Präambel = ganzes
+// Kapitel). Fence-aware wie findSection/findChapter: eine "## "-Zeile
+// INNERHALB eines geschlossenen ```-Codeblocks zählt NICHT als Abschnitt.
+function firstSectionInChapter(lines, range) {
+  const mask = computeFenceLineMask(lines);
+  for (let i = range[0] + 1; i < range[1]; i++) {
+    if (!mask[i] && HEAD_RE.test(lines[i])) return i;
+  }
+  return range[1];
 }
 
 // v7.33 Review-Nachbesserung (Finding 3, siehe DECISIONS #75/#78): Kollabiert
@@ -253,7 +288,7 @@ function applyOne(text, op) {
     // Konvention IMMER die erste Zeile) ist NIE ein Kapitel – ein
     // delete_chapter auf den Notizbuchnamen darf sie nicht treffen, sonst
     // reißt es Titel + kompletten Vorspann bis zum ersten ECHTEN Kapitel
-    // mit. findDeletableChapter() setzt die Suche NACH einer zuerst
+    // mit. findAddressableChapter() setzt die Suche NACH einer zuerst
     // getroffenen Titelzeile fort (Review-Fix 🟡, v7.32.1) – ein REGULÄRES
     // Kapitel mit demselben Namen wie der Notizbuch-Titel (z. B. Titel
     // "# Projekte" UND ein echtes "# Projekte"-Kapitel weiter unten) bleibt
@@ -262,9 +297,54 @@ function applyOne(text, op) {
     // Namensvergleich – ein Dokument OHNE führende "# "-Zeile hat keine
     // Titel-Ausnahme, dort ist auch die erste "# "-Zeile ein normales,
     // löschbares Kapitel.
-    const { range } = findDeletableChapter(chLines, chapterField);
+    const { range } = findAddressableChapter(chLines, chapterField);
     if (!range) return text; // nicht gefunden ODER nur als Titelzeile getroffen
     chLines.splice(range[0], range[1] - range[0]);
+    return tidy(chLines);
+  }
+
+  // v7.40 (append_to_chapter-Op, Live-Befund "Kapitel-Duplikat" – siehe
+  // DECISIONS #80): eigener Zweig, ebenfalls VOR der "heading"-Adressierung
+  // unten platziert (append_to_chapter adressiert wie delete_chapter über
+  // "chapter"/chapterFieldFor, hat i. d. R. KEIN eigenes op.heading – ein
+  // Zweig NACH der "const disp = dispHead(op.heading)"-Zeile würde das ohne
+  // heading sofort als No-op abfangen, bevor "chapter" geprüft wird).
+  // Hängt content als KAPITEL-FREITEXT direkt unter die #-Kapitelzeile an,
+  // VOR dem ersten ##-Abschnitt – die einzige bisherige Möglichkeit war ein
+  // ##-Abschnitt (append_to_section), was das Modell reflexartig zum
+  // Kapitelnamen duplizieren ließ ("# KPIs" mit redundantem "## KPIs"
+  // darin). Fehlt das Kapitel (auch: nur Titelzeile getroffen, siehe
+  // findAddressableChapter), wird es analog zu append_to_section/
+  // replace_section (v7.23) am Dokumentende neu angelegt – zwei
+  // aufeinanderfolgende Ops auf dasselbe neue Kapitel landen dadurch im
+  // SELBEN Kapitel (Ops laufen sequenziell auf dem Zwischenstand, siehe
+  // applyOpsDetailed).
+  if (op.type === "append_to_chapter") {
+    const chapterField = chapterFieldFor(op);
+    const chapterDisp = dispHead(chapterField);
+    if (!chapterDisp) return text; // weder chapter noch heading gesetzt
+    const content =
+      typeof op.content === "string" ? op.content.replace(/^\n+|\n+$/g, "") : "";
+    if (!content) return text;
+    const chLines = text.split("\n");
+    const { range } = findAddressableChapter(chLines, chapterField);
+    if (!range) {
+      // Kapitel nicht vorhanden (ODER nur als Titelzeile getroffen) -> neu
+      // anlegen, konsistent zum v7.23-Verhalten von append_to_section/
+      // replace_section mit fehlendem chapter.
+      padEnd(chLines);
+      chLines.push("# " + chapterDisp, "", ...content.split("\n"));
+      return tidy(chLines);
+    }
+    // Einfüge-Position: direkt VOR dem ersten ##-Abschnitt des Kapitels
+    // (bzw. am Kapitelende, falls keiner existiert) – NACH evtl.
+    // vorhandenem Präambel-Freitext. Leerzeilen direkt davor überspringen
+    // (analog zu append_to_section unten), damit der neue Inhalt direkt
+    // hinter dem letzten Präambel-Inhalt landet; tidy() normalisiert
+    // danach die Abstände zu den umgebenden Struktur-Zeilen.
+    let at = firstSectionInChapter(chLines, range);
+    while (at > range[0] + 1 && chLines[at - 1].trim() === "") at--;
+    chLines.splice(at, 0, ...content.split("\n"));
     return tidy(chLines);
   }
 
@@ -356,7 +436,8 @@ function applyOne(text, op) {
 // aus Sicht DIESES Moduls ein unbekannter Typ (memory_*-Ops werden vorher in
 // App.jsx#splitOps herausgefiltert und laufen nie hier durch, siehe dort).
 // v7.32: delete_chapter ergänzt (siehe applyOne/explainSkip, DECISIONS #74).
-const OP_TYPES = ["append_to_section", "replace_section", "delete_section", "delete_chapter", "rewrite"];
+// v7.40: append_to_chapter ergänzt (siehe applyOne/explainSkip, DECISIONS #80).
+const OP_TYPES = ["append_to_section", "replace_section", "delete_section", "delete_chapter", "append_to_chapter", "rewrite"];
 
 // Rahmen-Integrität des SYSTEM-HINWEIS (Review-Fix 🟡, Defense-in-Depth
 // Schicht 1/"Quelle"): heading/chapter/type in einer Op stammen vom MODELL
@@ -400,7 +481,7 @@ function explainSkip(text, op) {
     return content ? "keine inhaltliche Änderung" : "leerer content";
   }
   // v7.32 (delete_chapter-Op): eigener Zweig, spiegelt applyOne exakt (siehe
-  // dort, inkl. findDeletableChapter/Review-Fix 🟡 v7.32.1) – Prüfreihenfolge:
+  // dort, inkl. findAddressableChapter/Review-Fix 🟡 v7.32.1) – Prüfreihenfolge:
   // chapterField leer -> Kapitel gar nicht gefunden -> nur als Titelzeile
   // getroffen (kein weiteres gleichnamiges Kapitel) -> (sonst: applied wäre
   // true, landet nie hier).
@@ -409,16 +490,33 @@ function explainSkip(text, op) {
     const chapterDisp = dispHead(chapterField);
     if (!chapterDisp) return "fehlende Kapitel-Überschrift";
     const lines = text.split("\n");
-    const { range, titleBlocked } = findDeletableChapter(lines, chapterField);
+    const { range, titleBlocked } = findAddressableChapter(lines, chapterField);
     if (!range) {
       if (titleBlocked) {
         return "„" + sanitizeForWarning(chapterDisp) + "“ ist die Notizbuch-Titelzeile, kein Kapitel";
       }
       return "Kapitel „" + sanitizeForWarning(chapterDisp) + "“ nicht gefunden – Op übersprungen";
     }
-    // Gefunden (ggf. NACH der Titelzeile, siehe findDeletableChapter) ->
+    // Gefunden (ggf. NACH der Titelzeile, siehe findAddressableChapter) ->
     // applyOne hätte gelöscht (applied wäre true) - dieser Zweig wird unter
     // normalen Umständen nie erreicht.
+    return "keine inhaltliche Änderung";
+  }
+  // v7.40 (append_to_chapter-Op, DECISIONS #80): eigener Zweig, spiegelt
+  // applyOne exakt (NUR lesende Prüfungen) – Prüfreihenfolge: chapterField
+  // leer -> content leer -> (sonst: applied wäre true, landet praktisch nie
+  // hier, da ein gefundenes ODER neu angelegtes Kapitel IMMER etwas
+  // einfügt). Anders als delete_chapter braucht dieser Zweig KEINE
+  // titleBlocked-Fallunterscheidung: findAddressableChapter() liefert bei
+  // "nicht gefunden" UND "nur Titelzeile getroffen" gleichermaßen
+  // range===null, applyOne behandelt BEIDE Fälle identisch (Kapitel neu
+  // anlegen statt Skip).
+  if (op.type === "append_to_chapter") {
+    const chapterField = chapterFieldFor(op);
+    const chapterDisp = dispHead(chapterField);
+    if (!chapterDisp) return "fehlende Kapitel-Überschrift";
+    const content = typeof op.content === "string" ? op.content.replace(/^\n+|\n+$/g, "") : "";
+    if (!content) return "leerer content";
     return "keine inhaltliche Änderung";
   }
   const disp = dispHead(op.heading);
@@ -470,22 +568,24 @@ export function applyOpsDetailed(docText, ops) {
   for (let index = 0; index < list.length; index++) {
     const op = list[index];
     const type = op && typeof op === "object" ? op.type : undefined;
-    // v7.32 (delete_chapter-Op): "heading" hier ist NUR ein Anzeige-Feld für
-    // App.jsx#buildOpsWarning (⚠️-Warn-Pille) – delete_chapter adressiert
-    // aber über "chapter" (mit heading-Fallback, siehe chapterFieldFor), hat
-    // also i. d. R. KEIN eigenes op.heading. Ohne diese Sonderbehandlung
-    // bliebe die Warn-Pille ohne erkennbaren Kapitelnamen ("delete_chapter
-    // in „X“ (…)" statt "delete_chapter „Kapitelname“ in „X“ (…)").
-    // Dieselbe Prioritäts-Logik wie applyOne/explainSkip (DRY, kein
-    // Risiko einer abweichenden Anzeige). Review-Fix 🔵 (v7.32.1): für ALLE
-    // ANDEREN Op-Typen bleibt der ursprüngliche Vertrag exakt erhalten – NUR
-    // ein echter String in op.heading wird angezeigt (dispHead(42) läge
+    // v7.32 (delete_chapter-Op), v7.40 um append_to_chapter erweitert:
+    // "heading" hier ist NUR ein Anzeige-Feld für App.jsx#buildOpsWarning
+    // (⚠️-Warn-Pille) – delete_chapter UND append_to_chapter adressieren
+    // aber über "chapter" (mit heading-Fallback, siehe chapterFieldFor),
+    // haben also i. d. R. KEIN eigenes op.heading. Ohne diese
+    // Sonderbehandlung bliebe die Warn-Pille ohne erkennbaren Kapitelnamen
+    // ("delete_chapter in „X“ (…)" statt "delete_chapter „Kapitelname“ in
+    // „X“ (…)"). Dieselbe Prioritäts-Logik wie applyOne/explainSkip (DRY,
+    // kein Risiko einer abweichenden Anzeige). Review-Fix 🔵 (v7.32.1): für
+    // ALLE ANDEREN Op-Typen bleibt der ursprüngliche Vertrag exakt erhalten –
+    // NUR ein echter String in op.heading wird angezeigt (dispHead(42) läge
     // sonst z. B. bei "42" statt beim vorherigen/erwarteten undefined,
-    // chapterFieldFor prüft diesen typeof zwar bereits FÜR delete_chapter
-    // selbst, aber eben nicht für die drei ##-Abschnitts-Ops).
+    // chapterFieldFor prüft diesen typeof zwar bereits FÜR delete_chapter/
+    // append_to_chapter selbst, aber eben nicht für die drei ##-Abschnitts-
+    // Ops).
     const heading = op && typeof op === "object"
       ? dispHead(
-          op.type === "delete_chapter"
+          op.type === "delete_chapter" || op.type === "append_to_chapter"
             ? chapterFieldFor(op)
             : (typeof op.heading === "string" ? op.heading : "")
         ) || undefined

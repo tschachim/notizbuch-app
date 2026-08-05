@@ -7138,3 +7138,158 @@ aus `referenz-app.jsx` übernommen.
           verursachte in der weit überwiegenden Mehrheit der Fälle
           (funktionierender Handler) mehr Schaden (überschriebene
           Zwischenablage) als Nutzen (seltener Rückfallweg).
+
+80. **append_to_chapter-Op + zwei Prompt-Regeln gegen Kapitel-Struktur-
+    Fehler (v7.40, zwei Live-Befunde).**
+    - **Befund 1 (Kapitel-Duplikat).** Nutzer: „mach mal ein neues H1
+      Kapitel ‚KPIs‘ und schiebe alle kpi inbox items da rein“. Das Modell
+      erzeugte `# KPIs` und darin einen redundanten Abschnitt `## KPIs`
+      mit den Items. Root-Cause: Die Ops-Engine konnte Stichpunkte bisher
+      NUR in `##`-Abschnitte schreiben (`append_to_section`) – es gab
+      keine Op für Freitext DIREKT unter einer `#`-Kapitelzeile. Um den
+      Auftrag „schieb das ins Kapitel“ überhaupt umzusetzen, musste das
+      Modell zwangsläufig ein `##`-Ziel erfinden und griff dafür
+      reflexartig zum Kapitelnamen selbst.
+    - **Befund 2 (Ebenen-Missverständnis).** Nutzer: „tickets als
+      Unterkapitel von Codex“ (Codex ist ein bestehendes `#`-Kapitel). Das
+      Modell legte `### Tickets` INNERHALB des ERSTEN `##`-Abschnitts
+      (`## Offene Handovers`) des Kapitels an, statt `## Tickets` DIREKT
+      unter `# Codex`. Root-Cause: Der Prompt definiert die Hierarchie
+      (`# Kapitel`, `## Hauptabschnitt`, `### Unterthema`) rein
+      strukturell, aber ohne eine Übersetzungsregel dafür, was eine
+      Nutzer-Formulierung wie „Unterkapitel von X“ auf dieser Hierarchie
+      tatsächlich bedeutet – das Modell interpretierte „Unter-“ vom
+      genannten `## Offene Handovers`-Abschnitt aus statt vom `#`-Kapitel
+      aus.
+    - **Neuer Op-Typ `append_to_chapter`** (`src/lib/ops.js`):
+      `{"type":"append_to_chapter","chapter":"# Kapitel","content":"- Stichpunkt"}`
+      hängt `content` als KAPITEL-FREITEXT direkt unter die
+      `#`-Kapitelzeile – nach der Kopfzeile und nach evtl. vorhandenem
+      Freitext, aber VOR dem ersten `##`-Abschnitt des Kapitels (die
+      KAPITEL-PRÄAMBEL). Adressierung über `chapterFieldFor(op)`
+      (`chapter` mit `heading`-Fallback) – identische Robustheits-Logik
+      wie `delete_chapter`, dieselbe Titelzeilen-Ausnahme
+      (`findDeletableChapter` diente bisher NUR `delete_chapter` und
+      wurde dafür in `findAddressableChapter` umbenannt, Verhalten
+      unverändert – reine Namensklärung, weil der Helfer jetzt BEIDEN
+      Op-Typen dient).
+      - **Warum Präambel-Einfügung statt Kapitelende:** Content NACH dem
+        letzten `##`-Abschnitt eines Kapitels einzufügen würde optisch zu
+        DIESEM Abschnitt gehören (direkt unter dessen letzten
+        Stichpunkten) statt erkennbar zum Kapitel selbst – die
+        KAPITEL-PRÄAMBEL (vor jedem `##`-Abschnitt) ist die einzige
+        Position, die eindeutig als „Kapitel-Ebene, kein Abschnitt“ zu
+        lesen ist. Neuer Helfer `firstSectionInChapter(lines, range)`
+        (fence-aware wie `findSection`/`findChapter`, siehe DECISIONS #75)
+        liefert die erste `## `-Zeile innerhalb des Kapitel-Bereichs bzw.
+        das Kapitelende, falls keine existiert.
+      - **Leerzeilen-Skip vor der Einfügeposition** (analog zur
+        bestehenden `while (at > b[0] + 1 && lines[at - 1].trim() === "") at--;`-
+        Logik in `append_to_section`): landet der neue Inhalt direkt
+        hinter dem letzten Präambel-Inhalt (Freitext oder – falls keiner
+        vorhanden – direkt hinter der Kapitelzeile selbst), `tidy()`
+        normalisiert danach die Leerzeilen zu den umgebenden
+        Struktur-Zeilen. Bewusst in Kauf genommen (Restrisiko, siehe
+        unten): Hat ein Kapitel KEINEN eigenen Präambel-Freitext (der
+        Normalfall bei „Kapitel gruppiert nur `##`-Abschnitte“), landet
+        der neue Inhalt OHNE trennende Leerzeile direkt hinter der
+        `#`-Kapitelzeile (`tidy()` erzwingt eine Leerzeile nur VOR
+        Struktur-Zeilen, nicht danach) – dieselbe, bereits bestehende
+        Eigenheit wie bei `append_to_section` auf einen inhaltsleeren
+        `##`-Abschnitt. Optisch minimal, aber bewusst NICHT extra
+        behoben, um nicht von der bewährten, getesteten
+        Leerzeilen-Logik abzuweichen; Pin-Tests in `tests/ops.test.js`
+        dokumentieren das Verhalten explizit statt es zu verschleiern.
+      - **Kapitel nicht vorhanden (auch: nur als Notizbuch-Titelzeile
+        getroffen)** wird am Dokumentende NEU ANGELEGT (`padEnd`, dann
+        `"# " + chapterDisp`, Leerzeile, `content`) – konsistent zum
+        v7.23-Verhalten von `append_to_section`/`replace_section` bei
+        fehlendem `chapter`. Zwei aufeinanderfolgende `append_to_chapter`-
+        Ops auf dasselbe NEUE Kapitel landen dadurch im SELBEN Kapitel
+        (Ops laufen sequenziell auf dem Zwischenstand, siehe
+        `applyOpsDetailed`). Anders als bei `delete_chapter` braucht
+        `applyOne`/`explainSkip` dafür KEINE Fallunterscheidung zwischen
+        „gar nicht gefunden“ und „nur Titelzeile getroffen“ –
+        `findAddressableChapter()` liefert in beiden Fällen
+        `range: null`, und append_to_chapter behandelt beide identisch
+        (neu anlegen statt Skip). Konsequenz (bewusst akzeptiert): Trägt
+        die Notizbuch-Titelzeile zufällig denselben Namen wie das
+        adressierte Kapitel und existiert noch KEIN echtes Kapitel dieses
+        Namens, entsteht am Dokumentende ein zweites, gleichnamiges
+        `#`-Kapitel – seltener Randfall, durch eigenen Test gepinnt.
+      - **Leerer/fehlender `content`:** No-op (wie `append_to_section`).
+        `OP_TYPES` um `append_to_chapter` ergänzt; `explainSkip` spiegelt
+        `applyOne` exakt (fehlendes/leeres `chapter`-Feld → „fehlende
+        Kapitel-Überschrift“; leerer `content` → „leerer content“; sonst
+        „keine inhaltliche Änderung“, praktisch nie erreicht). Die
+        `delete_chapter`-Sonderbehandlung in `applyOpsDetailed` (Anzeige-
+        `heading` der ⚠️-Warn-Pille aus `chapterFieldFor(op)` statt
+        `op.heading`) wurde auf `append_to_chapter` ausgeweitet.
+      - **App.jsx:** kein Sonderpfad nötig – `splitOps` filtert nur
+        `memory_*`-Präfixe heraus, `append_to_chapter` läuft dadurch
+        automatisch über den normalen Notizbuch-Ops-Pfad. Version auf
+        v7.40 gebumpt.
+    - **Prompt-Regeln statt bloßer Hoffnung auf Modell-Verhalten
+      (`src/lib/anthropic.js`):** Beide Live-Befunde sind reine
+      Struktur-/Interpretations-Fehler, die Code allein nicht verhindern
+      kann (die Ops-Engine tut exakt, was das Modell anweist) – deshalb
+      zwei neue, explizite Prompt-Regeln statt eines rein technischen
+      Fixes:
+      - Neue Ops-Zeile für `append_to_chapter` in der „Erlaubte ops“-
+        Liste; die Intro-Zeile des Blocks nennt jetzt explizit, dass
+        `append_to_chapter`/`delete_chapter` `#`-Kapitel statt
+        `##`-Abschnitte adressieren.
+      - **Anti-Duplikat-Regel** (OPS-ZUVERLÄSSIGKEIT): „Lege NIEMALS
+        einen `##`-Abschnitt an, der nur den Namen seines `#`-Kapitels
+        wiederholt“ – direkte Antwort auf Befund 1, mit `append_to_chapter`
+        als der jetzt verfügbare Ausweg.
+      - **Ebenen-Übersetzungsregel** (OPS-ZUVERLÄSSIGKEIT): „Kapitel/
+        Unterkapitel/Abschnitt von X“ bei X = `#`-Kapitel bedeutet ein
+        `##`-Hauptabschnitt DIREKT in X, NIEMALS ein `###`-Unterthema in
+        einem bereits bestehenden `##`-Abschnitt von X – direkte Antwort
+        auf Befund 2. Ist X selbst ein `##`-Abschnitt, bleibt ein
+        `###`-Unterthema in dessen `content` gemeint. Ist X mehrdeutig
+        (existiert als Kapitel UND als Abschnitt), soll das Modell
+        nachfragen statt zu raten – bewusst KEINE Rate-Heuristik im
+        Prompt, weil eine falsche Wahl hier strukturell schwer rückgängig
+        zu machen ist (im Zweifel lieber eine Rückfrage als eine
+        weitere Fehl-Platzierung).
+      - Tool-Schema (`NOTEBOOK_TOOL`): `append_to_chapter` im `type`-Enum
+        samt Beschreibung (adressiert wie `delete_chapter` über
+        `chapter`, `content` Pflicht); `heading`-/`chapter`-Beschreibungen
+        entsprechend ergänzt; `content`-Beschreibung bewusst
+        UNVERÄNDERT gelassen (entfällt weiterhin nur bei
+        `delete_section`/`delete_chapter`, `append_to_chapter` braucht
+        `content` zwingend).
+      - Die bereits bestehenden Op-Typen-Aufzählungen an allen
+        Fundstellen ergänzt (analog zum bei `delete_chapter` in #74
+        etablierten Muster): OPS-ZUVERLÄSSIGKEIT-Liste,
+        GLIEDERUNGS-VORSCHLAG-Klarstellung („ops“:[] meint NOTIZBUCH-Ops),
+        REINE-FRAGEN-Ausnahme, `ops.description` im Tool-Schema – sonst
+        hätte der Prompt an mehreren Stellen behauptet, es gäbe den
+        neuen Op-Typ nicht, während das Tool-Schema ihn bereits erlaubt.
+    - **Tests:** `tests/ops.test.js` – neue Op mit relevanten Datenlagen
+      (Präambel mit/ohne vorhandenem Freitext, Kapitel ohne
+      `##`-Abschnitte, Kapitel als letzte Dokumentzeile, fehlendes
+      Kapitel inkl. Sequenz-Test für zwei Ops auf dasselbe neue Kapitel,
+      Titelzeilen-Fall mit/ohne echtes Kapitel darunter, Fence-Aware-
+      Grenze, Skip-Gründe, `heading`-Fallback) plus ergänzte
+      Wrapper-Äquivalenz-Pins. `tests/appOps.test.js` – End-zu-Ende-Test
+      für die ⚠️-Warn-Pille. `tests/anthropic.test.js` – Vertragstests für
+      Ops-Liste, beide neuen Regeln und Tool-Schema; die bestehenden
+      Op-Typen-Aufzählungstests (z. B. „Es gibt NUR diese op-Typen: …“)
+      wurden auf den neuen Typ erweitert, sonst hätten sie den Prompt
+      GEGEN die eigene Erweiterung gepinnt.
+    - **Bewusste Restrisiken:** (1) Die Leerzeilen-Eigenheit bei
+      Präambel-losen Kapiteln (siehe oben). (2) Dieselbe FENCE-BLIND-
+      Grenze wie bei allen `#`/`##`-Grenzen dieser Datei (DECISIONS #54/
+      #75) gilt auch für `firstSectionInChapter` – ein UNTERMINIERTER
+      Codeblock in der Kapitel-Präambel bleibt fence-blind (dokumentiertes,
+      bereits bekanntes Restrisiko, kein neues Verhalten). (3) Die
+      Ebenen-Übersetzungsregel und die Anti-Duplikat-Regel sind reine
+      Prompt-Instruktionen ohne Code-Sicherheitsnetz – das Modell bleibt
+      wie bei allen Prompt-Konventionen dieser App die letzte Instanz;
+      ein erneutes Live-Auftreten bräuchte eine weitere Prompt-Schärfung
+      oder ggf. ein Code-seitiges Sicherheitsnetz (z. B. eine Warnung bei
+      einem `##`-Abschnitt, dessen Name dem umschließenden `#`-Kapitel
+      entspricht).
