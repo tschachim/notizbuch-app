@@ -23,6 +23,12 @@
 //  7. Regressionstests aus dem Code-Review VOR dem v7.41-Commit: Blocker 1
 //     (Item-Typ-Auflösung bei einer Bullet-Liste INNERHALB einer Checkliste),
 //     "ganze Liste markiert" (D16-Grenze), MathBlock-Einzug (Finding 6).
+//  8. v7.41.1 (E2E-Fund am Live-Lauf von v7.41): 🔴 Blocker 1 – eine ECHTE
+//     Browser-Mausselektion, deren Anker/Ende exakt auf der Blockgrenze vor
+//     einem Bild/einer Formel landet, überspringt den Blatt-Knoten beim
+//     Übersetzen in ein ProseMirror-Selection-Objekt (TextSelection.between,
+//     siehe DocEditor.jsx#extendPastSkippedLeaves) – das Bild fehlt dadurch
+//     in der Auswahl, obwohl der Klick es erkennbar einschließen sollte.
 //
 // Nur DIESE Datei braucht jsdom (per-Datei-Override), der Rest der Suite
 // bleibt bei environment:"node" (vitest.config.js).
@@ -35,6 +41,7 @@ import TableRow from "@tiptap/extension-table-row";
 import TableHeader from "@tiptap/extension-table-header";
 import TableCell from "@tiptap/extension-table-cell";
 import { Markdown } from "tiptap-markdown";
+import { TextSelection } from "@tiptap/pm/state";
 import {
   FencedCodeBlock, BlockImage, IndentParagraph, IndentMarkdownIt, IndentKeymap, MdTable,
   MathInline, MathBlock,
@@ -736,21 +743,18 @@ describe("Regressionstest Blocker 1: Bullet-Liste INNERHALB einer Checkliste", (
     expect(out).toMatch(/^- \[ \] Eltern$/m);
   });
 
-  // Re-Review vor v7.41-Commit (🟡 Finding C, BEWUSST NICHT gefixt – siehe
-  // DECISIONS #81/docs/TESTFAELLE.md D15b/D17): Ein Shift-Tab, das einen
-  // Unterpunkt aus einer Checkliste heraushebt, erzeugt Markdown, dessen
-  // NÄCHSTER Lade-/Speicherzyklus (OHNE jede weitere Änderung) eine
-  // zusätzliche Leerzeile einfügt – der frisch gelifte Listen-Node behält
-  // sein beim ersten Speichern gesetztes "tight:true", markdown-it sieht
-  // beim erneuten Laden die (aus einem ANDEREN Grund vorhandene) Leerzeile
-  // und stuft die Liste als "tight:false" ein. KEIN Inhaltsverlust
-  // (roundtrip-stabil ab dem ZWEITEN Zyklus), aber es bricht EINMALIG die
-  // Projektzusage "Editor öffnen + direkt speichern = kein Commit". Ein
-  // Code-Fix an der loose/tight-Semantik von tiptap-markdown/
-  // prosemirror-markdown wurde als zu riskant bewertet – dieser Test PINNT
-  // das aktuelle (bekannte, akzeptierte) Verhalten, damit eine künftige
-  // tiptap-Aktualisierung, die es verändert, hier auffällt.
-  it("Shift-Tab aus einer Checkliste heraus: der ZWEITE Lade-/Speicherzyklus normalisiert einmalig eine Leerzeile (bekanntes, akzeptiertes Restrisiko)", () => {
+  // UPDATE (v7.41.1): Re-Review vor v7.41-Commit hatte dies als 🟡 Finding C
+  // bewusst NICHT gefixt (siehe DECISIONS #81/docs/TESTFAELLE.md D15b/D17) –
+  // ein Shift-Tab, das einen Unterpunkt aus einer Checkliste heraushebt,
+  // erzeugte Markdown, dessen NÄCHSTER Lade-/Speicherzyklus (OHNE jede
+  // weitere Änderung) EINMALIG eine zusätzliche Leerzeile vor der
+  // Checkliste einfügte. Die für Blocker 2 nötige Erweiterung von
+  // collapseChecklistGaps (siehe DocEditor.jsx: jetzt auch "normale Liste
+  // GEFOLGT VON Checkliste", nicht mehr nur umgekehrt) behebt GENAU dieses
+  // Muster ("- Eltern" gefolgt von der jetzt eingerückten Checkliste) als
+  // Nebeneffekt vollständig – der Roundtrip ist jetzt AB DEM ERSTEN Zyklus
+  // stabil, das ehemals akzeptierte Restrisiko entfällt.
+  it("Shift-Tab aus einer Checkliste heraus bleibt jetzt AB DEM ERSTEN Zyklus roundtrip-stabil (Finding C behoben)", () => {
     const md = "- Eltern\n  - [ ] Kind eins\n  - [ ] Kind zwei";
     const editor = buildEditor(md);
     editor.commands.setTextSelection(posOfText(editor, "Kind zwei"));
@@ -759,12 +763,9 @@ describe("Regressionstest Blocker 1: Bullet-Liste INNERHALB einer Checkliste", (
     editor.destroy();
     expect(afterShiftTab).toBe("- Eltern\n  - [ ] Kind eins\n\n  Kind zwei");
 
-    // Zweiter Zyklus (Editor erneut öffnen + speichern, KEINE weitere
-    // Änderung): normalisiert einmalig eine zusätzliche Leerzeile.
+    // Zweiter (und jeder weitere) Zyklus ändert jetzt NICHTS mehr.
     const secondCycle = roundtrip(afterShiftTab);
-    expect(secondCycle).toBe("- Eltern\n\n  - [ ] Kind eins\n\n  Kind zwei");
-
-    // Ab hier stabil – ein DRITTER Zyklus ändert nichts mehr.
+    expect(secondCycle).toBe(afterShiftTab);
     expect(roundtrip(secondCycle)).toBe(secondCycle);
   });
 });
@@ -894,5 +895,230 @@ describe("MathBlock-Einzug (Finding 6)", () => {
     const out = roundtrip("# T\n\n\t$$x$$");
     expect(out).toBe("# T\n\n  $$x$$");
     expect(out).not.toContain("\t");
+  });
+});
+
+// v7.41.1, 🔴 Blocker 1 aus dem E2E-Lauf von v7.41: "Bild wird bei
+// Mehrfachauswahl NICHT mit eingerückt, nur die Bildunterschrift". Ursache
+// (siehe Abschlussbericht/DECISIONS): NICHT runIndentChange selbst, sondern
+// EINE EBENE VORHER – ProseMirror übersetzt eine ECHTE Browser-Mausselektion
+// über TextSelection.between() (prosemirror-view#selectionBetween, GENAU der
+// Weg, den JEDE Mausselektion im Editor nimmt). Landet ein Selektionsende
+// exakt auf der Blockgrenze vor einem BLATT-Knoten ohne Inline-Inhalt (Bild/
+// Formel), sucht ProseMirror automatisch die nächste gültige TEXT-Position
+// und überspringt den Blatt-Knoten dabei STILLSCHWEIGEND (Selection.findFrom
+// mit textOnly=true) – der Kernfall des Nutzers (Zeilenende VOR einem Bild
+// anklicken, bis ans Ende der Bildunterschrift aufziehen) landet dadurch mit
+// "from" bereits INNERHALB der Bildunterschrift.
+//
+// WICHTIG (Auftrag): Diese Tests bauen die reale Selektionsgeometrie über
+// TextSelection.between() nach – NICHT über editor.commands.setTextSelection()
+// (das intern TextSelection.create() nutzt und diesen Übersprung-Effekt gar
+// nicht auslöst, siehe Recherche im Abschlussbericht). Genau diese Lücke
+// ("bequeme", aber unrealistische Selektion) hatte die v7.41-Testabdeckung
+// durchrutschen lassen.
+describe("Regressionstest v7.41.1, Blocker 1: reale Maus-Selektionsgeometrie um ein Bild herum", () => {
+  function posOfParagraph(editor, text) {
+    let pos = null, size = null;
+    editor.state.doc.descendants((node, p) => {
+      if (node.type.name === "paragraph" && node.textContent === text) { pos = p; size = node.nodeSize; }
+    });
+    return { pos, size };
+  }
+  // Simuliert EXAKT das, was prosemirror-view beim Lesen einer echten
+  // Mausselektion tut (selectionBetween -> TextSelection.between), inkl.
+  // Dispatch auf den Editor – "editor.state.selection" spiegelt danach
+  // GENAU das wider, was runIndentChange in echt zu sehen bekommt.
+  function setRealSelection(editor, anchorPos, headPos) {
+    const sel = TextSelection.between(editor.state.doc.resolve(anchorPos), editor.state.doc.resolve(headPos));
+    editor.view.dispatch(editor.state.tr.setSelection(sel));
+  }
+
+  it("Klick am Zeilenende VOR dem Bild, Aufziehen bis ans Ende der Bildunterschrift: Bild UND Bildunterschrift werden eingerückt", () => {
+    const md = "# T\n\nVorherige Zeile\n\n![Bild](img:xyz)\n\n*Unterschrift*";
+    const editor = buildEditor(md);
+    const { pos: paraPos, size: paraSize } = posOfParagraph(editor, "Vorherige Zeile");
+    const clickPos = paraPos + paraSize; // exakte Blockgrenze, Bild-Startposition
+    const endOfCaption = editor.state.doc.content.size - 1;
+    setRealSelection(editor, clickPos, endOfCaption);
+    const applied = changeIndent(editor, 1);
+    const out = saveLike(editor);
+    editor.destroy();
+    expect(applied).toBe(true);
+    // Bild UND Bildunterschrift eingerückt, "Vorherige Zeile" NICHT (das
+    // bewusste D16-Verhalten: reines Aneinandergrenzen zählt nicht als
+    // "berührt" – der Klick lag am ENDE dieser Zeile, nicht IN ihr).
+    expect(out).toBe("# T\n\nVorherige Zeile\n\n  ![Bild](img:xyz)\n\n  *Unterschrift*");
+  });
+
+  it("derselbe Fall unter einer Checkliste mit mehreren verschachtelten Unterpunkten (der konkrete Nutzer-Fall)", () => {
+    const md = [
+      "- [ ] Problem auf DEV mit MD Code, zum Beispiel PM lid 1901423",
+      "  - Fehler: Error (#DL1): Execution Timeout Expired im MDCore-Teil …",
+      "  - md-filter „not optimized (bgmdcore)“; `BgMdcore` mit PartID:67 …",
+      "  - ~10-Minuten-Lücke im Log (04:33:12 → 04:43:12) vor dem Timeout …",
+      "  - Betroffenes Statement: Temp-Table-Drops `#CMP_DFY` / `#TIIDS` …",
+      "",
+      "![MDCore Execution Timeout auf DEV](img:mshbjmyp7sfzu)",
+      "",
+      "*Log des MDCore-Laufs (file version 26.08.05.1843, ChangeSet:4517) …*",
+    ].join("\n");
+    const editor = buildEditor(md);
+    let lastLinePos = null, lastLineSize = null;
+    editor.state.doc.descendants((node, pos) => {
+      if (node.type.name === "paragraph" && /^Betroffenes/.test(node.textContent)) { lastLinePos = pos; lastLineSize = node.nodeSize; }
+    });
+    const clickPos = lastLinePos + lastLineSize; // Blockgrenze direkt vor dem Bild
+    const endOfCaption = editor.state.doc.content.size - 1;
+    setRealSelection(editor, clickPos, endOfCaption);
+    const applied = changeIndent(editor, 1);
+    const out = saveLike(editor);
+    editor.destroy();
+    expect(applied).toBe(true);
+    expect(out).toBe(md.replace(
+      "![MDCore Execution Timeout auf DEV](img:mshbjmyp7sfzu)\n\n*Log des MDCore-Laufs (file version 26.08.05.1843, ChangeSet:4517) …*",
+      "  ![MDCore Execution Timeout auf DEV](img:mshbjmyp7sfzu)\n\n  *Log des MDCore-Laufs (file version 26.08.05.1843, ChangeSet:4517) …*"
+    ));
+    // Nebenbefund beim Testschreiben: VOR dem Fix wanderte "Betroffenes …"
+    // zusätzlich eine Ebene tiefer in eine neue, verschachtelte Aufzählung
+    // (derselbe fehlgeleitete "from" landete auch im Listen-Zweig von
+    // runIndentChange) – bleibt jetzt unangetastet.
+    expect(out).toMatch(/^ {2}- Betroffenes Statement/m);
+  });
+
+  it("Formel statt Bild: derselbe Übersprung-Effekt ist NICHT auf Bilder beschränkt", () => {
+    const md = "# T\n\nVorherige Zeile\n\n$$x^2$$\n\n*Unterschrift*";
+    const editor = buildEditor(md);
+    const { pos: paraPos, size: paraSize } = posOfParagraph(editor, "Vorherige Zeile");
+    const clickPos = paraPos + paraSize;
+    const endOfCaption = editor.state.doc.content.size - 1;
+    setRealSelection(editor, clickPos, endOfCaption);
+    const applied = changeIndent(editor, 1);
+    let mathIndent = null;
+    editor.state.doc.descendants((n) => { if (n.type.name === "mathBlock") mathIndent = n.attrs.indent; });
+    editor.destroy();
+    expect(applied).toBe(true);
+    expect(mathIndent).toBe(1);
+  });
+
+  it("symmetrischer Rückwärts-Fall: eine Selektion, die GENAU vor dem Bild endet (statt beginnt), schließt das Bild trotzdem ein", () => {
+    // Bewusst umgekehrte Blockreihenfolge (Bildunterschrift ZUERST, Bild
+    // DANACH) – deckt die "to"-Seite von extendPastSkippedLeaves ab
+    // (Selection.findFrom sucht hier rückwärts zuerst, siehe Kommentar dort),
+    // nicht nur die "from"-Seite des Kernfalls oben.
+    const md = "# T\n\n*Caption*\n\n![Bild](img:xyz)\n\nNachfolgender Text";
+    const editor = buildEditor(md);
+    const { pos: capPos, size: capSize } = posOfParagraph(editor, "Caption");
+    const anchorPos = capPos + 2; // irgendwo im Bildunterschrift-Text
+    const headPos = capPos + capSize; // Blockgrenze direkt vor dem Bild
+    setRealSelection(editor, anchorPos, headPos);
+    const applied = changeIndent(editor, 1);
+    const out = saveLike(editor);
+    editor.destroy();
+    expect(applied).toBe(true);
+    expect(out).toBe("# T\n\n  *Caption*\n\n  ![Bild](img:xyz)\n\nNachfolgender Text");
+  });
+});
+
+// v7.41.1, 🟡 Finding 3 aus dem E2E-Lauf von v7.41: "Einzug verkleinern" bei
+// Ebene 0 ist für Absatz/Bild/Formel ausgegraut (siehe D15), für einen
+// TOP-LEVEL-Listenpunkt aber bewusst NICHT – Klick/Umschalt+Tab heben ihn
+// aus der Liste (liftListItem), exakt das Word-Verhalten, das der Nutzer
+// erwartet. Siehe DECISIONS für die Begründung, warum das KEIN Bug ist.
+describe("Finding 3 (v7.41.1): 'Einzug verkleinern' bei Ebene 0 – Absatz/Bild/Formel ausgegraut, Listenpunkt AKTIV", () => {
+  it("ein TOP-LEVEL-Listenpunkt (Ebene 0) hat 'Einzug verkleinern' AKTIV und wird zu einem normalen Absatz", () => {
+    const editor = buildEditor("# T\n\n- Eins\n- Zwei");
+    editor.commands.setTextSelection(posOfHeadingOrText(editor, "Eins"));
+    expect(canChangeIndent(editor, -1)).toBe(true);
+    const applied = changeIndent(editor, -1);
+    const out = saveLike(editor);
+    editor.destroy();
+    expect(applied).toBe(true);
+    // Die Aufzählung ist weg, "Eins" ist jetzt ein normaler Absatz.
+    expect(out).toBe("# T\n\nEins\n\n- Zwei");
+  });
+
+  it("ein Bild auf Ebene 0 hat 'Einzug verkleinern' ausgegraut (wie ein Absatz)", () => {
+    const editor = buildEditor("# T\n\n![Bild](data:image/png;base64,AAA)");
+    let pos = null;
+    editor.state.doc.descendants((n, p) => { if (n.type.name === "image") pos = p; });
+    editor.commands.setTextSelection(pos);
+    expect(canChangeIndent(editor, -1)).toBe(false);
+    const applied = changeIndent(editor, -1);
+    editor.destroy();
+    expect(applied).toBe(false);
+  });
+
+  it("eine Formel auf Ebene 0 hat 'Einzug verkleinern' ausgegraut (wie ein Absatz)", () => {
+    const editor = buildEditor("# T\n\n$$x^2$$");
+    let pos = null;
+    editor.state.doc.descendants((n, p) => { if (n.type.name === "mathBlock") pos = p; });
+    editor.commands.setTextSelection(pos);
+    expect(canChangeIndent(editor, -1)).toBe(false);
+    const applied = changeIndent(editor, -1);
+    editor.destroy();
+    expect(applied).toBe(false);
+  });
+});
+function posOfHeadingOrText(editor, text) {
+  let pos = null;
+  editor.state.doc.descendants((node, p) => { if (node.isText && node.text === text) pos = p; });
+  return pos;
+}
+
+// v7.41.1, 🔵 Finding 4 aus dem E2E-Lauf von v7.41: Die 0..6-Klemmung gilt
+// NUR für das "indent"-Attribut (Absatz/Bild/Formel) – die STRUKTURELLE
+// Listen-Verschachtelung (sinkListItem/liftListItem) hat bewusst KEINE
+// Obergrenze. Siehe DECISIONS für die Begründung, D15 wurde entsprechend
+// korrigiert ("6-Klicks-Grenze" bezog sich fälschlich auf Listen).
+describe("Finding 4 (v7.41.1): keine Tiefenbegrenzung für strukturelle Listen-Verschachtelung", () => {
+  it("ein Listenpunkt lässt sich weit über 6 Ebenen tief verschachteln, ohne dass der Knopf ausgraut", () => {
+    // 10 Punkte nacheinander: jeder (außer dem ersten) sinkt unter seinen
+    // Vorgänger – klassische "Treppen"-Verschachtelung, 9 Ebenen tief.
+    const lines = Array.from({ length: 10 }, (_, i) => "- Punkt " + i);
+    const editor = buildEditor("# T\n\n" + lines.join("\n"));
+    for (let i = 1; i < 10; i++) {
+      const pos = posOfHeadingOrText(editor, "Punkt " + i);
+      editor.commands.setTextSelection(pos);
+      for (let sinkTimes = 0; sinkTimes < i; sinkTimes++) {
+        expect(canChangeIndent(editor, 1)).toBe(true); // NIE ausgegraut, auch tief verschachtelt
+        expect(changeIndent(editor, 1)).toBe(true);
+      }
+    }
+    const out = saveLike(editor);
+    editor.destroy();
+    // "Punkt 9" liegt jetzt 9 Ebenen tief (18 Leerzeichen).
+    expect(out).toContain("                  - Punkt 9");
+    // Roundtrip-stabil (die Tiefe an sich bricht nichts).
+    expect(roundtrip(out)).toBe(out);
+  });
+});
+
+// v7.41.1, 🔵 Finding 5 aus dem E2E-Lauf von v7.41: Tab in einer Überschrift
+// war bisher ein "leises" No-op (runIndentChange liefert false, inTopLevelList
+// greift nicht, der Browser-Standard übernimmt und der Tastaturfokus
+// verlässt den Editor). Entscheidung (siehe DECISIONS): SCHLUCKEN, konsistent
+// zum bereits etablierten Verhalten in Top-Level-Listen.
+describe("Finding 5 (v7.41.1): Tab in einer Überschrift wird geschluckt (verlässt den Editor-Fokus nicht mehr)", () => {
+  it("Tab in einer Überschrift bleibt inhaltlich ein No-op, wird aber von der Editor-Tastaturkette geschluckt", () => {
+    const editor = buildEditor("# T\n\n## Abschnitt\n\nAbsatz");
+    const pos = posOfHeadingOrText(editor, "Abschnitt");
+    editor.commands.setTextSelection(pos);
+    const handled = realKey(editor, "Tab");
+    const out = saveLike(editor);
+    editor.destroy();
+    expect(handled).toBe(true); // geschluckt, NICHT an den Browser-Standard durchgereicht
+    expect(out).toBe("# T\n\n## Abschnitt\n\nAbsatz"); // inhaltlich unverändert
+  });
+
+  it("Shift-Tab in einer Überschrift verhält sich symmetrisch", () => {
+    const editor = buildEditor("# T\n\n## Abschnitt\n\nAbsatz");
+    const pos = posOfHeadingOrText(editor, "Abschnitt");
+    editor.commands.setTextSelection(pos);
+    const handled = realKey(editor, "Tab", true);
+    const out = saveLike(editor);
+    editor.destroy();
+    expect(handled).toBe(true);
+    expect(out).toBe("# T\n\n## Abschnitt\n\nAbsatz");
   });
 });

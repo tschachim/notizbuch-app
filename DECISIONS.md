@@ -7726,7 +7726,12 @@ aus `referenz-app.jsx` übernommen.
       Datenverlust, ab dem zweiten Zyklus stabil – bewusst NICHT
       gefixt (Risiko eines Eingriffs in die loose/tight-Semantik wurde
       als höher bewertet als der kosmetische Nutzen), per Pin-Test
-      dokumentiert.
+      dokumentiert. **ÜBERHOLT seit v7.41.1: vollständig behoben, siehe
+      Eintrag #83** – die dortige Erweiterung von `collapseChecklistGaps`
+      um die Gegenrichtung („normale Liste gefolgt von Checkliste“) löst
+      dieses Restrisiko als Nebeneffekt auf; im Review nachgemessen, in
+      beiden Richtungen ab dem ERSTEN Zyklus stabil. Dieser Punkt bleibt
+      nur als Historie stehen – er ist KEIN offenes Restrisiko mehr.
 
 82. **Bilder direkt in den Editor einfügen (v7.41 Teil B, Nutzerwunsch
     „Ich würde gerne Bilder direkt in den Editor kopieren können. Das
@@ -7950,3 +7955,252 @@ aus `referenz-app.jsx` übernommen.
       möchte, muss vorerst einen anderen Weg wählen (z. B. Chat-Anhang,
       falls dort unterstützt); bewusst in Kauf genommen, um KEIN
       kaputtes Bild im Daten-Repo zu riskieren.
+
+83. **v7.41.1 – zwei 🔴-Blocker aus dem E2E-Lauf von v7.41 behoben, plus
+    drei 🟡/🔵-Nachbesserungen (E2E gegen die Live-App, echte Maus/
+    Tastatur).** Ehrlicher Befund vorab: BEIDE Blocker betreffen Szenarien,
+    die `TaskItem.configure({nested:true})` (Eintrag #81, "Einrückungen")
+    überhaupt erst erreichbar gemacht hat – vor v7.41 waren Checklisten
+    nicht verschachtelbar, die hier gefundenen Interaktionen zwischen
+    Bild/Formel-Blattknoten und einer verschachtelten Checkliste konnten
+    schlicht nicht auftreten. Die v7.41-Unit-Tests deckten das nicht ab,
+    weil sie durchgängig "bequeme" Selektionen (`setTextSelection` mit
+    fest berechneten Zahlen) statt echter, ambiger Mausgeometrie
+    verwendeten – GENAU das, was der Auftrag für diese Nachbesserung
+    ausdrücklich verlangt hat.
+    - **🔴 Blocker 1: Bild fehlt bei Mehrfachauswahl, nur die
+      Bildunterschrift wird eingerückt.** Ursachenanalyse (verifiziert
+      mit `TextSelection.between()` direkt, UNABHÄNGIG von `runIndentChange`):
+      Ein Browser-Mausklick "am Zeilenende VOR dem Bild" liefert eine
+      Cursor-Position, deren `.parent` **kein** `inlineContent` hat (die
+      Position liegt exakt auf der Blockgrenze zwischen Text und dem
+      folgenden Bild/der Formel – beides Blatt-Knoten ohne eigenen
+      Inhalt). ProseMirror übersetzt eine ECHTE Mausselektion IMMER über
+      `TextSelection.between()` (`prosemirror-view#selectionBetween` –
+      der Weg, den JEDE Mausselektion im Editor nimmt, siehe
+      `node_modules/prosemirror-state/dist/index.js`), NICHT über das im
+      Test bequeme `TextSelection.create()`
+      (`editor.commands.setTextSelection()`) – NUR ERSTERES sucht bei
+      einer nicht-inline-fähigen Randposition automatisch die nächste
+      gültige TEXT-Position (`Selection.findFrom` mit `textOnly=true`,
+      `prosemirror-state#findSelectionIn`) und ÜBERSPRINGT dabei
+      STILLSCHWEIGEND jeden Blatt-Knoten auf dem Weg (ein Blatt-Knoten
+      wird von `findSelectionIn` nie als Zwischenziel akzeptiert). Der
+      Kernfall des Nutzers (Zeilenende vor dem Bild anklicken, bis ans
+      Ende der Bildunterschrift aufziehen) landet dadurch mit `from`
+      bereits INNERHALB der Bildunterschrift – das Bild liegt komplett
+      VOR `from` und gilt für `runIndentChange`s `doc.forEach`-Schleife
+      als "nicht berührt". `runIndentChange` selbst arbeitete die ganze
+      Zeit korrekt mit dem, was es an Selektion bekam – der Fehler lag
+      EINE EBENE VORHER, in der (unausgesprochenen) Annahme, `state.
+      selection.from/.to` seien immer genau das, was der Nutzer optisch
+      markiert hat.
+      - **Nebenbefund beim Ursachen-Nachweis:** Dieselbe Verschiebung
+        verursachte einen ZWEITEN, bisher unbemerkten Effekt – bei einer
+        mehrzeiligen verschachtelten Liste (der reale Nutzer-Fall aus
+        #81) sinkt der zuletzt berührte Listenpunkt fälschlich eine
+        Ebene tiefer (der verschobene `from` landete im Listen-Zweig von
+        `runIndentChange` an einer Stelle, die `sinkListItem` auf den
+        LETZTEN Listenpunkt statt auf gar keinen anwendete). Mit dem Fix
+        unten verschwindet auch dieser Nebeneffekt (siehe Test
+        "derselbe Fall unter einer Checkliste..." in
+        `tests/docEditorIndent.test.jsx`).
+      - **Fix (`DocEditor.jsx#extendPastSkippedLeaves`,
+        `isLeafmostBoundary`, `isSkippableLeaf`):** Steht `from`/`to`
+        (bei einer ECHTEN Mehrfachauswahl, `from !== to`) exakt an der
+        äußersten erreichbaren Position eines Top-Level-Blocks – der
+        Landestelle, die `findSelectionIn` beim Überspringen liefert –,
+        wird die Grenze so lange auf den vorherigen/nächsten Top-Level-
+        Nachbarn ausgedehnt, wie DER inhaltslos UND nicht inline-fähig
+        ist (`!node.inlineContent && node.content.size === 0` – GENAU
+        das Kriterium, unter dem `findSelectionIn` einen Knoten
+        überspringt statt hineinzusteigen). Bewusst NICHT hart auf
+        "image"/"mathBlock" verdrahtet, sondern generisch über die
+        Node-Eigenschaften – deckt beide Typen ab, ohne bei künftigen
+        weiteren Blatt-Block-Typen erneut angefasst werden zu müssen.
+        Symmetrisch für "to" ergänzt (Selection.findFrom sucht je nach
+        Zugrichtung vorwärts ODER rückwärts zuerst, siehe Kommentar im
+        Code) – ein von unten nach oben aufgezogenes Rückwärts-Beispiel
+        bestätigt, dass beide Richtungen betroffen waren.
+      - **Tests:** `tests/docEditorIndent.test.jsx`, neue Describe-Gruppe
+        "Regressionstest v7.41.1, Blocker 1" – baut die reale
+        Selektionsgeometrie über ECHTES `TextSelection.between()` nach
+        (nicht über `setTextSelection`, das den Übersprung gar nicht
+        auslöst): der Kernfall (Absatz+Bild+Bildunterschrift), derselbe
+        Fall unter der originalen, mehrzeilig verschachtelten
+        Nutzer-Checkliste aus dem Auftrag, eine Formel statt eines
+        Bildes, und der symmetrische Rückwärts-Fall. Alle vier VOR dem
+        Fix nachweislich rot (aktiv verifiziert: Fix kurz zurückgenommen,
+        Tests liefen rot, Fix wiederhergestellt).
+      - **Bewusst akzeptierte Über-Dehnung (Nachtrag aus dem Review zu
+        v7.41.1, dort gemessen):** Der Fix dehnt die Auswahl auch dann
+        aus, wenn der Nutzer den Nachbarblock gar nicht markiert hat –
+        markiert er NUR die Bildunterschrift, rückt das Bild darüber mit
+        ein; markiert er NUR die Zeile über dem Bild, rückt das Bild
+        darunter mit ein. Das ist NICHT vermeidbar: "Bild +
+        Bildunterschrift" und "nur Bildunterschrift" liefern nach
+        `TextSelection.between()` BYTE-IDENTISCHE Selektionen (im
+        gemessenen Beispiel beide `{from:13,to:25}`) – ProseMirror gibt
+        keinerlei Möglichkeit her, die beiden Absichten zu
+        unterscheiden. Die Auflösung ist bewusst zugunsten des
+        gemeldeten Nutzer-Falls gewählt (Bild wird mit eingerückt);
+        die Gegenrichtung wäre exakt der Fehler, der hier behoben
+        wurde. In `docs/TESTFAELLE.md` (D17) ausdrücklich als
+        erwartetes Verhalten festgehalten, damit ein E2E-Lauf daraus
+        keinen Fehlalarm macht.
+    - **🔴 Blocker 2: Listentyp eines verschachtelten Kindpunkts
+      umwandeln zerstört die gesamte Verschachtelung.** Ursachenanalyse:
+      `toggleBulletList`/`toggleOrderedList`/`toggleTaskList` rufen
+      intern `@tiptap/core#toggleList` auf. Bei einem verschachtelten
+      Listenpunkt versucht `toggleList` zuerst `tr.setNodeMarkup()`
+      (reine Typ-Änderung an Ort und Stelle), das schlägt aber IMMER
+      fehl, weil die vorhandenen Kind-Knoten (z. B. `taskItem`) nicht
+      zum Content-Schema des Zieltyps passen (`bulletList` erwartet
+      `listItem`, `listType.validContent(...)` liefert `false`) –
+      `toggleList` fällt danach auf `commands.clearNodes()` +
+      `wrapInList()` zurück. `clearNodes()` entfernt dabei SÄMTLICHE
+      Block-Verschachtelung der betroffenen Selektion (nicht nur eine
+      Ebene), `wrapInList()` baut anschließend nur die BERÜHRTEN Punkte
+      neu ein – das komplette Eltern-Kind-Gefüge (inklusive UNBERÜHRTER
+      Geschwisterpunkte!) geht verloren, alle Punkte landen als getrennte
+      Top-Level-Listen. Dasselbe Muster wie der `collapseChecklistGaps`-
+      Fund aus #81: Vor v7.41 waren Checklisten mit `nested:false`
+      konfiguriert, dieses Szenario war schlicht NICHT ERREICHBAR.
+      - **Fix (`DocEditor.jsx#convertListItemTypeCommand`,
+        `NestedListToggle`):** Eine eigene, verschachtelungserhaltende
+        Umsetzung ersetzt `toggleBulletList`/`toggleOrderedList`/
+        `toggleTaskList` per Command-Override (siehe unten für die
+        Mechanik). Statt "herausheben + neu einwickeln" wird die
+        UMSCHLIESSENDE Liste direkt an Ort und Stelle in bis zu DREI
+        Geschwister-Listen aufgeteilt ("davor" im Original-Typ
+        unverändert / die betroffenen Punkte im NEUEN Zieltyp / "danach"
+        im Original-Typ unverändert) – exakt wie ein Fließtext-Absatz
+        eine Liste in Markdown "durchtrennen" würde. Der Bereich der
+        betroffenen Punkte wird über `$from.blockRange($to, node =>
+        node.firstChild.type === itemType)` bestimmt – GENAU derselbe
+        Bereichs-Finder wie in `sinkListItem`/`liftListItem` selbst
+        (`prosemirror-schema-list`), deckt Cursor UND Mehrfachauswahl
+        über mehrere Geschwister-Punkte hinweg identisch ab. Kein
+        Listenpunkt an der Selektion (neue Liste anlegen/komplette Liste
+        entfernen) fällt unverändert auf `commands.toggleList(...)`
+        zurück (denselben generischen Befehl, den die Original-Kommandos
+        intern nutzen) – NUR der konkret gemeldete, verschachtelte Fall
+        bekommt eine eigene Behandlung.
+      - **Command-Override-Mechanik:** `NestedListToggle` ist eine neue
+        `Extension`, die `toggleBulletList`/`toggleOrderedList`/
+        `toggleTaskList` NEU definiert – MUSS in der `useEditor()`-Liste
+        NACH `StarterKit`/`TaskList`/`TaskItem` stehen, weil
+        `ExtensionManager#commands` (`@tiptap/core`) `addCommands()`
+        aller Extensions per `Object.assign` in Prioritäts-Reihenfolge
+        mischt (bei Gleichstand: Original-Array-Reihenfolge, `Array.sort`
+        ist seit ES2019 stabil) – der ZULETZT gemischte Eintrag gewinnt.
+        Ein Override auf Ebene der TOOLBAR-KNÖPFE allein hätte die
+        eingebauten Tastenkürzel (z. B. `Mod-Shift-8` für
+        `toggleBulletList`) inkonsistent zurückgelassen – der
+        Command-Override deckt BEIDE Wege einheitlich ab. Die
+        Kern-Logik ist bewusst als reines `(state, dispatch) => boolean`
+        aufgebaut (wie `sinkListItem`/`liftListItem` selbst oder tiptaps
+        eigenes `clearNodes`) und arbeitet AUSSCHLIESSLICH über den
+        übergebenen `tr`/`dispatch` – ein direkter `editor.view.
+        dispatch()` (die erste, beim Testschreiben verworfene Fassung)
+        brach innerhalb einer `editor.chain()...run()`-Kette mit
+        "Applying a mismatched transaction", weil die Kette EINE
+        gemeinsame Transaktion über mehrere Kommandos aufbaut und erst
+        am Ende dispatcht.
+      - **Bewusst akzeptierte Grenze (ECHTER Bug in der markdown-it/
+        tiptap-markdown-Pipeline, KEIN Fehler in diesem Kommando):**
+        "davor"/Zielteil/"danach" landen beim Speichern als DREI
+        textuell UNUNTERSCHEIDBARE, direkt aufeinanderfolgende
+        "-"-Zeilen im selben Markdown – Markdown kennt kein Konzept von
+        "drei benachbarte, aber strukturell getrennte Listen" (reine
+        ProseMirror-Modellinformation). `markdown-it-task-lists` setzt
+        `contains-task-list` auf das gesamte (beim erneuten Laden wieder
+        zusammengefasste) `<ul>`, sobald IRGENDEIN Kind-`<li>` eine
+        Checkbox hat; ist das ERSTE `<li>` dieses `<ul>`s dann KEIN
+        Checklisten-Punkt, verlangt `taskList`s starres Content-Schema
+        (`taskItem+`) trotzdem ab dem ersten Kind einen `taskItem` –
+        ProseMirrors HTML-Parser füllt die Lücke mit einem
+        GESPENSTISCHEN LEEREN `taskItem` und reißt die eigentlich
+        zusammengehörige Struktur auseinander. Verifiziert MEHRFACH
+        UNABHÄNGIG: (1) mit reinem `markdown-it` + `markdown-it-task-
+        lists`, KOMPLETT ohne tiptap/diese App, (2) mit/ohne Leerzeile
+        zwischen den beiden Teil-Listen (keine Auswirkung – ein
+        Marker-Wechsel `-`/`*` würde das Problem lösen, hätte aber die
+        Projekt-weit auf `-` fixierte Marker-Konvention aufgeweicht,
+        eigene neue Node-Attribute UND kontextabhängige Serializer
+        gebraucht – als unverhältnismäßig invasiv für einen schmalen
+        Rand­fall bewertet). Betrifft NACHWEISLICH GENAU EINE Richtung:
+        Der ERSTE sichtbare Punkt des zusammengefassten Textblocks ist
+        NACH der Umwandlung keine Checkliste mehr, während ein SPÄTERER
+        Punkt weiterhin eine ist (in JEDER Konstellation: verschachtelt
+        oder Top-Level, erstes/mittleres/letztes Element, Einzel- oder
+        Mehrfachauswahl – die umgekehrte Richtung, "Checkliste zuerst",
+        ist in ALLEN getesteten Konstellationen nachweislich sicher).
+        `convertListItemTypeCommand` erkennt dieses Muster VOR dem
+        Dispatch und gibt `true` OHNE `dispatch(tr)` zurück (sicherer
+        No-op wie ein ausgegrauter Knopf) – bewusst NICHT `false`, weil
+        das den nativen `toggleList`-Fallback ausgelöst hätte, der
+        GENAU das Blocker-2-Verschachtelungsproblem hat. Der Nutzer
+        merkt in diesem schmalen Rand­fall nur "der Knopf tut nichts" –
+        klar besser als eine beim nächsten Laden lautlos zerstörte
+        Struktur. Der konkrete, im Auftrag vorgegebene Fall (D17:
+        zweiten/letzten Checklisten-Unterpunkt in eine Aufzählung
+        umwandeln) liegt in der SICHEREN Richtung und funktioniert
+        uneingeschränkt.
+      - **Tests:** neue Datei `tests/docEditorListToggle.test.jsx` –
+        Repro aus dem Auftrag (Eltern bleibt Checkbox, EIN Kind wird
+        Aufzählung, das ANDERE bleibt Checkbox), alle drei Zieltypen,
+        beide Richtungen, mehrstufige Verschachtelung, Mehrfachauswahl,
+        unberührte Enkel-Kinder, "Ziel-Typ bereits aktiv"-Fallback, "kein
+        Listenpunkt"-Fallback, UND eine eigene Describe-Gruppe für die
+        No-op-Absicherung (inklusive eines direkten, von
+        `convertListItemType` unabhängigen Belegs der zugrunde liegenden
+        markdown-it-Lücke). Aktiv verifiziert, dass die Kern-Tests ohne
+        den Fix rot sind (Kern-Logik kurz auf `return false`
+        zurückgesetzt, 7 von 9 aussagekräftigen Tests liefen rot wie
+        erwartet – die restlichen 2 nutzen Fallback-Pfade, die von
+        diesem Fix unabhängig bereits vorher korrekt waren).
+    - **🟡 Finding 3 (D15-Doku war falsch, Verhalten ist richtig):**
+      "Einzug verkleinern" ist bei einem NICHT eingerückten Listenpunkt
+      bewusst AKTIV (nicht ausgegraut) – ein Klick/`Umschalt+Tab` wandelt
+      ihn per `liftListItem` in einen normalen Absatz um (Checkbox/
+      Aufzählung geht verloren). Das ist GEWOLLTES Word-Verhalten (einen
+      Listenpunkt auf oberster Ebene aus der Liste heben), keine
+      Inkonsistenz zwischen Knopf und Taste. "Ausgegraut bei Ebene 0"
+      gilt weiterhin – aber NUR für Absatz/Bild/Formel (das `indent`-
+      Attribut kann nicht unter 0 sinken), geprüft und bestätigt für alle
+      drei Typen (`tests/docEditorIndent.test.jsx`, Describe "Finding 3").
+      D15 entsprechend präzisiert.
+    - **🔵 Finding 4 (D15-Doku war falsch):** Die 0..6-Klemmung gilt NUR
+      für das `indent`-Attribut (Absatz/Bild/Formel) – die STRUKTURELLE
+      Listen-Verschachtelung (`sinkListItem`/`liftListItem`) hat KEINE
+      Tiefenbegrenzung, exakt wie in Word/gängigen Editoren. Eine
+      künstliche Grenze hätte keinen Mehrwert (tief verschachtelte Listen
+      sind ein Nutzer-Stilmittel, kein Fehlerfall) und hätte eigenen,
+      nicht angefragten Code gebraucht. D15 entsprechend präzisiert
+      ("6-Klicks-Grenze" bezog sich fälschlich auf Listen statt nur auf
+      das `indent`-Attribut), Test mit 9 Verschachtelungsebenen ergänzt.
+    - **🔵 Finding 5 (Tab in einer Überschrift):** Verließ bisher den
+      Editor-Fokus (Browser-Default), weil `runIndentChange` für
+      Überschriften `false` liefert und `inTopLevelList()` sie nicht
+      erfasst. Entschieden: SCHLUCKEN (neue `inHeading()`-Prüfung in
+      `IndentKeymap`), konsistent zum bereits etablierten Verhalten in
+      Top-Level-Listen (`inTopLevelList`, Finding A aus #81) – ein rein
+      visuelles No-op soll den Tastaturfokus nicht überraschend aus dem
+      Editor werfen. Der Editor bleibt über andere, dokumentierte Wege
+      verlassbar (Klick außerhalb, Speichern/Abbrechen); Tab war dafür
+      nie ein beworbener Ausstiegsweg. `docs/TESTFAELLE.md` D15
+      entsprechend ergänzt.
+    - **Randnotiz `collapseChecklistGaps`:** Für Blocker 2 musste die
+      Funktion um die GESPIEGELTE Lücken-Richtung erweitert werden
+      ("normale Liste GEFOLGT VON Checkliste", vorher nur umgekehrt
+      abgedeckt) – als Nebeneffekt löst das den in #81 als "bewusst
+      akzeptiertes Restrisiko" dokumentierten Finding-C-Fall
+      (Leerzeilen-Normalisierung nach einem Shift-Tab aus einer
+      Checkliste heraus) VOLLSTÄNDIG auf; der zugehörige Test in
+      `tests/docEditorIndent.test.jsx` wurde von "pinnt das bekannte
+      Verhalten" auf "roundtrip-stabil ab dem ersten Zyklus" aktualisiert.
+      Bewusst NICHT auf "beliebige Liste gefolgt von beliebiger Liste"
+      verallgemeinert (verifiziert: eine Aufzählung gefolgt von einer
+      Nummerierung bleibt tight, ohne erzwungene Leerzeile – eine dort
+      vorhandene Leerzeile wäre echte Nutzerformatierung).

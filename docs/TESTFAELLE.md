@@ -1004,40 +1004,66 @@ Danach `-Uninstall` ausführen, falls die Einrichtung nur für diesen
 Testlauf vorgenommen wurde (Cleanup, sonst bleibt sie bestehen).
 
 **D15 [VERBUNDEN] Einzug im Editor per Knopf und Tastatur (v7.41,
-Nutzerwunsch „Icons wie in Excel“).** Editor öffnen (Stift-Knopf), im
-QA-Notizbuch einen neuen Stichpunkt „QA-Einzug A“ anlegen. Erwartet: zwei
-neue Toolbar-Knöpfe neben den Listen-Knöpfen (Pfeil-Symbole „Einzug
-verkleinern“/„Einzug vergrößern“); der Knopf „Einzug verkleinern“ ist
-ausgegraut/deaktiviert (der Absatz ist noch nicht eingerückt). Cursor in
-„QA-Einzug A“ setzen, „Einzug vergrößern“ mehrfach klicken. Erwartet:
-Der Absatz rückt bei jedem Klick sichtbar weiter nach rechts; nach 6
-Klicks ist der Knopf „Einzug vergrößern“ ausgegraut (Obergrenze erreicht),
-ein 7. Klick tut nichts mehr. Danach mit „Einzug verkleinern“ (oder
+Nutzerwunsch „Icons wie in Excel“; Doku in v7.41.1 an das reale, bewusst
+gewollte Verhalten angepasst, siehe DECISIONS #83).** Editor öffnen
+(Stift-Knopf), im QA-Notizbuch einen neuen Stichpunkt „QA-Einzug A“
+anlegen. Erwartet: zwei neue Toolbar-Knöpfe neben den Listen-Knöpfen
+(Pfeil-Symbole „Einzug verkleinern“/„Einzug vergrößern“); der Knopf
+„Einzug verkleinern“ ist ausgegraut/deaktiviert (der Absatz ist noch nicht
+eingerückt). Cursor in „QA-Einzug A“ setzen, „Einzug vergrößern“ mehrfach
+klicken. Erwartet: Der Absatz rückt bei jedem Klick sichtbar weiter nach
+rechts; nach 6 Klicks ist der Knopf „Einzug vergrößern“ ausgegraut
+(Obergrenze erreicht), ein 7. Klick tut nichts mehr. **Diese 6-Klicks-
+Obergrenze gilt AUSDRÜCKLICH NUR für einen freistehenden Absatz/ein
+Bild/eine Formel** (das `indent`-Attribut ist auf 0–6 geklemmt) – für
+einen LISTENPUNKT (Stichpunkt/Nummerierung/Checkbox) gibt es KEINE
+Tiefenbegrenzung, siehe unten. Danach mit „Einzug verkleinern“ (oder
 Umschalt+Tab) wieder auf 0 zurückstellen – bei 0 ist „Einzug verkleinern“
 wieder ausgegraut. Cursor erneut in den Absatz setzen und EINMAL `Tab`
 drücken: Erwartet, der Absatz rückt genau wie beim Knopf-Klick eine Ebene
 ein (gleiche Wirkung). `Umschalt+Tab` macht das rückgängig. Cursor in eine
-Überschrift (`##`) setzen, `Tab` drücken: Erwartet KEINE Änderung
-(Überschriften werden nie eingerückt, No-op). Speichern. Erwartet: neue
-Version in der Historie. Editor OHNE JEDE weitere Änderung erneut öffnen
-und direkt speichern. Erwartet: KEIN Commit/keine neue Version
-(No-op-Roundtrip, wie bei D5–D10). Zusätzlich (Tastatur-Priorität, siehe
-DECISIONS #81): Cursor in eine Zelle einer Tabelle setzen (bei Bedarf
-vorher wie in D2 eine kleine Tabelle anlegen) und `Tab` drücken. Erwartet:
-Der Cursor springt wie gewohnt zur nächsten Zelle (unverändertes
-Bestandsverhalten) – KEINE Einrückung findet an der Tabelle statt.
+Überschrift (`##`) setzen, `Tab` drücken: Erwartet KEINE inhaltliche
+Änderung (Überschriften werden nie eingerückt) – **der Tastendruck wird
+aber geschluckt** (v7.41.1-Nachbesserung, DECISIONS #83, Finding 5): Der
+Tastaturfokus bleibt im Editor, statt (wie vor v7.41.1) über den
+Browser-Standard aus dem Editor herauszuspringen. `Umschalt+Tab` verhält
+sich in der Überschrift symmetrisch (ebenfalls geschluckt, kein
+Fokusverlust). Speichern. Erwartet: neue Version in der Historie. Editor
+OHNE JEDE weitere Änderung erneut öffnen und direkt speichern. Erwartet:
+KEIN Commit/keine neue Version (No-op-Roundtrip, wie bei D5–D10).
+Zusätzlich (Tastatur-Priorität, siehe DECISIONS #81): Cursor in eine
+Zelle einer Tabelle setzen (bei Bedarf vorher wie in D2 eine kleine
+Tabelle anlegen) und `Tab` drücken. Erwartet: Der Cursor springt wie
+gewohnt zur nächsten Zelle (unverändertes Bestandsverhalten) – KEINE
+Einrückung findet an der Tabelle statt.
+
+**D15c [VERBUNDEN] „Einzug verkleinern“ bei einem Listenpunkt auf
+Ebene 0 hebt ihn aus der Liste – GEWOLLTES Verhalten, nicht ausgegraut
+(v7.41.1, DECISIONS #83, Finding 3).** Editor öffnen, einen NICHT
+eingerückten Stichpunkt anlegen, z. B. „QA-Einzug Liste“. Cursor
+hineinsetzen. Erwartet: „Einzug verkleinern“ ist AKTIV (nicht ausgegraut)
+– anders als bei einem freistehenden Absatz auf Ebene 0 (siehe D15).
+Klicken (oder `Umschalt+Tab`). Erwartet: „QA-Einzug Liste“ wird zu einem
+normalen Absatz, die Aufzählung geht verloren – exakt das aus Word
+bekannte Verhalten „Listenpunkt aus der Liste heben“, kein Fehler.
+Danach eine tiefe Verschachtelung anlegen (einen Stichpunkt per `Tab`
+mehr als 6-mal hintereinander unter sich selbst verschachteln lassen,
+z. B. durch wiederholtes Anlegen+Einrücken mehrerer Unterpunkte
+untereinander): Erwartet, der Knopf „Einzug vergrößern“ graut dabei NIE
+aus (im Gegensatz zur 6-Klicks-Grenze bei einem Absatz/Bild aus D15) –
+die strukturelle Listen-Tiefe ist bewusst unbegrenzt.
 
 **D15b [VERBUNDEN] Checklisten-Einzug per Tastatur (v7.41).** Editor
 öffnen, eine Checkliste mit zwei Punkten anlegen: „QA-Check A“, „QA-Check
 B“. Cursor in „QA-Check B“ setzen, `Tab` drücken. Erwartet: „QA-Check B“
 rückt unter „QA-Check A“ ein (Checklisten sind jetzt verschachtelbar,
-siehe D17). `Umschalt+Tab` macht das rückgängig. Bekanntes, bewusst
-akzeptiertes Restrisiko (DECISIONS #81, Finding C): Hebt ein
-`Umschalt+Tab` einen Unterpunkt aus einer GEMISCHT verschachtelten
-Checkliste heraus (Checkbox-Elternpunkt mit einfachen Aufzählungs-
-Kindern oder umgekehrt), kann der NÄCHSTE Öffnen+Speichern-Zyklus
-einmalig eine Leerzeilen-Normalisierung committen – kein Fehler,
-kein Datenverlust, ab dem übernächsten Zyklus wieder stabil.
+siehe D17). `Umschalt+Tab` macht das rückgängig. Hebt ein `Umschalt+Tab`
+einen Unterpunkt aus einer GEMISCHT verschachtelten Checkliste heraus
+(Checkbox-Elternpunkt mit einfachen Aufzählungs-Kindern oder umgekehrt):
+Erwartet seit v7.41.1 (DECISIONS #83) KEINE Leerzeilen-Normalisierung
+mehr beim nächsten Öffnen+Speichern – das in DECISIONS #81/Finding C
+dokumentierte Restrisiko wurde als Nebeneffekt der Blocker-2-Korrektur
+vollständig behoben, der Roundtrip bleibt ab dem ERSTEN Zyklus stabil.
 
 **D16 [VERBUNDEN] Einzug über eine Mehrfachauswahl (v7.41, Wortlaut nach
 Code-Review präzisiert – siehe DECISIONS #81 „bewusst akzeptierte
@@ -1069,39 +1095,88 @@ nicht einrücken, siehe oben – nur der Absatz-Teil der Auswahl ist
 betroffen). Speichern, Editor erneut öffnen und direkt speichern: KEIN
 Commit (No-op-Roundtrip).
 
-**D17 [VERBUNDEN] Checklisten-Verschachtelung, Bild+Bildunterschrift
-einrücken, Anzeige in der Dokument-Ansicht (v7.41, der konkrete
-Nutzer-Fall).** Editor öffnen, eine Checkliste mit EINEM Punkt anlegen,
-z. B. „QA-Checkliste Eltern“. Direkt danach (Enter, dann Tab) einen
-Unterpunkt „QA-Checkliste Kind eins“ eintippen. Erwartet: Der Unterpunkt
-lässt sich per `Tab` UNTER den Checkbox-Punkt einrücken (vorher, ohne
-diesen Auftrag, war eine Checkliste im Editor gar nicht verschachtelbar).
-Noch einen zweiten Unterpunkt „QA-Checkliste Kind zwei“ auf derselben
-Ebene ergänzen. Danach den Listentyp DIESES Unterpunkts ändern (Aufzähl-
-Knopf statt Checkliste), sodass ein Checkbox-Elternpunkt mit eingerückten
-EINFACHEN Aufzählungspunkten entsteht (genau der gemeldete Fall: eine
-Checkliste mit eingerückten „- “-Unterpunkten ohne eigene Checkbox).
-Speichern. Erwartet in der Dokument-Ansicht: Die Unterpunkte erscheinen
-SICHTBAR eingerückt UNTER dem Checkbox-Elternpunkt (nicht bündig auf
-derselben Ebene – das war exakt der ursprünglich gemeldete Fehler).
-Editor OHNE weitere Änderung erneut öffnen und direkt speichern: KEIN
-Commit (No-op-Roundtrip – insbesondere darf aus den eingerückten
-Unterpunkten KEINE zusätzliche Leerzeile zwischen Elternpunkt und
-Unterpunkten entstehen und die Ansicht darf sich dadurch nicht ändern).
-Danach ein Bild einfügen (Chat: ein Bild anhängen und per Op ins
-Dokument einfügen lassen, oder ein bereits vorhandenes Bild im
-QA-Notizbuch verwenden) und direkt darunter eine kursive Bildunterschrift
-eintippen. Beide Zeilen (Bild + Bildunterschrift) markieren und „Einzug
-vergrößern“ klicken. Speichern. Erwartet: Bild UND Bildunterschrift
-erscheinen in der Ansicht gemeinsam eingerückt (gleicher Versatz nach
-rechts). Editor erneut öffnen: Bild und Bildunterschrift zeigen weiterhin
-denselben Einzug (Roundtrip-stabil), erneutes Speichern ohne Änderung
-löst KEINEN Commit aus. Bekanntes, bewusst akzeptiertes Restrisiko
-(DECISIONS #81, Finding C): Wird stattdessen per `Umschalt+Tab` ein
-Unterpunkt aus dieser gemischten Verschachtelung wieder herausgehoben,
-kann der NÄCHSTE Öffnen+Speichern-Zyklus einmalig eine Leerzeilen-
-Normalisierung committen – kein Fehler, kein Datenverlust, ab dem
-übernächsten Zyklus wieder stabil.
+**D17 [VERBUNDEN] Checklisten-Verschachtelung, Listentyp eines
+verschachtelten Kindpunkts wechseln, Bild+Bildunterschrift einrücken,
+Anzeige in der Dokument-Ansicht (v7.41, der konkrete Nutzer-Fall; v7.41.1
+korrigiert zwei dabei gefundene Blocker, siehe DECISIONS #83).** Editor
+öffnen, eine Checkliste mit EINEM Punkt anlegen, z. B. „QA-Checkliste
+Eltern“. Direkt danach (Enter, dann Tab) einen Unterpunkt „QA-Checkliste
+Kind eins“ eintippen. Erwartet: Der Unterpunkt lässt sich per `Tab` UNTER
+den Checkbox-Punkt einrücken (vorher, ohne diesen Auftrag, war eine
+Checkliste im Editor gar nicht verschachtelbar). Noch einen zweiten
+Unterpunkt „QA-Checkliste Kind zwei“ auf derselben Ebene ergänzen.
+Danach den Listentyp DES ZWEITEN Unterpunkts („Kind zwei“) ändern
+(Aufzähl-Knopf statt Checkliste). Erwartet (🔴 Blocker 2, v7.41.1 behoben):
+„QA-Checkliste Eltern“ bleibt eine ECHTE Checkbox, „QA-Checkliste Kind
+eins“ bleibt eine verschachtelte CHECKBOX, NUR „QA-Checkliste Kind zwei“
+wird zu einem verschachtelten, einfachen Aufzählungspunkt OHNE eigene
+Checkbox – NICHT (wie vor dem Fix beobachtet) drei getrennte,
+unverschachtelte Top-Level-Einträge. Speichern. Erwartet in der
+Dokument-Ansicht: Beide Unterpunkte erscheinen SICHTBAR eingerückt UNTER
+dem Checkbox-Elternpunkt (nicht bündig auf derselben Ebene). Editor OHNE
+weitere Änderung erneut öffnen und direkt speichern: KEIN Commit
+(No-op-Roundtrip – insbesondere darf aus den eingerückten Unterpunkten
+KEINE zusätzliche Leerzeile zwischen Elternpunkt und Unterpunkten
+entstehen und die Ansicht darf sich dadurch nicht ändern). Danach ein
+Bild einfügen (Chat: ein Bild anhängen und per Op ins Dokument einfügen
+lassen, oder ein bereits vorhandenes Bild im QA-Notizbuch verwenden) und
+direkt darunter eine kursive Bildunterschrift eintippen. Beide Zeilen
+(Bild + Bildunterschrift) MIT DER MAUS markieren – **wichtig für den
+Nachweis von Blocker 1: Klick an das ENDE der Zeile VOR dem Bild** (also
+z. B. ans Ende von „QA-Checkliste Kind zwei“, NICHT auf das Bild selbst),
+dann mit gehaltener Umschalt-Taste ans Ende der Bildunterschrift klicken
+– und „Einzug vergrößern“ klicken. Erwartet (🔴 Blocker 1, v7.41.1
+behoben): Bild UND Bildunterschrift erscheinen NACH dem Speichern in der
+Ansicht GEMEINSAM eingerückt (gleicher Versatz nach rechts) – NICHT (wie
+vor dem Fix beobachtet) nur die Bildunterschrift, während das Bild bündig
+bleibt. „QA-Checkliste Kind zwei“ selbst bleibt dabei unverändert auf
+seiner bisherigen Ebene (keine zusätzliche, ungewollte Verschachtelung
+als Nebeneffekt). Editor erneut öffnen: Bild und Bildunterschrift zeigen
+weiterhin denselben Einzug (Roundtrip-stabil), erneutes Speichern ohne
+Änderung löst KEINEN Commit aus. Das in DECISIONS #81/Finding C
+dokumentierte Restrisiko (Leerzeilen-Normalisierung nach einem
+`Umschalt+Tab` aus einer gemischten Checkliste heraus) ist seit v7.41.1
+vollständig behoben (siehe D15b) – hier also KEIN Restrisiko mehr zu
+erwarten.
+
+GEWOLLTE Über-Dehnung der Markierung (v7.41.1, KEIN Fehler – nicht als
+Finding melden): Markiert man NUR die Bildunterschrift und rückt ein,
+wird das direkt darüberstehende Bild MIT eingerückt; markiert man NUR
+die Zeile ÜBER dem Bild, wird das Bild darunter mit eingerückt. Das ist
+unvermeidbar: Der Browser normalisiert eine Mausauswahl, die an einer
+Blockgrenze neben einem Bild beginnt oder endet, auf die nächste
+Textposition – „Bild + Unterschrift“ und „nur Unterschrift“ ergeben
+danach exakt dieselbe Auswahl, sie sind technisch nicht unterscheidbar.
+Die Auflösung ist bewusst zugunsten des Nutzer-Falls (Bild wird mit
+eingerückt) gewählt, siehe DECISIONS #83.
+
+**D17b [VERBUNDEN] Grenzfall der Listentyp-Umwandlung: ERSTEN Kindpunkt
+umwandeln bleibt ein sicherer No-op (v7.41.1, bewusst akzeptierte Grenze,
+DECISIONS #83).** Direkt im Anschluss an D17 (oder erneut mit einer
+frischen Checkliste „QA-Checkliste Eltern2“ + zwei Checklisten-
+Unterpunkten „Kind A“/„Kind B“): Diesmal den Listentyp des ERSTEN
+Unterpunkts („Kind A“ bzw. „QA-Checkliste Kind eins“) ändern (Aufzähl-
+Knopf), während der ZWEITE Unterpunkt eine Checkliste bleibt. Erwartet:
+Der Klick tut sichtbar NICHTS (Dokument bleibt unverändert) – dies ist
+eine bewusste Absicherung gegen eine bekannte, verifizierte Lücke in der
+zugrunde liegenden Markdown-Bibliothek (nicht dieser App), die bei GENAU
+dieser Reihenfolge beim nächsten Laden eine zusätzliche Geister-
+Checkliste einfügen würde. Speichern (falls überhaupt ein „Speichern“
+möglich ist, da nichts geändert wurde) sollte ohnehin keinen Commit
+auslösen. Kein Grund zur Sorge, wenn hier nichts passiert – das ist der
+erwartete, sichere Zustand.
+
+Derselbe No-op greift AUCH ohne jede Verschachtelung, überall dort, wo
+der umgewandelte Punkt VOR einem Punkt steht, der Checkliste bleibt –
+ebenfalls kein Fehler, ebenfalls nicht als Finding melden. Konkret
+geprüfte Fälle (Toolbar-Klick tut jeweils sichtbar nichts): in
+`- Eins` / `- Zwei` den ZWEITEN Punkt zur Checkliste machen; dasselbe bei
+drei Punkten mit dem mittleren; dasselbe in einer nummerierten Liste; und
+in `- [ ] A` / `- [ ] B` den ERSTEN Punkt zur Aufzählung machen.
+Funktionieren MUSS dagegen: in `- Eins` / `- Zwei` den ERSTEN Punkt zur
+Checkliste machen. Faustregel: Die Umwandlung greift, solange danach kein
+Punkt WEITER OBEN in derselben Liste ohne Kästchen steht, während weiter
+unten noch ein Kästchen folgt.
 
 **D18 [VERBUNDEN] Bild direkt in den Editor einfügen (v7.41 Teil B,
 Nutzerwunsch „Ich würde gerne Bilder direkt in den Editor kopieren

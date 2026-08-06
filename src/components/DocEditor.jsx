@@ -154,8 +154,26 @@ export const unescapeMd = (md) =>
 // Checkliste "- [") – der linke Teil bleibt bewusst auf Checklisten-Zeilen
 // beschränkt, da NUR taskList von diesem Tight-Defekt betroffen ist.
 // Exportiert (wie unescapeMd oben), damit Tests die ECHTE Funktion prüfen.
+//
+// v7.41.1-Erweiterung (Blocker 2, "Listentyp eines verschachtelten Kindpunkts
+// umwandeln"): convertListItemType (siehe unten) kann jetzt zwei
+// aufeinanderfolgende GESCHWISTER-Unterlisten unterschiedlichen Typs
+// erzeugen (z. B. eine per Umwandlung entstandene Aufzählung, gefolgt von
+// der unveränderten restlichen Checkliste). Der oben beschriebene
+// Tight-Defekt trifft NUR den Fall "eine Checkliste WIRD BEGONNEN" – bisher
+// deckte die erste Ersetzung ausschließlich "Checkliste GEFOLGT VON X" ab
+// (X beginnt NACH der Checkliste). Jetzt kann eine Checkliste auch NACH
+// einer normalen Liste beginnen ("X GEFOLGT VON Checkliste") – dieselbe
+// Ursache, nur mit vertauschten Rollen. Bewusst NICHT auf "beliebige Liste
+// gefolgt von beliebiger Liste" verallgemeinert: Eine Aufzählung gefolgt von
+// einer Nummerierung (oder umgekehrt) bleibt nachweislich tight (siehe
+// Testschreiben, keine erzwungene Leerzeile dort) – eine dort vorhandene
+// Leerzeile wäre echte, gewollte Nutzerformatierung und darf nicht
+// verschluckt werden.
 export const collapseChecklistGaps = (md) =>
-  md.replace(/^([ \t]*- \[[ xX]\][^\n]*)\n\n(?=[ \t]*(?:[-*]\s|\d+[.)]\s))/gm, "$1\n");
+  md
+    .replace(/^([ \t]*- \[[ xX]\][^\n]*)\n\n(?=[ \t]*(?:[-*]\s|\d+[.)]\s))/gm, "$1\n")
+    .replace(/^([ \t]*(?:[-*]\s|\d+[.)]\s)[^\n]*)\n\n(?=[ \t]*- \[[ xX]\])/gm, "$1\n");
 
 // Einzug für Nicht-Listen-Blöcke (v7.41, Auftrag "Einrückungen"): Markdown/
 // ProseMirror kennen dafür keine Struktur (anders als Listen, deren Einzug
@@ -1374,11 +1392,84 @@ export function moveOutlineRange(editor, entries, draggedIndex, targetIndex) {
 /* zum Aufrufzeitpunkt identisch sind, passen die Positionen ohne weiteres  */
 /* Mapping. "dryRun" (siehe canChangeIndent) durchläuft dieselbe Logik ohne */
 /* zu dispatchen – für die Deaktivierung der Toolbar-Knöpfe.                */
+// BUGFIX (v7.41.1, 🔴 Blocker 1 aus dem E2E-Lauf von v7.41): "Bild wird bei
+// Mehrfachauswahl NICHT mit eingerückt, nur die Bildunterschrift". Ursache
+// liegt NICHT in runIndentChange selbst (die "touches"-Prüfung unten
+// arbeitet korrekt mit dem, was sie an Selektion bekommt), sondern EINE
+// EBENE VORHER: ProseMirror übersetzt eine ECHTE Browser-Mausselektion über
+// TextSelection.between() in ein Selection-Objekt (siehe prosemirror-view#
+// selectionBetween – GENAU der Weg, den JEDE Mausselektion im Editor nimmt,
+// reproduziert und verifiziert per Unit-Test mit echtem TextSelection.between
+// statt nur editor.commands.setTextSelection(), das diesen Effekt NICHT
+// auslöst). Landet ein Selektionsende exakt auf einer Blockgrenze vor einem
+// BLATT-Knoten ohne Inline-Inhalt (Bild/Formel – kein Text, kein eigener
+// Inhalt), sucht TextSelection.between automatisch vorwärts die nächste
+// gültige TEXT-Position (Selection.findFrom mit textOnly=true, siehe
+// prosemirror-state#findSelectionIn) – ein Blatt-Knoten wird dabei NIE als
+// Zwischenziel akzeptiert und einfach übersprungen. Der Kernfall des
+// Nutzers (Zeilenende VOR einem Bild anklicken, bis ans Ende der direkt
+// folgenden kursiven Bildunterschrift aufziehen) landet dadurch mit "from"
+// bereits INNERHALB der Bildunterschrift – das Bild liegt in der
+// resultierenden Selektion vollständig VOR "from" und gilt für
+// runIndentChange als "nicht berührt", obwohl der Klick es erkennbar
+// einschließen sollte.
+//
+// Fix: Steht "from" (bzw. "to") GENAU an der jeweils äußersten (ersten/
+// letzten) erreichbaren Position eines Top-Level-Blocks – also exakt dort,
+// wo Selection.findFrom bei seiner rekursiven "immer den ersten/letzten
+// Kind-Knoten nehmen"-Suche landen würde –, wird die Grenze so lange auf
+// den vorherigen/nächsten Top-Level-Nachbarn ausgedehnt, wie DER inhaltslos
+// UND nicht inline-fähig ist (exakt das Kriterium, unter dem
+// findSelectionIn einen Knoten überspringt statt hineinzusteigen). Das
+// deckt Bild UND Formel ab, ohne die Typen hart zu verdrahten. Ein reiner
+// Cursor (from===to) bleibt unangetastet – Blocker 1 betrifft ausschließlich
+// echte Mehrfachauswahlen. Symmetrisch für "to" ergänzt (Spiegelfall: von
+// unten nach oben über ein Bild hinweg aufziehen), auch wenn der gemeldete
+// Fall nur die Vorwärts-Richtung betraf.
+function isLeafmostBoundary(doc, pos, forward) {
+  const $pos = doc.resolve(pos);
+  if ($pos.depth === 0) return false; // Rand des gesamten Dokuments
+  const offset = forward ? $pos.parentOffset : $pos.parent.content.size - $pos.parentOffset;
+  if (offset !== 0) return false;
+  for (let d = $pos.depth; d > 1; d--) {
+    const idx = $pos.index(d - 1);
+    const siblingCount = $pos.node(d - 1).childCount;
+    if (forward ? idx !== 0 : idx !== siblingCount - 1) return false;
+  }
+  return true;
+}
+function isSkippableLeaf(node) {
+  return !node.inlineContent && node.content.size === 0;
+}
+function extendPastSkippedLeaves(doc, from, to) {
+  if (from >= to) return { from, to }; // nur echte Range betroffen (Blocker 1)
+  let f = from, t = to;
+  if (isLeafmostBoundary(doc, f, true)) {
+    let boundary = doc.resolve(f).before(1);
+    for (;;) {
+      const prev = boundary > 0 ? doc.resolve(boundary).nodeBefore : null;
+      if (!prev || !isSkippableLeaf(prev)) break;
+      boundary -= prev.nodeSize;
+      f = boundary;
+    }
+  }
+  if (isLeafmostBoundary(doc, t, false)) {
+    let boundary = doc.resolve(t).after(1);
+    for (;;) {
+      const next = boundary < doc.content.size ? doc.resolve(boundary).nodeAfter : null;
+      if (!next || !isSkippableLeaf(next)) break;
+      boundary += next.nodeSize;
+      t = boundary;
+    }
+  }
+  return { from: f, to: t };
+}
+
 function runIndentChange(editor, delta, dryRun) {
   if (!editor) return false;
   const { state } = editor;
   const { doc, schema } = state;
-  const { from, to } = state.selection;
+  const { from, to } = extendPastSkippedLeaves(doc, state.selection.from, state.selection.to);
   const tr = state.tr;
   let applied = false;
 
@@ -1544,15 +1635,213 @@ function inTopLevelList(state) {
     ["bulletList", "orderedList", "taskList"].includes($from.node(1).type.name);
 }
 
+// BUGFIX (v7.41.1, 🔵 Finding 5 aus dem E2E-Lauf von v7.41): Tab in einer
+// Überschrift ist für runIndentChange ein inhaltliches No-op (Überschriften
+// werden nie eingerückt, siehe Kopfkommentar dort) – changeIndent() liefert
+// dafür "false", UND inTopLevelList() greift hier nicht (eine Überschrift
+// ist keine Liste), wodurch die ProseMirror-Keymap-Kette an den
+// Browser-Standard durchreicht: Tab verlässt den Editor-Fokus komplett.
+// Entscheidung (siehe DECISIONS): SCHLUCKEN, konsistent zum bereits
+// etablierten Verhalten in Top-Level-Listen (siehe inTopLevelList/Finding A
+// oben) – ein rein visuelles No-op soll den Tastaturfokus nicht aus dem
+// Editor werfen, das wäre für Tastatur-Nutzer überraschender als ein
+// wirkungsloser Tastendruck. Der Editor bleibt über andere Wege verlassbar
+// (Klick außerhalb, Speichern/Abbrechen-Knöpfe), Tab war dafür nie die
+// dokumentierte Route.
+function inHeading(state) {
+  return state.selection.$from.parent.type.name === "heading";
+}
+
 export const IndentKeymap = Extension.create({
   name: "indentKeymap",
   priority: 1001,
   addKeyboardShortcuts() {
     const run = (delta) => () =>
-      changeIndent(this.editor, delta) || inTopLevelList(this.editor.state);
+      changeIndent(this.editor, delta) || inTopLevelList(this.editor.state) || inHeading(this.editor.state);
     return {
       Tab: run(1),
       "Shift-Tab": run(-1),
+    };
+  },
+});
+
+/* ---------------------------------------------------------------------- */
+/* Listentyp eines (ggf. verschachtelten) Listenpunkts umwandeln (v7.41.1, */
+/* 🔴 Blocker 2 aus dem E2E-Lauf von v7.41): "Stichpunktliste"/"Nummerierte */
+/* Liste"/"Checkliste" (Toolbar-Knöpfe UND deren Tastenkürzel, siehe        */
+/* NestedListToggle-Extension unten) riefen bisher TipTaps eingebaute       */
+/* toggleBulletList/toggleOrderedList/toggleTaskList-Kommandos auf, die     */
+/* intern @tiptap/core#toggleList nutzen. toggleList behandelt NUR den      */
+/* Fall "Selektion + ihr NÄCHSTER umschließender Listen-Vorfahre" – bei     */
+/* einem VERSCHACHTELTEN Listenpunkt (z. B. ein Checkbox-Elternpunkt mit    */
+/* zwei eingerückten Checklisten-Kindern, seit TaskItem.configure(          */
+/* {nested:true}) überhaupt erst erreichbar, siehe DECISIONS) ist dieser    */
+/* NÄCHSTE Vorfahre die INNERE (verschachtelte) Liste. toggleList prüft für */
+/* "Listentyp wechseln" zwar zuerst tr.setNodeMarkup() (reine Typ-Änderung  */
+/* AN ORT UND STELLE), das schlägt aber immer fehl, weil die vorhandenen    */
+/* Kind-Knoten (z. B. "taskItem") nicht zum Content-Schema des Zieltyps     */
+/* ("bulletList" erwartet "listItem") passen (listType.validContent(...)   */
+/* liefert false) – toggleList fällt danach auf commands.clearNodes() +     */
+/* wrapInList() zurück. clearNodes() entfernt SÄMTLICHE Block-Verschach-    */
+/* telung der betroffenen Selektion (nicht nur eine Ebene), wrapInList()    */
+/* baut danach nur die BERÜHRTEN Punkte neu ein – das komplette Eltern-     */
+/* Kind-Gefüge (inkl. UNBERÜHRTER Geschwisterpunkte!) geht verloren, alle   */
+/* Punkte landen als getrennte Top-Level-Listen (siehe Ursachenanalyse im   */
+/* Abschlussbericht).                                                      */
+/*                                                                          */
+/* Fix: eine EIGENE, verschachtelungserhaltende Umsetzung. Statt "heraus-   */
+/* heben + neu einwickeln" wird die UMSCHLIESSENDE Liste direkt an Ort und  */
+/* Stelle in bis zu DREI Geschwister-Listen AUFGETEILT ("davor" im          */
+/* Original-Typ unverändert / "die betroffenen Punkte" im NEUEN Zieltyp /   */
+/* "danach" im Original-Typ unverändert) – exakt wie ein Fließtext-Absatz   */
+/* eine Liste in Markdown "durchtrennen" würde. Nur die tatsächlich         */
+/* ausgewählten Punkte wechseln den Typ, alles andere (inkl. der ÄUSSEREN   */
+/* Verschachtelung, z. B. der Checkbox-Elternpunkt) bleibt strukturell      */
+/* exakt an seinem Platz.                                                  */
+function nearestListItemAncestor(state) {
+  const { $from } = state.selection;
+  for (let d = $from.depth; d > 0; d--) {
+    const n = $from.node(d);
+    if (n.type.name === "listItem" || n.type.name === "taskItem") return n.type;
+  }
+  return null;
+}
+
+// Reines ProseMirror-Kommando (state, dispatch) => boolean – GENAU wie
+// sinkListItem/liftListItem selbst oder tiptaps eigenes clearNodes (siehe
+// node_modules/@tiptap/core/src/commands/clearNodes.ts) aufgebaut: arbeitet
+// AUSSCHLIESSLICH über den übergebenen "tr" und ruft "dispatch(tr)" nur bei
+// tatsächlicher Anwendung auf. WICHTIG: Ein direkter editor.view.dispatch()
+// wäre hier ein eigener Bugfix wert gewesen – innerhalb einer
+// editor.chain()...run()-Kette baut tiptap EINE gemeinsame Transaktion über
+// mehrere Kommandos hinweg auf und dispatcht sie erst am Ende; ein
+// zwischenzeitlicher, eigenständiger view.dispatch() lässt den Rest der
+// Kette auf einem bereits veralteten State aufsetzen ("Applying a mismatched
+// transaction", beim Testschreiben selbst gefunden und hier vermieden).
+// "listAttrs" (z. B. {} für bulletList/taskList) wird NUR auf den neuen
+// Zieltyp-Teil angewendet – "davor"/"danach" behalten die Original-Attribute
+// (z. B. "tight") der umschlossenen Liste unverändert.
+function convertListItemTypeCommand(targetListTypeName, targetItemTypeName, listAttrs) {
+  return (state, dispatch) => {
+    const { schema } = state;
+    const { $from, $to } = state.selection;
+    const targetListType = schema.nodes[targetListTypeName];
+    const targetItemType = schema.nodes[targetItemTypeName];
+    if (!targetListType || !targetItemType) return false;
+
+    const itemType = nearestListItemAncestor(state);
+    // Kein Listenpunkt an der Selektion: kein Sonderfall dieses Blockers –
+    // das native toggleList (siehe NestedListToggle unten) erledigt "neue
+    // Liste anlegen"/"Liste komplett entfernen" bereits korrekt.
+    if (!itemType) return false;
+
+    // GENAU derselbe Bereichs-Finder wie sinkListItem/liftListItem selbst
+    // (prosemirror-schema-list) – deckt Cursor UND Mehrfachauswahl über
+    // mehrere Geschwister-Punkte hinweg identisch ab.
+    const range = $from.blockRange($to, (node) => node.childCount > 0 && node.firstChild.type === itemType);
+    if (!range) return false;
+    const listNode = range.parent;
+
+    if (listNode.type.name === targetListTypeName) {
+      // Zieltyp bereits aktiv: unverändertes Bestandsverhalten ("Knopf
+      // erneut klicken" hebt die betroffenen Punkte aus der Liste, wie es
+      // die native toggleList-Logik für diesen Fall ohnehin schon vorsieht).
+      return liftListItem(itemType)(state, dispatch);
+    }
+
+    // GRENZFALL (v7.41.1, beim Testschreiben gefundener ECHTER Bug in der
+    // markdown-it/tiptap-markdown-Pipeline, KEIN Fehler in diesem Kommando):
+    // "davor"/"Zielteil"/"danach" landen beim Speichern als DREI TEXTUELL
+    // UNUNTERSCHEIDBARE, direkt aufeinanderfolgende "-"-Zeilen im selben
+    // Markdown – Markdown selbst kennt kein Konzept von "drei benachbarte,
+    // aber strukturell getrennte Listen" (das ist reine ProseMirror-
+    // Modellinformation). markdown-it fasst sie beim ERNEUTEN Laden deshalb
+    // wieder zu EINEM <ul> zusammen (siehe markdown-it-task-lists: setzt
+    // "contains-task-list" auf das <ul>, sobald IRGENDEIN Kind-<li> eine
+    // Checkbox hat). Ist das ERSTE <li> dieses zusammengefassten <ul>s KEIN
+    // Checklisten-Punkt, während ein SPÄTERES <li> einer ist, verlangt
+    // taskLists Content-Schema ("taskItem+") trotzdem ab dem ERSTEN Kind
+    // einen taskItem – ProseMirrors HTML-Parser füllt die Lücke mit einem
+    // GESPENSTISCHEN LEEREN taskItem auf und reißt die eigentlich
+    // zusammengehörige Struktur auseinander (verifiziert mit reinem
+    // markdown-it-task-lists, UNABHÄNGIG von dieser App). Betrifft NUR die
+    // Richtung "die Liste WAR eine Checkliste, das ERSTE sichtbare Element
+    // des zusammengefassten Textblocks ist NACH der Umwandlung KEINE
+    // Checkliste mehr, während ein SPÄTERES Element weiterhin eine ist" –
+    // die umgekehrte Richtung (Checkliste zuerst) ist nachweislich sicher.
+    // Bewusste Entscheidung (siehe DECISIONS/TESTFAELLE D17): STATT den
+    // Nutzer eine beim nächsten Laden lautlos zerstörte Struktur speichern
+    // zu lassen, bricht die Umwandlung HIER kontrolliert ab (No-op, wie ein
+    // ausgegrauter Knopf) – kein Fix auf Markdown-Ebene verfügbar, ohne die
+    // global auf "-" fixierte Marker-Konvention (Nutzerkonsistenz) für
+    // Listen aufzuweichen.
+    const firstSegmentIsTask = range.startIndex > 0
+      ? listNode.type.name === "taskList"
+      : targetListTypeName === "taskList";
+    const laterSegmentIsTask = range.startIndex > 0
+      ? targetListTypeName === "taskList"
+      : range.endIndex < listNode.childCount && listNode.type.name === "taskList";
+    // "true" (nicht "false") zurückgeben: "false" würde in NestedListToggle
+    // (siehe unten, "convertListItemTypeCommand(...) || commands.toggleList(
+    // ...)") den NATIVEN Fallback auslösen – und DER hat exakt das
+    // Verschachtelungs-Problem aus Blocker 2, das dieser ganze Umbau löst.
+    // "true" ohne "dispatch(tr)" macht den Toolbar-Klick stattdessen zu
+    // einem sicheren No-op (wie ein ausgegrauter Knopf) statt zu einer
+    // stillen Datenkorruption beim nächsten Laden.
+    if (!firstSegmentIsTask && laterSegmentIsTask) return true;
+
+    const before = [], middle = [], after = [];
+    listNode.forEach((child, _offset, i) => {
+      if (i < range.startIndex) before.push(child);
+      else if (i < range.endIndex) middle.push(targetItemType.create(null, child.content));
+      else after.push(child);
+    });
+    if (!middle.length) return false; // sollte durch den Range-Finder nie vorkommen
+
+    if (dispatch) {
+      const parts = [];
+      if (before.length) parts.push(listNode.type.create(listNode.attrs, Fragment.fromArray(before)));
+      parts.push(targetListType.create({ ...listNode.attrs, ...listAttrs }, Fragment.fromArray(middle)));
+      if (after.length) parts.push(listNode.type.create(listNode.attrs, Fragment.fromArray(after)));
+
+      const listPos = range.$from.before(range.depth);
+      dispatch(state.tr.replaceWith(listPos, listPos + listNode.nodeSize, Fragment.fromArray(parts)));
+    }
+    return true;
+  };
+}
+
+// Exportiert (für gezielte Unit-Tests unabhängig vom Toolbar-Knopf) –
+// editor.commands.command() bettet das reine (state,dispatch)-Kommando
+// korrekt ein, inklusive Chain-Kompatibilität.
+export function convertListItemType(editor, targetListTypeName, targetItemTypeName, listAttrs = {}) {
+  if (!editor) return false;
+  const cmd = convertListItemTypeCommand(targetListTypeName, targetItemTypeName, listAttrs);
+  return editor.commands.command(({ state, dispatch }) => cmd(state, dispatch));
+}
+
+// Ersetzt toggleBulletList/toggleOrderedList/toggleTaskList NUR für den
+// verschachtelten Fall (siehe convertListItemTypeCommand oben) – "kein
+// Listenpunkt an der Selektion" fällt unverändert auf das jeweilige NATIVE
+// Kommando zurück (über den separat registrierten, generischen
+// "toggleList"-Befehl von @tiptap/core, DENSELBEN, den die
+// Original-Kommandos intern nutzen – "neue Liste anlegen"/"komplette Liste
+// entfernen" bleibt dadurch exakt Bestandsverhalten). Muss NACH TaskList/
+// TaskItem/StarterKit in der Extensions-Liste stehen (siehe useEditor()
+// unten): ExtensionManager mischt addCommands() aller Extensions über
+// Object.assign in ihrer (nach Priorität sortierten, bei Gleichstand
+// ORIGINAL-Reihenfolge beibehaltenden) Reihenfolge – der ZULETZT gemischte
+// Eintrag gewinnt bei gleichem Kommando-Namen.
+export const NestedListToggle = Extension.create({
+  name: "nestedListToggle",
+  addCommands() {
+    const make = (listTypeName, itemTypeName, listAttrs) => () => ({ state, dispatch, commands }) =>
+      convertListItemTypeCommand(listTypeName, itemTypeName, listAttrs)(state, dispatch) ||
+      commands.toggleList(listTypeName, itemTypeName, false);
+    return {
+      toggleBulletList: make("bulletList", "listItem", {}),
+      toggleOrderedList: make("orderedList", "listItem", {}),
+      toggleTaskList: make("taskList", "taskItem", {}),
     };
   },
 });
@@ -1884,6 +2173,11 @@ export default function DocEditor({
       // vorhanden (z. B. falls IndentKeymap versehentlich entfernt würde),
       // aber für den normalen Betrieb irrelevant.
       TaskItem.configure({ nested: true }),
+      // NestedListToggle (v7.41.1, Blocker 2) MUSS nach StarterKit/TaskList/
+      // TaskItem stehen (siehe Kopfkommentar dort) – nur so gewinnt ihre
+      // eigene toggleBulletList/toggleOrderedList/toggleTaskList-Definition
+      // beim Command-Merge gegen die eingebauten Varianten.
+      NestedListToggle,
       // Generische Links (v7.8, Nutzerwunsch): autolink/linkOnPaste an – eine
       // getippte oder über eine Auswahl eingefügte http(s)-URL wird
       // automatisch verlinkt. isAllowedUri (Nachbesserung, Finding 2 des
