@@ -175,6 +175,101 @@ export const collapseChecklistGaps = (md) =>
     .replace(/^([ \t]*- \[[ xX]\][^\n]*)\n\n(?=[ \t]*(?:[-*]\s|\d+[.)]\s))/gm, "$1\n")
     .replace(/^([ \t]*(?:[-*]\s|\d+[.)]\s)[^\n]*)\n\n(?=[ \t]*- \[[ xX]\])/gm, "$1\n");
 
+// v7.41.2, Geister-Checkbox (siehe SplitMixedTaskLists oben und DECISIONS):
+// zusätzliches Sicherheitsnetz in save() (siehe dort), NACH
+// collapseChecklistGaps angewendet. SplitMixedTaskLists verhindert nur
+// NEUE Phantome beim Laden – ein BEREITS gespeichertes Phantom (aus einem
+// Dokument, das schon vor diesem Fix beschädigt wurde) bleibt davon
+// unberührt: Das Phantom selbst ist ein leerer taskItem und steht als
+// ERSTES Element seiner Liste – ein <ul>, dessen erstes <li> eine Checkbox
+// ist, hat keinen Schema-Konflikt mehr und wird von SplitMixedTaskLists
+// bewusst nicht angefasst (siehe dort). Dieser Helfer räumt solche
+// Bestandsfälle beim NÄCHSTEN Speichern textuell auf: eine komplett
+// INHALTSLEERE "- [ ]"/"- [x]"-Zeile ohne jeden Folgetext ist in dieser
+// App nie sinnvoll UND wird verworfen.
+//
+// Läuft ausschließlich HIER (save()), NIEMALS während der laufenden
+// Bearbeitung: eine vom Nutzer bewusst angelegte, noch leere Checkbox
+// bleibt deshalb sichtbar, SOLANGE er im Editor ist (der Editor selbst,
+// "editor.state.doc", wird von diesem Helfer nie berührt) – erst der
+// nächste tatsächliche Speichervorgang (der ohnehin nur bei einer ECHTEN
+// Änderung überhaupt läuft, siehe "md === baseline.current" in save())
+// entfernt sie endgültig aus dem persistierten Text.
+//
+// Ausnahme 1 (WICHTIG, sonst Datenverlust): eine leere Checkbox mit
+// FOLGEINHALT auf tieferer Einzugsebene ("- [ ] " als absichtlicher, nur
+// noch unbeschrifteter Elternpunkt über echten Unterpunkten ODER eine
+// eingerückte Fortsetzung als Absatz) bleibt stehen. Die Suche nach diesem
+// Folgeinhalt überspringt dabei GENAU EINE Leerzeile (ein loses Eltern-
+// Kind-Paar): Im echten save()-Pfad hat collapseChecklistGaps eine solche
+// Lücke zwar bereits verdichtet (siehe oben), dieser Helfer soll aber auch
+// STANDALONE korrekt bleiben (Tests, künftige Aufrufer) – ohne diesen
+// Blanko-Überschlag würde "- [ ] \n\n  - Kind" das Kind verwaisen lassen
+// (Review-Finding, v7.41.2 Nachbesserung).
+//
+// Ausnahme 2 (Review-Finding, v7.41.2 Nachbesserung): NUR eine Checkbox AM
+// ANFANG eines Listenblocks gilt als Phantom-Kandidat. Gemessen (v7.41.1
+// wie v7.41.2): Phantome entstehen AUSSCHLIESSLICH als ERSTES Element
+// ihres (ggf. bereits mehrfach akkumulierten) Listenblocks – nie als
+// zweiter/mittlerer/letzter Punkt. "Zeile anlegen und später ausfüllen"
+// ist dagegen ein Alltagsfall (Enter am Ende eines Checklistenpunkts legt
+// GENAU so einen neuen, noch leeren Punkt an) – OHNE diese Bedingung würde
+// die Funktion genau das lautlos wieder löschen. "Blockanfang" heißt
+// konkret: die zuvor bereits entschiedene (in "out" landende) Zeile davor
+// ist entweder leer/nicht vorhanden ODER selbst KEINE Listenzeile – "out"
+// statt der rohen "lines" als Bezugspunkt, damit mehrere KASKADIERENDE
+// Phantome (das erste bereits entfernt) den Status des nächsten nicht
+// verfälschen. Bewusst NICHT zusätzlich auf die Einrückung des Vorgängers
+// geprüft (ein Vorgänger auf JEDER Einrückungstiefe zählt als
+// "Geschwister vorhanden") – siehe DECISIONS für die Abwägung: eine
+// striktere, einrückungssensitive Variante würde zusätzlich einen
+// verschachtelten ERSTEN, absichtlich leeren Kindpunkt (z. B. "- Eltern\n
+// - [ ] ", noch nichts eingetippt) fälschlich löschen – genau die stille
+// Inhalts-Löschung, die diese Nachbesserung verhindern soll. Bewusst
+// akzeptierte Grenze: Ein BEREITS bestehendes Phantom, das GENAU an dieser
+// Stelle (verschachtelter erster Kindpunkt, direkt nach seinem Elternpunkt)
+// in einem Bestandsdokument steht, heilt dieses Sicherheitsnetz NICHT
+// automatisch – von SplitMixedTaskLists (verhindert NEUE Fälle beim Laden)
+// abgesehen bräuchte das eine Positionsinformation, die aus reinem Text
+// nicht mehr zuverlässig von echtem Nutzerinhalt zu unterscheiden ist.
+export const dropEmptyCheckboxLines = (md) => {
+  const lines = md.split("\n");
+  const isListLine = (l) => /^[ \t]*(?:[-*]\s|\d+[.)]\s)/.test(l);
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const m = /^([ \t]*)- \[[ xX]\][ \t]*$/.exec(line);
+    if (m) {
+      const indent = m[1].length;
+      // Folgeinhalt: direkt nächste Zeile, oder (loses Paar) eine Zeile
+      // NACH übersprungenen Leerzeilen – siehe "Ausnahme 1". BELIEBIG viele
+      // Leerzeilen statt genau einer (🔵 des Delta-Reviews): im echten
+      // save()-Pfad ein No-op (tiptap-markdown setzt zwischen Blöcke
+      // höchstens EINE Leerzeile, collapseChecklistGaps verdichtet
+      // zusätzlich), macht die exportierte Funktion aber auch bei roher,
+      // nicht vorbereinigter Eingabe eingabetolerant – sonst verwaiste
+      // "- [ ] \n\n\n  - Kind" das Kind.
+      let childIdx = i + 1;
+      while (lines[childIdx] === "") childIdx++;
+      const child = lines[childIdx];
+      const childIndent = child !== undefined ? /^[ \t]*/.exec(child)[0].length : -1;
+      const hasChild = child !== undefined && child.trim() !== "" && childIndent > indent;
+      // Blockanfang: siehe "Ausnahme 2".
+      const prev = out.length ? out[out.length - 1] : "";
+      const startsBlock = prev.trim() === "" || !isListLine(prev);
+      if (!hasChild && startsBlock) {
+        // Die Zeile selbst UND eine EINZELNE direkt folgende Leerzeile
+        // überspringen (sonst bliebe eine doppelte Leerzeile zurück, falls
+        // das Phantom vom nächsten Block per Leerzeile abgesetzt war).
+        if (lines[i + 1] === "") i++;
+        continue;
+      }
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+};
+
 // Einzug für Nicht-Listen-Blöcke (v7.41, Auftrag "Einrückungen"): Markdown/
 // ProseMirror kennen dafür keine Struktur (anders als Listen, deren Einzug
 // über Verschachtelung/sinkListItem läuft, siehe changeIndent unten) – ein
@@ -928,6 +1023,158 @@ export const IndentMarkdownIt = Extension.create({
 });
 
 /* -------------------------------------------------------------------- */
+/* Geister-Checkbox (v7.41.2, ECHTER Bug, ÄLTER als v7.41 – trifft ganz     */
+/* gewöhnliche Notizbuch-Inhalte, siehe DECISIONS für die vollständige       */
+/* Ursachenanalyse und den mehrzyklischen Nachweis): eine gewöhnliche        */
+/* Stichpunktliste, gefolgt (MIT ODER OHNE Leerzeile) von einer Checkliste   */
+/* MIT DEMSELBEN Marker ("-"), ist in CommonMark KEINE zwei getrennten       */
+/* Listen, sondern EINE einzige – Markdown kennt kein "-"-Listenende außer   */
+/* über einen Marker-/Ebenenwechsel. markdown-it-task-lists setzt die        */
+/* Klasse "contains-task-list" auf das <ul>, SOBALD IRGENDEIN Kind-<li>      */
+/* eine Checkbox hat; ist das ERSTE <li> dieses <ul>s KEINE Checkbox,        */
+/* verlangt TaskLists starres Content-Schema ("taskItem+") trotzdem ab dem   */
+/* ERSTEN Kind einen taskItem – ProseMirrors HTML-Parser füllt die           */
+/* Schema-Lücke MIT EINEM GESPENSTISCHEN LEEREN taskItem AUF (verifiziert    */
+/* mit purem markdown-it-task-lists, UNABHÄNGIG von tiptap/dieser App –      */
+/* dieselbe Lücke, die convertListItemTypeCommand oben für einen ANDEREN     */
+/* Auslöser bereits dokumentiert und dort per No-op umschifft – siehe dort   */
+/* für den Verweis, ob dieser Guard nach diesem Fix noch gebraucht wird).    */
+/* Der Phantom-Punkt landet in der Ansicht als sichtbares leeres Kästchen    */
+/* UND wird beim nächsten Speichern committet – UND vermehrt sich mit        */
+/* jedem weiteren Bearbeitungszyklus um ein WEITERES (jede erneute Ladung    */
+/* trifft dieselbe Parser-Lücke erneut, diesmal mit dem vorherigen           */
+/* Phantom als zusätzlichem "-"-Element ganz am Anfang der Liste).           */
+/*                                                                          */
+/* Fix: die Mehrdeutigkeit im DOM auflösen, BEVOR ProseMirror parst –        */
+/* dasselbe Hook-Muster wie FileLinkMarkdownIt/IndentMarkdownIt oben, nur    */
+/* über parse.updateDOM(element) statt parse.setup(md). tiptap-markdown      */
+/* ruft BEIDE Hooks bei JEDEM parse()-Aufruf auf (MarkdownParser.js#parse:   */
+/* setup() vor dem Rendern, updateDOM() NACH dem Rendern, aber VOR dem        */
+/* eigentlichen ProseMirror-HTML-Parsing) – das gilt für JEDEN Ladeweg,       */
+/* also auch editor.commands.setContent()/insertContentAt() (siehe           */
+/* node_modules/tiptap-markdown/src/Markdown.js#addCommands: beide rufen     */
+/* intern parser.parse() auf), NICHT nur den initialen Editor-Aufbau.        */
+/* Jedes <ul class="contains-task-list">, dessen ERSTES <li> KEIN            */
+/* Checklisten-Punkt ist, wird an JEDER Task/Nicht-Task-Grenze in            */
+/* eigenständige Geschwister-<ul> aufgeteilt (mehrfache Wechsel INNERHALB    */
+/* einer Liste zerfallen entsprechend in mehr als zwei Teil-Listen) – exakt  */
+/* die Struktur, die die Serialisierung für "bulletList gefolgt von          */
+/* taskList" ohnehin schon schreibt (siehe BulletList/TaskList-Node), und    */
+/* die beim ERNEUTEN Laden NICHT mehr zusammengefasst geparst wird, WEIL     */
+/* kein <ul> mehr existiert, dessen erstes Kind keine Checkbox ist.          */
+/*                                                                          */
+/* Reihenfolge-Anforderung (WICHTIG, siehe "priority" unten): Muss VOR        */
+/* TaskLists eigenem updateDOM-Hook laufen. tiptap-markdown ruft ALLE         */
+/* updateDOM-Hooks in der Reihenfolge von "extensionManager.extensions" auf   */
+/* (nach Priorität sortiert, siehe ExtensionManager.sort in @tiptap/core).    */
+/* Liefe TaskLists eigener Hook ZUERST, würde er "data-type=taskList" NUR auf */
+/* das ORIGINALE (gemischte) <ul> setzen – die hier NEU erzeugten             */
+/* Geschwister-<ul> blieben ohne dieses Attribut zurück (TaskLists parseDOM   */
+/* verlangt zwingend ul[data-type="taskList"], siehe node_modules/@tiptap/    */
+/* extension-task-list) und würden beim ANSCHLIESSENDEN ProseMirror-Parsing   */
+/* als GENERISCHE bulletList misinterpretiert. "priority: 101" (v7.41.2       */
+/* Nachbesserung, Review-Finding) statt sich – wie ursprünglich – auf die     */
+/* Position in der useEditor()-Extensions-Liste zu verlassen: GENAU dieselbe  */
+/* Zerbrechlichkeit, die IndentKeymap ("priority: 1001") und NestedListToggle */
+/* ("priority: 50") bereits vermeiden – TaskList/TaskItem haben KEINEN        */
+/* eigenen Extension-Level-priority-Wert (Default 100, siehe node_modules/    */
+/* @tiptap/extension-task-list|task-item/src – der "priority: 51" DORT        */
+/* gehört zu einer parseDOM-Regel, nicht zur Extension), "101" sortiert       */
+/* SplitMixedTaskLists in ExtensionManager.sort() GARANTIERT vor sie,         */
+/* unabhängig von ihrer tatsächlichen Position in useEditor() unten.          */
+/* Gefahrlos: die Extension steuert weder Nodes/Marks noch ProseMirror-       */
+/* Plugins/Commands bei, eine höhere Priorität kann deshalb an KEINER         */
+/* anderen Stelle etwas verschieben. Die Position VOR TaskList in der Liste   */
+/* unten bleibt trotzdem stehen – rein als Lese-Konvention, nicht mehr als    */
+/* funktionale Notwendigkeit.                                                */
+/*                                                                          */
+/* Verschachtelte gemischte Listen (ein <ul class="contains-task-list">      */
+/* INNERHALB eines <li>, z. B. ein Checkbox-Elternpunkt mit einer             */
+/* eingerückten gemischten Liste als Kind): querySelectorAll trifft JEDES     */
+/* passende <ul> im gesamten Baum, unabhängig von der Verschachtelungs-       */
+/* tiefe – die Aufteilung läuft pro <ul> unabhängig und respektiert dadurch    */
+/* automatisch jede Ebene für sich. <ul> ohne Kinder: "firstElementChild"      */
+/* ist dann null, die Funktion bricht für dieses <ul> sofort ab – kommt in     */
+/* der Praxis nie vor (markdown-it erzeugt kein leeres <ul>), rein defensiv.   */
+/*                                                                          */
+/* Geerbte Lockerheit (beim Testschreiben gefunden, siehe DECISIONS):         */
+/* CommonMark entscheidet "tight"/"loose" für die GESAMTE ursprüngliche,       */
+/* noch ungetrennte Liste EINHEITLICH (irgendeine Leerzeile IRGENDWO in der    */
+/* Liste macht ALLE ihre <li> "loose", also mit <p>-umschlossenem Inhalt).     */
+/* Nach der Aufteilung erbt ein neu entstandenes NICHT-Task-<ul> diese          */
+/* <p>-Umschließung auch dann, wenn innerhalb GENAU DIESER Teilgruppe gar       */
+/* keine Leerzeile stand (die Leerzeile, die die Gesamtliste "loose" gemacht    */
+/* hat, kann irgendwo ANDERS – insbesondere GENAU an der jetzt neu               */
+/* geschaffenen Gruppengrenze – gestanden haben). MarkdownTightLists             */
+/* (tiptap-markdown) liest "tight" beim Parsen direkt von                        */
+/* "!element.querySelector('p')" ab (node_modules/tiptap-markdown/src/            */
+/* extensions/tiptap/tight-lists.js) – eine geerbte <p>-Hülle hätte dadurch        */
+/* eine UNGEWOLLTE Leerzeile ZWISCHEN zwei eigentlich tight gemeinten              */
+/* Geschwister-Punkten INNERHALB derselben neuen Teilliste zur Folge               */
+/* (empirisch mit genau dem Auftragsbeispiel "Notiz eins"/"Notiz zwei" +           */
+/* Leerzeile + Checkliste nachgestellt). taskList ist davon NICHT betroffen        */
+/* (kein "tight"-Attribut auf diesem Node-Typ überhaupt, siehe                     */
+/* MarkdownTightLists' "listTypes": ["bulletList","orderedList"] – der             */
+/* Serializer fällt für taskList IMMER auf den konfigurierten                      */
+/* "tightLists"-Default zurück, siehe node_modules/prosemirror-markdown/src/       */
+/* to_markdown.ts#renderList). Für bulletList/orderedList wird die geerbte         */
+/* <p>-Hülle deshalb HIER GEZIELT entfernt: NUR bei einem <li>, dessen              */
+/* EINZIGES Kind ein <p> ist (kein weiterer Geschwister-Block wie eine              */
+/* eingebettete Unterliste – DIE bräuchte ihre <p>-Hülle unverändert), wird          */
+/* der Absatz "unwrapped" (Kinder direkt ins <li> gehoben). Bewusster               */
+/* Kompromiss (siehe DECISIONS): Eine ECHTE, vom Nutzer INNERHALB genau              */
+/* dieser Teilgruppe gewollte Leerzeile lässt sich aus dem bereits                   */
+/* gerenderten DOM nicht mehr von einer bloß GEERBTEN unterscheiden                  */
+/* (CommonMark trifft die Loose/Tight-Entscheidung, bevor diese Erweiterung           */
+/* überhaupt laufen kann) – "immer tight nach der Aufteilung" passt zum               */
+/* ohnehin konfigurierten App-Standard (Markdown.configure({tightLists:true}))         */
+/* und betrifft nur den seltenen Fall "Stichpunktliste + Checkliste,                   */
+/* mindestens eine Seite mit 2+ Punkten, irgendwo eine Leerzeile im                     */
+/* ursprünglichen Gesamtblock".                                                          */
+export const SplitMixedTaskLists = Extension.create({
+  name: "splitMixedTaskLists",
+  priority: 101,
+  addStorage() {
+    return {
+      markdown: {
+        parse: {
+          updateDOM(element) {
+            [...element.querySelectorAll("ul.contains-task-list")].forEach((ul) => {
+              const isTask = (li) => li.classList.contains("task-list-item");
+              if (!ul.firstElementChild || isTask(ul.firstElementChild)) return;
+              let current = null;
+              const groups = [];
+              [...ul.children].forEach((li) => {
+                if (!current || isTask(li) !== isTask(current.firstElementChild)) {
+                  current = document.createElement("ul");
+                  if (isTask(li)) current.className = "contains-task-list";
+                  groups.push(current);
+                  ul.parentNode.insertBefore(current, ul);
+                }
+                current.appendChild(li);
+              });
+              // Geerbte Lockerheit korrigieren (siehe Kopfkommentar) – NUR
+              // für die neu entstandenen NICHT-Task-Gruppen, NUR bei einem
+              // <li> mit ausschließlich einem <p>-Kind (eine eingebettete
+              // Unterliste als weiteres Geschwister-Element bleibt unangetastet).
+              groups.forEach((g) => {
+                if (g.className === "contains-task-list") return;
+                [...g.children].forEach((li) => {
+                  if (li.children.length === 1 && li.firstElementChild.tagName === "P") {
+                    li.replaceChildren(...li.firstElementChild.childNodes);
+                  }
+                });
+              });
+              ul.remove();
+            });
+          },
+        },
+      },
+    };
+  },
+});
+
+/* -------------------------------------------------------------------- */
 /* AutoKorrektur (v7.25, Nutzerwunsch: "Word-artige Zeichenersetzung     */
 /* beim Tippen, mit umfangreicher eingebauter Bibliothek, konfigurier-   */
 /* bar"). Die eigentliche Bibliothek + die gesamte Konflikt-Auflösung    */
@@ -1648,8 +1895,25 @@ function inTopLevelList(state) {
 // wirkungsloser Tastendruck. Der Editor bleibt über andere Wege verlassbar
 // (Klick außerhalb, Speichern/Abbrechen-Knöpfe), Tab war dafür nie die
 // dokumentierte Route.
+//
+// BUGFIX (v7.41.2, 🔵 Restrisiko aus dem Review vor dem v7.41.1-Commit,
+// gemessen statt nur vermutet): "state.selection.$from.parent" ist der
+// INNERSTE umschließende Block, unabhängig von dessen Verschachtelungs-
+// tiefe – steht der Cursor in einer Tabellenzelle, deren Block per
+// Toolbar-Knopf zu einer Überschrift gemacht wurde (Zelleninhalt ist
+// laut Schema ein Block, "heading" ist als solcher zulässig), lieferte
+// diese Prüfung fälschlich "true" und ließ IndentKeymap Tab/Shift-Tab
+// SCHLUCKEN, obwohl gar keine Top-Level-Überschrift vorliegt – Tables
+// eigene goToNextCell/addRowAfter-Bindungen (siehe inTopLevelList direkt
+// oberhalb, "Kette reicht an goToNextCell durch wie bisher") kamen dadurch
+// innerhalb einer solchen Zelle nie mehr zum Zug. Fix analog
+// inTopLevelList: NUR die oberste Ebene (direktes Kind von doc) zählt als
+// "Überschrift" im Sinne dieser Regel – eine Überschrift, die ihrerseits
+// in einer Tabellenzelle steckt, hat dort $from.node(1).type.name ===
+// "table", nicht "heading".
 function inHeading(state) {
-  return state.selection.$from.parent.type.name === "heading";
+  const { $from } = state.selection;
+  return $from.depth > 0 && $from.node(1).type.name === "heading";
 }
 
 export const IndentKeymap = Extension.create({
@@ -1749,46 +2013,25 @@ function convertListItemTypeCommand(targetListTypeName, targetItemTypeName, list
       return liftListItem(itemType)(state, dispatch);
     }
 
-    // GRENZFALL (v7.41.1, beim Testschreiben gefundener ECHTER Bug in der
-    // markdown-it/tiptap-markdown-Pipeline, KEIN Fehler in diesem Kommando):
-    // "davor"/"Zielteil"/"danach" landen beim Speichern als DREI TEXTUELL
-    // UNUNTERSCHEIDBARE, direkt aufeinanderfolgende "-"-Zeilen im selben
-    // Markdown – Markdown selbst kennt kein Konzept von "drei benachbarte,
-    // aber strukturell getrennte Listen" (das ist reine ProseMirror-
-    // Modellinformation). markdown-it fasst sie beim ERNEUTEN Laden deshalb
-    // wieder zu EINEM <ul> zusammen (siehe markdown-it-task-lists: setzt
-    // "contains-task-list" auf das <ul>, sobald IRGENDEIN Kind-<li> eine
-    // Checkbox hat). Ist das ERSTE <li> dieses zusammengefassten <ul>s KEIN
-    // Checklisten-Punkt, während ein SPÄTERES <li> einer ist, verlangt
-    // taskLists Content-Schema ("taskItem+") trotzdem ab dem ERSTEN Kind
-    // einen taskItem – ProseMirrors HTML-Parser füllt die Lücke mit einem
-    // GESPENSTISCHEN LEEREN taskItem auf und reißt die eigentlich
-    // zusammengehörige Struktur auseinander (verifiziert mit reinem
-    // markdown-it-task-lists, UNABHÄNGIG von dieser App). Betrifft NUR die
-    // Richtung "die Liste WAR eine Checkliste, das ERSTE sichtbare Element
-    // des zusammengefassten Textblocks ist NACH der Umwandlung KEINE
-    // Checkliste mehr, während ein SPÄTERES Element weiterhin eine ist" –
-    // die umgekehrte Richtung (Checkliste zuerst) ist nachweislich sicher.
-    // Bewusste Entscheidung (siehe DECISIONS/TESTFAELLE D17): STATT den
-    // Nutzer eine beim nächsten Laden lautlos zerstörte Struktur speichern
-    // zu lassen, bricht die Umwandlung HIER kontrolliert ab (No-op, wie ein
-    // ausgegrauter Knopf) – kein Fix auf Markdown-Ebene verfügbar, ohne die
-    // global auf "-" fixierte Marker-Konvention (Nutzerkonsistenz) für
-    // Listen aufzuweichen.
-    const firstSegmentIsTask = range.startIndex > 0
-      ? listNode.type.name === "taskList"
-      : targetListTypeName === "taskList";
-    const laterSegmentIsTask = range.startIndex > 0
-      ? targetListTypeName === "taskList"
-      : range.endIndex < listNode.childCount && listNode.type.name === "taskList";
-    // "true" (nicht "false") zurückgeben: "false" würde in NestedListToggle
-    // (siehe unten, "convertListItemTypeCommand(...) || commands.toggleList(
-    // ...)") den NATIVEN Fallback auslösen – und DER hat exakt das
-    // Verschachtelungs-Problem aus Blocker 2, das dieser ganze Umbau löst.
-    // "true" ohne "dispatch(tr)" macht den Toolbar-Klick stattdessen zu
-    // einem sicheren No-op (wie ein ausgegrauter Knopf) statt zu einer
-    // stillen Datenkorruption beim nächsten Laden.
-    if (!firstSegmentIsTask && laterSegmentIsTask) return true;
+    // GRENZFALL, BIS v7.41.1 hier per No-op abgesichert, seit v7.41.2
+    // ENTFALLEN (siehe DECISIONS): "davor"/"Zielteil"/"danach" landen beim
+    // Speichern als DREI TEXTUELL UNUNTERSCHEIDBARE, direkt aufeinander-
+    // folgende "-"-Zeilen im selben Markdown – Markdown kennt kein Konzept
+    // von "drei benachbarte, aber strukturell getrennte Listen". markdown-it
+    // fasste sie beim ERNEUTEN Laden deshalb wieder zu EINEM <ul> zusammen;
+    // war dessen ERSTES <li> danach KEIN Checklisten-Punkt, während ein
+    // SPÄTERES einer war, füllte ProseMirrors HTML-Parser die Schema-Lücke
+    // mit einem GESPENSTISCHEN LEEREN taskItem auf (dieselbe "Geister-
+    // Checkbox"-Parser-Lücke wie beim ganz gewöhnlichen "Stichpunktliste
+    // gefolgt von Checkliste"-Fall, siehe SplitMixedTaskLists weiter oben).
+    // SplitMixedTaskLists löst genau diese Mehrdeutigkeit jetzt beim Laden
+    // auf (unabhängig davon, WIE die zusammengefasste Liste entstanden ist)
+    // – die frühere No-op-Absicherung HIER wäre dadurch nur noch ein
+    // überflüssiger, den Nutzer verwirrender Sonderfall ohne jede
+    // Rückmeldung ("Checkliste zuerst" funktionierte immer schon, die
+    // umgekehrte Richtung tat scheinbar nichts) und wurde ersatzlos
+    // entfernt (verifiziert: alle betroffenen Konvertierungsrichtungen sind
+    // jetzt roundtrip-stabil, siehe tests/docEditorListToggle.test.jsx).
 
     const before = [], middle = [], after = [];
     listNode.forEach((child, _offset, i) => {
@@ -1826,14 +2069,29 @@ export function convertListItemType(editor, targetListTypeName, targetItemTypeNa
 // Kommando zurück (über den separat registrierten, generischen
 // "toggleList"-Befehl von @tiptap/core, DENSELBEN, den die
 // Original-Kommandos intern nutzen – "neue Liste anlegen"/"komplette Liste
-// entfernen" bleibt dadurch exakt Bestandsverhalten). Muss NACH TaskList/
-// TaskItem/StarterKit in der Extensions-Liste stehen (siehe useEditor()
-// unten): ExtensionManager mischt addCommands() aller Extensions über
-// Object.assign in ihrer (nach Priorität sortierten, bei Gleichstand
-// ORIGINAL-Reihenfolge beibehaltenden) Reihenfolge – der ZULETZT gemischte
-// Eintrag gewinnt bei gleichem Kommando-Namen.
+// entfernen" bleibt dadurch exakt Bestandsverhalten). ExtensionManager
+// mischt addCommands() aller Extensions über Object.assign in ihrer (nach
+// Priorität sortierten, bei Gleichstand ORIGINAL-Reihenfolge beibehaltenden)
+// Reihenfolge – der ZULETZT gemischte Eintrag gewinnt bei gleichem
+// Kommando-Namen.
+//
+// "priority: 50" (v7.41.2, Nachbesserung): NIEDRIGER als der Default (100)
+// von TaskList/TaskItem/StarterKits BulletList/OrderedList/ListItem (keiner
+// von ihnen setzt einen eigenen Extension-Level-priority-Wert, siehe
+// node_modules/@tiptap/extension-task-list|task-item/src – der "priority:
+// 51" DORT gehört zu einer parseDOM-Regel, nicht zur Extension selbst)
+// sortiert NestedListToggle in ExtensionManager.sort() GARANTIERT ans Ende
+// der für addCommands() maßgeblichen Reihenfolge, UNABHÄNGIG von ihrer
+// tatsächlichen Position in der useEditor()-Extensions-Liste (siehe unten)
+// – die bisherige Reihenfolge-Argumentation ("MUSS NACH TaskList/TaskItem/
+// StarterKit stehen") war korrekt, aber zerbrechlich (genau wie bei
+// IndentKeymap vor dessen eigenem "priority: 1001", siehe dort). Gefahrlos:
+// NestedListToggle steuert weder Nodes/Marks noch ProseMirror-Plugins bei,
+// eine niedrigere Priorität kann deshalb an KEINER anderen Stelle (Schema-
+// Aufbau, Plugin-/Keymap-Reihenfolge) etwas verschieben.
 export const NestedListToggle = Extension.create({
   name: "nestedListToggle",
+  priority: 50,
   addCommands() {
     const make = (listTypeName, itemTypeName, listAttrs) => () => ({ state, dispatch, commands }) =>
       convertListItemTypeCommand(listTypeName, itemTypeName, listAttrs)(state, dispatch) ||
@@ -2153,6 +2411,13 @@ export default function DocEditor({
       TextStyle,
       Color,
       Highlight.configure({ multicolor: true }),
+      // Geister-Checkbox (v7.41.2, siehe SplitMixedTaskLists oben): Muss VOR
+      // TaskLists eigenem updateDOM-Hook laufen – seit der v7.41.2-
+      // Nachbesserung über "priority: 101" an der Extension selbst
+      // sichergestellt (nicht mehr über diese Listenposition, siehe
+      // ausführlichen Kommentar dort). Position hier bleibt als
+      // Lese-Konvention stehen.
+      SplitMixedTaskLists,
       TaskList,
       // nested:true (v7.41, Auftrag "Einrückungen"): Checklisten müssen
       // verschachtelbar sein (der Nutzer-Fall hat eine Checkliste als
@@ -2472,7 +2737,7 @@ export default function DocEditor({
     if (!editor || saving || uploading) return;
     const md = editor.storage.markdown.getMarkdown();
     if (md === baseline.current) { onCancel(); return; } // nichts geändert
-    let out = collapseChecklistGaps(unescapeMd(unresolveImgs(md, imgMap)));
+    let out = dropEmptyCheckboxLines(collapseChecklistGaps(unescapeMd(unresolveImgs(md, imgMap))));
     // Sicherheitsnetz (siehe UNRESOLVED_IMG_RE oben für die ausführliche
     // Begründung): eine Bildreferenz OHNE img:-Ziel darf nicht gespeichert
     // werden – seit v7.41 Teil B nur noch der Ausnahmefall (z. B. ohne

@@ -44,14 +44,15 @@ import { Markdown } from "tiptap-markdown";
 import { TextSelection } from "@tiptap/pm/state";
 import {
   FencedCodeBlock, BlockImage, IndentParagraph, IndentMarkdownIt, IndentKeymap, MdTable,
-  MathInline, MathBlock,
-  unescapeMd, collapseChecklistGaps, changeIndent, canChangeIndent,
+  MathInline, MathBlock, SplitMixedTaskLists,
+  unescapeMd, collapseChecklistGaps, dropEmptyCheckboxLines, changeIndent, canChangeIndent,
 } from "../src/components/DocEditor.jsx";
 import { mathToPlaceholders } from "../src/lib/math.jsx";
 
 // Exakt die Verdrahtung aus DocEditor.jsx (useEditor()) – IndentKeymap ZUERST
 // (niedrigste Tastatur-Priorität, siehe Kommentar dort), paragraph:false +
-// IndentParagraph, TaskItem mit nested:true.
+// IndentParagraph, TaskItem mit nested:true, SplitMixedTaskLists VOR
+// TaskList/TaskItem (v7.41.2, siehe Kommentar an der Extension).
 function buildEditor(md, extra = []) {
   return new Editor({
     extensions: [
@@ -60,6 +61,7 @@ function buildEditor(md, extra = []) {
       IndentParagraph,
       FencedCodeBlock,
       BlockImage,
+      SplitMixedTaskLists,
       TaskList,
       TaskItem.configure({ nested: true }),
       MdTable.configure({ resizable: false }),
@@ -77,10 +79,11 @@ function buildEditor(md, extra = []) {
 }
 
 // Simuliert exakt den save()-Pfad in DocEditor.jsx (ohne unresolveImgs/
-// data:-Check, die hier nicht gebraucht werden): unescapeMd dann
-// collapseChecklistGaps.
+// data:-Check, die hier nicht gebraucht werden): unescapeMd, dann
+// collapseChecklistGaps, dann dropEmptyCheckboxLines (v7.41.2, Geister-
+// Checkbox-Netz, siehe dort – läuft in save() NACH collapseChecklistGaps).
 function saveLike(editor) {
-  return collapseChecklistGaps(unescapeMd(editor.storage.markdown.getMarkdown()));
+  return dropEmptyCheckboxLines(collapseChecklistGaps(unescapeMd(editor.storage.markdown.getMarkdown())));
 }
 
 // ECHTER Tastendruck über die reale ProseMirror-Keymap-Kette (Re-Review vor

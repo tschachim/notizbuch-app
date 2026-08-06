@@ -8160,6 +8160,18 @@ aus `referenz-app.jsx` übernommen.
         zurückgesetzt, 7 von 9 aussagekräftigen Tests liefen rot wie
         erwartet – die restlichen 2 nutzen Fallback-Pfade, die von
         diesem Fix unabhängig bereits vorher korrekt waren).
+      - **ÜBERHOLT seit v7.41.2 (siehe Eintrag zum Auftrag "Geister-
+        Checkbox" weiter unten):** Die oben beschriebene "Bewusst
+        akzeptierte Grenze" (No-op statt Konvertierung in GENAU einer
+        Richtung) ist dieselbe zugrunde liegende `markdown-it-task-
+        lists`/`taskItem+`-Parser-Lücke wie beim ganz gewöhnlichen
+        "Stichpunktliste gefolgt von Checkliste"-Fall – NICHT auf
+        `convertListItemTypeCommand` beschränkt, wie hier ursprünglich
+        angenommen. `SplitMixedTaskLists` löst die Mehrdeutigkeit jetzt
+        beim Laden GENERELL auf, der No-op-Sonderfall wurde ERSATZLOS
+        ENTFERNT – alle Konvertierungsrichtungen funktionieren seither
+        normal und bleiben roundtrip-stabil (verifiziert in
+        `tests/docEditorListToggle.test.jsx`).
     - **🟡 Finding 3 (D15-Doku war falsch, Verhalten ist richtig):**
       "Einzug verkleinern" ist bei einem NICHT eingerückten Listenpunkt
       bewusst AKTIV (nicht ausgegraut) – ein Klick/`Umschalt+Tab` wandelt
@@ -8204,3 +8216,231 @@ aus `referenz-app.jsx` übernommen.
       verallgemeinert (verifiziert: eine Aufzählung gefolgt von einer
       Nummerierung bleibt tight, ohne erzwungene Leerzeile – eine dort
       vorhandene Leerzeile wäre echte Nutzerformatierung).
+
+84. **Geister-Checkbox – ECHTER Bug, ÄLTER als v7.41, behoben (v7.41.2,
+    Live-Befund + E2E-Reproduktion).** Steht in einem Dokument eine normale
+    Stichpunktliste und darunter (MIT ODER OHNE Leerzeile) eine Checkliste
+    MIT DEMSELBEN Marker (`-`), fügte der Editor beim Laden eine LEERE
+    Checkbox ein – sichtbar in der Ansicht, wurde beim nächsten Speichern
+    mitcommittet und vermehrte sich mit jedem weiteren Bearbeitungszyklus um
+    eine weitere (gemessen: Zyklus 1 → ein leeres Kästchen, Zyklus 2 → zwei,
+    Zyklus 3 → drei, Zyklus 4 → vier – bei je einer Bearbeitung an ganz
+    anderer Stelle im Dokument). Trifft GANZ GEWÖHNLICHE Notizbuch-Inhalte
+    ("ein paar Stichpunkte, darunter eine Aufgabenliste"), keine
+    Randerscheinung.
+    - **Ursachenanalyse (verifiziert, siehe Reviewer-Vorgabe):**
+      `"# T\n\n- Notiz\n\n- [ ] Aufgabe"` lädt und serialisiert bereits im
+      REINEN Ladepfad (ganz OHNE `collapseChecklistGaps`) sofort als
+      `"# T\n\n- [ ] \n\n- Notiz\n\n- [ ] Aufgabe"` – ein leerer Checklisten-
+      Punkt VOR der eigentlichen Stichpunktliste. Grund: In CommonMark
+      bilden zwei `-`-markierte Listen OHNE Marker-/Ebenenwechsel IMMER EINE
+      einzige Liste, unabhängig davon, ob eine Leerzeile dazwischensteht
+      (empirisch bestätigt: MIT und OHNE Leerzeile identisches Ergebnis).
+      `markdown-it-task-lists` setzt die Klasse `contains-task-list` auf
+      das gesamte `<ul>`, sobald IRGENDEIN Kind-`<li>` eine Checkbox hat.
+      Ist das ERSTE `<li>` dieses `<ul>`s KEINE Checkbox, verlangt
+      TaskLists starres Content-Schema (`taskItem+`) trotzdem ab dem
+      ERSTEN Kind einen `taskItem` – ProseMirrors HTML-Parser füllt die
+      Schema-Lücke mit einem GESPENSTISCHEN LEEREN `taskItem` auf
+      (verifiziert mit purem `markdown-it-task-lists`, UNABHÄNGIG von
+      tiptap/dieser App). Da die `md === baseline.current`-Prüfung in
+      `save()` ein reines Öffnen+Speichern OHNE Änderung folgenlos lässt,
+      fiel der Bug beim bloßen Ansehen nicht auf – jede ECHTE Bearbeitung
+      (an beliebiger Stelle) schrieb das Phantom jedoch fest, und der
+      NÄCHSTE Ladevorgang traf dieselbe Lücke erneut, diesmal mit dem
+      vorherigen Phantom als zusätzlichem Element am Listenanfang (daher
+      die Vermehrung um genau eins pro Zyklus). `*`-Marker statt `-` ist
+      NUR den ERSTEN Speichervorgang lang sicher (unterschiedliche Marker
+      bilden in CommonMark getrennte Listen), weil der Serializer den
+      Marker global auf `-` normalisiert (`bulletListMarker: "-"`) – der
+      ZWEITE Zyklus trifft dieselbe Lücke dann doch. Dieselbe Lücke betraf
+      bereits `convertListItemTypeCommand` (Eintrag #83, Blocker 2) für
+      EINEN speziellen Auslöser (Konvertierung eines Listenpunkt-Typs) –
+      siehe dort für die jetzt überholte Markierung.
+    - **Fix (`DocEditor.jsx#SplitMixedTaskLists`):** Eine neue Extension
+      löst die Mehrdeutigkeit im DOM auf, BEVOR ProseMirror parst –
+      dasselbe Hook-Muster wie `FileLinkMarkdownIt`/`IndentMarkdownIt`
+      (dort `parse.setup(md)`, hier `parse.updateDOM(element)`; beide Hooks
+      laufen laut `tiptap-markdown/src/parse/MarkdownParser.js#parse` bei
+      JEDEM `parse()`-Aufruf, verifiziert auch für
+      `editor.commands.setContent()`/`insertContentAt()` – beide rufen
+      intern `parser.parse()`, siehe `tiptap-markdown/src/Markdown.js`).
+      Jedes `<ul class="contains-task-list">`, dessen ERSTES `<li>` KEIN
+      Checklisten-Punkt ist, wird an JEDER Task/Nicht-Task-Grenze in
+      eigenständige Geschwister-`<ul>` aufgeteilt – exakt die Struktur, die
+      die Serialisierung für "bulletList gefolgt von taskList" ohnehin
+      schon schreibt. Deckt dabei ab: mehrere Wechsel INNERHALB einer
+      Liste (zerfällt in entsprechend mehr Teil-Listen), verschachtelte
+      gemischte Listen (`querySelectorAll` trifft jede Verschachtelungs-
+      tiefe unabhängig), `<ul>` ohne Kinder (defensiver früher Abbruch,
+      kommt über `markdown-it` in der Praxis nie vor). Muss VOR TaskLists
+      eigenem `updateDOM`-Hook laufen (setzt `data-type="taskList"` auf
+      jedes `.contains-task-list`-Element) – sonst bekämen die hier NEU
+      erzeugten Geschwister-`<ul>` dieses Attribut nie und würden von
+      ProseMirror als generische `bulletList` fehlinterpretiert.
+      **Nachbesserung (Re-Review):** ursprünglich über die reine Position in
+      der `useEditor()`-Extensions-Liste sichergestellt (alle drei
+      Extensions Default-Priorität 100, `ExtensionManager.sort()` bei
+      Gleichstand stabil nach Listenposition) – GENAU die Zerbrechlichkeit,
+      die `IndentKeymap`/`NestedListToggle` bereits mit einem expliziten
+      `priority`-Wert vermeiden. `SplitMixedTaskLists` bekam deshalb
+      `priority: 101` (höher als der TaskList/TaskItem-Default, die beide
+      KEINEN eigenen Extension-Level-`priority` setzen) – sortiert die
+      Extension jetzt unabhängig von ihrer Position in `useEditor()`
+      garantiert davor. Gefahrlos, da sie weder Nodes/Marks noch
+      ProseMirror-Plugins/Commands beisteuert.
+      - **Nachbesserung "geerbte Lockerheit" (beim Testschreiben
+        gefunden):** CommonMark entscheidet Tight/Loose für die GESAMTE
+        ursprüngliche, noch ungetrennte Liste EINHEITLICH – eine
+        Leerzeile IRGENDWO in der Liste macht ALLE ihre `<li>` "loose"
+        (mit `<p>`-Wrapper). Ohne Gegenmaßnahme hätte ein nach der
+        Aufteilung entstandenes NICHT-Task-`<ul>` diese `<p>`-Hülle
+        geerbt, selbst wenn INNERHALB genau dieser Teilgruppe gar keine
+        Leerzeile stand (gemessen am Auftragsbeispiel "Notiz eins"/"Notiz
+        zwei" + Leerzeile + Checkliste: ohne Gegenmaßnahme erschien
+        zwischen "Notiz eins" und "Notiz zwei" eine ungewollte, im
+        Original nicht vorhandene Leerzeile). `taskList` selbst ist davon
+        NICHT betroffen (trägt gar kein `tight`-Attribut, der Serializer
+        fällt für diesen Node-Typ IMMER auf den konfigurierten
+        `tightLists`-Default zurück, siehe `prosemirror-markdown/src/
+        to_markdown.ts#renderList`) – NUR für neu entstandene `bulletList`/
+        `orderedList`-Teilgruppen wird die geerbte `<p>`-Hülle deshalb
+        GEZIELT entfernt (nur bei einem `<li>`, dessen EINZIGES Kind ein
+        `<p>` ist – eine eingebettete Unterliste als weiteres
+        Geschwister-Element bleibt unangetastet). Bewusster Kompromiss:
+        Eine ECHTE, vom Nutzer INNERHALB genau dieser Teilgruppe gewollte
+        Leerzeile lässt sich aus dem bereits gerenderten DOM nicht mehr
+        von einer bloß GEERBTEN unterscheiden (CommonMark trifft die
+        Entscheidung, bevor diese Erweiterung überhaupt laufen kann) –
+        "immer tight nach der Aufteilung" passt zum ohnehin konfigurierten
+        App-Standard und betrifft nur den seltenen Fall "Stichpunktliste +
+        Checkliste, mindestens eine Seite mit 2+ Punkten, irgendwo eine
+        Leerzeile im ursprünglichen Gesamtblock".
+    - **Zusätzliches Netz (`DocEditor.jsx#dropEmptyCheckboxLines`, in
+      `save()` NACH `collapseChecklistGaps` angewendet):**
+      `SplitMixedTaskLists` verhindert nur NEUE Phantome beim Laden – ein
+      BEREITS gespeichertes Phantom (aus einem vor diesem Fix beschädigten
+      Bestandsdokument) bleibt davon unberührt, weil das Phantom SELBST
+      ein `taskItem` ist und als ERSTES Element seiner Liste steht (ein
+      `<ul>`, dessen erstes `<li>` eine Checkbox ist, hat keinen Schema-
+      Konflikt mehr). `dropEmptyCheckboxLines` entfernt beim NÄCHSTEN
+      Speichern jede komplett inhaltsleere `- [ ]`/`- [x]`-Zeile, die (a)
+      keinen tiefer eingerückten Folgeinhalt hat UND (b) am ANFANG eines
+      Listenblocks steht. Läuft AUSSCHLIESSLICH in `save()`, NIE während
+      der laufenden Bearbeitung (der Helfer greift nie auf
+      `editor.state.doc` zu) – eine vom Nutzer bewusst angelegte, noch
+      leere Checkbox bleibt deshalb sichtbar, solange er im Editor ist, und
+      verschwindet erst beim nächsten ECHTEN Speichervorgang.
+      - **Nachbesserung "Positionsbedingung" (Re-Review, 🟡 1 – ECHTE, neu
+        durch diesen Diff eingeführte stille Löschung von Nutzerinhalt,
+        end-to-end gemessen):** Die ursprüngliche Fassung entfernte JEDE
+        inhaltsleere Checkbox ohne Folgeinhalt, unabhängig von ihrer
+        Position – "Enter am Ende eines Checklistenpunkts" (ein
+        Alltagsfall: der Nutzer legt eine neue, noch leere Checkbox an und
+        füllt sie später aus) wurde dadurch beim nächsten Speichern
+        lautlos gelöscht. Gemessen (v7.41.1 wie v7.41.2): Phantome
+        entstehen AUSSCHLIESSLICH als ERSTES Element ihres Listenblocks –
+        nie als zweiter/mittlerer/letzter Punkt. Fix: Eine Checkbox gilt
+        nur noch als Phantom-Kandidat, wenn die davorstehende (bereits
+        bereinigte) Zeile leer/nicht vorhanden ist ODER selbst KEINE
+        Listenzeile ist ("out", nicht die rohen Zeilen, als Bezugspunkt –
+        sonst würden mehrere KASKADIERENDE Phantome ab dem zweiten
+        fälschlich als "hat einen Vorgänger" durchgehen). Bewusst NICHT
+        zusätzlich einrückungssensitiv verglichen (ein verschachtelter
+        ERSTER Kindpunkt zählt bereits dann als "hat einen Vorgänger",
+        wenn IRGENDEINE Listenzeile unmittelbar davorsteht, unabhängig von
+        deren Einrückung): Eine striktere Variante hätte einen
+        verschachtelten ERSTEN, absichtlich leeren Nutzer-Kindpunkt
+        (`"- Eltern\n  - [ ] "`, noch nichts eingetippt) wieder gelöscht –
+        exakt dieselbe Klasse Fehler, nur eine Ebene tiefer verschoben.
+        Bewusst akzeptierte Grenze: Ein Bestandsphantom GENAU an dieser
+        Stelle (verschachtelter erster Kindpunkt direkt nach seinem
+        Elternpunkt) heilt dieses Netz nicht automatisch – aus reinem Text
+        ist das nicht mehr zuverlässig von echtem Nutzerinhalt zu
+        unterscheiden, und `SplitMixedTaskLists` verhindert ohnehin, dass
+        NEUE Fälle dieser Art überhaupt entstehen.
+      - **Zwei Begleitfunde (Re-Review), beide über eine robustere
+        Folgeinhalts-Suche behoben:** (1) Stand ein echtes Kind per
+        Leerzeile abgesetzt vom Phantom (`"- [ ] \n\n  - Kind"`), verwaiste
+        es beim STANDALONE-Aufruf der Funktion (ohne vorher gelaufenes
+        `collapseChecklistGaps`, das diese Lücke im echten `save()`-Pfad
+        zwar bereits schließt, aber nur als Kommentar-Kopplung, nicht im
+        Code stand). (2) Eine per Leerzeile abgesetzte ABSATZ-Fortsetzung
+        (kein Listenpunkt) war davon gar nicht erst erfasst, weil
+        `collapseChecklistGaps`s Lookahead nur Listenzeilen kennt – das
+        Ergebnis war ein verwaister, weiterhin eingerückter Absatz ohne
+        seinen (gelöschten) Listenpunkt. Fix: Die Folgeinhalts-Suche
+        überspringt jetzt selbst GENAU EINE Leerzeile und akzeptiert JEDEN
+        tiefer eingerückten, nicht-leeren Inhalt (Listenzeile ODER
+        Absatz-Fortsetzung) als Beleg für "kein Phantom" – die Funktion ist
+        dadurch auch unabhängig von der Aufrufreihenfolge korrekt, nicht
+        nur im heutigen `save()`-Pfad.
+    - **Folgearbeit – No-op-Guard in `convertListItemTypeCommand` (Eintrag
+      #83, Blocker 2) ERSATZLOS ENTFERNT:** Der dort dokumentierte
+      kontrollierte No-op traf laut Nachmessung ALLTAGSFÄLLE, nicht nur
+      Randfälle (z. B. `- Eins`/`- Zwei`, Cursor auf `Zwei`, Knopf
+      "Checkliste" → bisher wirkungslos, ohne jede Rückmeldung an den
+      Nutzer) – dieselbe zugrunde liegende Parser-Lücke wie beim
+      allgemeinen Geister-Checkbox-Fall, jetzt durch `SplitMixedTaskLists`
+      generell aufgelöst. Verifiziert (siehe
+      `tests/docEditorListToggle.test.jsx`): ALLE fünf im Auftrag
+      aufgeführten, vormals blockierten Konvertierungsrichtungen
+      funktionieren jetzt korrekt UND bleiben roundtrip-stabil, inklusive
+      des Sonderfalls "unterschiedliche Marker" (`1. Eins`/`2. Zwei` →
+      Checkliste), der die Lücke wegen der ohnehin schon getrennten
+      Listentypen nie hatte. `docs/TESTFAELLE.md` D17b entsprechend von
+      "No-op ist erwartetes Verhalten" auf "Konvertierung funktioniert" umgeschrieben.
+    - **Ebenfalls mitgenommen (offene 🔵 aus dem letzten Review):**
+      - **`inHeading()` kapert Tab in Tabellenzellen (behoben):** Prüfte
+        bisher nur `state.selection.$from.parent.type.name === "heading"`
+        – das ist der INNERSTE umschließende Block, unabhängig von der
+        Verschachtelungstiefe. Stand der Cursor in einer per Toolbar-Knopf
+        zur Überschrift gemachten Tabellenzelle, lieferte das fälschlich
+        `true` und schluckte Tab/Shift-Tab, bevor Tables eigene
+        `goToNextCell`/`addRowAfter`-Bindungen zum Zug kamen. Fix analog
+        `inTopLevelList`: NUR eine Überschrift auf oberster Ebene
+        (`$from.depth > 0 && $from.node(1).type.name === "heading"`)
+        zählt – eine Überschrift INNERHALB einer Tabellenzelle hat dort
+        `$from.node(1).type.name === "table"`. `docs/TESTFAELLE.md` D15
+        um diesen Fall ergänzt.
+      - **`NestedListToggle` robuster gegen die Listenreihenfolge:**
+        `priority: 50` (niedriger als der Default 100 von TaskList/
+        TaskItem/StarterKits Listen-Nodes, von denen keine einen eigenen
+        Extension-Level-`priority`-Wert setzt) sortiert die Extension in
+        `ExtensionManager.sort()` jetzt GARANTIERT ans Ende der für
+        `addCommands()` maßgeblichen Reihenfolge – unabhängig von ihrer
+        tatsächlichen Position in der `useEditor()`-Liste. Gefahrlos: die
+        Extension steuert weder Nodes/Marks noch ProseMirror-Plugins bei.
+      - **Selbsterfüllende Testverzweigungen in
+        `tests/docEditorIndent.test.jsx`:** Gezielt nach dem Muster
+        `if (can) {…} else {…}` (bzw. Vergleichen zweier zur Laufzeit
+        berechneter Variablen ohne hartkodierten Erwartungswert) gesucht –
+        über die gesamte Datei hinweg ist bereits JEDE `can`/`applied`/
+        `handled`-Prüfung auf einen konkreten, hartkodierten Literalwert
+        gepinnt (der einzige historische Fall dieser Art, "Shift-Tab
+        verhält sich in derselben Struktur symmetrisch", war zum
+        Zeitpunkt dieses Auftrags bereits gepinnt). KEIN weiteres
+        Vorkommen gefunden – nichts zu ändern.
+    - **Tests:** neue Datei `tests/docEditorGhostCheckbox.test.jsx` (31
+      Tests: mit/ohne Leerzeile, `*`-Marker über zwei Zyklen, mehrere
+      Wechsel innerhalb einer Liste, verschachtelte Listen, "Checkliste
+      zuerst" unverändert sicher, vierzyklischer Verlauf mit je einer
+      Änderung an anderer Stelle, die "geerbte Lockerheit" UND ihre
+      Gegenprobe (reine Stichpunktliste ohne Checkliste bleibt unberührt)
+      explizit gepinnt, `dropEmptyCheckboxLines` inkl. Randfälle wie
+      Dokumentende ohne Zeilenumbruch/eingerücktes Kind/Absatz-Fortsetzung/
+      mehrere aufeinanderfolgende Phantome UND die Re-Review-Nachbesserung
+      "Positionsbedingung" beidseitig gepinnt: Phantom am Blockanfang wird
+      weiterhin entfernt, ein Nutzer-Platzhalter nach echtem Inhalt – Mitte,
+      Ende, ohne Zeilenumbruch – bleibt erhalten, die akzeptierte
+      verschachtelte Grenze ist ebenfalls als Test dokumentiert). Aktiv
+      verifiziert, dass die Kern-Gruppe ohne den Fix rot ist:
+      `SplitMixedTaskLists` testweise aus der Extensions-Liste entfernt, 8
+      von 31 Tests liefen rot wie erwartet (die übrigen 23 sind entweder
+      für den Fix irrelevante Randfälle, die vom `*`-Marker-Sonderfall
+      abgedeckte erste Iteration, die Gegenprobe ganz ohne Checkliste, oder
+      testen ausschließlich `dropEmptyCheckboxLines`, das unabhängig von
+      `SplitMixedTaskLists` funktioniert), Fix wiederhergestellt, alle 31
+      wieder grün. `tests/docEditorListToggle.test.jsx` und
+      `tests/docEditorIndent.test.jsx` um `SplitMixedTaskLists`/
+      `dropEmptyCheckboxLines` in ihrer Editor-Verdrahtung ergänzt.

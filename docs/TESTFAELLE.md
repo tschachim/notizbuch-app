@@ -1035,7 +1035,13 @@ Zusätzlich (Tastatur-Priorität, siehe DECISIONS #81): Cursor in eine
 Zelle einer Tabelle setzen (bei Bedarf vorher wie in D2 eine kleine
 Tabelle anlegen) und `Tab` drücken. Erwartet: Der Cursor springt wie
 gewohnt zur nächsten Zelle (unverändertes Bestandsverhalten) – KEINE
-Einrückung findet an der Tabelle statt.
+Einrückung findet an der Tabelle statt. Danach denselben Zellen-Inhalt
+per Überschrift-Knopf zu einer Überschrift machen (v7.41.2-Nachbesserung,
+DECISIONS #84) und erneut `Tab` drücken: Erwartet weiterhin, der Cursor
+springt zur nächsten Zelle (bzw. legt in der letzten Zelle eine neue
+Zeile an) – NICHT wie vor diesem Fix ein wirkungsloses, geschlucktes
+`Tab` (die Überschrift-Sonderbehandlung aus D15 gilt ausdrücklich nur für
+eine Überschrift auf oberster Ebene, nicht innerhalb einer Tabellenzelle).
 
 **D15c [VERBUNDEN] „Einzug verkleinern“ bei einem Listenpunkt auf
 Ebene 0 hebt ihn aus der Liste – GEWOLLTES Verhalten, nicht ausgegraut
@@ -1151,32 +1157,36 @@ Die Auflösung ist bewusst zugunsten des Nutzer-Falls (Bild wird mit
 eingerückt) gewählt, siehe DECISIONS #83.
 
 **D17b [VERBUNDEN] Grenzfall der Listentyp-Umwandlung: ERSTEN Kindpunkt
-umwandeln bleibt ein sicherer No-op (v7.41.1, bewusst akzeptierte Grenze,
-DECISIONS #83).** Direkt im Anschluss an D17 (oder erneut mit einer
-frischen Checkliste „QA-Checkliste Eltern2“ + zwei Checklisten-
-Unterpunkten „Kind A“/„Kind B“): Diesmal den Listentyp des ERSTEN
-Unterpunkts („Kind A“ bzw. „QA-Checkliste Kind eins“) ändern (Aufzähl-
-Knopf), während der ZWEITE Unterpunkt eine Checkliste bleibt. Erwartet:
-Der Klick tut sichtbar NICHTS (Dokument bleibt unverändert) – dies ist
-eine bewusste Absicherung gegen eine bekannte, verifizierte Lücke in der
-zugrunde liegenden Markdown-Bibliothek (nicht dieser App), die bei GENAU
-dieser Reihenfolge beim nächsten Laden eine zusätzliche Geister-
-Checkliste einfügen würde. Speichern (falls überhaupt ein „Speichern“
-möglich ist, da nichts geändert wurde) sollte ohnehin keinen Commit
-auslösen. Kein Grund zur Sorge, wenn hier nichts passiert – das ist der
-erwartete, sichere Zustand.
+umwandeln funktioniert jetzt (v7.41.2 – bis v7.41.1 ein bewusster No-op,
+seit der Geister-Checkbox-Korrektur ersatzlos behoben, siehe DECISIONS
+#83/#84).** Direkt im Anschluss an D17 (oder erneut mit einer frischen
+Checkliste „QA-Checkliste Eltern2“ + zwei Checklisten-Unterpunkten
+„Kind A“/„Kind B“): Diesmal den Listentyp des ERSTEN Unterpunkts
+(„Kind A“ bzw. „QA-Checkliste Kind eins“) ändern (Aufzähl-Knopf), während
+der ZWEITE Unterpunkt eine Checkliste bleibt. Erwartet: „Kind A“ wird zu
+einem verschachtelten, einfachen Aufzählungspunkt OHNE eigene Checkbox,
+„Kind B“ bleibt eine verschachtelte CHECKBOX, der Elternpunkt bleibt
+unverändert eine ECHTE Checkbox. Speichern. Erwartet in der Dokument-
+Ansicht: Die Struktur zeigt genau diese drei Zeilen, INSBESONDERE OHNE
+eine zusätzliche, leere Checkbox irgendwo im Dokument (die „Geister-
+Checkbox“, siehe D19 – genau das war die zugrunde liegende Lücke, gegen
+die der frühere No-op absicherte). Editor OHNE weitere Änderung erneut
+öffnen und direkt speichern: KEIN Commit (No-op-Roundtrip).
 
-Derselbe No-op greift AUCH ohne jede Verschachtelung, überall dort, wo
-der umgewandelte Punkt VOR einem Punkt steht, der Checkliste bleibt –
-ebenfalls kein Fehler, ebenfalls nicht als Finding melden. Konkret
-geprüfte Fälle (Toolbar-Klick tut jeweils sichtbar nichts): in
-`- Eins` / `- Zwei` den ZWEITEN Punkt zur Checkliste machen; dasselbe bei
-drei Punkten mit dem mittleren; dasselbe in einer nummerierten Liste; und
-in `- [ ] A` / `- [ ] B` den ERSTEN Punkt zur Aufzählung machen.
-Funktionieren MUSS dagegen: in `- Eins` / `- Zwei` den ERSTEN Punkt zur
-Checkliste machen. Faustregel: Die Umwandlung greift, solange danach kein
-Punkt WEITER OBEN in derselben Liste ohne Kästchen steht, während weiter
-unten noch ein Kästchen folgt.
+Dieselbe Umwandlung funktioniert jetzt AUCH ohne jede Verschachtelung,
+überall dort, wo der umgewandelte Punkt VOR einem Punkt steht, der
+Checkliste bleibt (bzw. umgekehrt) – konkret geprüfte Fälle (Toolbar-Klick
+konvertiert jetzt jeweils sichtbar, KEIN No-op mehr): in `- Eins` /
+`- Zwei` den ZWEITEN Punkt zur Checkliste machen; dasselbe bei drei
+Punkten mit dem mittleren; dasselbe in einer nummerierten Liste (Ziel
+Checkliste); und in `- [ ] A` / `- [ ] B` den ERSTEN Punkt zur Aufzählung
+machen. Erwartet in JEDEM dieser Fälle: die Umwandlung greift sofort
+sichtbar, das Dokument bleibt nach dem Speichern UND nach erneutem
+Öffnen+Speichern ohne weitere Änderung stabil (kein Commit, keine
+zusätzliche leere Checkbox). Sollte einer dieser Fälle stattdessen
+sichtbar NICHTS tun oder beim erneuten Öffnen eine leere Checkbox zeigen,
+ist DAS jetzt als Finding zu melden (umgekehrt zur v7.41.1-Doku dieses
+Falls).
 
 **D18 [VERBUNDEN] Bild direkt in den Editor einfügen (v7.41 Teil B,
 Nutzerwunsch „Ich würde gerne Bilder direkt in den Editor kopieren
@@ -1231,6 +1241,46 @@ der Bild-Stelle) erscheint aber trotzdem im Editor – ein Paste darf
 NIE den kompletten Ausschnitt verwerfen, nur weil irgendwo ein nicht
 übernehmbares Bild darin vorkommt. Speichern, Editor erneut öffnen:
 Text bleibt erhalten, kein Bildlink im Dokument.
+
+**D19 [VERBUNDEN] Geister-Checkbox: Stichpunktliste gefolgt von einer
+Checkliste (v7.41.2, ECHTER Bug, ÄLTER als v7.41, jetzt behoben – siehe
+DECISIONS #84).** Editor öffnen, eine GEWÖHNLICHE Stichpunktliste mit
+zwei Punkten anlegen („QA-Geister eins“, „QA-Geister zwei“), direkt
+darunter (OHNE Leerzeile) eine Checkliste mit zwei Punkten anlegen
+(„QA-Geister Aufgabe A“, „QA-Geister Aufgabe B“). Speichern. Erwartet in
+der Dokument-Ansicht: GENAU die vier eingegebenen Zeilen – KEINE
+zusätzliche, leere Checkbox VOR der Stichpunktliste (das war der Bug:
+eine sichtbare leere Checkbox ohne jeden Text). Editor erneut öffnen:
+ebenfalls keine leere Checkbox sichtbar, direkt wieder schließen löst
+keinen Commit aus (No-op-Roundtrip). Jetzt eine Bearbeitung an GANZ
+ANDERER Stelle im Dokument vornehmen (z. B. eine Überschrift umbenennen
+oder in einem anderen Abschnitt einen Satz ergänzen – NICHT die beiden
+Listen selbst anfassen) und speichern. Erwartet: weiterhin keine leere
+Checkbox, „QA-Geister eins/zwei“ und „QA-Geister Aufgabe A/B“ unverändert.
+Diesen Zyklus (Editor öffnen, Änderung an anderer Stelle, speichern) noch
+DREI weitere Male wiederholen (insgesamt vier Zyklen). Erwartet: Nach
+JEDEM der vier Zyklen ist die Stichpunkt-/Checklisten-Struktur
+unverändert und zu KEINEM Zeitpunkt erscheint eine leere Checkbox (der
+frühere Bug hätte hier nach dem 1./2./3./4. Zyklus ein/zwei/drei/vier
+leere Kästchen erzeugt, die sich zusätzlich bei jedem weiteren Speichern
+mitcommittet hätten). Falls die Testumgebung ein Notizbuch mit einem
+Marker-Wechsel unterstützt: probeweise die Stichpunktliste mit `*` statt
+`-` beginnen lassen (z. B. über die Markdown-Quelle, falls zugänglich) –
+auch hier darf über mehrere Speicherzyklen hinweg keine leere Checkbox
+entstehen.
+
+GEWOLLTE Nebenwirkung (v7.41.2, KEIN Fehler – nicht als Finding melden):
+Steht in einer Liste, die (an anderer Stelle) eine Checkliste enthält,
+eine bewusste Leerzeile zwischen zwei NICHT-Checklisten-Punkten (z. B.
+„QA-Geister eins“ / Leerzeile / „QA-Geister zwei“, danach erst die
+Checkliste), verschwindet diese Leerzeile beim ERSTEN Speichern und die
+beiden Punkte rücken sichtbar zusammen (DocView rendert eine lose Liste
+als getrennte `<ul>`-Blöcke mit sichtbarem Abstand – der Nutzer sieht den
+Wegfall also tatsächlich). Das ist der bewusst in Kauf genommene Kompromiss
+der zugrunde liegenden Korrektur (siehe DECISIONS #84, „geerbte
+Lockerheit“) und kein Bug. Eine reine Stichpunktliste OHNE jede Checkliste
+im selben Dokument ist davon NICHT betroffen – dort bleibt eine bewusste
+Leerzeile zwischen zwei Punkten unverändert erhalten.
 
 ## E. Schnellnotizen
 

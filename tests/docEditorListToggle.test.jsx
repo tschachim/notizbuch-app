@@ -12,13 +12,18 @@
 // Stelle-erhaltende "Liste in bis zu drei Geschwister-Listen aufteilen"-
 // Umsetzung.
 //
-// Deckt zusätzlich einen beim Testschreiben gefundenen ECHTEN Bug in der
-// markdown-it/tiptap-markdown-Pipeline ab (markdown-it-task-lists + taskLists
-// starrem "taskItem+"-Content-Schema, siehe Kommentar bei
-// convertListItemTypeCommand in DocEditor.jsx): eine bestimmte
-// Konvertierungsrichtung würde beim NÄCHSTEN Laden lautlos eine Geister-
-// Checkliste einfügen – convertListItemType erkennt diesen Fall und bricht
-// KONTROLLIERT ab (sicherer No-op), statt die Korruption zu speichern.
+// v7.41.2 UPDATE (siehe DECISIONS und tests/docEditorGhostCheckbox.test.jsx):
+// Der ehemals hier dokumentierte "ECHTE Bug in der markdown-it/tiptap-
+// markdown-Pipeline" (eine bestimmte Konvertierungsrichtung fügte beim
+// NÄCHSTEN Laden lautlos eine Geister-Checkliste ein) ist DIESELBE
+// Parser-Lücke wie beim ganz gewöhnlichen "Stichpunktliste gefolgt von
+// Checkliste"-Fall (Auftrag "Geister-Checkbox") – SplitMixedTaskLists
+// (DocEditor.jsx) löst sie jetzt beim Laden GENERELL auf, unabhängig davon,
+// wodurch die zusammengefasste Liste entstanden ist. Der vormals hier
+// nötige, kontrollierte No-op in convertListItemTypeCommand ist damit
+// ERSATZLOS ENTFALLEN (verifiziert: siehe describe-Block weiter unten,
+// "vormals abgesicherter Grenzfall, jetzt behoben") – alle Konvertierungs-
+// richtungen funktionieren jetzt normal und bleiben roundtrip-stabil.
 import { describe, it, expect } from "vitest";
 import { Editor } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
@@ -30,14 +35,15 @@ import TableCell from "@tiptap/extension-table-cell";
 import { Markdown } from "tiptap-markdown";
 import {
   FencedCodeBlock, BlockImage, IndentParagraph, IndentMarkdownIt, IndentKeymap, MdTable,
-  MathInline, MathBlock, NestedListToggle, convertListItemType,
-  unescapeMd, collapseChecklistGaps,
+  MathInline, MathBlock, NestedListToggle, SplitMixedTaskLists, convertListItemType,
+  unescapeMd, collapseChecklistGaps, dropEmptyCheckboxLines,
 } from "../src/components/DocEditor.jsx";
 import { mathToPlaceholders } from "../src/lib/math.jsx";
 
 // Exakt dieselbe Verdrahtung wie tests/docEditorIndent.test.jsx, ergänzt um
 // NestedListToggle (muss NACH TaskList/TaskItem stehen, siehe Kommentar an
-// der Extension selbst).
+// der Extension selbst) und SplitMixedTaskLists (v7.41.2, MUSS VOR TaskList/
+// TaskItem stehen, siehe Kommentar an DIESER Extension).
 function buildEditor(md) {
   return new Editor({
     extensions: [
@@ -46,6 +52,7 @@ function buildEditor(md) {
       IndentParagraph,
       FencedCodeBlock,
       BlockImage,
+      SplitMixedTaskLists,
       TaskList,
       TaskItem.configure({ nested: true }),
       NestedListToggle,
@@ -62,7 +69,7 @@ function buildEditor(md) {
   });
 }
 function saveLike(editor) {
-  return collapseChecklistGaps(unescapeMd(editor.storage.markdown.getMarkdown()));
+  return dropEmptyCheckboxLines(collapseChecklistGaps(unescapeMd(editor.storage.markdown.getMarkdown())));
 }
 function posOfText(editor, text) {
   let pos = null;
@@ -200,14 +207,13 @@ describe("convertListItemType / NestedListToggle (v7.41.1, Blocker 2)", () => {
     expect(out).toBe("# T\n\n- Einfacher Absatz");
   });
 
-  it("TOP-LEVEL-Liste (nicht verschachtelt): dieselbe Logik greift identisch, INKLUSIVE derselben Parser-Bug-Absicherung", () => {
-    // KEIN Sonderfall "nur verschachtelt" – convertListItemType behandelt
-    // Top-Level-Listen genau gleich (findet seinen Listenpunkt-Vorfahren
-    // unabhängig von der Tiefe). Die erste Position einer Liste in eine
-    // Aufzählung umzuwandeln, während das zweite Element eine Checkliste
-    // bleibt, träfe HIER GENAUSO die in DECISIONS dokumentierte
-    // markdown-it-Parser-Lücke (verifiziert: identischer Effekt auch ohne
-    // Elternpunkt) – bleibt deshalb ebenfalls ein sicherer No-op.
+  // v7.41.2 UPDATE (Folgearbeit-Tabelle im Auftrag "Geister-Checkbox", Zeile
+  // "- [ ] A / - [ ] B, Cursor A, Aufzählung -> heute nichts"): war bis
+  // v7.41.1 ein sicherer No-op (siehe Git-Historie) – seit SplitMixedTaskLists
+  // (DocEditor.jsx) die zugrunde liegende Parser-Lücke beim Laden generell
+  // auflöst, konvertiert dieselbe Aktion jetzt tatsächlich UND bleibt
+  // roundtrip-stabil.
+  it("TOP-LEVEL-Liste (nicht verschachtelt), ERSTE Position -> Aufzählung, ZWEITE bleibt Checkliste: konvertiert jetzt (Parser-Lücke behoben)", () => {
     const md = "# T\n\n- [ ] Eins\n- [ ] Zwei";
     const editor = buildEditor(md);
     editor.commands.setTextSelection(posOfText(editor, "Eins"));
@@ -215,7 +221,8 @@ describe("convertListItemType / NestedListToggle (v7.41.1, Blocker 2)", () => {
     const out = saveLike(editor);
     editor.destroy();
     expect(result).toBe(true);
-    expect(out).toBe(md); // No-op, siehe Kommentar oben
+    expect(out).toBe("# T\n\n- Eins\n- [ ] Zwei");
+    expect(roundtrip(out)).toBe(out);
   });
 
   it("TOP-LEVEL-Liste, SICHERE Richtung (Checkliste zuerst): Konvertierung greift normal", () => {
@@ -235,38 +242,32 @@ describe("convertListItemType / NestedListToggle (v7.41.1, Blocker 2)", () => {
   });
 });
 
-// Beim Testschreiben gefundener ECHTER Bug in markdown-it-task-lists/
-// tiptap-markdown (siehe Kopfkommentar convertListItemTypeCommand,
-// DocEditor.jsx): Wandelt man den ERSTEN Punkt einer verschachtelten Liste
-// so um, dass ein SPÄTERES, unangetastetes Geschwister weiterhin eine
-// Checkliste ist, das umgewandelte Element selbst aber NICHT mehr, ergeben
-// die serialisierten "-"-Zeilen beim ERNEUTEN Laden EINE zusammengefasste
-// Markdown-Liste (Markdown kennt kein "drei benachbarte, aber strukturell
-// getrennte Listen" – reine ProseMirror-Modellinformation). Ist das ERSTE
-// <li> dieser zusammengefassten Liste keine Checkbox, während ein SPÄTERES
-// eine ist, füllt ProseMirrors HTML-Parser die Content-Schema-Lücke
-// ("taskItem+") mit einem gespenstischen LEEREN taskItem auf – verifiziert
-// mit purem markdown-it-task-lists, UNABHÄNGIG von tiptap/dieser App.
-// convertListItemType erkennt GENAU dieses Muster (siehe
-// convertListItemTypeCommand) und bricht kontrolliert ab (sicherer No-op)
-// statt die Korruption beim nächsten Laden zu riskieren.
-describe("Bewusst abgesicherter Grenzfall: würde die Konvertierung eine bekannte markdown-it-Parser-Lücke auslösen, bleibt sie ein sicherer No-op", () => {
-  it("ERSTES von zwei Checklisten-Kindern -> Aufzählung, ZWEITES bleibt Checkliste: No-op statt Korruption", () => {
+// v7.41.2 UPDATE: Bis v7.41.1 hier per kontrolliertem No-op abgesichert
+// (siehe Git-Historie) – die zugrunde liegende Parser-Lücke (markdown-it-
+// task-lists + TaskLists starrem "taskItem+"-Content-Schema: ist das ERSTE
+// <li> einer zusammengefassten Liste keine Checkbox, während ein SPÄTERES
+// eine ist, füllte ProseMirrors HTML-Parser die Schema-Lücke mit einem
+// gespenstischen LEEREN taskItem auf) ist DIESELBE wie beim ganz
+// gewöhnlichen "Stichpunktliste gefolgt von Checkliste"-Fall (Auftrag
+// "Geister-Checkbox", siehe tests/docEditorGhostCheckbox.test.jsx und
+// DECISIONS). SplitMixedTaskLists (DocEditor.jsx) löst sie jetzt beim Laden
+// GENERELL auf – der No-op in convertListItemTypeCommand ist ersatzlos
+// entfallen, beide vormals abgesicherten Richtungen konvertieren jetzt
+// korrekt UND bleiben roundtrip-stabil (unten aktiv verifiziert).
+describe("vormals abgesicherter Grenzfall (bis v7.41.1), seit SplitMixedTaskLists behoben", () => {
+  it("ERSTES von zwei Checklisten-Kindern -> Aufzählung, ZWEITES bleibt Checkliste: konvertiert jetzt korrekt", () => {
     const md = "# T\n\n- [ ] Eltern\n  - [ ] Kind eins\n  - [ ] Kind zwei";
     const editor = buildEditor(md);
     editor.commands.setTextSelection(posOfText(editor, "Kind eins"));
     const result = editor.chain().focus().toggleBulletList().run();
     const out = saveLike(editor);
     editor.destroy();
-    // "true" (die Chain "greift"), aber OHNE jede Dokumentänderung – siehe
-    // Kommentar an convertListItemTypeCommand für die Begründung, warum
-    // "true ohne dispatch" hier bewusst gewählt ist (sonst würde die Chain
-    // auf den GENAUSO kaputten nativen Fallback zurückfallen).
     expect(result).toBe(true);
-    expect(out).toBe(md);
+    expect(out).toBe("# T\n\n- [ ] Eltern\n  - Kind eins\n  - [ ] Kind zwei");
+    expect(roundtrip(out)).toBe(out);
   });
 
-  it("umgekehrt: LETZTES von zwei Aufzählungs-Kindern -> Checkliste, ERSTES bleibt Aufzählung: No-op statt Korruption", () => {
+  it("umgekehrt: LETZTES von zwei Aufzählungs-Kindern -> Checkliste, ERSTES bleibt Aufzählung: konvertiert jetzt korrekt", () => {
     const md = "# T\n\n- Eltern\n  - Kind eins\n  - Kind zwei";
     const editor = buildEditor(md);
     editor.commands.setTextSelection(posOfText(editor, "Kind zwei"));
@@ -274,21 +275,35 @@ describe("Bewusst abgesicherter Grenzfall: würde die Konvertierung eine bekannt
     const out = saveLike(editor);
     editor.destroy();
     expect(result).toBe(true);
-    expect(out).toBe(md);
+    expect(out).toBe("# T\n\n- Eltern\n  - Kind eins\n  - [ ] Kind zwei");
+    expect(roundtrip(out)).toBe(out);
+  });
+});
+
+// Folgearbeit-Tabelle aus dem Auftrag "Geister-Checkbox" (die restlichen,
+// noch nicht oben abgedeckten Zeilen – TOP-LEVEL, ERSTE Position ->
+// Aufzählung/Checkliste, ein SPÄTERES Geschwister bleibt beim jeweils
+// ANDEREN Typ).
+describe("Folgearbeit-Tabelle (Auftrag \"Geister-Checkbox\"): alle fünf Fälle funktionieren jetzt", () => {
+  it("'- Eins' / '- Zwei' / '- Drei', Cursor 'Zwei', Checkliste: konvertiert nur 'Zwei'", () => {
+    const editor = buildEditor("# T\n\n- Eins\n- Zwei\n- Drei");
+    editor.commands.setTextSelection(posOfText(editor, "Zwei"));
+    const result = editor.chain().focus().toggleTaskList().run();
+    const out = saveLike(editor);
+    editor.destroy();
+    expect(result).toBe(true);
+    expect(out).toBe("# T\n\n- Eins\n- [ ] Zwei\n- Drei");
+    expect(roundtrip(out)).toBe(out);
   });
 
-  it("beweist, dass die Absicherung wirklich noetig ist: ohne sie würde exakt dieses Muster beim erneuten Laden eine Geister-Checkliste erzeugen", () => {
-    // Direkter Beleg der zugrunde liegenden markdown-it/tiptap-markdown-
-    // Lücke, UNABHÄNGIG von convertListItemType: Diese Markdown-Zeichenkette
-    // (wie sie OHNE die obige Absicherung entstanden wäre) zerfällt beim
-    // Laden nachweislich in eine zusätzliche leere Checkliste.
-    const wouldHaveBeenSaved = "- [ ] Eltern\n  - Kind eins\n  - [ ] Kind zwei";
-    const editor = buildEditor(wouldHaveBeenSaved);
-    let emptyTaskItemFound = false;
-    editor.state.doc.descendants((node) => {
-      if (node.type.name === "taskItem" && node.textContent === "" && node.childCount <= 1) emptyTaskItemFound = true;
-    });
+  it("'1. Eins' / '2. Zwei', Cursor 'Zwei', Checkliste: unterschiedliche Marker waren nie betroffen, funktioniert unverändert", () => {
+    const editor = buildEditor("# T\n\n1. Eins\n2. Zwei");
+    editor.commands.setTextSelection(posOfText(editor, "Zwei"));
+    const result = editor.chain().focus().toggleTaskList().run();
+    const out = saveLike(editor);
     editor.destroy();
-    expect(emptyTaskItemFound).toBe(true);
+    expect(result).toBe(true);
+    expect(out).toBe("# T\n\n1. Eins\n- [ ] Zwei");
+    expect(roundtrip(out)).toBe(out);
   });
 });
