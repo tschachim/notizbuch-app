@@ -286,6 +286,25 @@ function escapeHtmlAttr(s) {
 // IMG_LINE_RE (markdown.jsx), ohne die dort ungenutzten Capture-Groups.
 const IMG_LINE_RE_FOR_MATH = /^!\[[^\]]*\]\(img:[a-zA-Z0-9]+\)$/;
 
+// BUGFIX (Code-Review vor v7.41-Commit, 🔵 Finding 6, Auftrag
+// "Einrückungen"): Ein eingerückter Display-Formel-Block ("  $$…$$")
+// verlor seinen Einzug beim Editor-Roundtrip – matchDisplayBlock() strippt
+// die Zeile ausschließlich auf ihren TeX-Inhalt (siehe dort,
+// "line.replace(DISPLAY_MATH_START_RE, ...)"), die führende Einrückung war
+// damit unwiederbringlich weg, BEVOR der <math-block>-Tag überhaupt gebaut
+// wird. Duplikat von indentLevel (lib/markdown.jsx) aus demselben
+// Zirkelbezug-Grund wie IMG_LINE_RE_FOR_MATH oben – identische Arithmetik
+// (2 Leerzeichen = 1 Ebene, Tab zählt wie 2, gekappt bei 6), siehe DECISIONS.
+function indentLevelForMath(line) {
+  let spaces = 0;
+  for (const ch of String(line)) {
+    if (ch === " ") spaces += 1;
+    else if (ch === "\t") spaces += 2;
+    else break;
+  }
+  return Math.min(6, Math.floor(spaces / 2));
+}
+
 // Sentinel für \$-Escapes auf dem Editor-Ladepfad (Review-Finding 2): Ein
 // Zeichen aus dem privaten Unicode-Bereich (kommt in echten Notizen
 // praktisch nie vor) ersetzt \$ komplett, statt den Backslash als Text
@@ -423,7 +442,12 @@ export function mathToPlaceholders(md) {
     if (DISPLAY_MATH_START_RE.test(line)) {
       const block = matchDisplayBlock(lines, i);
       if (block) {
-        out.push("<" + MATH_BLOCK_TAG + ' data-tex="' + escapeHtmlAttr(block.tex) + '"></' + MATH_BLOCK_TAG + ">");
+        // Einzug der ÖFFNENDEN Zeile (siehe Fix-Kommentar bei
+        // indentLevelForMath oben) – NUR gesetzt, wenn > 0, damit ein
+        // unveränderter, unindented Formel-Block byte-identisch bleibt.
+        const lvl = indentLevelForMath(line);
+        const indentAttr = lvl > 0 ? ' data-indent="' + lvl + '"' : "";
+        out.push("<" + MATH_BLOCK_TAG + indentAttr + ' data-tex="' + escapeHtmlAttr(block.tex) + '"></' + MATH_BLOCK_TAG + ">");
         i = block.endIdx;
         continue;
       }

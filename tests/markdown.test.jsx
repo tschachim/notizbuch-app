@@ -20,7 +20,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { DocView, parseTree, renumberCitations, TASK_RE, IMG_LINE_RE } from "../src/lib/markdown.jsx";
+import { DocView, parseTree, renumberCitations, TASK_RE, IMG_LINE_RE, indentLevel } from "../src/lib/markdown.jsx";
 import { setLinkProviders } from "../src/lib/linkProviders.jsx";
 
 const render = (text, imgMap = {}) =>
@@ -484,6 +484,189 @@ describe("DocView: Grundgerüst", () => {
     expect(html.match(/checked=""/g) || html.match(/checked/g)).toBeTruthy();
     expect(html).toContain("offen");
     expect(html).toContain("fertig");
+  });
+});
+
+// v7.41 (Auftrag "Einrückungen", Nutzerwunsch): 2 Leerzeichen = eine Ebene,
+// Tab zählt beim Lesen wie 2 Leerzeichen, maximal 6 Ebenen.
+describe('indentLevel (v7.41, Auftrag "Einrückungen")', () => {
+  it("0 Leerzeichen -> Ebene 0", () => {
+    expect(indentLevel("Text ohne Einzug")).toBe(0);
+  });
+  it("2 Leerzeichen -> Ebene 1", () => {
+    expect(indentLevel("  Text")).toBe(1);
+  });
+  it("ungerade Leerzeichenzahl rundet ab: 3 Leerzeichen -> Ebene 1", () => {
+    expect(indentLevel("   Text")).toBe(1);
+  });
+  it("4 Leerzeichen -> Ebene 2", () => {
+    expect(indentLevel("    Text")).toBe(2);
+  });
+  it("12 Leerzeichen (6 Ebenen) -> Ebene 6", () => {
+    expect(indentLevel(" ".repeat(12) + "Text")).toBe(6);
+  });
+  it("Kappung: mehr als 12 Leerzeichen bleibt bei Ebene 6", () => {
+    expect(indentLevel(" ".repeat(13) + "Text")).toBe(6);
+    expect(indentLevel(" ".repeat(20) + "Text")).toBe(6);
+    expect(indentLevel(" ".repeat(40) + "Text")).toBe(6);
+  });
+  it("ein Tab zählt wie 2 Leerzeichen", () => {
+    expect(indentLevel("\tText")).toBe(1);
+    expect(indentLevel("\t\tText")).toBe(2);
+  });
+  it("gemischt Tab+Leerzeichen zählt beide Anteile zusammen (1 Tab + 2 Leerzeichen = 4 -> Ebene 2)", () => {
+    expect(indentLevel("\t  Text")).toBe(2);
+  });
+  it("eine leere Zeile hat Ebene 0 (kein Absturz bei fehlendem Inhalt)", () => {
+    expect(indentLevel("")).toBe(0);
+  });
+  it("führende Leerzeichen NACH nicht-whitespace zählen nicht mehr mit (nur der Zeilenanfang)", () => {
+    expect(indentLevel("kein Einzug  aber Leerzeichen mitten drin")).toBe(0);
+  });
+});
+
+// v7.41 (Auftrag "Einrückungen"): der Padding-Ansatz aus dem Kopfkommentar
+// von renderBlocks (lib/markdown.jsx) – Listenpunkte/Absätze/Bilder/
+// Tabellen/Trennlinien bekommen ihren Einzug über einen linken
+// margin-left-Zusatz, KEINE echte <ul>-Verschachtelung.
+describe('DocView: Einrückung (v7.41, Auftrag "Einrückungen")', () => {
+  it("ein eingerückter Absatz bekommt margin-left proportional zur Ebene (2 Leerzeichen = 1,5rem)", () => {
+    const html = render("# T\n\n## A\n\nUnverändert\n\n  Eingerückt eine Ebene");
+    const pTags = [...html.matchAll(/<p[^>]*>([^<]*)<\/p>/g)];
+    const plain = pTags.find((m) => m[1].includes("Unverändert"));
+    const indented = pTags.find((m) => m[1].includes("Eingerückt"));
+    expect(plain[0]).not.toMatch(/margin-left/);
+    expect(indented[0]).toMatch(/margin-left:1\.5rem/);
+  });
+
+  it("Ebene 2 (4 Leerzeichen) ergibt 3rem, Ebene 6 (12+ Leerzeichen) 9rem", () => {
+    const html = render("# T\n\n## A\n\n    Ebene zwei\n\n" + " ".repeat(20) + "Ebene sechs (gekappt)");
+    expect(html).toContain('style="margin-left:3rem"');
+    expect(html).toContain('style="margin-left:9rem"');
+    expect(html).toContain("Ebene zwei");
+    expect(html).toContain("Ebene sechs");
+  });
+
+  it("ein eingerücktes Bild (figure) bekommt denselben Einzug", () => {
+    const html = render("# T\n\n## A\n\n  ![Titel](img:xyz)", { xyz: "data:image/png;base64,AAA" });
+    expect(html).toMatch(/<figure[^>]*style="margin-left:1\.5rem"/);
+  });
+
+  it("eine eingerückte Tabelle bekommt den Einzug auf ihrem Wrapper-Div", () => {
+    const html = render("# T\n\n## A\n\n  | a | b |\n  | --- | --- |\n  | 1 | 2 |");
+    expect(html).toMatch(/<div class="overflow-x-auto my-3" style="margin-left:1\.5rem">/);
+  });
+
+  it("eine eingerückte Trennlinie (---) bekommt denselben Einzug", () => {
+    const html = render("# T\n\n## A\n\nText\n\n  ---\n\nmehr Text");
+    expect(html).toMatch(/<hr[^>]*style="margin-left:1\.5rem"/);
+  });
+
+  it("Überschriften werden NIE eingerückt (indentLevel gilt nicht für #/##/###-Zeilen)", () => {
+    // Eine EINGERÜCKTE "#"-Zeile wird von parseTree/renderBlocks gar nicht
+    // erst als Überschrift erkannt (zeilenanfangs-verankerte Regex ohne
+    // Leerraum-Toleranz) - sie fällt bewusst auf den normalen, dann
+    // eingerückten Absatz-Zweig zurück statt eine Struktur-Zeile zu werden.
+    // Das ist HIER der Beleg dafür, dass ein Einzugs-Feature Überschriften
+    // strukturell nicht antasten kann.
+    const html = render("# T\n\n  # sieht aus wie eine Überschrift, ist aber Text");
+    expect(html).not.toMatch(/<h1[^>]*>\s*#/);
+    expect(html).toContain('<p style="margin-left:1.5rem"');
+    expect(html).toContain("sieht aus wie eine Überschrift");
+  });
+
+  it("ein Ebenenwechsel MITTEN in einer Liste beendet die laufende Liste und beginnt eine neue (Padding-Ansatz)", () => {
+    const html = render("# T\n\n## A\n\n- Ebene null\n  - Ebene eins\n- wieder Ebene null");
+    const uls = [...html.matchAll(/<ul[^>]*>/g)];
+    // Typwechsel UND Ebenenwechsel: drei getrennte <ul>-Blöcke (0,1,0), nicht
+    // eine einzige zusammengefasste Liste.
+    expect(uls.length).toBe(3);
+    expect(uls[0][0]).not.toMatch(/margin-left/);
+    expect(uls[1][0]).toMatch(/margin-left:1\.5rem/);
+    expect(uls[2][0]).not.toMatch(/margin-left/);
+  });
+
+  // BUGFIX (Code-Review vor v7.41-Commit, 🟡 Finding 2): Ein Ebenenwechsel
+  // beendet die laufende Liste (siehe Test oben) – bei einer NUMMERIERTEN
+  // Liste fing das neue <ol> danach ohne "start" immer wieder bei "1." an,
+  // selbst wenn die Quelle bei "2."/"3." weiterzählte.
+  it("eine nummerierte Liste zählt nach einem Ebenenwechsel korrekt weiter, statt wieder bei 1. zu beginnen", () => {
+    const html = render("# T\n\n## A\n\n1. Eins\n   1. Unter\n2. Zwei\n3. Drei");
+    const ols = [...html.matchAll(/<ol[^>]*>[\s\S]*?<\/ol>/g)].map((m) => m[0]);
+    expect(ols).toHaveLength(3);
+    // Erste Liste (nur "Eins"): beginnt bei 1, kein explizites "start" nötig.
+    expect(ols[0]).not.toMatch(/start=/);
+    expect(ols[0]).toContain("Eins");
+    // Zweite Liste (eingerückt, nur "Unter"): ebenfalls bei 1, kein "start".
+    expect(ols[1]).not.toMatch(/start=/);
+    expect(ols[1]).toContain("Unter");
+    // Dritte Liste ("Zwei", "Drei"): MUSS bei 2 weiterzählen, sonst würde
+    // <ol> nativ wieder bei 1/2 statt 2/3 rendern.
+    expect(ols[2]).toMatch(/start="2"/);
+    expect(ols[2]).toContain("Zwei");
+    expect(ols[2]).toContain("Drei");
+  });
+
+  it("eine gewöhnliche, ununterbrochene nummerierte Liste bekommt weiterhin KEIN start-Attribut", () => {
+    const html = render("# T\n\n## A\n\n1. Eins\n2. Zwei\n3. Drei");
+    expect(html).not.toMatch(/start=/);
+  });
+
+  it("gemischt Checkliste/Aufzählung mit unterschiedlicher Einrückung bleibt sauber getrennt", () => {
+    const html = render("# T\n\n## A\n\n- [ ] Checkbox oben\n  - Bullet eingerückt\n  - [ ] Checkbox eingerückt");
+    // Drei Blöcke: task(0), ul(1), task(1) - Typ- UND Ebenenwechsel.
+    const blocks = [...html.matchAll(/<ul[^>]*>/g)];
+    expect(blocks.length).toBe(3);
+    expect(blocks[1][0]).toMatch(/margin-left:1\.5rem/);
+    expect(blocks[2][0]).toMatch(/margin-left:1\.5rem/);
+  });
+
+  it("tiefere Aufzählungsebenen bekommen ein anderes Aufzählungszeichen (Ebene 0 disc, 1 circle, ab 2 square)", () => {
+    const html = render("# T\n\n## A\n\n- null\n  - eins\n    - zwei");
+    expect(html).toContain('class="list-disc pl-5');
+    expect(html).toContain('class="[list-style-type:circle] pl-5');
+    expect(html).toContain('class="[list-style-type:square] pl-5');
+  });
+
+  it("Einrückung INNERHALB eines Codeblocks bleibt unangetastet (kein margin-left, Inhalt byte-genau)", () => {
+    const html = render("# T\n\n## A\n\n```\n    stark eingerueckte Codezeile\n```");
+    expect(html).not.toMatch(/margin-left/);
+    expect(html).toContain("    stark eingerueckte Codezeile");
+  });
+
+  // BUGFIX (Code-Review vor v7.41-Commit, 🟡 Finding 5a): Der bisherige Test
+  // rief onToggleTask NIE auf und verglich lediglich den Eingabe-String mit
+  // sich selbst (keine echte Aussagekraft, hätte einen kaputten idx nicht
+  // gefunden). Jetzt ECHTES DOM (createRoot/act/click, Muster wie beim
+  // FileLink-Test unten in dieser Datei) mit wirklichen Klicks auf BEIDE
+  // Checkboxen – prüft, dass onToggleTask für Eltern- UND (eingerückten)
+  // Kindpunkt mit dem jeweils KORREKTEN Original-Zeilenindex aufgerufen wird.
+  it("Checkbox-Zeilenindex (fürs Abhaken) bleibt bei eingerückten Checklisten korrekt", () => {
+    const doc = "# T\n\n## A\n\n- [ ] Elternpunkt\n  - [ ] Kindpunkt";
+    const onToggleTask = vi.fn();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <DocView text={doc} collapsed={{}} onToggle={() => {}} imgMap={{}} onImgClick={() => {}} onToggleTask={onToggleTask} />
+      );
+    });
+    const checkboxes = container.querySelectorAll('input[type="checkbox"]');
+    expect(checkboxes).toHaveLength(2);
+
+    act(() => { checkboxes[0].click(); });
+    // Zeile 4 (0-basiert) ist "- [ ] Elternpunkt".
+    expect(onToggleTask).toHaveBeenLastCalledWith(4, true);
+
+    act(() => { checkboxes[1].click(); });
+    // Zeile 5 ist der EINGERÜCKTE Kindpunkt "  - [ ] Kindpunkt" – der idx
+    // darf durch die Einrückung/das neue Attribut nicht verschoben werden.
+    expect(onToggleTask).toHaveBeenLastCalledWith(5, true);
+    expect(onToggleTask).toHaveBeenCalledTimes(2);
+
+    act(() => root.unmount());
+    container.remove();
   });
 });
 
@@ -1054,6 +1237,20 @@ describe("DocView: LaTeX-Formeln (KaTeX)", () => {
     const html = render("# T\n\n## A\n\n$$E=mc^2$$");
     expect(html).toContain("katex-display");
     expect(html).not.toMatch(/<p[^>]*><span[^>]*katex-display/);
+  });
+
+  // BUGFIX (Re-Review vor v7.41-Commit, 🔵 Finding D): Der Absatz neben
+  // einer eingerückten Formel bekam schon vorher margin-left, die Formel
+  // selbst blieb bündig, obwohl "  $$x$$" seit dem Einzugs-Fix (Finding 6)
+  // den Editor-Roundtrip bereits überlebt – die ANSICHT zog nur nicht nach.
+  it("eine eingerückte Display-Formel bekommt in der Ansicht denselben Einzug wie ein Absatz auf derselben Ebene", () => {
+    const html = render("# T\n\n## A\n\n  $$x^2$$");
+    expect(html).toMatch(/style="margin-left:1\.5rem"/);
+  });
+
+  it("eine NICHT eingerückte Display-Formel bekommt weiterhin KEINEN margin-left (keine Regression)", () => {
+    const html = render("# T\n\n## A\n\n$$x^2$$");
+    expect(html).not.toMatch(/margin-left/);
   });
 
   it("einzeiliges $$…$$ funktioniert genauso wie mehrzeilig", () => {

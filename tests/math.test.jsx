@@ -231,6 +231,32 @@ describe("mathToPlaceholders (Lade-Pfad des WYSIWYG-Editors)", () => {
     expect(extractAttr(out, MATH_BLOCK_TAG)).toBe("\na^2 + b^2\n= c^2\n");
   });
 
+  // Re-Review vor v7.41-Commit (🔵 Finding I): indentLevelForMath ist ein
+  // bewusstes Duplikat von indentLevel (lib/markdown.jsx, Zirkelbezug-Grund
+  // siehe Kopfkommentar dort) – nichts hält beide Implementierungen
+  // automatisch in Sync. Ein Tab-Test deckt sowohl die sonst unabgedeckte
+  // Tab-Zeile in indentLevelForMath ab als auch die Regel "Tab zählt wie 2
+  // Leerzeichen" auf BEIDEN Seiten des Duplikats.
+  it("ein Tab vor einer Display-Formel wird wie 2 Leerzeichen behandelt (data-indent=1)", () => {
+    const out = mathToPlaceholders("\t$$x$$");
+    expect(out).toContain('data-indent="1"');
+    // extractAttr() (oben) geht von GENAU einem Attribut ("data-tex") aus –
+    // mit "data-indent" davor reicht hier ein direkter Check auf den
+    // vollständigen Tag statt den gemeinsamen Helfer für einen Sonderfall
+    // umzubauen.
+    expect(out).toContain('<' + MATH_BLOCK_TAG + ' data-indent="1" data-tex="x"></' + MATH_BLOCK_TAG + '>');
+  });
+
+  it("zwei Tabs vor einer Display-Formel ergeben Ebene 2", () => {
+    const out = mathToPlaceholders("\t\t$$x$$");
+    expect(out).toContain('data-indent="2"');
+  });
+
+  it("eine NICHT eingerückte Display-Formel bekommt KEIN data-indent-Attribut", () => {
+    const out = mathToPlaceholders("$$x$$");
+    expect(out).not.toContain("data-indent");
+  });
+
   it("escaped &, <, >, \" im TeX-Inhalt korrekt (verlustfrei umkehrbar)", () => {
     const tex = 'x < 5 & y > 3 "quoted"';
     const out = mathToPlaceholders("$" + tex + "$");

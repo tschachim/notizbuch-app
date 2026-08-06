@@ -13,7 +13,7 @@ import { DocView, IMG_REF_RE, TASK_RE, parseTree, renumberCitations, decodeBasic
 import { linkifyFilePaths } from "./lib/filelinks.js";
 import {
   prepareImage, newImgId, extForMime, mimeForName, dataUrlParts, blobToDataURL,
-  makeNotebookIcon,
+  makeNotebookIcon, uploadEditorImage,
 } from "./lib/images.js";
 import { MODELS, callClaude } from "./lib/anthropic.js";
 import { buildFeedbackTrigger, isNoFeedback, dedupeFeedbackParagraphs } from "./lib/feedback.js";
@@ -1293,6 +1293,22 @@ export default function NotizbuchApp() {
     }
     setPendingFile({ file, name: safeFileName(file.name) });
   };
+
+  // Bild direkt im WYSIWYG-Editor einfügen (v7.41 Teil B, Nutzerwunsch
+  // "Bilder direkt in den Editor kopieren können"): wird DocEditor als
+  // onAddImage-Prop gereicht (siehe dort für Paste/Drop/Toolbar-Knopf). Die
+  // eigentliche Logik (Upload + imgMap/imgIndex-Pflege) steckt in
+  // lib/images.js#uploadEditorImage – testbar ohne React/DOM; hier nur noch
+  // der Anschluss an den aktuellen App-Zustand. Wirft bei jedem Fehler
+  // (nicht verbunden, Upload fehlgeschlagen) – DocEditor zeigt die Meldung
+  // in seiner bestehenden Fehleranzeige.
+  const addEditorImage = (file) =>
+    uploadEditorImage(file, {
+      connected,
+      cfg: settingsRef.current,
+      imgIndex: imgIndex.current,
+      setImgMap,
+    });
 
   const handlePaste = (e) => {
     const items = e.clipboardData && e.clipboardData.items;
@@ -2801,7 +2817,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.40</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.41</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -3216,6 +3232,7 @@ export default function NotizbuchApp() {
               saving={savingEdit || busy}
               navWidth={layout.navW}
               autocorrect={autocorrect}
+              onAddImage={addEditorImage}
             />
           ) : (
             <div className="flex-1 min-h-0 flex">

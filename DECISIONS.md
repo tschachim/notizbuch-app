@@ -7293,3 +7293,660 @@ aus `referenz-app.jsx` übernommen.
       oder ggf. ein Code-seitiges Sicherheitsnetz (z. B. eine Warnung bei
       einem `##`-Abschnitt, dessen Name dem umschließenden `#`-Kapitel
       entspricht).
+
+81. **Einrückungen im Dokument – Ansicht, Editor-Knöpfe und Tab/Shift-Tab
+    (v7.41, Nutzerwunsch).** Der Nutzer hatte einen 2-Leerzeichen-
+    eingerückten Checklisten-Block gespeichert, der in der Dokument-
+    Ansicht trotzdem bündig mit seinem Elternpunkt erschien, und wünschte
+    sich zusätzlich Einzugs-Knöpfe „wie in Excel“ im Editor. Root-Cause
+    (Ansicht): `renderBlocks` (`lib/markdown.jsx`) war komplett
+    einrückungs-blind – `UL_RE`/`OL_RE`/`TASK_RE` verschlucken führenden
+    Leerraum, alle Listenpunkte landeten flach in EINEM `<ul>`/`<ol>`;
+    Absätze/Bilder/Tabellen/`hr` hatten gar kein Einzugs-Konzept.
+    - **Konvention:** 2 Leerzeichen pro Ebene, maximal 6 Ebenen (12
+      Leerzeichen), Tabs werden NIE geschrieben, aber beim Lesen wie 2
+      Leerzeichen behandelt. `indentLevel(line)` (`lib/markdown.jsx`,
+      exportiert, rein) kapselt die Arithmetik – Renderer UND
+      Editor-Ladepfad (siehe unten) verwenden GENAU dieselbe Funktion.
+    - **A1 – Ansicht, Padding-Ansatz statt echter `<ul>`-Verschachtelung.**
+      `renderBlocks` wendet pro Zeile `indentLevel` an und setzt
+      `marginLeft: level * 1.5rem` (kombiniert mit den bestehenden
+      `pl-5`/`pl-1`-Klassen, die weiterhin den Platz für Aufzählungs-
+      zeichen/Checkbox reservieren). `ensure(type, level)` beendet die
+      laufende Liste bei JEDEM Typ- ODER Ebenenwechsel und beginnt eine
+      neue `<ul>`/`<ol>` mit dem passenden Einzug – bewusst KEINE echte
+      DOM-Verschachtelung: das behandelt Listenpunkte, Absätze, Bilder und
+      Bildunterschriften einheitlich und ist genau das Modell, das ein
+      Nutzer aus Word/Excel erwartet. Zusätzlich (kosmetisch, geringes
+      Risiko): tiefere Aufzählungsebenen bekommen ein anderes
+      Aufzählungszeichen (disc/circle/square, Tailwind-Arbiträrwerte, da
+      es dafür keine feste Utility-Klasse gibt). Überschriften bleiben
+      UNANGETASTET (kein `indentLevel`-Aufruf) – `parseTree` erkennt
+      Kapitel/Abschnitte zeilenanfangs-verankert ohne Leerraum-Toleranz,
+      eine „eingerückte“ `#`-Zeile ist dadurch STRUKTURELL bereits gar
+      keine Überschrift mehr, sondern fällt automatisch auf den
+      Absatz-Zweig durch (kein Sonderfall nötig, siehe Test in
+      `tests/markdown.test.jsx`). Fenced-Codeblöcke/Display-Formeln
+      bleiben unverändert (kein `indentLevel` auf ihren Inhalt) – deren
+      Inhalt ist laut App-Konvention byte-genauer Klartext.
+    - **A2 – Checklisten verschachtelbar.** `TaskItem.configure({nested:
+      true})` (`DocEditor.jsx`) – vorher konnte eine Checkliste im Editor
+      gar nicht verschachtelt werden, obwohl genau das der Nutzer-Fall
+      war (Checkbox-Elternpunkt mit eingerückten Unterpunkten).
+    - **A3 – Editor-Attribut „indent“ für Absätze/Bilder.** Markdown/
+      ProseMirror kennen für freistehende Absätze/Bilder keine
+      Verschachtelungs-Struktur (anders als Listen) – ein neues
+      `indent`-Attribut (0-6, `indentAttrSpec`-Helfer für beide Nodes) ist
+      der einzige Weg. `IndentParagraph` (`Paragraph.extend()`, StarterKit
+      bekommt `paragraph:false`) und `BlockImage` (erweitert um `indent`)
+      schreiben beim Serialisieren `"  ".repeat(indent)` vor den Inhalt.
+      **Ladepfad (`IndentMarkdownIt`, neue `markdown.parse.setup(md)`-
+      Extension nach dem etablierten `FileLinkMarkdownIt`-Muster, inkl.
+      `__indentPatched`-Guard gegen mehrfaches Patchen derselben
+      md-Instanz):**
+      - `md.disable("code")` – markdown-its Regel für EINGERÜCKTE
+        Codeblöcke (4+ Leerzeichen/Tab) MUSS weg, sonst würde bereits
+        Einzugsebene 2 beim Laden zu einem Codeblock statt zu einem
+        eingerückten Absatz (konsistent zur App, die ohnehin nur
+        GEZÄUNTE Codeblöcke kennt, `lib/code.jsx`).
+      - Eine `core`-Regel NACH `"inline"` (die Kinder eines
+        `"inline"`-Tokens sind erst danach geparst) setzt für jeden
+        `paragraph_open` AUF OBERSTER EBENE `data-indent` anhand der
+        Einrückung seiner Quellzeile. „Oberste Ebene“ = ein Tiefenzähler
+        über das flache Token-Array zählt `list_item_open`/
+        `blockquote_open`/`table_open` mit – NUR so bekommt ein Absatz
+        INNERHALB eines Listenpunkts KEIN eigenes `indent`-Attribut
+        („kein doppelter Einzug“: der Listen-Serializer erzeugt seinen
+        Einzug bereits selbst, sonst würden 2 Leerzeichen beim Speichern
+        zu 4).
+      - Bild-Sonderfall: Besteht der Absatz nur aus einem Bild
+        (`![…](img:…)` allein auf der Zeile), hebt ProseMirror den
+        block-level Bild-Node aus seinem `<p>` heraus – `data-indent`
+        wird deshalb ZUSÄTZLICH auf dem `"image"`-Inline-Kind des
+        `"inline"`-Companion-Tokens gesetzt (folgt im flachen
+        Token-Array laut markdown-it immer direkt auf `paragraph_open`).
+      - **ECHTER Bug beim Testschreiben gefunden (nicht Teil des
+        ursprünglichen Auftrags, aber notwendig für einen stabilen
+        Roundtrip des Nutzer-Falls):** `TaskItem.configure({nested:true})`
+        macht eine Checkliste mit VERSCHACHTELTER Nicht-Checklisten-Liste
+        (Bullet/Nummerierung) als Kind ÜBERHAUPT ERST MÖGLICH – und genau
+        dort setzte tiptap-markdown/prosemirror-markdown BISHER IMMER
+        eine Leerzeile zwischen dem Checkbox-Text und der eingerückten
+        Unterliste. Root-Cause: `taskList` bekommt (anders als
+        `bulletList`/`orderedList`, siehe tiptap-markdown
+        `MarkdownTightLists`, `listTypes: ["bulletList","orderedList"]`)
+        NIE ein `tight`-Attribut; der Serializer fällt beim Betreten der
+        verschachtelten Liste auf seinen INTERNEN Default
+        `tightLists:false` zurück (tiptap-markdown übergibt `tightLists`
+        nie an den `MarkdownSerializerState`). Ohne Fix hätte die Ansicht
+        (Padding-Ansatz aus A1) die eingerückten Unterpunkte durch die
+        überlebende Leerzeile als eigenen, ABGETRENNTEN Block gezeigt
+        statt als zusammenhängende Einrückung unter dem Checkbox-
+        Elternpunkt – ein Rest des ursprünglich gemeldeten Symptoms wäre
+        also zurückgekommen. Fix: Die bestehende Leerzeilen-Kollaps-Regel
+        in `save()` (jetzt als eigene, exportierte Funktion
+        `collapseChecklistGaps` extrahiert) deckte bisher NUR „Checkliste
+        gefolgt von Checkliste“ ab – ihr Lookahead wurde auf JEDE
+        Listenzeile erweitert (Aufzählung/Nummerierung/Checkliste).
+    - **A4 – Toolbar-Knöpfe + Tab/Shift-Tab (`changeIndent`/
+      `canChangeIndent`, `DocEditor.jsx`).** Excel/Word-Semantik: wirkt
+      auf den Block der Cursorposition, bei einer Auswahl über mehrere
+      Blöcke auf ALLE berührten Top-Level-Blöcke – EINE Transaktion (ein
+      Undo-Schritt) für die gesamte Auswahl. Auflösung pro Block:
+      Überschrift -> No-op; Absatz/Bild -> `indent`-Attribut ±1 (0..6);
+      Aufzählung/Nummerierung/Checkliste -> `sinkListItem`/`liftListItem`
+      (`@tiptap/pm/schema-list`) des Item-Typs, der am INNERSTEN
+      Listenpunkt-Vorfahren der SELEKTION hängt (NICHT des Top-Level-
+      Blocks – siehe Blocker-1-Fix in der Nachbesserung unten); alles andere
+      (Tabelle/Trennlinie/Codeblock/Formel-Block) -> No-op (nicht Teil
+      dieses Auftrags). Da `sinkListItem`/`liftListItem` fertige
+      Commands sind, die IMMER an einen frischen `state.tr` gebunden
+      sind, nicht an unser gemeinsames `tr`: pro Listen-Block ein
+      TEMPORÄRER State mit `doc=tr.doc` (dem bereits akkumulierten
+      Zwischenstand der vorherigen Blöcke DIESER Auswahl), das Kommando
+      dort ausführen und seine Schritte auf `tr` replizieren
+      (`tr.step(step)` – da beide Dokumente zum Aufrufzeitpunkt identisch
+      sind, passen die Positionen ohne weiteres Mapping). `canChangeIndent`
+      teilt sich dieselbe Funktion mit einem `dryRun`-Flag (kein
+      `dispatch`) – für das Ausgrauen der Toolbar-Knöpfe.
+      **Tab/Shift-Tab (`IndentKeymap`, `priority: 1001`).** ÜBERARBEITET
+      nach dem Code-Review vor dem v7.41-Commit (siehe „Nachbesserung“
+      unten) – ursprünglich stand `IndentKeymap` bewusst als ERSTES
+      Element der `extensions`-Liste, weil TipTap pro Extension einen
+      eigenen `keymap()`-Plugin baut und die Extensions-Liste für die
+      Plugin-Reihenfolge umkehrt (`ExtensionManager.plugins`,
+      `[...this.extensions].reverse()`), „zuerst gelistet“ wurde dadurch
+      „zuletzt versucht“. Diese Reihenfolge-Argumentation war technisch
+      KORREKT, aber zerbrechlich UND sie machte `IndentKeymap` zum reinen
+      Fallback HINTER `TaskItem` (das durch seine Listenposition NACH
+      `StarterKit` höhere Priorität hatte als `ListItem`) – genau das
+      hat den Blocker verursacht (siehe unten): `TaskItem`s eigene
+      `Shift-Tab: liftListItem('taskItem')`-Bindung gewann bei einer
+      Bullet-Liste INNERHALB eines `taskItem`, bevor unser korrigiertes
+      `runIndentChange` überhaupt zum Zug kam. Jetzt: expliziter
+      `priority: 1001` (weit über dem Default 100) macht `IndentKeymap`
+      zum PRIMÄREN Handler für Tab/Shift-Tab – gefahrlos, weil
+      `runIndentChange` für Tabellen-Auswahlen strukturell `false`
+      liefert (kein `"table"`-Zweig) und die ProseMirror-Keymap-Kette
+      dann an `goToNextCell` (`@tiptap/extension-table`) durchreicht,
+      ebenso bei einer Überschrift/einem bereits maximal eingerückten
+      Block. Löst zugleich die fragile Reihenfolge-Argumentation ab.
+    - **Tests:** `tests/markdown.test.jsx` (`indentLevel` pur: Ebenen 0-6,
+      ungerade Leerzeichenzahl, Tab, Kappung >6; `DocView`: Absatz/Bild/
+      Tabelle/Trennlinie eingerückt, Überschriften bleiben unangetastet,
+      Ebenenwechsel mitten in einer Liste, gemischt Checkliste/
+      Aufzählung, Bullet-Zeichen-Abstufung, Einrückung INNERHALB eines
+      Codeblocks bleibt unangetastet, Checkbox-Zeilenindex bleibt
+      korrekt). `tests/docEditorIndent.test.jsx` (neu, echter TipTap/
+      markdown-it-Zyklus wie `docEditorMath.test.jsx`/
+      `docEditorCode.test.jsx`): Ladepfad (kein Codeblock mehr bei 4
+      Leerzeichen, `indent`-Attribut auf Absatz/Bild, kein doppelter
+      Einzug innerhalb eines Listenpunkts/einer Tabelle), Roundtrip
+      (Original-Nutzer-Ausschnitt byte-identisch UND idempotent, alle
+      Ebenen 0-6, Tab-im-Quelltext, Bild+Bildunterschrift ergibt GENAU
+      eine Ebene), `changeIndent`/`canChangeIndent` (Einzelzeile, Grenzen
+      0/6, Überschrift No-op, Mehrfachauswahl mit EINEM Undo-Schritt,
+      Sink/Lift inkl. erster-Punkt-kann-nicht-weiter, Tabellen-No-op),
+      Tab/Shift-Tab-Integration, die A2-Probe (Aufzählungs-/
+      Nummerierungs-Verschachtelung bleibt roundtrip-stabil – ERGEBNIS:
+      ja, sauber) und `collapseChecklistGaps` (der oben beschriebene Bug,
+      inkl. Idempotenz-Test und Abgrenzung „kein Listenpunkt danach ->
+      keine Kollabierung“).
+    - **Nachbesserung nach dem Pflicht-Code-Review vor dem v7.41-Commit
+      (echter TipTap/markdown-it-Stack, nicht nur gelesen).** Der Reviewer
+      fand einen 🔴 Blocker im Kern-Anwendungsfall des Nutzers plus
+      mehrere 🟡/🔵-Findings:
+      - **🔴 Blocker 1 – Item-Typ-Auflösung.** `runIndentChange` leitete
+        den `sinkListItem`/`liftListItem`-Item-Typ aus dem TOP-LEVEL-Node
+        ab (`node.type.name === "taskList" ? "taskItem" : "listItem"`).
+        Bei `- [ ] Eltern` mit einer eingerückten PLAIN-Aufzählung als
+        Kind (A2 macht das erst möglich) ist der Top-Level-Node
+        `taskList`, die Selektion steckt aber in einem `listItem` der
+        Bullet-Liste INNERHALB des `taskItem`. `liftListItem(taskItem)`
+        hob dadurch den GESAMTEN Checkbox-Elternpunkt aus der Liste
+        (Text statt Checkbox – stiller Inhaltsverlust beim Speichern),
+        `canChangeIndent(+1)` widersprach zugleich dem tatsächlichen
+        Tab-Verhalten (das über `TaskItem`s eigene, andersartig
+        priorisierte Bindung lief). Fix: den INNERSTEN Listenpunkt-
+        Vorfahren der SELEKTION auflösen (Tiefensuche über
+        `$inner.node(d)` für `d` von der Selektionstiefe bis 1, erster
+        Treffer `"listItem"`/`"taskItem"` gewinnt) statt den Typ vom
+        Top-Level-Block zu raten – siehe auch den Tab/Shift-Tab-Absatz
+        oben (`priority: 1001`), der dieselbe Ursache (Extension-
+        Reihenfolge statt expliziter Priorität) auf der Tastatur-Seite
+        behoben hat.
+      - **🟡 Finding 2 – Nummerierung startete nach jedem Ebenenwechsel
+        wieder bei 1.** `ensure()`/`flush()` (`lib/markdown.jsx`) kennen
+        jetzt zusätzlich `start` (die im Markdown tatsächlich notierte
+        Nummer des ersten Punkts einer NEUEN Liste, nur bei `ol` gesetzt,
+        nur wenn > 1 als HTML-`start`-Attribut geschrieben) – Geschwister
+        auf derselben Ebene, getrennt durch eine tiefer eingerückte
+        Zwischen-Liste, zählen dadurch korrekt weiter (`1. Eins / 1.
+        Unter / 2. Zwei / 3. Drei` statt `1./1./1./2.`).
+      - **🟡 Finding 3 – D16 beschrieb Verhalten, das es nicht gibt.**
+        `docs/TESTFAELLE.md` D16 verlangte, dass eine KOMPLETT markierte
+        Liste bzw. eine bis in den ERSTEN Listenpunkt reichende Auswahl
+        einrückt – tatsächlich ist das strukturell ein No-op
+        (`sinkListItem` scheitert, sobald die Range beim ersten Item
+        beginnt, es gibt keinen Vorgänger). **Bewusst akzeptierte Grenze,
+        kein Fix der Logik**: D16 an das reale Verhalten angepasst
+        (Auswahl ab dem ZWEITEN Punkt; die Grenze „komplette Liste/
+        erster Punkt lässt sich nicht weiter einrücken, Knopf ausgegraut“
+        ist jetzt explizit Teil des Testfalls), neuer Unit-Test „ganze
+        Liste markiert“ ergänzt (fehlte zuvor komplett).
+      - **🟡 Finding 4 (Teil B, `DocEditor.jsx`) – siehe Entscheidung #82,
+        „Nachbesserung“ dort** (ein Webseiten-Ausschnitt MIT Bild durfte
+        nicht mehr den kompletten Paste blockieren).
+      - **🟡 Findings 5a/5b – zwei Pro-forma-Tests ohne Aussagekraft.**
+        „Checkbox-Zeilenindex bleibt korrekt“ (`tests/markdown.test.jsx`)
+        rief `onToggleTask` nie auf und verglich den Eingabe-String nur
+        mit sich selbst – jetzt ECHTES DOM (`createRoot`/`act`, zwei
+        wirkliche Klicks auf Eltern- UND eingerückten Kindpunkt, prüft
+        den tatsächlich übergebenen `idx`). „…NICHT auf einem Phantom-
+        Absatz“ (`tests/docEditorIndent.test.jsx`) zählte
+        `looseParagraphCount` hoch, ohne ihn je zu prüfen – Assertion
+        ergänzt.
+      - **🔵 Finding 6 – eingerückte Display-Formeln verloren den Einzug
+        beim Roundtrip.** `mathToPlaceholders` (`lib/math.jsx`) strippte
+        die führende Einrückung, BEVOR der `<math-block>`-Tag gebaut
+        wurde. Fix: `indentLevelForMath` (Duplikat von `indentLevel` aus
+        demselben Zirkelbezug-Grund wie `IMG_LINE_RE_FOR_MATH`) schreibt
+        `data-indent` direkt in den generierten Tag; `MathBlock`
+        (`DocEditor.jsx`) bekommt ein `indent`-Attribut analog
+        `BlockImage` UND – wichtiger Unterschied zu `BlockImage` – eine
+        angepasste `renderHTML`, die `HTMLAttributes` jetzt tatsächlich
+        übernimmt (die bisherige, hartkodierte `{"data-tex": ...}` hätte
+        das von `indentAttrSpec.renderHTML` berechnete `data-indent`
+        sonst verworfen).
+      - **🔵 Finding 7 – eingerückte Absätze behielten führende
+        Leerzeichen im sichtbaren Text.** Führende Leerzeichen/Tabs sind
+        seit diesem Feature AUSSCHLIESSLICH Einzugs-Metadaten (bereits
+        über `indentLevel`/`marginLeft` ausgewertet) – der Absatz-Zweig
+        in `renderBlocks` strippt sie jetzt vor `<Inline>`, konsistent zu
+        den Listen-Zweigen, die ihr Präfix längst extrahieren.
+      - **Zwei ergänzende Erkenntnisse ohne Code-Änderung:** (a) Ein
+        ProseMirror-`Slice` MUSS aus derselben Schema-Instanz stammen wie
+        das Ziel-Dokument – zwei per `new Editor(...)` gebaute Instanzen
+        mit identischer Extensions-Konfiguration erzeugen trotzdem ZWEI
+        VERSCHIEDENE Schema-Objekte (eigene `NodeType`-Instanzen);
+        `parent.canReplace(...)` vergleicht Objektidentität, ein „fremder“
+        Node passt dadurch nie, selbst bei identischem Namen – reines
+        Test-Artefakt (im echten Editor stammt ein Paste-Slice immer aus
+        derselben View), aber beim Schreiben der Finding-4-Tests
+        empirisch entdeckt und dokumentiert (siehe
+        `tests/docEditorImages.test.jsx`). (b) Finding 9 (vermutete
+        Prop-Veralterung von `onAddImage` bei Paste/Drop) ließ sich mit
+        einem echten Regressionstest (zwei `root.render()`-Aufrufe +
+        simuliertes Paste-Event) NICHT reproduzieren – die installierte
+        `@tiptap/react`-Version (2.27.2) aktualisiert `editorProps` der
+        LEBENDEN View bei jedem Render über
+        `editor.setOptions()`/`view.setProps()`, siehe Entscheidung #82.
+    - **Nachbesserung nach einer zweiten Review-Runde vor demselben
+      v7.41-Commit.** Der Reviewer maß diesmal mit
+      `view.someProp("handleKeyDown", (f) => f(view, event))` statt
+      `editor.commands.keyboardShortcut()` – dadurch werden echte
+      Tastendrücke INKLUSIVE reiner Selektionswechsel (z. B.
+      `goToNextCell` in Tabellen) in jsdom sichtbar, nicht nur
+      dokument-ändernde Schritte (siehe Einschränkung (2) der
+      Restrisiken-Liste oben). Dieselbe Technik wurde für alle unten
+      genannten neuen/überarbeiteten Tests übernommen.
+      - **🟡 Finding A – Tab/Shift-Tab widersprachen dem Knopf-Zustand
+        UND trafen bei gemischter Verschachtelung den FALSCHEN Block.**
+        `IndentKeymap` gab bei einem `runIndentChange`-Fehlschlag (z. B.
+        weil `sinkListItem`/`liftListItem` für den per Blocker-1-Fix
+        korrekt aufgelösten Item-Typ strukturell scheitert) `false`
+        zurück – die ProseMirror-Keymap-Kette reichte die Taste dann an
+        die NÄCHSTE passende Bindung durch: `TaskItem`s bzw. `ListItem`s
+        EIGENE `Tab`/`Shift-Tab`-Bindung, die den Item-Typ erneut anhand
+        der Selektion, aber mit ANDERER (der jeweiligen Extension
+        eigener) Tiefensuche bestimmt. Bei gemischter Verschachtelung
+        (Checkliste mit einer PLAIN-Bullet-Liste als Kind oder
+        umgekehrt) fand diese zweite Bindung einen ANDEREN Listenpunkt
+        als den, für den `canChangeIndent` (Grundlage des Knopf-
+        Zustands) gerechnet hatte – Tab rückte sichtbar einen falschen
+        Block ein/aus, obwohl der Knopf für den aktuellen Block
+        ausgegraut war. Fix: `inTopLevelList(state)` prüft, ob die
+        Selektion überhaupt in einer Top-Level-Liste
+        (`bulletList`/`orderedList`/`taskList`) steckt; `IndentKeymap`
+        gibt jetzt `changeIndent(...) || inTopLevelList(state)` zurück
+        – schlägt `runIndentChange` innerhalb einer Liste fehl, wird die
+        Taste trotzdem SELBST verschluckt (kein Fallback mehr an
+        `TaskItem`/`ListItem`), außerhalb einer Liste (Tabelle,
+        Überschrift, normaler Absatz an Ebene 0/6) bleibt der
+        Durchreich-Fallback unverändert bestehen. Die Kommentare am
+        `TaskItem.configure({nested:true})`-Aufruf und an
+        `IndentKeymap` selbst, die vorher behaupteten, `TaskItem`s/
+        `ListItem`s eigene Tab-Bindungen kämen „praktisch nie zum Zug“,
+        waren dadurch überholt (sie kommen jetzt INNERHALB einer Liste
+        NIE mehr zum Zug) und wurden entsprechend korrigiert.
+      - **🟡 Finding B – der wichtigste Regressionstest für
+        `priority: 1001` prüfte zu wenig.** Der bestehende Tabellen-Tab-
+        Test nutzte `editor.commands.keyboardShortcut("Tab")` und prüfte
+        nur, dass sich der Zellinhalt NICHT änderte – das wäre auch
+        dann grün geblieben, wenn `goToNextCell` komplett kaputt gewesen
+        wäre (reiner Selektionswechsel, `keyboardShortcut()` repliziert
+        das nachweislich nicht, siehe Restrisiko (2) oben). Fix: Test
+        auf `view.someProp("handleKeyDown", ...)` umgestellt und um
+        Vorwärts-, Rückwärts- (Shift-Tab) sowie Letzte-Zelle-Fälle
+        erweitert – prüft jetzt tatsächlich die Zielzelle der
+        Selektion, nicht nur die Unveränderlichkeit des Ausgangstexts.
+        Ein neuer `realKey(editor, key, shift)`-Test-Helfer kapselt den
+        Aufruf; dabei ein eigener Test-Bug gefunden und behoben (drei
+        Stellen riefen `realKey(editor, "Shift-Tab", true)` statt
+        `realKey(editor, "Tab", true)` auf – `KeyboardEvent.key` MUSS
+        die literale Taste sein, `shiftKey: true` ist der Modifikator,
+        den `prosemirror-keymap` selbst zu „Shift-Tab“ zusammensetzt;
+        mit dem falschen Aufruf traf keine Bindung, der Test bestand
+        nur zufällig, weil er dieselbe – falsche – Unveränderlichkeit
+        prüfte wie vor dem Fix). Zusätzlich veraltete `describe`/Test-
+        Namen korrigiert, die noch das Verhalten VOR `priority: 1001`
+        beschrieben.
+      - **🟡 Finding C – Shift-Tab aus einer gemischten Verschachtelung
+        heraus erzeugt Markdown, dessen NÄCHSTER Lade-/Speicherzyklus
+        einmalig eine Leerzeile normalisiert. BEWUSST NICHT gefixt.**
+        Hebt Shift-Tab einen Unterpunkt aus einer Checkliste heraus
+        (z. B. `- [ ] Kind zwei` wird zu einem eigenständigen Absatz),
+        speichert der ERSTE Zyklus korrekt `- Eltern\n  - [ ] Kind
+        eins\n\n  Kind zwei`. Lädt man dieses Ergebnis erneut und
+        speichert OHNE weitere Änderung, entsteht `- Eltern\n\n  - [ ]
+        Kind eins\n\n  Kind zwei` – eine zusätzliche Leerzeile VOR dem
+        verbliebenen Checklistenpunkt taucht auf. Root-Cause: Die
+        verbliebene `taskList` bekommt (siehe Finding beim ursprünglichen
+        A3-Fix, `MarkdownTightLists` kennt nur `bulletList`/
+        `orderedList`) beim erneuten Parsen anhand der jetzt
+        vorhandenen Leerzeile eine andere „tight“-Einstufung durch
+        `markdown-it` als beim allerersten Parsen des Original-
+        Dokuments – ab dem ZWEITEN Zyklus ist das Ergebnis stabil (ein
+        DRITTER Zyklus ändert nichts mehr), es geht KEIN Inhalt
+        verloren. Ein Code-Fix an der loose/tight-Semantik von
+        `tiptap-markdown`/`prosemirror-markdown` wurde als zu riskant
+        bewertet (Gefahr, an anderer Stelle bestehende, funktionierende
+        Leerzeilen-Logik zu brechen) – stattdessen bewusst NUR
+        dokumentiert und mit einem Pin-Test in
+        `tests/docEditorIndent.test.jsx` festgehalten (reproduziert
+        genau die drei Zyklen), plus ein Hinweis in
+        `docs/TESTFAELLE.md` D15b/D17, damit der E2E-Tester dieses
+        einmalige Kippen nicht fälschlich als 🔴 meldet.
+      - **🔵 Finding D – Display-Formeln blieben in der Dokument-Ansicht
+        optisch bündig, obwohl der Roundtrip die Einrückung seit
+        Finding 6 bereits korrekt erhält.** `renderBlocks`
+        (`lib/markdown.jsx`) wandte `indentStyle(indentLevel(line))` auf
+        JEDEN Block-Typ außer `mathBlock` an. Fix: eine Zeile ergänzt,
+        analog zu Tabelle/Trennlinie.
+      - **🔵 Finding E – `MathBlock.renderHTML` schrieb den rohen
+        `tex`-Wert redundant als ZWEITES Attribut neben `data-tex`.**
+        Seit Finding 6 übernimmt `renderHTML` `HTMLAttributes`
+        vollständig (nötig für `data-indent`) – `tex` selbst hatte aber
+        kein `rendered: false`, wurde also zusätzlich zu `data-tex`
+        automatisch in `HTMLAttributes` aufgenommen. Fix: `tex: {
+        default: "", rendered: false }` – `data-tex` bleibt die einzige
+        Quelle beim Parsen, kein Verhaltensunterschied, nur ein
+        überflüssiges DOM-Attribut weniger.
+      - **🔵 Finding F – `runIndentChange` erkannte `mathBlock` trotz
+        eigenem `indent`-Attribut (Finding 6) nicht als Einzugs-Ziel.**
+        Die Bedingung für den Absatz-/Bild-Zweig um
+        `node.type.name === "mathBlock"` ergänzt – Formeln lassen sich
+        dadurch jetzt genau wie Absätze/Bilder per Tab/Shift-Tab bzw.
+        Toolbar-Knopf ein-/ausrücken; empirisch keine unerwarteten
+        Nebeneffekte (Erhöhen/Verringern/Kappung bei 0 und 6 verhalten
+        sich wie bei Absätzen).
+      - **🔵 Finding G – Test-Name/-Inhalt-Mismatch.** Ein Testname in
+        `tests/docEditorIndent.test.jsx` beschrieb nicht mehr, was der
+        Testkörper tatsächlich prüfte (die Assertions selbst waren
+        korrekt) – NUR der Name korrigiert.
+      - **🔵 Finding H – Tab auf einem LEEREN Absatz schrieb eine
+        Leerzeichen-Zeile ins gespeicherte Markdown.** Ein leerer
+        Absatz (`content.size === 0`) bekam trotzdem ein erhöhtes
+        `indent`-Attribut, `IndentParagraph`s Serializer schreibt
+        `"  ".repeat(indent)` auch ohne folgenden Inhalt – eine rein aus
+        Leerzeichen bestehende Zeile landet im Commit. Fix: gezielte
+        Guard-Klausel NUR für `paragraph` mit `content.size === 0`
+        (bewusst NICHT als allgemeine `content.size === 0`-Prüfung vor
+        die Bild-/Formel-Fälle gestellt, da Bild-/Formel-Atome IMMER
+        `content.size === 0` haben und sonst gar nicht mehr einrückbar
+        wären).
+      - **🔵 Finding I – Deckungslücke in `math.jsx`.** Der
+        Tab-Zweig von `indentLevelForMath` (Duplikat von `indentLevel`,
+        siehe Finding 6) war durch keinen Test abgedeckt. Neuer
+        Roundtrip-Test mit einer Tab-eingerückten Formel
+        (`"# T\n\n\t$x$"`) ergänzt.
+      - **Tests:** `tests/docEditorIndent.test.jsx` (Finding A: vier
+        neue Regressionstests für gemischte Verschachtelung, alle über
+        `view.someProp("handleKeyDown", ...)`, decken Checkliste-mit-
+        Bullet-Kind und Bullet-mit-Checklisten-Kind in beide Tab-
+        Richtungen ab, inkl. Prüfung, dass der Toolbar-Knopf-Zustand
+        `canChangeIndent` mit dem tatsächlichen Tab-Ergebnis
+        übereinstimmt; Finding B: Tabellen-Tab-Block umgeschrieben,
+        siehe oben; Finding C: neuer Pin-Test mit den drei
+        Lade-/Speicherzyklen; Finding F: drei neue Tests
+        (Erhöhen/Verringern/Kappung bei 6) im bestehenden
+        `MathBlock-Einzug`-Block; Finding G: Testname korrigiert;
+        Finding H: neuer Test „ein LEERER Absatz … lässt sich nicht
+        einrücken“). `tests/markdown.test.jsx` (Finding D: zwei neue
+        Tests, eingerückte vs. nicht eingerückte Formel im
+        `margin-left`). `tests/math.test.jsx` (Finding I: drei neue
+        Tests für `mathToPlaceholders` mit Tab-Einzug, doppeltem Tab
+        und ohne Einzug).
+    - **Bewusste Restrisiken:** (1) Tabellen/Trennlinien haben im Editor
+      KEIN `indent`-Attribut (nur Absatz/Bild, wie im Auftrag
+      spezifiziert) – eine außerhalb des Editors (Chat/API oder manuelle
+      Markdown-Bearbeitung) erzeugte eingerückte Tabelle/Trennlinie wird
+      in der Ansicht korrekt eingerückt dargestellt, verliert die
+      Einrückung aber beim nächsten Editor-Öffnen+Speichern (kein
+      Attribut zum Erhalten vorhanden). (2) Der Tab-Tastendruck INNERHALB
+      einer Tabellenzelle (`goToNextCell`, reiner Selektionswechsel ohne
+      Dokument-Schritt) ließ sich nicht per jsdom-Simulation
+      (`editor.commands.keyboardShortcut`) automatisiert verifizieren –
+      dieser tiptap-Testhelfer repliziert nachweislich NUR
+      dokument-ändernde Schritte, keine reinen Selektionswechsel (siehe
+      Kommentar im Test). Die Architektur-Begründung (`priority: 1001`,
+      siehe oben) ist durch Quellcode-Analyse abgesichert, die
+      tatsächliche Tastendruck-Priorität ist zusätzlich als neuer E2E-Fall
+      in `docs/TESTFAELLE.md` dokumentiert (echter Browser). (3) Ein
+      Cursor GENAU auf einer Blockgrenze (kollabierte Selektion, `from ===
+      to`, exakt zwischen zwei Top-Level-Blöcken) berührt in
+      `changeIndent`/`canChangeIndent` bewusst BEIDE angrenzenden Blöcke
+      (lieber einmal zu viel als gar nicht) – ein in der Praxis kaum
+      erreichbarer Randfall, da ProseMirror eine echte Text-Cursor-
+      Position praktisch nie exakt dorthin setzt. (4) Die Bullet-Zeichen-
+      Abstufung (disc/circle/square) ist rein kosmetisch und nutzt
+      Tailwind-Arbiträrwerte statt fester Utility-Klassen – funktional
+      ohne Risiko, aber visuell von der genauen Tailwind-Version
+      abhängig. (5) `collapseChecklistGaps` kollabiert eine Leerzeile
+      auch vor einer NICHT eingerückten, eigenständigen Fremdliste (kein
+      Kind, sondern zwei unabhängige Listen) – dieselbe Grammatik-Grenze
+      galt schon vorher für zwei aufeinanderfolgende Checklisten, jetzt
+      per Test gepinnt statt nur stillschweigend in Kauf genommen. (6)
+      **Finding C (siehe „Nachbesserung nach einer zweiten Review-Runde“
+      oben):** Ein Shift-Tab, das einen Unterpunkt aus einer gemischt
+      verschachtelten Checkliste heraushebt, kann beim NÄCHSTEN Öffnen
+      und Speichern (ohne jede weitere Änderung) einmalig eine
+      zusätzliche Leerzeile committen (loose/tight-Normalisierung durch
+      `markdown-it`/`tiptap-markdown` beim erneuten Parsen). Kein
+      Datenverlust, ab dem zweiten Zyklus stabil – bewusst NICHT
+      gefixt (Risiko eines Eingriffs in die loose/tight-Semantik wurde
+      als höher bewertet als der kosmetische Nutzen), per Pin-Test
+      dokumentiert.
+
+82. **Bilder direkt in den Editor einfügen (v7.41 Teil B, Nutzerwunsch
+    „Ich würde gerne Bilder direkt in den Editor kopieren können. Das
+    geht auch, aber ich kann es nicht speichern.“).** Root-Cause:
+    `save()` (`DocEditor.jsx`) blockte bewusst jedes eingefügte Bild als
+    Sicherheitsnetz (kein `img:<id>`, keine Datei im Daten-Repo, wäre
+    nach Reload/auf anderen Geräten weg) – aber es fehlte komplett der
+    Weg von einem eingefügten Bild ZU einer echten `img:<id>`-Referenz.
+    - **`lib/images.js#uploadEditorImage(file, {connected, cfg,
+      imgIndex, setImgMap})`.** Läuft bewusst denselben Weg wie ein per
+      Chat angehängtes Bild (`App.jsx#send`: `prepareImage` ->
+      `dataUrlParts` -> `newImgId` -> `ghPutFile` ->
+      `imgIndex`/`imgMap`) – NUR die Reihenfolge ist zwingend anders:
+      `send()` lädt ERST nach einer erfolgreichen Modellantwort hoch
+      (keine Datei-Leiche bei einem abgelehnten API-Call), hier MUSS der
+      Upload SOFORT passieren, weil der Editor eine dauerhafte
+      Referenz braucht, um das Bild überhaupt anzeigen/speichern zu
+      können. Nicht verbunden -> wirft sofort, KEIN Netz-Aufruf. Als
+      eigenständige, aus `App.jsx` herausgezogene Funktion in `lib/`
+      (statt Closure in der Komponente) direkt mit echten Datenlagen
+      testbar, OHNE React/DOM (`App.jsx#addEditorImage` ist nur noch ein
+      dünner Wrapper, der den aktuellen App-Zustand durchreicht) –
+      konsistent mit der Projekt-Konvention „Coverage-Gate + strenge
+      Testpflicht gelten für `src/lib`, `App.jsx`/Komponenten laufen über
+      E2E“ (`vitest.config.js`).
+    - **`DocEditor.jsx`: Paste/Drop/Toolbar-Knopf.** Neue, reine,
+      exportierte Bausteine (wie `extractOutline`/`jumpToHeading` u. a.):
+      `extractImageFiles(dataTransfer)` erkennt Bilddateien aus SOWOHL
+      `.items` ALS AUCH `.files` (Auftrag) – `.files` wird NUR als
+      Fallback befragt, wenn `.items` nichts Bild-artiges ergab, sonst
+      käme ein eingefügter Screenshot doppelt in den Editor (beide APIs
+      liefern beim Einfügen üblicherweise dieselbe Datei).
+      `findRemoteImageSrc(slice)`/`detectPastedImages(dataTransfer,
+      slice)` erkennen eine von einer Webseite kopierte
+      `<img src="https://…">`-Grafik OHNE Datei-Objekt.
+      `insertImagesSequentially(editor, files, startPos, onAddImage,
+      onError)` fügt SEQUENTIELL (nicht `Promise.all`) ein, weil die
+      Einfüge-Position des jeweils nächsten Bildes von der tatsächlich
+      erreichten Cursor-Position NACH dem vorherigen Insert abhängt
+      (`insertContentAt` setzt die Selektion automatisch ans Ende des
+      eingefügten Inhalts); ein fehlgeschlagenes Bild bricht die übrigen
+      NICHT ab. `editorProps.handlePaste`/`handleDrop` (useEditor())
+      rufen `detectPastedImages` auf und geben `false` zurück, sobald
+      KEIN Bild beteiligt ist – reiner Text/HTML-Paste (inkl.
+      `linkOnPaste`) bleibt dadurch GARANTIERT unverändert (ProseMirrors
+      `someProp()` prüft direkte `editorProps` VOR jedem Plugin, siehe
+      `node_modules/prosemirror-view`; unser `false` fällt exakt auf den
+      Zustand VOR dieser Änderung zurück). Ohne `onAddImage`-Prop bleibt
+      ALLES beim bisherigen Verhalten (undefined-tolerant, Auftrag) – der
+      neue Toolbar-Knopf „Bild einfügen“ (`ImagePlus`, bereits in
+      `node_modules/lucide-react` vorhanden, siehe `App.jsx`) wird dann
+      ebenfalls nicht gerendert. Während mindestens ein Upload läuft
+      (`uploadCount`-Zähler statt bool, weil ein Paste/Drop MEHRERE
+      Bilder gleichzeitig anstoßen kann): Hinweis „Bild wird hochgeladen
+      …“ (`Loader2`-Spinner) und „Speichern“ gesperrt (analog `saving`) –
+      verhindert, dass ein noch nicht referenziertes Bild mitgespeichert
+      wird.
+    - **Von einer Webseite kopierte Grafik: bewusst ABGELEHNT statt
+      geholt.** Der Auftrag erlaubte beide Wege. Entscheidung gegen
+      einen automatischen Fetch: ein Cross-Origin-`fetch()` auf eine
+      fremde Bild-URL scheitert auf den allermeisten Bild-Servern an
+      CORS (kein `Access-Control-Allow-Origin`), ein „meistens kaputtes“
+      Feature wäre schlechter als eine klare, sofortige Fehlermeldung.
+      `findRemoteImageSrc` erkennt den Fall bereits BEIM Einfügen (kein
+      Netz-Aufruf, rein clientseitig über den bereits geparsten
+      ProseMirror-Slice).
+    - **Sicherheitsnetz in `save()` erweitert, nicht ersetzt.**
+      `UNRESOLVED_IMG_RE` (`/!\[[^\]]*\]\((?:data:|https?:\/\/)[^)]*\)/`,
+      exportiert) löst die alte, auf `"](data:"` beschränkte
+      Teilstring-Prüfung ab: erkennt zusätzlich eine trotz
+      `findRemoteImageSrc` durchgerutschte `https://`-Bildreferenz (z. B.
+      über einen anderen Weg als Paste/Drop ins Dokument gelangt, etwa
+      Rückgängig nach einem Editor-Wechsel), lässt aber weiterhin
+      normale `img:`-Bildreferenzen UND normale Text-Links mit
+      http(s)-Ziel unangetastet (das führende `!` ist Pflicht-Anker).
+      Die Meldung wurde ans neue Verhalten angepasst: Bilder dürfen
+      jetzt eingefügt werden, der Text erscheint nur noch im
+      Ausnahmefall (ohne Verbindung eingefügt/von einer Webseite
+      kopiert).
+    - **Tests:** `tests/images-dom.test.js` (`uploadEditorImage`, echte
+      `fetch`-Stubs wie `tests/github.test.js`): Erfolgspfad (korrekter
+      Pfad/Base64/Commit-Text, `imgIndex`/`imgMap` befüllt, bestehende
+      `imgMap`-Einträge bleiben erhalten), MIME->Endung-Zuordnung,
+      Upload-Fehler (kein Eintrag, Fehler wird weitergereicht), nicht
+      verbunden/fehlende Konfiguration (kein `fetch`-Aufruf), zwei
+      Bilder nacheinander mit unterschiedlichen IDs. `tests/
+      docEditorImages.test.jsx` (echter TipTap-Roundtrip wie
+      `docEditorIndent.test.jsx`): `extractImageFiles` (`.items` vs.
+      `.files`-Fallback, kein Doppel-Insert, Filter auf `image/*`,
+      Randfälle), `findRemoteImageSrc`/`detectPastedImages` (Remote-Bild
+      erkannt, reiner Text liefert `null`, internes `data:`-Bild wird
+      NICHT als Remote-Fall gewertet, Datei hat Vorrang vor Remote-Fund),
+      `insertImagesSequentially` (Erfolgspfad inkl. echtem
+      `unresolveImgs`/`unescapeMd`-Roundtrip – Dokument enthält danach
+      `img:<id>` und KEIN `data:`, `indent:0`, mehrere Bilder in
+      Aufruf-/Dokument-Reihenfolge, Fehlerpfad ohne halben Zustand, ein
+      fehlgeschlagenes Bild bricht die übrigen nicht ab, Fehler ohne
+      `.message` fällt auf eine generische Meldung zurück),
+      `UNRESOLVED_IMG_RE` (data:/https-Bild erkannt, `img:`-Referenz und
+      normaler Text-Link unangetastet, kein False-Positive bei „Wow!
+      [Link](…)“).
+    - **Nachbesserung nach dem Pflicht-Code-Review vor dem v7.41-Commit**
+      (siehe Entscheidung #81 für den vollständigen Befund-Katalog,
+      dieser Absatz nur die Teil-B-spezifischen Punkte):
+      - **🟡 Finding 4 – ein Webseiten-Ausschnitt MIT Bild blockierte den
+        GESAMTEN Paste, auch begleitenden Text.** `handlePaste`/
+        `handleDrop` gaben bei einem gefundenen Remote-Bild bisher
+        `true` zurück, OHNE selbst etwas einzufügen – laut Vertrag des
+        `handlePaste`/`handleDrop`-Props unterlässt ProseMirror dann JEDE
+        eigene Einfüge-Reaktion, der GESAMTE Ausschnitt ging verloren
+        (Verschlechterung gegenüber v7.40, wo zumindest alles ungefiltert
+        ins Dokument gelangte und erst `save()` meckerte). Neue, reine
+        Funktion `stripRemoteImages(slice)` entfernt REKURSIV nur die
+        Remote-Bild-Knoten aus dem Fragment (rekursiv, damit auch ein
+        Bild INNERHALB einer eingefügten Liste/Tabelle erfasst wird) und
+        behält den Rest bei; `handlePaste` fügt den bereinigten Slice per
+        `view.dispatch(view.state.tr.replaceSelection(cleaned)
+        .scrollIntoView())` an der aktuellen Selektion ein,
+        `handleDrop` per `tr.replace(pos, pos, cleaned)` an der
+        Drop-Position (NICHT der Selektion – ein Drop landet an der
+        Mausposition, ein Unterschied zu Paste, der beim Nachbessern
+        bewusst beachtet wurde). Ein Slice, der NUR aus Remote-Bildern
+        bestand, bleibt weiterhin ein No-op (`cleaned.content.size === 0`
+        wird nicht eingefügt).
+      - **🔵 Finding 8 – Positions-Klemmung nach `await` in
+        `insertImagesSequentially`.** `pos` stammt ggf. von VOR dem
+        Upload (spürbar zeitaufwändig bei einer echten GitHub-API-
+        Anfrage); ändert der Nutzer währenddessen das Dokument (z. B.
+        löscht er Text), konnte `pos` danach außerhalb des inzwischen
+        kürzeren Dokuments liegen – `insertContentAt` hätte mit einer
+        `RangeError` abstürzen können, OBWOHL der Upload bereits
+        erfolgreich war (Waisen-Datei im Daten-Repo UND verlorenes
+        Bild). Fix: `Math.min(pos, editor.state.doc.content.size)`
+        unmittelbar vor dem Insert – im Normalfall (Dokument währenddessen
+        unverändert) ein No-op.
+      - **🔵 Finding 9 – vermutete Prop-Veralterung von `onAddImage`.**
+        Die Vermutung („`editorProps` wird nur einmal beim Mount
+        übergeben, ein Nutzer, der sich WÄHREND der Bearbeitung
+        verbindet, bliebe blockiert“) ließ sich mit einem echten
+        Regressionstest NICHT reproduzieren (zwei aufeinanderfolgende
+        `root.render()`-Aufrufe mit unterschiedlichem `onAddImage` +
+        ein simuliertes natives `paste`-Event auf dem gerenderten
+        `.tiptap-doc`-Element – der ZWEITE, aktuelle Mock wurde
+        aufgerufen, der ERSTE nie). Root-Cause der widerlegten Annahme:
+        Die installierte `@tiptap/react`-Version (2.27.2) vergleicht bei
+        JEDEM Render die Options (`EditorInstanceManager.compareOptions`,
+        `node_modules/@tiptap/react/src/useEditor.ts`) und ruft bei
+        Unterschieden (ein `editorProps`-Objektliteral ist bei jedem
+        Render ein NEUES Objekt, zählt also immer als „unterschiedlich“)
+        `editor.setOptions({...})` auf, was wiederum
+        `view.setProps(this.options.editorProps)` aufruft
+        (`@tiptap/core#Editor.setOptions`) – das aktualisiert
+        `handlePaste`/`handleDrop` der LEBENDEN View auf jedem Render,
+        OHNE den Editor neu zu erzeugen. Trotzdem eine `onAddImageRef`
+        ergänzt (harmlos, macht den Zugriff explizit unabhängig von
+        diesem tiptap-internen Refresh-Mechanismus, falls sich dessen
+        Verhalten in einer künftigen Version ändert) – aber als
+        tatsächlicher Bug war Finding 9 NICHT reproduzierbar, das wird
+        hier bewusst transparent festgehalten statt als „gefixt“
+        auszugeben.
+      - **🔵 Finding 10 – `accept="image/*"` ließ SVG/AVIF/BMP zu,
+        `extForMime` legt sie fälschlich als `.png` ab.** Eine Bilddatei
+        unter der 900-KB-Schwelle (`prepareImage`) bleibt inhaltlich
+        UNVERÄNDERT (z. B. rohes SVG-XML), landet aber unter einem
+        `bilder/<id>.png`-Pfad im Daten-Repo – ein späteres Lesen als
+        `image/png` ergibt ein kaputtes Bild. Entscheidung (statt
+        `extForMime`/`mimeForName` um weitere Formate zu erweitern):
+        Direkt-Einfügen bewusst auf GENAU die vier von `extForMime`
+        bereits korrekt unterstützten Formate beschränkt (`image/png`,
+        `image/jpeg`, `image/webp`, `image/gif`, neue Konstante
+        `ACCEPTED_IMAGE_MIME`/Helfer `isAcceptedImageType` in
+        `lib/images.js`) – SVG zusätzlich aus Sicherheitsgründen (kann
+        Skripte/externe Referenzen enthalten) nicht pauschal freigegeben.
+        EIN gemeinsames Array für Datei-Dialog (`accept`),
+        Zwischenablage- UND Drag&Drop-Filter (`extractImageFiles`), damit
+        alle drei Einfüge-Wege dieselbe Grenze ziehen; ein abgelehntes
+        Format wird still ausgefiltert (fällt auf das normale Paste-/
+        Drop-Verhalten zurück), keine neue Fehlermeldung dafür.
+      - **Tests:** `tests/docEditorImages.test.jsx` erweitert – 6
+        `stripRemoteImages`-Unit-Tests (Bild mitten im Text entfernt,
+        Text bleibt; reiner Bild-Slice wird leer; No-op-Referenzgleichheit
+        ohne Remote-Bild; `data:`-Bild bleibt unangetastet; mehrere
+        Remote-Bilder; nie werfend bei leerer Slice) plus ein echter
+        Integrationstest (bereinigter Slice per `replaceRange` einfügen);
+        Positions-Klemmung mit einer simulierten Nutzeraktion WÄHREND des
+        Uploads; MIME-Filter (`isAcceptedImageType` pur, SVG/AVIF werden
+        von `extractImageFiles` sowohl aus `.items` als auch aus dem
+        `.files`-Fallback abgelehnt, ein gemischter Satz aus akzeptiertem
+        und abgelehntem Format behält nur das akzeptierte); der
+        Regressionstest zu Finding 9 (`createRoot`/`act` + echtes
+        `paste`-Event, siehe oben).
+    - **Bewusste Restrisiken:** (1) Bricht der Nutzer die Bearbeitung
+      NACH dem Einfügen ab (Abbrechen-Knopf/Notizbuch wechseln ohne zu
+      speichern), bleibt die bereits hochgeladene Bilddatei als Waise im
+      Daten-Repo liegen – der Chat-Pfad lädt erst nach erfolgreicher
+      API-Antwort hoch, hier ist der Upload für die sofortige
+      Anzeige/Referenz unumgänglich (im Auftrag ausdrücklich als
+      akzeptabel benannt: kein Datenverlust, kein Blocker). (2) Eine von
+      einer Webseite kopierte Grafik wird abgelehnt statt übernommen
+      (siehe oben) – für den seltenen Fall, dass der Bild-Server
+      tatsächlich CORS erlauben würde, ist das ein unnötiger
+      Komfortverlust; die Alternative (ein „meistens kaputtes“ Feature)
+      wurde als schlechter bewertet. (3) `insertImagesSequentially`
+      arbeitet mit der zuletzt bekannten Cursor-/Selektionsposition; tippt
+      der Nutzer WÄHREND ein zweites/drittes Bild eines Mehrfach-Pastes
+      noch hochlädt an einer anderen Stelle weiter, kann die Einfüge-
+      Position dieses Bildes geringfügig von der ursprünglich erwarteten
+      abweichen (kein Datenfehler, nur eine leicht andere Position) –
+      seltener Randfall, „Speichern“ bleibt ohnehin bis zum Abschluss
+      ALLER Uploads gesperrt; die Position selbst bleibt seit Finding 8
+      aber IMMER gültig (kein Absturz mehr möglich). (4) Ein per HTML
+      mitgebrachtes, direkt als `data:`-URL eingebettetes Bild (statt als
+      eigenständiges Datei-/Item-Objekt) nimmt NICHT den `onAddImage`-Weg
+      (`extractImageFiles` erkennt nur echte Dateien) – bleibt wie vor
+      diesem Auftrag ausschließlich über das Sicherheitsnetz in `save()`
+      abgefangen (Nutzer muss es manuell entfernen); dieser Ursprungsweg
+      ist in der Praxis selten (die meisten Quellen liefern Bilder als
+      eigenständiges Clipboard-/Drop-Item, nicht als HTML-eingebettetes
+      Base64). (5) SVG/AVIF/BMP werden beim Direkt-Einfügen NICHT mehr
+      übernommen (Finding 10) – ein Nutzer, der gezielt ein SVG einfügen
+      möchte, muss vorerst einen anderen Weg wählen (z. B. Chat-Anhang,
+      falls dort unterstützt); bewusst in Kauf genommen, um KEIN
+      kaputtes Bild im Daten-Repo zu riskieren.

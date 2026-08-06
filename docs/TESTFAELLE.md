@@ -1003,6 +1003,160 @@ Testpfade ohne extreme Länge irrelevant.
 Danach `-Uninstall` ausführen, falls die Einrichtung nur für diesen
 Testlauf vorgenommen wurde (Cleanup, sonst bleibt sie bestehen).
 
+**D15 [VERBUNDEN] Einzug im Editor per Knopf und Tastatur (v7.41,
+Nutzerwunsch „Icons wie in Excel“).** Editor öffnen (Stift-Knopf), im
+QA-Notizbuch einen neuen Stichpunkt „QA-Einzug A“ anlegen. Erwartet: zwei
+neue Toolbar-Knöpfe neben den Listen-Knöpfen (Pfeil-Symbole „Einzug
+verkleinern“/„Einzug vergrößern“); der Knopf „Einzug verkleinern“ ist
+ausgegraut/deaktiviert (der Absatz ist noch nicht eingerückt). Cursor in
+„QA-Einzug A“ setzen, „Einzug vergrößern“ mehrfach klicken. Erwartet:
+Der Absatz rückt bei jedem Klick sichtbar weiter nach rechts; nach 6
+Klicks ist der Knopf „Einzug vergrößern“ ausgegraut (Obergrenze erreicht),
+ein 7. Klick tut nichts mehr. Danach mit „Einzug verkleinern“ (oder
+Umschalt+Tab) wieder auf 0 zurückstellen – bei 0 ist „Einzug verkleinern“
+wieder ausgegraut. Cursor erneut in den Absatz setzen und EINMAL `Tab`
+drücken: Erwartet, der Absatz rückt genau wie beim Knopf-Klick eine Ebene
+ein (gleiche Wirkung). `Umschalt+Tab` macht das rückgängig. Cursor in eine
+Überschrift (`##`) setzen, `Tab` drücken: Erwartet KEINE Änderung
+(Überschriften werden nie eingerückt, No-op). Speichern. Erwartet: neue
+Version in der Historie. Editor OHNE JEDE weitere Änderung erneut öffnen
+und direkt speichern. Erwartet: KEIN Commit/keine neue Version
+(No-op-Roundtrip, wie bei D5–D10). Zusätzlich (Tastatur-Priorität, siehe
+DECISIONS #81): Cursor in eine Zelle einer Tabelle setzen (bei Bedarf
+vorher wie in D2 eine kleine Tabelle anlegen) und `Tab` drücken. Erwartet:
+Der Cursor springt wie gewohnt zur nächsten Zelle (unverändertes
+Bestandsverhalten) – KEINE Einrückung findet an der Tabelle statt.
+
+**D15b [VERBUNDEN] Checklisten-Einzug per Tastatur (v7.41).** Editor
+öffnen, eine Checkliste mit zwei Punkten anlegen: „QA-Check A“, „QA-Check
+B“. Cursor in „QA-Check B“ setzen, `Tab` drücken. Erwartet: „QA-Check B“
+rückt unter „QA-Check A“ ein (Checklisten sind jetzt verschachtelbar,
+siehe D17). `Umschalt+Tab` macht das rückgängig. Bekanntes, bewusst
+akzeptiertes Restrisiko (DECISIONS #81, Finding C): Hebt ein
+`Umschalt+Tab` einen Unterpunkt aus einer GEMISCHT verschachtelten
+Checkliste heraus (Checkbox-Elternpunkt mit einfachen Aufzählungs-
+Kindern oder umgekehrt), kann der NÄCHSTE Öffnen+Speichern-Zyklus
+einmalig eine Leerzeilen-Normalisierung committen – kein Fehler,
+kein Datenverlust, ab dem übernächsten Zyklus wieder stabil.
+
+**D16 [VERBUNDEN] Einzug über eine Mehrfachauswahl (v7.41, Wortlaut nach
+Code-Review präzisiert – siehe DECISIONS #81 „bewusst akzeptierte
+Grenze“).** Editor öffnen, drei aufeinanderfolgende Stichpunkte anlegen:
+„QA-Mehrfach eins“, „QA-Mehrfach zwei“, „QA-Mehrfach drei“ (normale
+Aufzählung, kein Checklisten-Punkt). Mit der Maus NUR die ZWEITE und
+DRITTE Zeile markieren (Auswahl beginnt in „QA-Mehrfach zwei“, endet in
+„QA-Mehrfach drei“ – bewusst NICHT die ganze Liste, siehe unten) und
+„Einzug vergrößern“ klicken. Erwartet: BEIDE markierten Punkte rücken
+gemeinsam eine Ebene ein (nicht nur der, in dem der Cursor zuletzt
+stand), „QA-Mehrfach eins“ bleibt unverändert auf der obersten Ebene.
+Einmal „Rückgängig“ (Undo-Knopf oder Strg+Z) drücken. Erwartet: Beide
+Punkte springen in EINEM Schritt wieder auf ihre ursprüngliche Ebene
+zurück (ein einziger Undo-Schritt für die ganze Auswahl, nicht zwei
+einzelne). Danach die GESAMTE Liste markieren (alle drei Punkte,
+Auswahl beginnt bereits im ERSTEN Punkt) und „Einzug vergrößern“
+anschauen: Erwartet, der Knopf ist ausgegraut/deaktiviert, ein Klick
+(falls dennoch möglich) ändert NICHTS. **Das ist kein Bug**: Eine
+komplette Liste (bzw. jede Auswahl, die beim ERSTEN Punkt einer Liste
+beginnt) lässt sich strukturell nicht weiter einrücken, es gibt keinen
+„Vorgänger“, unter den der erste Punkt sinken könnte – exakt dieselbe
+Grenze wie beim einzelnen ersten Listenpunkt (siehe D15). Danach eine
+Auswahl aufziehen, die von einem normalen Absatz bis IN den ERSTEN
+Punkt einer direkt folgenden Aufzählung hineinreicht (z. B. ein
+Fließtext-Absatz direkt über „QA-Mehrfach eins“, Auswahl endet in
+dessen Zeile). „Einzug vergrößern“ klicken. Erwartet: NUR der Absatz
+rückt ein, die Liste bleibt unverändert (der erste Listenpunkt kann
+nicht einrücken, siehe oben – nur der Absatz-Teil der Auswahl ist
+betroffen). Speichern, Editor erneut öffnen und direkt speichern: KEIN
+Commit (No-op-Roundtrip).
+
+**D17 [VERBUNDEN] Checklisten-Verschachtelung, Bild+Bildunterschrift
+einrücken, Anzeige in der Dokument-Ansicht (v7.41, der konkrete
+Nutzer-Fall).** Editor öffnen, eine Checkliste mit EINEM Punkt anlegen,
+z. B. „QA-Checkliste Eltern“. Direkt danach (Enter, dann Tab) einen
+Unterpunkt „QA-Checkliste Kind eins“ eintippen. Erwartet: Der Unterpunkt
+lässt sich per `Tab` UNTER den Checkbox-Punkt einrücken (vorher, ohne
+diesen Auftrag, war eine Checkliste im Editor gar nicht verschachtelbar).
+Noch einen zweiten Unterpunkt „QA-Checkliste Kind zwei“ auf derselben
+Ebene ergänzen. Danach den Listentyp DIESES Unterpunkts ändern (Aufzähl-
+Knopf statt Checkliste), sodass ein Checkbox-Elternpunkt mit eingerückten
+EINFACHEN Aufzählungspunkten entsteht (genau der gemeldete Fall: eine
+Checkliste mit eingerückten „- “-Unterpunkten ohne eigene Checkbox).
+Speichern. Erwartet in der Dokument-Ansicht: Die Unterpunkte erscheinen
+SICHTBAR eingerückt UNTER dem Checkbox-Elternpunkt (nicht bündig auf
+derselben Ebene – das war exakt der ursprünglich gemeldete Fehler).
+Editor OHNE weitere Änderung erneut öffnen und direkt speichern: KEIN
+Commit (No-op-Roundtrip – insbesondere darf aus den eingerückten
+Unterpunkten KEINE zusätzliche Leerzeile zwischen Elternpunkt und
+Unterpunkten entstehen und die Ansicht darf sich dadurch nicht ändern).
+Danach ein Bild einfügen (Chat: ein Bild anhängen und per Op ins
+Dokument einfügen lassen, oder ein bereits vorhandenes Bild im
+QA-Notizbuch verwenden) und direkt darunter eine kursive Bildunterschrift
+eintippen. Beide Zeilen (Bild + Bildunterschrift) markieren und „Einzug
+vergrößern“ klicken. Speichern. Erwartet: Bild UND Bildunterschrift
+erscheinen in der Ansicht gemeinsam eingerückt (gleicher Versatz nach
+rechts). Editor erneut öffnen: Bild und Bildunterschrift zeigen weiterhin
+denselben Einzug (Roundtrip-stabil), erneutes Speichern ohne Änderung
+löst KEINEN Commit aus. Bekanntes, bewusst akzeptiertes Restrisiko
+(DECISIONS #81, Finding C): Wird stattdessen per `Umschalt+Tab` ein
+Unterpunkt aus dieser gemischten Verschachtelung wieder herausgehoben,
+kann der NÄCHSTE Öffnen+Speichern-Zyklus einmalig eine Leerzeilen-
+Normalisierung committen – kein Fehler, kein Datenverlust, ab dem
+übernächsten Zyklus wieder stabil.
+
+**D18 [VERBUNDEN] Bild direkt in den Editor einfügen (v7.41 Teil B,
+Nutzerwunsch „Ich würde gerne Bilder direkt in den Editor kopieren
+können. Das geht auch, aber ich kann es nicht speichern.“).** Editor
+öffnen (Stift-Knopf). Neuer Toolbar-Knopf „Bild einfügen“ (Bild-Symbol,
+zwischen Trennlinie und Formel-Knöpfen). Klicken öffnet einen
+Dateiauswahl-Dialog; ein kleines Testbild auswählen (JPG/PNG, notfalls
+per Screenshot-Tool selbst erzeugen). Erwartet: kurz „Bild wird
+hochgeladen …“ (Spinner) unter dem Editor, „Speichern“ ist währenddessen
+ausgegraut/deaktiviert. Nach Abschluss steht das Bild sichtbar an der
+Cursor-Position im Editor. Speichern klicken. Erwartet: KEINE rote
+Fehlermeldung („Bild ohne Referenz“ o. ä.), neue Version in der Historie.
+Editor erneut öffnen (oder Seite neu laden): Das Bild ist weiterhin da
+(dauerhaft im Daten-Repo abgelegt, keine tote Referenz). Falls die
+Testumgebung das Einfügen eines Bildes aus der Zwischenablage per
+Strg+V unterstützt (z. B. ein zuvor per Screenshot-Tool kopiertes Bild):
+gleiches Bild zusätzlich per Strg+V einfügen – gleiches erwartetes
+Ergebnis. Zwei Bilder auf einmal auswählen (Mehrfachauswahl im
+Dateidialog): Erwartet, beide erscheinen nacheinander im Dokument.
+
+**D18b [OFFEN] Bild einfügen ohne Verbindung.** Ohne verbundene
+Zugangsdaten ein Notizbuch öffnen (der Editor lässt sich auch ohne
+Verbindung öffnen) und über den neuen „Bild einfügen“-Knopf ein Bild
+auswählen. Erwartet: klare Fehlermeldung („Nicht verbunden – ein
+eingefügtes Bild kann nicht dauerhaft gespeichert werden.“), KEIN Bild
+erscheint im Dokument, der restliche Text bleibt unverändert
+bearbeitbar. „Speichern“ funktioniert für bereits vorhandenen Text
+weiterhin normal (die abgelehnte Bild-Aktion blockiert nichts anderes).
+
+**D18c [VERBUNDEN] Normales Einfügen (Text/Link) bleibt unverändert.**
+Editor öffnen. Einen Fließtext OHNE URL aus einer anderen Quelle
+kopieren und per Strg+V einfügen. Erwartet: Text erscheint unverändert,
+keine Bild-bezogene Meldung. Danach einen Text mit einer http(s)-URL
+(z. B. „Siehe https://example.com“) einfügen. Erwartet: unverändertes
+Verhalten wie vor diesem Auftrag – die URL wird automatisch verlinkt
+(siehe D14), keine Bild-bezogene Meldung erscheint.
+
+**D18d [OFFEN] Von einer Webseite kopiertes Bild wird sauber
+abgelehnt, begleitender Text bleibt aber erhalten (bewusste Grenze für
+das Bild selbst, siehe DECISIONS – der Text-Verlust war ein Bug, siehe
+Code-Review-Fix Finding 4).** Best effort, je nach Browser/Kopierquelle
+ggf. nicht zuverlässig reproduzierbar (als ÜBERSPRUNGEN melden, falls
+nicht nachstellbar): In einem Browser-Tab eine Webseite mit einem
+Absatz suchen, der neben Fließtext auch ein eingebettetes Bild/Icon
+enthält (z. B. ein Logo mitten im Text), diesen GESAMTEN Absatz per
+Rich-Text-Auswahl (Text + Bild gemeinsam markieren, NICHT „Bild
+kopieren“ per Rechtsklick) kopieren und im Editor einfügen. Erwartet:
+klare Fehlermeldung, dass von einer Webseite kopierte Bilder nicht
+direkt übernommen werden können; KEIN kaputter `https://…`-Bildlink
+landet im gespeicherten Dokument; der TEXT des Absatzes (vor UND nach
+der Bild-Stelle) erscheint aber trotzdem im Editor – ein Paste darf
+NIE den kompletten Ausschnitt verwerfen, nur weil irgendwo ein nicht
+übernehmbares Bild darin vorkommt. Speichern, Editor erneut öffnen:
+Text bleibt erhalten, kein Bildlink im Dokument.
+
 ## E. Schnellnotizen
 
 **E1 [OFFEN] Post-it-Lebenszyklus.** „Schnellnotiz“-Knopf (Desktop:

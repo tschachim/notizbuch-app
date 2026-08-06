@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import { getHTMLFromFragment, Node, Extension, InputRule, textInputRule } from "@tiptap/core";
-import { Fragment } from "@tiptap/pm/model";
-import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
+import { Fragment, Slice } from "@tiptap/pm/model";
+import { EditorState, Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
+import { sinkListItem, liftListItem } from "@tiptap/pm/schema-list";
 import StarterKit from "@tiptap/starter-kit";
 import CodeBlockExtension from "@tiptap/extension-code-block";
+import Paragraph from "@tiptap/extension-paragraph";
 import Image from "@tiptap/extension-image";
 import TextStyle from "@tiptap/extension-text-style";
 import { Color } from "@tiptap/extension-color";
@@ -22,13 +24,14 @@ import {
   Bold, Italic, Code, Code2, List, ListOrdered, ListChecks, Heading1, Heading2, Heading3,
   Minus, Undo2, Redo2, Strikethrough, Palette, Highlighter, Table as TableIcon,
   Sigma, SquareFunction, Link2 as LinkIcon, Sparkles, Loader2, GripVertical,
+  IndentIncrease, IndentDecrease, ImagePlus,
 } from "lucide-react";
 import {
   mathToPlaceholders, renderKatexHtml, MATH_SERIALIZED_RE, MATH_INLINE_TAG, MATH_BLOCK_TAG,
   ESCAPED_DOLLAR_SENTINEL,
 } from "../lib/math.jsx";
 import { splitFenceSegments } from "../lib/code.jsx";
-import { LINK_URL_RE } from "../lib/markdown.jsx";
+import { LINK_URL_RE, indentLevel } from "../lib/markdown.jsx";
 import { FILE_URL_RE, pathToFileUrl } from "../lib/filelinks.js";
 import {
   cleanupLinkTitle, providerFor, providerHasCredentials, fetchLinkTitle,
@@ -36,6 +39,7 @@ import {
 } from "../lib/linkProviders.jsx";
 import { buildActiveRules } from "../lib/autocorrect.js";
 import { stripInboxPlaceholder } from "../lib/ops.js";
+import { ACCEPTED_IMAGE_MIME, isAcceptedImageType } from "../lib/images.js";
 
 /* WYSIWYG-Editor für die manuelle Bearbeitung der Wissensbasis.
    TipTap mit Markdown-Round-Trip, beschränkt auf den Dialekt, den der
@@ -73,7 +77,11 @@ const resolveImgs = (md, imgMap) =>
     imgMap[id] ? "](" + imgMap[id] + ")" : m);
 
 // … und beim Speichern wieder zurückübersetzen (Base64 enthält keine Klammern).
-function unresolveImgs(md, imgMap) {
+// Exportiert (v7.41 Teil B, wie unescapeMd/MdTable/… unten), damit
+// tests/docEditorImages.test.jsx den kompletten save()-Pfad (inkl. der
+// img:-Rückübersetzung EINGEFÜGTER Bilder) gegen die ECHTE Funktion prüfen
+// kann statt eine Kopie im Test nachzubauen.
+export function unresolveImgs(md, imgMap) {
   let out = md;
   for (const [id, url] of Object.entries(imgMap)) {
     out = out.split("](" + url + ")").join("](img:" + id + ")");
@@ -121,6 +129,82 @@ export const unescapeMd = (md) =>
     .map((seg) => (seg.code ? seg.raw : unescapeMdSegment(seg.raw)))
     .join("\n");
 
+// tiptap-markdown lässt zwischen Checklisten-Einträgen Leerzeilen – hier
+// zusammengezogen. Multiline-Anker statt führendem "\n", sonst überspringt
+// der Overlap bei 3+ Einträgen jede zweite Lücke.
+//
+// v7.41-Erweiterung (ECHTER Bug, beim Testschreiben für "Einrückungen"
+// gefunden, siehe DECISIONS): Die Lookahead-Bedingung deckte bisher NUR
+// "Checkliste gefolgt von Checkliste" ab. Seit TaskItem.configure({nested:
+// true}) (siehe unten) sind Checklisten mit einer VERSCHACHTELTEN
+// Aufzählung/Nummerierung als Kind ÜBERHAUPT ERST MÖGLICH – genau der
+// Nutzer-Fall (Checkbox-Elternpunkt mit eingerückten "- "-Unterpunkten) –
+// und GENAU DORT setzte tiptap-markdown/prosemirror-markdown BISHER IMMER
+// eine Leerzeile: "taskList" bekommt (anders als "bulletList"/
+// "orderedList", siehe tiptap-markdown/MarkdownTightLists) NIE ein
+// "tight"-Attribut, der Serializer fällt beim Betreten der verschachtelten
+// Liste dadurch auf seinen INTERNEN Default "tightLists:false" zurück
+// (tiptap-markdown übergibt tightLists nie an den MarkdownSerializerState)
+// – EGAL wie die verschachtelte Liste selbst aussieht. Ohne diese
+// Erweiterung würde die Ansicht (renderBlocks, lib/markdown.jsx) die
+// eingerückten Unterpunkte durch die überlebende Leerzeile als eigenen,
+// ABGETRENNTEN Block zeigen statt als zusammenhängende Einrückung UNTER
+// dem Checkbox-Elternpunkt. Lookahead deshalb auf JEDE Art Listenzeile
+// erweitert (Aufzählung "-"/"*", Nummerierung "1.", UND weiterhin
+// Checkliste "- [") – der linke Teil bleibt bewusst auf Checklisten-Zeilen
+// beschränkt, da NUR taskList von diesem Tight-Defekt betroffen ist.
+// Exportiert (wie unescapeMd oben), damit Tests die ECHTE Funktion prüfen.
+export const collapseChecklistGaps = (md) =>
+  md.replace(/^([ \t]*- \[[ xX]\][^\n]*)\n\n(?=[ \t]*(?:[-*]\s|\d+[.)]\s))/gm, "$1\n");
+
+// Einzug für Nicht-Listen-Blöcke (v7.41, Auftrag "Einrückungen"): Markdown/
+// ProseMirror kennen dafür keine Struktur (anders als Listen, deren Einzug
+// über Verschachtelung/sinkListItem läuft, siehe changeIndent unten) – ein
+// frei stehender Absatz/ein Bild braucht deshalb ein eigenes "indent"-
+// Attribut (0-6, dieselbe Konvention wie indentLevel in lib/markdown.jsx).
+// Gemeinsamer Helfer für Paragraph UND BlockImage, damit beide exakt
+// dieselbe Klemmung/dasselbe HTML-Attribut verwenden.
+function parseIndentAttr(el) {
+  const n = parseInt(el.getAttribute("data-indent") || "0", 10);
+  return Number.isFinite(n) ? Math.min(6, Math.max(0, n)) : 0;
+}
+const indentAttrSpec = {
+  default: 0,
+  parseHTML: parseIndentAttr,
+  renderHTML: (attrs) => (attrs.indent ? { "data-indent": attrs.indent } : {}),
+};
+
+// StarterKits eingebauter paragraph-Node bleibt deaktiviert (siehe
+// StarterKit.configure() unten, analog codeBlock/FencedCodeBlock) –
+// IndentParagraph ersetzt ihn unter demselben Node-Namen ("paragraph") nur
+// um "indent" ergänzt. NUR TOP-LEVEL-Absätze tragen ein sinnvolles
+// indent-Attribut: ein Absatz INNERHALB eines Listenpunkts bekommt seinen
+// Einzug bereits durch die Listen-Verschachtelung selbst (siehe
+// IndentMarkdownIt weiter unten, Tiefenprüfung beim Laden) – "kein
+// doppelter Einzug" (Auftrag).
+export const IndentParagraph = Paragraph.extend({
+  addAttributes() {
+    return { ...this.parent?.(), indent: indentAttrSpec };
+  },
+  addStorage() {
+    return {
+      markdown: {
+        // Wie der prosemirror-markdown-Standardserializer für Absätze
+        // (state.renderInline + state.closeBlock), nur mit vorangestelltem
+        // Einzug – state.write() vor renderInline schreibt die Leerzeichen
+        // an den Anfang der Zeile, OHNE die Escape-Logik von renderInline
+        // zu berühren.
+        serialize(state, node) {
+          state.write("  ".repeat(node.attrs.indent || 0));
+          state.renderInline(node);
+          state.closeBlock(node);
+        },
+        parse: {},
+      },
+    };
+  },
+});
+
 // tiptap-markdown serialisiert Bilder mit dem Inline-Serializer von
 // prosemirror-markdown – ohne closeBlock klebt die Folgezeile direkt an der
 // Bildzeile und die App-Konvention „![…](img:…) allein auf einer Zeile“
@@ -130,7 +214,7 @@ export const unescapeMd = (md) =>
 // Größenänderung per Maus: Die Breite wird als "|w<px>"-Suffix im Alt-Text
 // persistiert (![Titel|w320](img:…)) – Markdown hat kein width-Attribut,
 // und nur der Alt-Text übersteht Roundtrip UND den zeilenbasierten Renderer.
-const BlockImage = Image.extend({
+export const BlockImage = Image.extend({
   addAttributes() {
     return {
       ...this.parent?.(),
@@ -148,6 +232,11 @@ const BlockImage = Image.extend({
         },
         renderHTML: (attrs) => (attrs.width ? { width: attrs.width } : {}),
       },
+      // Einzug (v7.41): landet HIER auf dem Bild-NODE, weil ProseMirror den
+      // block-level Bild-Node beim Laden aus seinem umschließenden <p>
+      // heraushebt (siehe IndentMarkdownIt weiter unten) – ein Attribut am
+      // <p> selbst ginge für einen reinen Bild-Absatz verloren.
+      indent: indentAttrSpec,
     };
   },
   addStorage() {
@@ -155,7 +244,8 @@ const BlockImage = Image.extend({
       markdown: {
         serialize(state, node) {
           const suffix = node.attrs.width ? "|w" + node.attrs.width : "";
-          state.write("![" + state.esc(node.attrs.alt || "") + suffix + "](" + node.attrs.src + ")");
+          const prefix = "  ".repeat(node.attrs.indent || 0);
+          state.write(prefix + "![" + state.esc(node.attrs.alt || "") + suffix + "](" + node.attrs.src + ")");
           state.closeBlock(node);
         },
         parse: {},
@@ -572,23 +662,44 @@ export const MathInline = Node.create({
   },
 });
 
+// indent (v7.41, Code-Review vor v7.41-Commit, 🔵 Finding 6): analog zu
+// BlockImage – mathToPlaceholders (math.jsx) schreibt "data-indent" bereits
+// direkt in den generierten Tag (siehe dort), addAttributes() reicht daher,
+// tiptap injiziert das Auslesen automatisch in die BESTEHENDE, eigene
+// parseHTML()-Regel (injectExtensionAttributesToParseRule in @tiptap/core –
+// merged NEBEN dem dort schon vorhandenen "tex", kein Konflikt). renderHTML
+// MUSS dafür aber explizit "HTMLAttributes" übernehmen (bisher ignoriert,
+// nur "data-tex" hartkodiert) – tiptap berechnet "data-indent" zwar über
+// indentAttrSpec.renderHTML, das Ergebnis landet aber nur im HTMLAttributes-
+// Parameter, den die Node-eigene renderHTML-Funktion aktiv verwenden muss.
 export const MathBlock = Node.create({
   name: "mathBlock",
   group: "block",
   atom: true,
   addAttributes() {
-    return { tex: { default: "" } };
+    // "rendered: false" (Re-Review vor v7.41-Commit, 🔵 Finding E): ohne
+    // dieses Flag würde "tex" ZUSÄTZLICH in "HTMLAttributes" auftauchen
+    // (tiptap berechnet HTMLAttributes automatisch aus ALLEN Attributen
+    // mit rendered!==false, siehe getRenderedAttributes/@tiptap/core) –
+    // renderHTML unten schreibt "tex" aber bereits EXPLIZIT als
+    // "data-tex", ein zusätzliches, rohes "tex"-Attribut wäre reine
+    // Dopplung (gemessen: "<math-block tex="…" data-indent="…"
+    // data-tex="…">"). Betrifft NUR die Render-Seite – parseHTML() unten
+    // liest "tex" weiterhin selbst aus "data-tex" (eigener, custom
+    // getAttrs, unabhängig vom automatischen Attribut-Mechanismus).
+    return { tex: { default: "", rendered: false }, indent: indentAttrSpec };
   },
   parseHTML() {
     return [{ tag: MATH_BLOCK_TAG, getAttrs: (el) => ({ tex: el.getAttribute("data-tex") || "" }) }];
   },
-  renderHTML({ node }) {
-    return [MATH_BLOCK_TAG, { "data-tex": node.attrs.tex }];
+  renderHTML({ node, HTMLAttributes }) {
+    return [MATH_BLOCK_TAG, { ...HTMLAttributes, "data-tex": node.attrs.tex }];
   },
   addStorage() {
     return {
       markdown: {
         serialize(state, node) {
+          state.write("  ".repeat(node.attrs.indent || 0));
           state.write("$$" + node.attrs.tex + "$$");
           state.closeBlock(node);
         },
@@ -709,6 +820,88 @@ export const FileLinkMarkdownIt = Extension.create({
             md.__fileLinkPatched = true;
             const orig = md.validateLink.bind(md);
             md.validateLink = (url) => FILE_URL_FULL_RE.test(String(url)) || orig(url);
+          },
+        },
+      },
+    };
+  },
+});
+
+/* -------------------------------------------------------------------- */
+/* Einzug – Editor-Ladepfad (v7.41, Auftrag "Einrückungen"). markdown-it   */
+/* wirft führende Leerzeichen von Absätzen normalerweise weg – ohne diesen */
+/* Hook käme ein gespeicherter Einzug beim erneuten Öffnen des Editors nie  */
+/* wieder an. Zwei Teile, beide über denselben setup(md)-Hook wie          */
+/* FileLinkMarkdownIt oben (inkl. __indentPatched-Guard aus demselben       */
+/* Grund: setup() läuft bei JEDEM parse()-Aufruf erneut auf DERSELBEN       */
+/* md-Instanz):                                                            */
+/*                                                                          */
+/* 1) md.disable("code"): markdown-its Regel für EINGERÜCKTE Codeblöcke     */
+/*    (4+ Leerzeichen/ein Tab, CommonMark) MUSS weg, sonst würde bereits    */
+/*    Einzugsebene 2 (4 Leerzeichen) beim Laden zu einem Codeblock statt zu */
+/*    einem eingerückten Absatz. Konsistent zur restlichen App, die         */
+/*    ohnehin nur GEZÄUNTE Codeblöcke kennt (siehe Kopfkommentar in         */
+/*    lib/code.jsx und DECISIONS "Gemeinsame Fence-Erkennung").             */
+/*                                                                          */
+/* 2) Eine core-Regel NACH "inline" (die Kinder eines "inline"-Tokens sind  */
+/*    erst danach geparst, siehe Punkt "Bild-Sonderfall" unten) setzt für   */
+/*    jeden "paragraph_open" AUF OBERSTER EBENE "data-indent" anhand der    */
+/*    Einrückung seiner Quellzeile (token.map[0] -> state.src). "oberste    */
+/*    Ebene" heißt: NICHT innerhalb eines list_item_open/blockquote_open/   */
+/*    table_open – ein Tiefenzähler läuft über das FLACHE Token-Array (die  */
+/*    Blockstruktur ist dort über nesting +1/-1 kodiert). "Kein doppelter   */
+/*    Einzug" (Auftrag): Inhalt INNERHALB eines Listenpunkts bekommt        */
+/*    dadurch bewusst KEIN indent-Attribut – der Listen-Serializer erzeugt  */
+/*    seinen Einzug bereits selbst (2 Leerzeichen blieben sonst beim        */
+/*    Speichern 4).                                                        */
+/*                                                                          */
+/*    Bild-Sonderfall: Besteht der Absatz NUR aus einem Bild (App-          */
+/*    Konvention "![…](img:…) allein auf einer Zeile", IMG_LINE_RE), hebt   */
+/*    ProseMirror den block-level BlockImage-Node aus seinem <p> heraus     */
+/*    (BlockImage ist group:"block", tiptap-markdowns normalizeBlocks       */
+/*    extrahiert es aus dem <p>) – das Attribut am <p> selbst ginge dabei   */
+/*    verloren. Deshalb wird "data-indent" IMMER ZUSÄTZLICH auf dem         */
+/*    "image"-Inline-Kind gesetzt (das companion "inline"-Token folgt im    */
+/*    flachen Token-Array laut markdown-it immer direkt auf                */
+/*    "paragraph_open", siehe rules_block/paragraph.mjs).                   */
+export const IndentMarkdownIt = Extension.create({
+  name: "indentMarkdownIt",
+  addStorage() {
+    return {
+      markdown: {
+        parse: {
+          setup(md) {
+            if (md.__indentPatched) return;
+            md.__indentPatched = true;
+            md.disable("code");
+            md.core.ruler.after("inline", "docIndentAttrs", (state) => {
+              const lines = state.src.split("\n");
+              const tokens = state.tokens;
+              let depth = 0;
+              for (let i = 0; i < tokens.length; i++) {
+                const token = tokens[i];
+                if (token.type === "list_item_open" || token.type === "blockquote_open" || token.type === "table_open") {
+                  depth++;
+                  continue;
+                }
+                if (token.type === "list_item_close" || token.type === "blockquote_close" || token.type === "table_close") {
+                  depth--;
+                  continue;
+                }
+                if (depth !== 0 || token.type !== "paragraph_open" || !token.map) continue;
+                const level = indentLevel(lines[token.map[0]] || "");
+                if (level <= 0) continue;
+                token.attrSet("data-indent", String(level));
+                const inlineToken = tokens[i + 1];
+                if (
+                  inlineToken && inlineToken.type === "inline" &&
+                  inlineToken.children && inlineToken.children.length === 1 &&
+                  inlineToken.children[0].type === "image"
+                ) {
+                  inlineToken.children[0].attrSet("data-indent", String(level));
+                }
+              }
+            });
           },
         },
       },
@@ -1145,7 +1338,434 @@ export function moveOutlineRange(editor, entries, draggedIndex, targetIndex) {
   return true;
 }
 
-export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving, navWidth, autocorrect }) {
+/* ---------------------------------------------------------------------- */
+/* Einzugs-Knöpfe/-Tastenkürzel (v7.41, Auftrag "Einrückungen", Nutzer-     */
+/* wunsch "Einzug vergrößern/verkleinern wie in Excel"). Excel/Word-        */
+/* Semantik: wirkt auf den Block der aktuellen Cursorposition, bei einer    */
+/* Auswahl über mehrere Blöcke auf ALLE berührten Blöcke – jeweils EINE     */
+/* Transaktion (ein Undo-Schritt für die GESAMTE Auswahl).                  */
+/*                                                                          */
+/* Pro berührtem Top-Level-Block (doc.forEach, siehe runIndentChange):      */
+/*  - Überschrift -> No-op (Auftrag: Überschriften werden NIE eingerückt,   */
+/*    siehe DECISIONS/lib/markdown.jsx#parseTree – sie sind zeilenanfangs-  */
+/*    verankert, eine eingerückte Überschrift würde die gesamte Gliederung  */
+/*    zerlegen).                                                           */
+/*  - Absatz/Bild -> "indent"-Attribut ±1, geklemmt auf 0..6.               */
+/*  - Aufzählung/Nummerierung/Checkliste -> sinkListItem/liftListItem des   */
+/*    Item-Typs, der am INNERSTEN Listenpunkt-Vorfahren der SELEKTION       */
+/*    (nicht des Top-Level-Blocks!) hängt – bei einer Bullet-Liste          */
+/*    INNERHALB eines taskItem ("- [ ] Eltern" mit eingerückter Aufzählung  */
+/*    als Kind) ist der Top-Level-Node "taskList", aber der relevante Item- */
+/*    Typ "listItem" (siehe Blocker-1-Fix, Code-Review vor v7.41-Commit –   */
+/*    der Top-Level-Typ hätte hier fälschlich den ganzen Checkbox-          */
+/*    Elternpunkt aus der Liste gehoben). sinkListItem/liftListItems eigene */
+/*    $from.blockRange-Logik deckt eine Mehrfachauswahl INNERHALB EINER     */
+/*    Liste bereits selbst ab, auch über verschiedene Ebenen hinweg.        */
+/*  - alles andere (Tabelle/Trennlinie/Codeblock/Formel-Block) -> No-op,    */
+/*    nicht Teil dieses Auftrags (siehe DECISIONS, bewusste Grenze).        */
+/*                                                                          */
+/* EIN gemeinsames "tr" für die GESAMTE Auswahl (Auftrag: ein Undo-Schritt) */
+/* – aber sinkListItem/liftListItem (prosemirror-schema-list) sind fertige  */
+/* Commands, die IMMER an einen frischen "state.tr" gebunden sind, nicht an */
+/* unser gemeinsames "tr". Lösung: pro Listen-Block einen TEMPORÄREN State  */
+/* mit doc=tr.doc (dem bereits akkumulierten Zwischenstand der VORHERIGEN   */
+/* Blöcke dieser Auswahl) aufbauen, das Kommando NUR DORT ausführen und     */
+/* seine Schritte auf "tr" replizieren (tr.step(step)) – da beide Dokumente */
+/* zum Aufrufzeitpunkt identisch sind, passen die Positionen ohne weiteres  */
+/* Mapping. "dryRun" (siehe canChangeIndent) durchläuft dieselbe Logik ohne */
+/* zu dispatchen – für die Deaktivierung der Toolbar-Knöpfe.                */
+function runIndentChange(editor, delta, dryRun) {
+  if (!editor) return false;
+  const { state } = editor;
+  const { doc, schema } = state;
+  const { from, to } = state.selection;
+  const tr = state.tr;
+  let applied = false;
+
+  doc.forEach((node, pos) => {
+    const end = pos + node.nodeSize;
+    // "Berührt" die Auswahl? Bei einer echten Range (from<to) ZÄHLT reines
+    // Aneinandergrenzen NICHT (sonst würde ein direkt VOR/NACH der Auswahl
+    // liegender Block fälschlich mit einbezogen). Bei einem reinen Cursor
+    // (from===to, der Normalfall bei Tab/Klick ohne Auswahl) zählt auch das
+    // exakte Antreffen einer Blockgrenze (seltener Randfall, z. B. Cursor
+    // exakt zwischen zwei Blöcken) – lieber einmal zu viel als gar nicht.
+    const touches = from === to ? pos <= from && from <= end : pos < to && end > from;
+    if (!touches) return;
+
+    if (node.type.name === "heading") return; // No-op, siehe Kopfkommentar
+
+    // BUGFIX (Re-Review vor v7.41-Commit, 🔵 Finding H): Ein LEERER Absatz
+    // (z. B. ein frisches Dokument oder eine Leerzeile, auf der der Cursor
+    // steht) ließ sich bisher trotzdem einrücken – IndentParagraph schreibt
+    // den Einzug beim Speichern IMMER vor den (hier leeren) Inhalt, das
+    // Ergebnis war eine Zeile aus REINEN Leerzeichen im committeten
+    // Markdown (in der Ansicht unsichtbar, aber eine Whitespace-only-Zeile
+    // im Dokument). No-op für einen leeren Absatz macht zugleich den
+    // Knopf-Zustand (canChangeIndent) korrekt ausgegraut.
+    if (node.type.name === "paragraph" && node.content.size === 0) return;
+
+    // "mathBlock" (Re-Review vor v7.41-Commit, 🔵 Finding F) ergänzt:
+    // MathBlock trägt seit Finding 6 (Formel-Einzug-Roundtrip) ebenfalls
+    // ein "indent"-Attribut (0..6, dieselbe Klemmung wie bei Absatz/Bild
+    // über indentAttrSpec) – ohne diese Ergänzung ließe sich eine z. B.
+    // per Chat/API bereits eingerückt angelegte Formel im Editor weder
+    // weiter einrücken noch zurücknehmen (canChangeIndent immer false).
+    if (node.type.name === "paragraph" || node.type.name === "image" || node.type.name === "mathBlock") {
+      const mappedPos = tr.mapping.map(pos);
+      const cur = tr.doc.nodeAt(mappedPos);
+      if (!cur) return;
+      const curIndent = cur.attrs.indent || 0;
+      const next = Math.max(0, Math.min(6, curIndent + delta));
+      if (next === curIndent) return;
+      applied = true;
+      if (!dryRun) tr.setNodeMarkup(mappedPos, undefined, { ...cur.attrs, indent: next });
+      return;
+    }
+
+    if (node.type.name === "bulletList" || node.type.name === "orderedList" || node.type.name === "taskList") {
+      const innerFrom = tr.mapping.map(Math.max(from, pos + 1));
+      const innerTo = tr.mapping.map(Math.min(to, end - 1));
+      if (innerFrom > innerTo) return;
+      // BUGFIX (Code-Review vor v7.41-Commit, 🔴 Blocker 1): der Item-Typ
+      // darf NICHT aus dem TOP-LEVEL-Node abgeleitet werden – bei
+      // "- [ ] Eltern" mit einer eingerückten PLAIN-Aufzählung als Kind
+      // (siehe A2, TaskItem.configure({nested:true})) ist der Top-Level-Node
+      // "taskList", die Selektion steckt aber in einem "listItem" (der
+      // Bullet-Liste INNERHALB des taskItem). liftListItem(taskItem) hätte
+      // dann den GESAMTEN Checkbox-Elternpunkt aus der Liste gehoben (Text
+      // statt Checkbox, stiller Inhaltsverlust) statt nur den inneren
+      // Listenpunkt. Stattdessen den INNERSTEN Listenpunkt-Vorfahren der
+      // tatsächlichen Selektion auflösen ("listItem" ODER "taskItem", je
+      // nachdem was näher an der Selektion liegt).
+      const $inner = tr.doc.resolve(innerFrom);
+      let itemType = null;
+      for (let d = $inner.depth; d > 0 && !itemType; d--) {
+        const n = $inner.node(d);
+        if (n.type.name === "listItem" || n.type.name === "taskItem") itemType = n.type;
+      }
+      if (!itemType) return;
+      const sel = TextSelection.between(tr.doc.resolve(innerFrom), tr.doc.resolve(innerTo));
+      const tempState = EditorState.create({ doc: tr.doc, selection: sel, schema });
+      const cmd = delta > 0 ? sinkListItem(itemType) : liftListItem(itemType);
+      if (dryRun) {
+        if (cmd(tempState)) applied = true;
+        return;
+      }
+      let captured = null;
+      if (cmd(tempState, (trx) => { captured = trx; }) && captured) {
+        captured.steps.forEach((step) => tr.step(step));
+        applied = true;
+      }
+      return;
+    }
+    // Tabelle/Trennlinie/Codeblock: bewusst kein Einzugsziel (siehe
+    // Kopfkommentar) – No-op. Der Formel-Block ist seit Finding F oben
+    // ausdrücklich AUSGENOMMEN, er wird dort behandelt.
+  });
+
+  if (!applied) return false;
+  if (!dryRun) editor.view.dispatch(tr);
+  return true;
+}
+
+// Löst den Einzug für die aktuelle Auswahl aus (Toolbar-Klick/Tab). Gibt
+// zurück, ob tatsächlich etwas geändert wurde (analog jumpToHeading/
+// moveOutlineRange oben) – Tab/Shift-Tab (siehe IndentKeymap unten) nutzen
+// das, um bei "false" die bestehenden Bindungen (Tabelle: goToNextCell) bzw.
+// den Browser-Default NICHT zu blockieren. AUSNAHME seit dem Re-Review vor
+// dem v7.41-Commit (🟡 Finding A): steht die Auswahl in einer Top-Level-
+// Liste, schluckt IndentKeymap den Tastendruck auch bei "false" bewusst –
+// sonst rückten die eingebauten ListItem-/TaskItem-Bindungen einen ÄUSSEREN
+// Listenpunkt ein, während der Toolbar-Knopf ausgegraut war (siehe
+// inTopLevelList unten).
+export function changeIndent(editor, delta) {
+  return runIndentChange(editor, delta, false);
+}
+
+// Reine Machbarkeits-Prüfung OHNE jede Dokumentänderung – für das
+// Ausgrauen der Toolbar-Knöpfe (z. B. der erste Listenpunkt einer Liste
+// lässt sich nicht weiter einrücken, Einzug 0 nicht verkleinern).
+export function canChangeIndent(editor, delta) {
+  return runIndentChange(editor, delta, true);
+}
+
+// Tab/Shift-Tab (Auftrag). "priority: 1001" (Code-Review vor v7.41-Commit,
+// Nachbesserung zu Blocker 1) statt sich auf die Position in der
+// useEditor()-Extensions-Liste zu verlassen: TipTap sortiert Extensions vor
+// dem Bau der ProseMirror-Plugins nach "priority" (höher zuerst, Default
+// 100, siehe ExtensionManager.sort in @tiptap/core) – VOR v7.41 stand
+// IndentKeymap deshalb bewusst als ERSTES Element der Liste, weil die
+// Plugin-Reihenfolge für gleiche Priorität durch ein Reverse+Stable-Sort
+// entsteht ("zuerst gelistet" -> "zuletzt versucht"). Diese Reihenfolge-
+// Argumentation war KORREKT, aber zerbrechlich (jede spätere Umsortierung
+// der Liste hätte sie lautlos gebrochen) UND sie machte unser eigenes
+// Kommando zum reinen FALLBACK – TaskItem ist in derselben Liste NACH
+// StarterKit gelistet und hatte dadurch (vor diesem Fix) höhere Priorität
+// als ListItem, wodurch "Shift-Tab: liftListItem('taskItem')" bei einer
+// Bullet-Liste INNERHALB eines taskItem gewann, statt an das korrigierte
+// runIndentChange durchzureichen (siehe Blocker 1). Ein expliziter
+// priority-Wert weit über dem Default macht IndentKeymap jetzt bewusst zum
+// PRIMÄREN Handler für Tab/Shift-Tab – gefahrlos, weil runIndentChange für
+// Tabellen-Auswahlen strukturell "false" liefert (kein "table"-Zweig, siehe
+// dort) und die ProseMirror-Keymap-Kette dann wie bisher an die nächste
+// Bindung (goToNextCell der Table-Extension) durchreicht; ebenso bei einer
+// Überschrift/einem bereits maximal eingerückten Block (siehe unten).
+//
+// BUGFIX (Re-Review vor v7.41-Commit, 🟡 Finding A): "priority: 1001" allein
+// löst NICHT das gesamte Problem – liefert changeIndent() "false" (z. B.
+// weil sinkListItem/liftListItem für den INNERSTEN Listenpunkt der
+// Selektion nicht greift), reicht die ProseMirror-Keymap-Kette den
+// Tastendruck an die NÄCHSTE Bindung durch – und das sind TaskItems/
+// ListItems EIGENE Tab/Shift-Tab-Bindungen (this.editor.commands.
+// sinkListItem/liftListItem(this.name), siehe node_modules/@tiptap/
+// extension-task-item, node_modules/@tiptap/extension-list-item). Die
+// arbeiten NICHT auf dem innersten Listenpunkt, sondern auf dem, den
+// $from.blockRange($to, node => node.firstChild.type == itemType) für
+// GENAU IHREN EIGENEN Item-Typ zuerst findet – bei gemischter
+// Verschachtelung (Checkliste mit eingerückter Aufzählung als Kind oder
+// umgekehrt) ist das ein ANDERER, meist ÄUSSERER Listenpunkt als der, auf
+// dem der Cursor tatsächlich steht (gemessen: Cursor auf dem innersten
+// Punkt, Tab sinkt einen ÄUSSEREN Geschwister-Punkt samt seiner Kinder).
+// Kein Datenverlust (roundtrip-stabil, Strg+Z stellt das Original wieder
+// her), aber Knopf-Zustand (ausgegraut) und tatsächliches Tab-Verhalten
+// widersprechen sich, UND Tab rückt sichtbar den falschen Block ein.
+// Fix: Tab/Shift-Tab INNERHALB einer Top-Level-Liste (bulletList/
+// orderedList/taskList als direktes Kind von doc, also GENAU der Bereich,
+// den runIndentChange über doc.forEach() überhaupt betrachtet) schlucken
+// (true zurückgeben), SOBALD changeIndent() nichts geändert hat – die
+// Tastenkombination bleibt dadurch bewusst wirkungslos, statt an eine
+// Bindung durchzureichen, die den falschen Block träfe. Tabellen bleiben
+// unberührt: dort ist $from.node(1) eine "table", nicht eine Liste, die
+// Kette reicht an goToNextCell durch wie bisher.
+function inTopLevelList(state) {
+  const { $from } = state.selection;
+  return $from.depth > 0 &&
+    ["bulletList", "orderedList", "taskList"].includes($from.node(1).type.name);
+}
+
+export const IndentKeymap = Extension.create({
+  name: "indentKeymap",
+  priority: 1001,
+  addKeyboardShortcuts() {
+    const run = (delta) => () =>
+      changeIndent(this.editor, delta) || inTopLevelList(this.editor.state);
+    return {
+      Tab: run(1),
+      "Shift-Tab": run(-1),
+    };
+  },
+});
+
+/* ---------------------------------------------------------------------- */
+/* Bilder direkt in den Editor einfügen (v7.41 Teil B, Nutzerwunsch         */
+/* "Ich würde gerne Bilder direkt in den Editor kopieren können. Das geht   */
+/* auch, aber ich kann es nicht speichern."). Bisher blockte save() (unten) */
+/* jedes eingefügte Bild als "Bild ohne Referenz" – dieser Block sorgt      */
+/* dafür, dass ein per Zwischenablage eingefügtes ODER per Drag&Drop        */
+/* abgelegtes Bild SOFORT zu einer echten App-Referenz wird (Upload über    */
+/* die onAddImage-Prop, siehe App.jsx#addEditorImage/uploadEditorImage),    */
+/* statt nur als lose data:-URL im Dokument zu landen. Alle Bausteine sind  */
+/* reine, exportierte Funktionen (wie extractOutline/jumpToHeading oben) –  */
+/* testbar ohne echten Paste-/Drop-DOM-Event, siehe                        */
+/* tests/docEditorImages.test.jsx.                                         */
+/* ---------------------------------------------------------------------- */
+
+// Erkennt Bilddateien in einem Paste-/Drop-Ereignis: SOWOHL ".items" ALS
+// AUCH ".files" (Auftrag) – je nach Browser/Quelle ist nur eine der beiden
+// DataTransfer-APIs zuverlässig gefüllt (Firefox liefert einen eingefügten
+// Screenshot z. B. nur über .items, ein Drag aus dem Explorer/Finder eher
+// über .files). Bei einem eingefügten Bild enthalten aber ÜBLICHERWEISE
+// BEIDE APIs dieselbe(n) Datei(en) – deshalb NUR ein Fallback: ".files"
+// wird nur befragt, wenn ".items" NICHTS Bild-artiges ergab, sonst kämen
+// Screenshots doppelt in den Editor.
+//
+// isAcceptedImageType statt generischem ".startsWith(\"image/\")" (Code-
+// Review vor v7.41-Commit, 🔵 Finding 10, siehe lib/images.js für die
+// ausführliche Begründung): ein SVG/AVIF/BMP würde sonst unter einer
+// falschen ".png"-Endung im Daten-Repo landen (extForMime kennt diese
+// Formate nicht) – ein nicht unterstütztes Format wird hier still
+// ausgefiltert (fällt danach auf das normale Paste-/Drop-Verhalten
+// zurück, z. B. HTML-Text), keine neue Fehlermeldung dafür (Auftrag:
+// minimal-invasiv, kein Over-Engineering für einen seltenen Randfall).
+export function extractImageFiles(dataTransfer) {
+  if (!dataTransfer) return [];
+  const fromItems = [];
+  if (dataTransfer.items) {
+    for (const it of dataTransfer.items) {
+      if (it && it.kind === "file" && isAcceptedImageType(it.type)) {
+        const f = it.getAsFile && it.getAsFile();
+        if (f) fromItems.push(f);
+      }
+    }
+  }
+  if (fromItems.length) return fromItems;
+  const fromFiles = [];
+  if (dataTransfer.files) {
+    for (const f of dataTransfer.files) {
+      if (f && isAcceptedImageType(f.type)) fromFiles.push(f);
+    }
+  }
+  return fromFiles;
+}
+
+// Erkennt eine von einer Webseite kopierte/gezogene Grafik OHNE zugehörige
+// Bilddatei (kein Eintrag in clipboardData/dataTransfer, siehe
+// extractImageFiles oben) – typischerweise ein per HTML mitgebrachtes
+// "<img src="https://…">" (z. B. eine per Rich-Text-Auswahl kopierte
+// Webseite). Ein solches Bild kann NICHT über onAddImage geholt werden:
+// ein Cross-Origin-Fetch würde auf den meisten Bild-Servern an CORS
+// scheitern (siehe DECISIONS – bewusst NICHT versucht), und ein roher
+// https-Link ist ohnehin keine gültige Bildreferenz der App (IMG_LINE_RE
+// in lib/markdown.jsx kennt nur "img:<id>") – würde also unbemerkt einen
+// nicht darstellbaren Bildlink speichern. "slice" ist die von ProseMirror
+// bereits geparste Paste-/Drop-Nutzlast (dritter handlePaste-/vierter
+// handleDrop-Parameter) – slice.content ist ein Fragment (kein
+// Node.descendants()), seine KINDER sind aber vollwertige Nodes, deshalb
+// zusätzlich pro Kind rekursiv absuchen (deckt ein Bild INNERHALB einer
+// eingefügten Liste/Tabelle mit ab).
+// Gemeinsames Prädikat für findRemoteImageSrc/stripRemoteImages (siehe
+// unten) – EIN Ort für "was zählt als nicht übernehmbares Remote-Bild".
+const isRemoteImageNode = (n) =>
+  !!n.type && n.type.name === "image" && /^https?:\/\//i.test(n.attrs.src || "");
+
+export function findRemoteImageSrc(slice) {
+  if (!slice || !slice.content) return null;
+  let found = null;
+  slice.content.forEach((node) => {
+    if (found) return;
+    const check = (n) => {
+      if (found) return false;
+      if (isRemoteImageNode(n)) {
+        found = n.attrs.src;
+        return false;
+      }
+      return true;
+    };
+    if (!check(node)) return;
+    node.descendants(check);
+  });
+  return found;
+}
+
+// BUGFIX (Code-Review vor v7.41-Commit, 🟡 Finding 4): handlePaste/handleDrop
+// (unten) gaben bei EINEM gefundenen Remote-Bild bisher "true" zurück, OHNE
+// selbst etwas einzufügen – ProseMirror unterlässt dann laut Vertrag des
+// handlePaste/handleDrop-Props JEDE eigene Einfüge-Reaktion, der GESAMTE
+// eingefügte Ausschnitt ging verloren, auch begleitender Text (z. B. ein von
+// einer Webseite kopierter Absatz mit einem eingebetteten Logo). Diese
+// Funktion entfernt NUR die Remote-Bild-Knoten aus dem Fragment (rekursiv,
+// damit auch ein Bild INNERHALB einer eingefügten Liste/Tabelle erfasst
+// wird) und behält den Rest bei – Aufrufer fügen den bereinigten Slice
+// selbst ein (siehe handlePaste/handleDrop), statt den kompletten Ausschnitt
+// zu verwerfen. openStart/openEnd bleiben unverändert: Für die realistischen
+// Fälle (Bild als eigener Block bzw. Bild+Text auf oberster Ebene des
+// Fragments) bleibt die "offene" Struktur der äußeren Ränder davon
+// unberührt, ein entferntes Bild sitzt nie an der offenen Kante selbst
+// (siehe Tests) – ein rein hypothetisches, extrem verschachteltes
+// Paste-Fragment, das genau DORT ein Remote-Bild trüge, ist ein bewusst
+// akzeptierter Randfall (siehe DECISIONS).
+export function stripRemoteImages(slice) {
+  if (!slice || !slice.content) return slice;
+  const filterFragment = (fragment) => {
+    const kept = [];
+    let changed = false;
+    fragment.forEach((node) => {
+      if (isRemoteImageNode(node)) { changed = true; return; }
+      if (node.content && node.content.childCount) {
+        const newContent = filterFragment(node.content);
+        if (newContent !== node.content) {
+          changed = true;
+          kept.push(node.copy(newContent));
+          return;
+        }
+      }
+      kept.push(node);
+    });
+    return changed ? Fragment.fromArray(kept) : fragment;
+  };
+  const content = filterFragment(slice.content);
+  if (content === slice.content) return slice; // nichts zu tun
+  return new Slice(content, slice.openStart, slice.openEnd);
+}
+
+// Gemeinsame Entscheidungslogik für Paste UND Drop: liefert entweder eine
+// Liste zu übernehmender Bilddateien ({ files }), ODER die URL einer NICHT
+// übernehmbaren, von einer Webseite kopierten Grafik ({ remoteSrc }), ODER
+// null (kein Bild beteiligt – der Aufrufer lässt dann das BESTEHENDE
+// Paste-/Drop-Verhalten unverändert, z. B. linkOnPaste/reinen Text/HTML).
+export function detectPastedImages(dataTransfer, slice) {
+  const files = extractImageFiles(dataTransfer);
+  if (files.length) return { files };
+  const remoteSrc = findRemoteImageSrc(slice);
+  if (remoteSrc) return { remoteSrc };
+  return null;
+}
+
+// Fügt eine Reihe von Bilddateien NACHEINANDER an einer festen Startposition
+// ein (Cursor bei Paste/Toolbar-Knopf, Mausposition bei Drop). Bewusst
+// SEQUENTIELL statt parallel (Promise.all): die Einfüge-Position des
+// jeweils NÄCHSTEN Bildes hängt von der tatsächlich erreichten
+// Cursor-Position NACH dem vorherigen Insert ab (insertContentAt setzt die
+// Selektion automatisch ans Ende des eingefügten Inhalts, siehe
+// @tiptap/core) – parallele Uploads würden sowohl die Upload-Reihenfolge
+// als auch die Einfüge-Reihenfolge der Bilder verwürfeln. Ein fehlgeschlagenes
+// Bild (onAddImage wirft, z. B. nicht verbunden/Upload-Fehler) bricht die
+// übrigen NICHT ab: onError wird pro Fehler aufgerufen (letzter Fehler
+// "gewinnt" in der einzeiligen Fehleranzeige des Editors, siehe unten),
+// aber kein Node wird für die fehlgeschlagene Datei eingefügt – "kein
+// halber Zustand" (Auftrag). indent:0 (explizit, obwohl bereits Schema-
+// Default, siehe indentAttrSpec oben) macht die Konvention "neu eingefügte
+// Bilder starten uneingerückt" an dieser Stelle sichtbar.
+export async function insertImagesSequentially(editor, files, startPos, onAddImage, onError) {
+  let pos = startPos;
+  for (const file of files) {
+    try {
+      const { dataUrl } = await onAddImage(file);
+      // BUGFIX (Code-Review vor v7.41-Commit, 🔵 Finding 8): "pos" stammt
+      // ggf. von VOR diesem "await" (erste Iteration: vom Aufrufer
+      // übergebener startPos, spätere Iterationen: vor dem NÄCHSTEN Upload).
+      // Der Upload braucht bei einer echten GitHub-API-Anfrage spürbar Zeit
+      // – ändert der Nutzer währenddessen das Dokument (z. B. löscht er
+      // Text), kann "pos" danach außerhalb des inzwischen KÜRZEREN Dokuments
+      // liegen; insertContentAt würde dann mit einer RangeError abstürzen,
+      // OHNE dass der bereits abgeschlossene Upload (Datei liegt im
+      // Daten-Repo) rückgängig gemacht wird – eine Waisen-Datei UND ein
+      // verlorenes Bild. Math.min klemmt auf die aktuelle Dokumentgröße;
+      // im Normalfall (Dokument währenddessen unverändert) ist das ein
+      // No-op.
+      const safePos = Math.min(pos, editor.state.doc.content.size);
+      editor.chain().insertContentAt(safePos, { type: "image", attrs: { src: dataUrl, indent: 0 } }).run();
+      pos = editor.state.selection.to;
+    } catch (e) {
+      onError(e && e.message ? e.message : "Bild konnte nicht eingefügt werden");
+    }
+  }
+}
+
+// Sicherheitsnetz in save() (unten): Eine Bildreferenz OHNE "img:"-Ziel darf
+// nie gespeichert werden. Vor v7.41 Teil B prüfte dieser Check NUR auf
+// "](data:" (ein direkt eingefügtes Bild hatte damals IMMER eine data:-URL,
+// weil es gar keinen anderen Weg ins Dokument gab) – seit Paste/Drop jetzt
+// automatisch über onAddImage laufen (siehe oben), bekommt ein eingefügtes
+// Bild im NORMALFALL bereits eine echte img:-Referenz, BEVOR save() überhaupt
+// läuft. Trotzdem bleibt ein generischeres Netz nötig: (a) ohne Verbindung
+// wirft onAddImage/uploadEditorImage sofort (siehe dort) – insertImagesSequentially
+// fügt dann GAR KEINEN Node ein, ABER eine als HTML mitgebrachte data:-URL
+// (z. B. aus einer Quelle, die Bilder direkt als Base64 im Markup einbettet,
+// nicht als eigenständige Datei/Item) nimmt NICHT den handlePaste-Weg oben,
+// weil extractImageFiles nur echte File-Objekte erkennt; (b) findRemoteImageSrc
+// fängt die typische "von einer Webseite kopiert"-Grafik zwar bereits beim
+// Einfügen ab, ein zusätzliches Netz beim Speichern schadet aber nicht
+// (Verteidigung in der Tiefe – z. B. falls Inhalt auf einem anderen Weg als
+// Paste/Drop ins Dokument gelangt, etwa über "Rückgängig" nach einem
+// Editor-Wechsel). Exportiert (wie unescapeMd/MdTable/… oben), damit Tests
+// die ECHTE Prüfung verwenden statt eine Kopie nachzubauen.
+export const UNRESOLVED_IMG_RE = /!\[[^\]]*\]\((?:data:|https?:\/\/)[^)]*\)/;
+
+export default function DocEditor({
+  initialDoc, imgMap, onSave, onCancel, saving, navWidth, autocorrect, onAddImage,
+}) {
   const baseline = useRef(null);
   // AutoKorrektur (v7.25): Regeln werden NUR EINMAL beim Mount aus der
   // übergebenen Konfiguration gebaut (leeres deps-Array – dieselbe
@@ -1180,11 +1800,55 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
   // TipTap feuert Transaktionen ohne React-Re-Render; kleiner Zähler,
   // damit die Aktiv-Zustände der Toolbar-Knöpfe mitziehen.
   const [, setTick] = useState(0);
+  // Bild-Upload (v7.41 Teil B): Zähler statt bool, weil ein Paste/Drop
+  // MEHRERE Bilder gleichzeitig anstoßen kann (insertImagesSequentially,
+  // siehe oben) – "uploading" ist erst wieder false, wenn WIRKLICH alle
+  // laufenden Uploads fertig sind. Blockt "Speichern" (analog "saving"),
+  // damit nie mit halbfertigem Zustand gespeichert wird (Auftrag).
+  const [uploadCount, setUploadCount] = useState(0);
+  const uploading = uploadCount > 0;
+  // Verstecktes <input type="file"> für den Toolbar-Knopf "Bild einfügen"
+  // (B3) – dieselbe Technik wie z. B. der Notizbuch-Icon-Upload in App.jsx.
+  const imageFileInputRef = useRef(null);
+  // Finding 9 aus dem Code-Review vor dem v7.41-Commit vermutete, handlePaste/
+  // handleDrop (siehe editorProps unten) würden den "onAddImage"-Prop vom
+  // ERSTEN Render dauerhaft einfrieren, weil useEditor() ohne deps-Array
+  // aufgerufen wird. NACHGEPRÜFT (echter Regressionstest mit zwei
+  // aufeinanderfolgenden root.render()-Aufrufen + einem simulierten Paste,
+  // siehe tests/docEditorImages.test.jsx): Das trifft für die installierte
+  // @tiptap/react-Version (2.27.2) NICHT zu – deren useEditor() vergleicht
+  // bei JEDEM Render die Options (EditorInstanceManager.compareOptions,
+  // node_modules/@tiptap/react/src/useEditor.ts) und ruft bei Unterschieden
+  // (editorProps ist bei jedem Render ein NEUES Objektliteral, damit IMMER
+  // "unterschiedlich") editor.setOptions({...}) auf – das wiederum ruft
+  // view.setProps(this.options.editorProps) auf (@tiptap/core#setOptions)
+  // und aktualisiert damit handlePaste/handleDrop der LEBENDEN View auf JEDEM
+  // Render, OHNE den Editor neu zu erzeugen. Der Prop-Zugriff war also schon
+  // VOR dieser Ref korrekt aktuell. Die Ref bleibt trotzdem drin (schadet
+  // nicht, macht den Zugriff explizit unabhängig von diesem tiptap-internen
+  // Refresh-Mechanismus, falls sich dessen Verhalten in einer künftigen
+  // Version ändert) – aber Finding 9 ist als tatsächlicher Bug NICHT
+  // reproduzierbar, siehe Bericht.
+  const onAddImageRef = useRef(onAddImage);
+  onAddImageRef.current = onAddImage;
 
   const editor = useEditor({
     extensions: [
+      // Einzugs-Tastenkürzel (v7.41, Auftrag "Einrückungen"): Die Position
+      // in dieser Liste ist NICHT mehr die Priorität-Absicherung (siehe
+      // "priority: 1001" direkt an der IndentKeymap-Definition oben für die
+      // Begründung, inkl. des Blockers, den die frühere reine
+      // Reihenfolge-Argumentation live verursacht hat) – IndentKeymap steht
+      // hier trotzdem bewusst weit oben, rein als Lese-Konvention ("zuerst,
+      // was für Tastatureingaben zuständig ist").
+      IndentKeymap,
       StarterKit.configure({
         heading: { levels: [1, 2, 3] },
+        // paragraph (v7.41): StarterKits eingebauter Absatz-Node bleibt
+        // deaktiviert – IndentParagraph unten ersetzt ihn mit demselben
+        // Node-Namen ("paragraph"), ergänzt um das "indent"-Attribut
+        // (analog codeBlock/FencedCodeBlock direkt darunter).
+        paragraph: false,
         // codeBlock (v7.7, Nutzerwunsch "voller Support"): StarterKits
         // eingebaute Node bleibt hier deaktiviert – FencedCodeBlock oben
         // ersetzt sie mit demselben Node-Typnamen ("codeBlock", toggle-/
@@ -1194,13 +1858,32 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
         codeBlock: false,
         blockquote: false,
       }),
+      IndentParagraph,
       FencedCodeBlock,
       BlockImage,
       TextStyle,
       Color,
       Highlight.configure({ multicolor: true }),
       TaskList,
-      TaskItem.configure({ nested: false }),
+      // nested:true (v7.41, Auftrag "Einrückungen"): Checklisten müssen
+      // verschachtelbar sein (der Nutzer-Fall hat eine Checkliste als
+      // Elternpunkt mit eingerückten Unterpunkten). TaskItem bringt dafür
+      // eigene Tab/Shift-Tab-Bindungen mit (siehe
+      // node_modules/@tiptap/extension-task-item) – IndentKeymap (priority
+      // 1001, siehe dort) ist bei JEDEM Tab/Shift-Tab-Druck ZUERST dran und
+      // löst den Normalfall über das korrigierte runIndentChange auf.
+      // Liefert das nichts (z. B. weil der INNERSTE Listenpunkt der
+      // Selektion nicht dem entspricht, den TaskItem/ListItems EIGENE
+      // Bindung träfe – siehe Re-Review-Fix Finding A, inTopLevelList()),
+      // SCHLUCKT IndentKeymap den Tastendruck innerhalb einer Top-Level-
+      // Liste bewusst, statt ihn an diese Bindungen durchzureichen: die
+      // würden sonst einen ANDEREN, meist äußeren Block einrücken als den,
+      // auf dem der Cursor steht. TaskItem/ListItems eigene Bindungen
+      // kommen dadurch bei EINER Top-Level-Liste im Dokument NIE zum Zug
+      // (weder im Erfolgs- noch im No-op-Fall) – rein technisch weiterhin
+      // vorhanden (z. B. falls IndentKeymap versehentlich entfernt würde),
+      // aber für den normalen Betrieb irrelevant.
+      TaskItem.configure({ nested: true }),
       // Generische Links (v7.8, Nutzerwunsch): autolink/linkOnPaste an – eine
       // getippte oder über eine Auswahl eingefügte http(s)-URL wird
       // automatisch verlinkt. isAllowedUri (Nachbesserung, Finding 2 des
@@ -1245,6 +1928,10 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
       // markdown-it lässt file:-URLs beim Laden zu (siehe Kopfkommentar dort) –
       // OHNE diese Extension bleibt "[Titel](file:///…)" beim Öffnen Klartext.
       FileLinkMarkdownIt,
+      // Einzug beim Laden (v7.41, siehe IndentMarkdownIt oben) – ohne diese
+      // Extension käme ein gespeicherter Absatz-/Bild-Einzug beim erneuten
+      // Öffnen des Editors nie wieder an.
+      IndentMarkdownIt,
       // Optische Unterscheidung Fußnote/generischer Link direkt im Editor
       // (siehe LinkDecorations oben).
       LinkDecorations,
@@ -1292,7 +1979,85 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
     // DECISIONS #64/#64-Erweiterung).
     content: resolveImgs(mathToPlaceholders(stripInboxPlaceholder(initialDoc)), imgMap),
     autofocus: "start",
-    editorProps: { attributes: { class: "tiptap-doc focus:outline-none" } },
+    editorProps: {
+      attributes: { class: "tiptap-doc focus:outline-none" },
+      // Bilder direkt einfügen (v7.41 Teil B): "editor" wird hier per
+      // Closure referenziert, NICHT als Argument übergeben – zulässig, weil
+      // handlePaste/handleDrop erst durch einen ECHTEN Paste-/Drop-Event
+      // aufgerufen werden, also immer erst NACHDEM "const editor = ..."
+      // unten fertig zugewiesen ist (dasselbe Prinzip wie bei jedem anderen
+      // Callback in dieser Komponente, der "editor" referenziert, z. B.
+      // save()/openLinkPicker() weiter unten). "onAddImageRef.current" statt
+      // der Prop direkt: siehe die ausführliche Begründung bei der
+      // useRef-Definition oben (Finding 9 aus dem Code-Review – als
+      // tatsächlicher Bug NICHT reproduzierbar, die Ref bleibt trotzdem als
+      // zusätzliche, vom tiptap-internen Refresh-Mechanismus unabhängige
+      // Absicherung). Ohne onAddImage-Prop bleibt ALLES beim bisherigen
+      // Verhalten (Auftrag: "undefined-tolerant") – someProp() aus
+      // prosemirror-view fällt dann direkt auf die bestehenden Plugins
+      // zurück (u. a. linkOnPaste), siehe Kommentar an detectPastedImages
+      // oben.
+      handlePaste: (view, event, slice) => {
+        const addImage = onAddImageRef.current;
+        if (!addImage) return false;
+        const detected = detectPastedImages(event.clipboardData, slice);
+        if (!detected) return false; // kein Bild beteiligt -> Standard-Paste (Text/HTML/linkOnPaste)
+        if (detected.remoteSrc) {
+          setError(
+            "Von einer Webseite kopierte Bilder können nicht direkt übernommen werden " +
+            "(kein Zugriff auf die Bilddatei). Bitte das Bild speichern und über den " +
+            "Knopf „Bild einfügen“ hochladen."
+          );
+          // BUGFIX (Code-Review vor v7.41-Commit, 🟡 Finding 4): NICHT mehr
+          // "return true" ohne jede Einfügung – das verwarf laut Vertrag des
+          // handlePaste-Props den KOMPLETTEN Ausschnitt, auch begleitenden
+          // Text (z. B. ein von einer Webseite kopierter Absatz mit einem
+          // eingebetteten Logo). stripRemoteImages entfernt NUR die
+          // Remote-Bild-Knoten, der Rest wird ganz normal eingefügt.
+          const cleaned = stripRemoteImages(slice);
+          if (cleaned.content.size) view.dispatch(view.state.tr.replaceSelection(cleaned).scrollIntoView());
+          return true;
+        }
+        setError(null);
+        setUploadCount((n) => n + 1);
+        insertImagesSequentially(editor, detected.files, view.state.selection.to, addImage, setError)
+          .finally(() => setUploadCount((n) => n - 1));
+        return true;
+      },
+      handleDrop: (view, event, slice, moved) => {
+        // "moved": ein interner ProseMirror-Drag (Text/Bild INNERHALB des
+        // Editors verschieben) – dabei ist niemals eine externe Bilddatei
+        // im Spiel, unverändertes Bestandsverhalten.
+        const addImage = onAddImageRef.current;
+        if (!addImage || moved) return false;
+        const detected = detectPastedImages(event.dataTransfer, slice);
+        if (!detected) return false;
+        // "pos" (Drop-Koordinaten, mit Fallback auf die aktuelle Selektion)
+        // wird für BEIDE Zweige unten gebraucht – ein Drop landet an der
+        // Mausposition, NICHT an der aktuellen Selektion wie ein Paste.
+        const coords = view.posAtCoords({ left: event.clientX, top: event.clientY });
+        const pos = coords ? coords.pos : view.state.selection.to;
+        if (detected.remoteSrc) {
+          setError(
+            "Von einer Webseite kopierte Bilder können nicht direkt übernommen werden " +
+            "(kein Zugriff auf die Bilddatei). Bitte das Bild speichern und über den " +
+            "Knopf „Bild einfügen“ hochladen."
+          );
+          // Siehe handlePaste oben für die ausführliche Begründung. Anders
+          // als dort ("replaceSelection") landet der bereinigte Rest HIER an
+          // der Drop-Position ("pos" oben) – ein Drop ersetzt NIE die
+          // aktuelle Selektion.
+          const cleaned = stripRemoteImages(slice);
+          if (cleaned.content.size) view.dispatch(view.state.tr.replace(pos, pos, cleaned).scrollIntoView());
+          return true;
+        }
+        setError(null);
+        setUploadCount((n) => n + 1);
+        insertImagesSequentially(editor, detected.files, pos, addImage, setError)
+          .finally(() => setUploadCount((n) => n - 1));
+        return true;
+      },
+    },
     onCreate: ({ editor: ed }) => { baseline.current = ed.storage.markdown.getMarkdown(); },
     onTransaction: () => setTick((t) => t + 1),
   });
@@ -1407,20 +2172,24 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
   };
 
   const save = () => {
-    if (!editor || saving) return;
+    // uploading (v7.41 Teil B): mindestens ein Bild-Upload läuft noch – erst
+    // NACH dessen Abschluss hat das Dokument eine echte img:-Referenz statt
+    // einer rohen data:-URL (siehe insertImagesSequentially oben).
+    if (!editor || saving || uploading) return;
     const md = editor.storage.markdown.getMarkdown();
     if (md === baseline.current) { onCancel(); return; } // nichts geändert
-    let out = unescapeMd(unresolveImgs(md, imgMap));
-    // tiptap-markdown lässt zwischen Checklisten-Einträgen Leerzeilen – zusammenziehen.
-    // Multiline-Anker statt führendem \n, sonst überspringt der Overlap bei
-    // 3+ Einträgen jede zweite Lücke.
-    out = out.replace(/^([ \t]*- \[[ xX]\][^\n]*)\n\n(?=[ \t]*- \[)/gm, "$1\n");
-    // Sicherheitsnetz: Es darf keine data:-URL im Dokument landen (z. B. ein
-    // direkt in den Editor eingefügtes Bild ohne img:-Referenz).
-    if (out.includes("](data:")) {
+    let out = collapseChecklistGaps(unescapeMd(unresolveImgs(md, imgMap)));
+    // Sicherheitsnetz (siehe UNRESOLVED_IMG_RE oben für die ausführliche
+    // Begründung): eine Bildreferenz OHNE img:-Ziel darf nicht gespeichert
+    // werden – seit v7.41 Teil B nur noch der Ausnahmefall (z. B. ohne
+    // Verbindung eingefügt oder von einer Webseite kopiert), der normale
+    // Weg (Zwischenablage/Drag&Drop/Toolbar-Knopf) bekommt seine Referenz
+    // bereits beim Einfügen.
+    if (UNRESOLVED_IMG_RE.test(out)) {
       setError(
-        "Das Dokument enthält ein Bild ohne Referenz (direkt eingefügt?). " +
-        "Bitte entferne es hier und füge Bilder über den Chat hinzu."
+        "Das Dokument enthält ein Bild, das nicht dauerhaft gespeichert werden konnte " +
+        "(z. B. ohne Verbindung eingefügt oder von einer Webseite kopiert). " +
+        "Bitte entferne es hier und füge es erneut ein, sobald eine Verbindung besteht."
       );
       return;
     }
@@ -1440,6 +2209,12 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
   const currentHighlight = editor.isActive("highlight")
     ? editor.getAttributes("highlight").color || "#fde047"
     : null;
+  // Einzugs-Knöpfe (v7.41): pro Render neu geprüft (onTransaction/setTick
+  // oben löst bei jeder Editor-Änderung einen Re-Render aus) – reine,
+  // dispatch-freie Probe (canChangeIndent), damit die Knöpfe ausgegraut
+  // erscheinen, sobald nichts mehr zu tun ist (Auftrag).
+  const indentDecOk = canChangeIndent(editor, -1);
+  const indentIncOk = canChangeIndent(editor, 1);
 
   const applyColor = (value) => {
     const c = editor.chain().focus();
@@ -1681,10 +2456,71 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
           className={btn(editor.isActive("taskList"))} title="Checkliste">
           <ListChecks size={15} />
         </button>
+        {/* Einzug vergrößern/verkleinern (v7.41, Nutzerwunsch "Icons wie in
+            Excel"): wirkt auf den Block der Cursorposition bzw. bei einer
+            Auswahl auf ALLE berührten Blöcke, siehe changeIndent/
+            canChangeIndent oben. focus() zuerst, damit ein Klick auf den
+            Knopf den Editor-Fokus nicht verliert (gleiches Muster wie bei
+            allen anderen Toolbar-Knöpfen hier). */}
+        <button onClick={() => { editor.commands.focus(); changeIndent(editor, -1); }}
+          disabled={!indentDecOk}
+          className={btn(false) + (indentDecOk ? "" : " opacity-40")}
+          title="Einzug verkleinern (Umschalt+Tab)">
+          <IndentDecrease size={15} />
+        </button>
+        <button onClick={() => { editor.commands.focus(); changeIndent(editor, 1); }}
+          disabled={!indentIncOk}
+          className={btn(false) + (indentIncOk ? "" : " opacity-40")}
+          title="Einzug vergrößern (Tab)">
+          <IndentIncrease size={15} />
+        </button>
         <button onClick={() => editor.chain().focus().setHorizontalRule().run()}
           className={btn(false)} title="Trennlinie">
           <Minus size={15} />
         </button>
+
+        {/* Bild einfügen (v7.41 Teil B, B3): Dateiauswahl als Alternative zu
+            Zwischenablage/Drag&Drop (siehe editorProps.handlePaste/handleDrop
+            oben) – NUR sichtbar, wenn eine onAddImage-Prop übergeben wurde
+            (undefined-tolerant, Auftrag). "multiple" erlaubt mehrere Bilder
+            auf einmal (dieselbe insertImagesSequentially-Funktion wie beim
+            Paste/Drop). e.target.value wird zurückgesetzt, damit dieselbe
+            Datei ein zweites Mal ausgewählt werden kann (Standard-Trick bei
+            <input type="file">, sonst feuert onChange beim erneuten Wählen
+            derselben Datei nicht). */}
+        {onAddImage && (
+          <>
+            <button
+              onClick={() => imageFileInputRef.current && imageFileInputRef.current.click()}
+              className={btn(false)}
+              title="Bild einfügen"
+            >
+              <ImagePlus size={15} />
+            </button>
+            <input
+              ref={imageFileInputRef}
+              type="file"
+              // ACCEPTED_IMAGE_MIME statt "image/*" (Code-Review vor
+              // v7.41-Commit, 🔵 Finding 10, siehe lib/images.js/
+              // extractImageFiles oben) – "accept" ist nur ein Hinweis für
+              // den Datei-Dialog (Nutzer können trotzdem "Alle Dateien"
+              // wählen), der isAcceptedImageType-Filter unten ist das
+              // eigentliche Sicherheitsnetz.
+              accept={ACCEPTED_IMAGE_MIME.join(",")}
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                const files = Array.from(e.target.files || []).filter((f) => isAcceptedImageType(f.type));
+                e.target.value = "";
+                if (!files.length) return;
+                setError(null);
+                setUploadCount((n) => n + 1);
+                insertImagesSequentially(editor, files, editor.state.selection.to, onAddImage, setError)
+                  .finally(() => setUploadCount((n) => n - 1));
+              }}
+            />
+          </>
+        )}
 
         <button onClick={() => insertMath(false)} className={btn(false)} title="Formel einfügen (inline, $…$)">
           <Sigma size={15} />
@@ -1920,15 +2756,25 @@ export default function DocEditor({ initialDoc, imgMap, onSave, onCancel, saving
         </nav>
       </div>
 
+      {/* Upload-Hinweis (v7.41 Teil B): solange mindestens ein Bild noch
+          hochgeladen wird, ist "Speichern" gesperrt (siehe save() oben) –
+          dieser Hinweis macht sichtbar, WARUM, statt den Knopf kommentarlos
+          ausgegraut zu lassen. */}
+      {uploading && (
+        <div className="px-3 py-2 rounded-lg bg-indigo-50 border border-indigo-200 text-xs text-indigo-800 flex items-center gap-1.5">
+          <Loader2 size={12} className="animate-spin" />
+          Bild wird hochgeladen …
+        </div>
+      )}
       {error && (
         <div className="px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800">
           {error}
         </div>
       )}
       <div className="flex items-center gap-2">
-        <button onClick={save} disabled={saving}
+        <button onClick={save} disabled={saving || uploading}
           className={"px-3 py-1.5 rounded-lg bg-indigo-700 text-white text-sm font-medium " +
-            (saving ? "opacity-40" : "hover:bg-indigo-800")}>
+            (saving || uploading ? "opacity-40" : "hover:bg-indigo-800")}>
           {saving ? "Speichert …" : "Speichern"}
         </button>
         <button onClick={onCancel}

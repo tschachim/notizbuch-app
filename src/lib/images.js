@@ -3,6 +3,8 @@
 /* prepareImage/readAsDataURL 1:1 aus der Referenz-App übernommen.     */
 /* ------------------------------------------------------------------ */
 
+import { ghPutFile } from "./github.js";
+
 export const readAsDataURL = (file) =>
   new Promise((res, rej) => {
     const r = new FileReader();
@@ -54,10 +56,70 @@ export function mimeForName(name) {
   return "image/png";
 }
 
+// Direkt-Einfügen in den Editor (v7.41 Teil B, Code-Review vor v7.41-Commit,
+// 🔵 Finding 10): "accept="image/*"" am Datei-Dialog UND der generische
+// ".type.startsWith("image/")"-Filter bei Zwischenablage/Drag&Drop (siehe
+// DocEditor.jsx#extractImageFiles) ließen JEDES Bildformat durch – auch
+// SVG/AVIF/BMP, für die extForMime() oben KEINEN eigenen Zweig kennt und
+// stillschweigend auf ".png" zurückfällt. Für ein Bild unter der 900-KB-
+// Schwelle (prepareImage, oben) bleibt der ROHE Dateiinhalt unverändert
+// (z. B. SVG-XML-Text), landet aber unter einem "bilder/<id>.png"-Pfad im
+// Daten-Repo – ein späteres Lesen als "image/png" ergibt ein kaputtes Bild.
+// ENTSCHEIDUNG (statt extForMime/mimeForName um weitere Formate zu
+// erweitern): Direktes Einfügen bewusst auf GENAU die vier Formate
+// beschränkt, die extForMime bereits korrekt rundtrip-sicher ablegt –
+// SVG zusätzlich aus Sicherheitsgründen (kann Skripte/externe Referenzen
+// enthalten) nicht pauschal freigegeben. EIN gemeinsames Array für
+// Datei-Dialog ("accept"), Zwischenablage- UND Drag&Drop-Filter
+// (DocEditor.jsx#extractImageFiles/das manuelle <input>-onChange), damit
+// alle drei Einfüge-Wege dieselbe Grenze ziehen.
+export const ACCEPTED_IMAGE_MIME = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+export function isAcceptedImageType(type) {
+  return ACCEPTED_IMAGE_MIME.includes(type);
+}
+
 export function dataUrlParts(dataUrl) {
   const m = /^data:([^;,]+);base64,(.*)$/s.exec(dataUrl);
   if (!m) return null;
   return { mime: m[1], base64: m[2] };
+}
+
+// Bild direkt in den WYSIWYG-Editor einfügen (v7.41 Teil B, Nutzerwunsch
+// "Bilder direkt in den Editor kopieren können"). Läuft bewusst denselben
+// Weg wie ein per Chat angehängtes Bild (App.jsx#send: prepareImage ->
+// dataUrlParts -> newImgId -> ghPutFile -> imgIndex/imgMap) – NUR die
+// Reihenfolge ist zwingend anders: send() lädt das Bild erst NACH einer
+// erfolgreichen Modellantwort hoch (keine Datei-Leiche bei einem
+// abgelehnten/fehlgeschlagenen API-Call), während hier der Upload SOFORT
+// passieren muss, weil der Editor eine dauerhafte "img:<id>"-Referenz
+// braucht, um das Bild überhaupt anzeigen/speichern zu können. Bricht der
+// Nutzer die Bearbeitung danach ab, bleibt die Datei als Waise im
+// Daten-Repo liegen (kein Datenverlust, siehe DECISIONS – bewusst
+// akzeptiert, wie im Auftrag vorgegeben).
+//
+// Als eigenständige, aus App.jsx herausgezogene Funktion (statt Closure
+// in der Komponente) direkt mit echten Datenlagen testbar (Erfolg/Fehler/
+// nicht verbunden), OHNE React/DOM – App.jsx reicht nur noch den
+// aktuellen Verbindungs-/State-Zugriff durch (siehe addEditorImage dort).
+// imgIndex wird ABSICHTLICH als das rohe Objekt (nicht der React-Ref
+// selbst) übergeben und direkt mutiert – exakt dieselbe Semantik wie
+// "imgIndex.current[imgId] = path" in App.jsx#send.
+export async function uploadEditorImage(file, { connected, cfg, imgIndex, setImgMap } = {}) {
+  if (!connected || !cfg) {
+    throw new Error("Nicht verbunden – ein eingefügtes Bild kann nicht dauerhaft gespeichert werden.");
+  }
+  const p = await prepareImage(file);
+  const parts = dataUrlParts(p.dataUrl);
+  if (!parts) throw new Error("Bilddaten unlesbar");
+  const id = newImgId();
+  const path = "bilder/" + id + "." + extForMime(parts.mime);
+  await ghPutFile(cfg, path, parts.base64, "Bild " + id + " hinzugefügt");
+  // Erst NACH erfolgreichem Upload registrieren (kein halber Zustand bei
+  // einem Fehler oben – der throw davor verlässt die Funktion, bevor
+  // irgendetwas mutiert wird).
+  imgIndex[id] = path;
+  setImgMap((prev) => ({ ...prev, [id]: p.dataUrl }));
+  return { id, dataUrl: p.dataUrl };
 }
 
 export const blobToDataURL = (blob) =>

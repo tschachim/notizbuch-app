@@ -736,7 +736,7 @@ const splitRow = (line) =>
     .split(/(?<!\\)\|/)
     .map((c) => c.trim().replace(/\\\|/g, "|"));
 
-function renderTable(tlines, key) {
+function renderTable(tlines, key, level) {
   let header = null;
   let bodyLines = tlines;
   if (tlines.length >= 2 && TABLE_SEP_RE.test(tlines[1])) {
@@ -756,7 +756,7 @@ function renderTable(tlines, key) {
   const thCls = "border border-slate-200 bg-slate-50 px-2 py-1 text-left font-semibold text-slate-800";
   const tdCls = "border border-slate-200 px-2 py-1 text-slate-700 align-top";
   return (
-    <div key={key} className="overflow-x-auto my-3">
+    <div key={key} className="overflow-x-auto my-3" style={indentStyle(level)}>
       <table className="border-collapse text-sm">
         {header && (
           <thead>
@@ -775,28 +775,85 @@ function renderTable(tlines, key) {
   );
 }
 
+/* ---------------- Einrückung (v7.41, Auftrag "Einrückungen") ---------------- */
+/* Konvention (siehe DECISIONS): 2 Leerzeichen pro Ebene am Zeilenanfang,
+   maximal 6 Ebenen (12 Leerzeichen). Ein Tab zählt wie 2 Leerzeichen beim
+   LESEN (die App SCHREIBT selbst nie Tabs, siehe DocEditor.jsx). Reine,
+   exportierte Funktion – testbar ohne DOM/React, und vom Editor-Ladepfad
+   (DocEditor.jsx#IndentMarkdownIt) wiederverwendet, damit Renderer und
+   Editor exakt dieselbe Ebenen-Arithmetik anwenden. */
+export function indentLevel(line) {
+  let spaces = 0;
+  for (const ch of String(line)) {
+    if (ch === " ") spaces += 1;
+    else if (ch === "\t") spaces += 2;
+    else break;
+  }
+  return Math.min(6, Math.floor(spaces / 2));
+}
+
+// Padding-Ansatz statt echter <ul>-Verschachtelung (siehe renderBlocks
+// unten): 1,5rem pro Ebene als linker Zusatz-Einzug, kombiniert mit den
+// bestehenden pl-5/pl-1-Klassen der Listen (die reservieren bereits den
+// Platz für Aufzählungszeichen/Checkbox – ohne sie würde eine tief
+// eingerückte Liste ihr Aufzählungszeichen an den linken Rand verlieren).
+const INDENT_REM_PER_LEVEL = 1.5;
+function indentStyle(level) {
+  return level > 0 ? { marginLeft: level * INDENT_REM_PER_LEVEL + "rem" } : undefined;
+}
+
+// Optische Abstufung des Aufzählungszeichens nach Ebene (wie Word/Excel) –
+// rein kosmetisch, ändert nichts am gespeicherten Markdown. Tailwind kennt
+// "list-disc" als feste Utility-Klasse, für "circle"/"square" gibt es
+// keine eigene Utility – Arbiträrwert-Syntax statt einer neuen Abhängigkeit.
+function bulletClass(level) {
+  if (level >= 2) return "[list-style-type:square]";
+  if (level === 1) return "[list-style-type:circle]";
+  return "list-disc";
+}
+
 /* ---------------- Block-Rendering ---------------- */
 
 function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
   const blocks = [];
-  let list = null; // { type: "ul" | "ol" | "task", items: [] }
+  let list = null; // { type: "ul" | "ol" | "task", level, items: [] }
   let key = 0;
   const kp = keyPrefix || "b";
 
   const flush = () => {
     if (list && list.items.length) {
+      const style = indentStyle(list.level);
       if (list.type === "ol") {
-        blocks.push(<ol key={kp + key++} className="list-decimal pl-5 mb-3 space-y-1">{list.items}</ol>);
+        // BUGFIX (Code-Review vor v7.41-Commit, 🟡 Finding 2): Ein
+        // Ebenenwechsel beendet die laufende Liste (siehe ensure() unten) –
+        // OHNE "start" fängt jedes neue <ol> nativ wieder bei 1 an, auch
+        // wenn die Quelle z. B. bei "2." weiterzählt (Geschwister auf
+        // derselben Ebene, getrennt durch eine tiefer eingerückte
+        // Zwischen-Liste). "start" nur setzen, wenn tatsächlich > 1 nötig
+        // ist – der Normalfall (Liste beginnt bei 1) bleibt unverändert.
+        blocks.push(
+          <ol key={kp + key++} start={list.start > 1 ? list.start : undefined} style={style} className="list-decimal pl-5 mb-3 space-y-1">
+            {list.items}
+          </ol>
+        );
       } else if (list.type === "task") {
-        blocks.push(<ul key={kp + key++} className="pl-1 mb-3 space-y-1">{list.items}</ul>);
+        blocks.push(<ul key={kp + key++} style={style} className="pl-1 mb-3 space-y-1">{list.items}</ul>);
       } else {
-        blocks.push(<ul key={kp + key++} className="list-disc pl-5 mb-3 space-y-1">{list.items}</ul>);
+        blocks.push(<ul key={kp + key++} style={style} className={bulletClass(list.level) + " pl-5 mb-3 space-y-1"}>{list.items}</ul>);
       }
     }
     list = null;
   };
-  const ensure = (type) => {
-    if (!list || list.type !== type) { flush(); list = { type, items: [] }; }
+  // Ebene ZUSÄTZLICH zum Typ berücksichtigen (Auftrag "Einrückungen"): ein
+  // Ebenenwechsel beendet die laufende Liste genau wie ein Typwechsel –
+  // Padding-Ansatz (siehe oben), jede Ebene bekommt ihr EIGENES <ul>/<ol>
+  // mit passendem Einzug statt echter DOM-Verschachtelung. "start" (nur für
+  // "ol" relevant, sonst ignoriert) ist die im Markdown tatsächlich
+  // notierte Nummer des ERSTEN Punkts einer NEUEN Liste – bei einer
+  // Fortsetzung (Typ/Ebene unverändert) wird der Parameter ignoriert, das
+  // bereits gesetzte list.start bleibt stehen.
+  const ensure = (type, level, start) => {
+    if (!list || list.type !== type || list.level !== level) { flush(); list = { type, level, items: [], start }; }
   };
 
   // Für matchDisplayBlock: reine Textzeilen ohne die {text, idx}-Hülle,
@@ -842,13 +899,14 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
         li++;
         tlines.push(lines[li].text);
       }
-      blocks.push(renderTable(tlines, kp + key++));
+      blocks.push(renderTable(tlines, kp + key++, indentLevel(line)));
     } else if (mathBlock) {
       flush();
       blocks.push(
         <div
           key={kp + key++}
           className="my-3 overflow-x-auto"
+          style={indentStyle(indentLevel(line))}
           dangerouslySetInnerHTML={{ __html: renderKatexHtml(mathBlock.tex, true) }}
         />
       );
@@ -868,7 +926,7 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
       // Titel steckt weiterhin im Markdown (![Titel](img:…)) – Roundtrip
       // bleibt unverändert, es wird nur nicht mehr zusätzlich gerendert.
       blocks.push(
-        <figure key={kp + key++} className="my-3">
+        <figure key={kp + key++} className="my-3" style={indentStyle(indentLevel(line))}>
           {src ? (
             <img
               src={src}
@@ -889,7 +947,7 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
       flush();
       blocks.push(<h1 key={kp + key++} className="text-xl font-bold text-slate-900 mb-2">{decodeBasicEntities(line.replace(/^#\s+/, ""))}</h1>);
     } else if (taskM) {
-      ensure("task");
+      ensure("task", indentLevel(line));
       const checked = taskM[2].toLowerCase() === "x";
       list.items.push(
         <li key={kp + key++} className="flex items-start gap-2 text-slate-700 leading-relaxed">
@@ -905,14 +963,18 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
         </li>
       );
     } else if (OL_RE.test(line)) {
-      ensure("ol");
+      // Führende Nummer mitnehmen (siehe ensure()/flush() oben) – nur
+      // relevant, wenn HIER tatsächlich eine neue Liste beginnt (Typ-/
+      // Ebenenwechsel), eine Fortsetzung ignoriert den Parameter.
+      const numM = /^\s*(\d+)[.)]\s+/.exec(line);
+      ensure("ol", indentLevel(line), numM ? parseInt(numM[1], 10) : 1);
       list.items.push(
         <li key={kp + key++} className="text-slate-700 leading-relaxed">
           <Inline text={line.replace(/^\s*\d+[.)]\s+/, "")} />
         </li>
       );
     } else if (UL_RE.test(line)) {
-      ensure("ul");
+      ensure("ul", indentLevel(line));
       list.items.push(
         <li key={kp + key++} className="text-slate-700 leading-relaxed">
           <Inline text={line.replace(/^\s*[-*]\s+/, "")} />
@@ -920,12 +982,23 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
       );
     } else if (/^-{3,}$/.test(line.trim())) {
       flush();
-      blocks.push(<hr key={kp + key++} className="my-4 border-slate-200" />);
+      blocks.push(<hr key={kp + key++} style={indentStyle(indentLevel(line))} className="my-4 border-slate-200" />);
     } else if (line.trim() === "") {
       flush();
     } else {
       flush();
-      blocks.push(<p key={kp + key++} className="text-slate-700 leading-relaxed mb-2"><Inline text={line} /></p>);
+      // BUGFIX (Code-Review vor v7.41-Commit, 🔵 Finding 7): führende
+      // Leerzeichen/Tabs sind seit diesem Feature AUSSCHLIESSLICH
+      // Einzugs-Metadaten (bereits über indentLevel() ausgewertet, siehe
+      // style oben) – sie gehören NICHT zusätzlich in den sichtbaren Text.
+      // Bisher blieben sie im <p>-Inhalt stehen (HTML kollabiert sie zwar
+      // visuell, aber inkonsistent zu den Listen-Zweigen, die ihr Präfix
+      // bereits beim Extrahieren strippen, siehe OL_RE/UL_RE/TASK_RE oben).
+      blocks.push(
+        <p key={kp + key++} style={indentStyle(indentLevel(line))} className="text-slate-700 leading-relaxed mb-2">
+          <Inline text={line.replace(/^[ \t]+/, "")} />
+        </p>
+      );
     }
   }
   flush();
