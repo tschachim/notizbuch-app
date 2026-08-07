@@ -9497,3 +9497,211 @@ aus `referenz-app.jsx` übernommen.
       reinem Text nicht mehr zuverlässig von einem echten, absichtlich
       leeren Kindpunkt zu unterscheiden) – unverändert gegenüber Eintrag
       #84, durch diese Nachbesserung weder verschärft noch gelöst.
+
+93. **v7.46, Fehler 1 (Datenkorruption, ECHTER Bug): Ein maskiertes Pipe
+    (`\|`) INNERHALB eines Codespans einer Tabellenzelle verlor sein
+    Escape beim Speichern – über mehrere Editier-Zyklen zerfiel die
+    gesamte Tabelle zu einem einzigen, nicht mehr tabellarischen Absatz.**
+    Auftrag verlangte, die Ursache GENAU einzugrenzen zwischen (a) der
+    GFM-Tabellenregel von markdown-it, (b) dem von tiptap-markdown
+    gerenderten HTML und (c) dem `MdTable`-Parse-Pfad – **keiner der
+    drei war betroffen**, die Lücke saß beim erneuten SPEICHERN im
+    `MdTable`-Serializer selbst (`DocEditor.jsx`):
+    - **markdown-its Tabellenregel (`escapedSplit`,
+      `rules_block/table.mjs`) löst `\|` beim Laden schon immer korrekt
+      auf – GFM-spezifikationskonform sogar innerhalb eines Codespans**
+      (offizielles GFM-Spec-Beispiel: `` `\|` `` in einer Zelle rendert zu
+      `<code>|</code>`, OHNE Backslash – die Zellentrennung läuft
+      strukturell VOR jeder Inline-/Codespan-Erkennung, das Escape wirkt
+      deshalb bewusst schon dort). Empirisch verifiziert (echter
+      TipTap-Editor mit `MdTable`+`Markdown.configure`): `` | x | `a\|b`
+      code | `` lädt korrekt als Codespan-Knoten mit textContent
+      `"a|b code"` (literales Pipe, kein Backslash) – das LADEN war nie
+      der Bug.
+    - **Kaputt war das erneute Speichern desselben Codespans.**
+      prosemirror-markdown behandelt den `code`-Mark mit `escape:false`
+      (`to_markdown.ts`, `MarkSerializerSpec`) – `state.renderInline()`
+      ruft für Text INNERHALB eines Codespans NIE `state.esc()` auf,
+      sondern schreibt den kompletten String aus öffnenden/schließenden
+      Backticks + Rohtext direkt über `state.text(str, false)`
+      (`to_markdown.ts`, Zeile ~388). Der bestehende `MdTable`-Patch
+      (`state.esc = (str, …) => esc(str, …).replace(/\|/g, "\\|")`)
+      maskiert dadurch JEDE Zelle korrekt – AUSSER Codespan-Inhalt, der
+      diesen Pfad komplett umgeht. Ein aus `` `\|` `` GFM-konform
+      geladener (oder im Editor selbst getippter) roher Pipe innerhalb
+      eines Codespans landete dadurch beim Speichern UNMASKIERT in der
+      Tabellenzeile. Optisch fiel das beim Speichern selbst nicht auf
+      (der Codespan zeigt weiterhin `|`) – aber genau dieses fehlende
+      Escape trennt beim NÄCHSTEN Laden (markdown-its Tabellenregel kennt
+      beim Zeilen-Split noch keine Codespan-Grenzen) die Zelle in eine
+      zusätzliche Spalte auf; über weitere Speicher-Zyklen wächst die
+      Spaltenzahl gegen die feste Kopfzeilen-Breite, bis die Zeile(n) gar
+      nicht mehr als gültige GFM-Tabelle erkannt werden und der gesamte
+      Block zu einem einzigen Absatz zusammenfällt (empirisch mit einem
+      dreizyklischen Testaufbau nachvollzogen – Zyklus 1: Escape fehlt in
+      der gespeicherten Zeile; Zyklus 2: Tabelle bereits vollständig
+      zerfallen). Das ist der tatsächliche, mehrstufige Verlustmechanismus
+      hinter der im Auftrag vereinfacht dargestellten Kurzform
+      `"| x | a\|b | -> | x | a |"`.
+    - **Fix:** Zusätzlich zu `state.esc` wird jetzt auch `state.text`
+      innerhalb von `MdTable`s Serializer gepatcht (try/finally setzt
+      beide beim Verlassen zurück, wie schon `state.esc`) – aber NUR für
+      den `escape===false`-Aufruf (der `escape:true`-Normalfall bleibt
+      unverändert über `state.esc`, ein zusätzliches Escaping hier hätte
+      sonst z. B. `"a\|b"` fälschlich zu `"a\\|b"` doppelt maskiert).
+      `state.text` ist die EINZIGE Stelle, über die jede Textausgabe
+      läuft (mit ODER ohne Escape) – der Patch trifft dadurch strukturell
+      GENAU den escape:false-Pfad, unabhängig vom jeweiligen Mark.
+    - **Bewusst nicht eingegrenzt auf den `code`-Mark**, weil `state.text`
+      beim Schreiben keinen Mark-Kontext mehr kennt: Der Patch schützt als
+      Nebeneffekt auch ein Pipe in einer Link-URL/einem -Titel innerhalb
+      einer Tabellenzelle (vorher ebenfalls unmaskiert, aber außerhalb des
+      im Auftrag verlangten Testumfangs) – ein bewusst in Kauf genommener,
+      strikt zusätzlicher Schutz ohne Testabdeckung dafür.
+    - **Tests:** `tests/docEditorTablePipeEscape.test.jsx` (neu, 8 Tests):
+      einzelne/mehrere Maskierungen in einer Zelle, Pipe am Zellanfang/
+      -ende, erste vs. letzte Spalte, Kombination mit `<br>`-Umbruch UND
+      Aufzählung in derselben Zelle (v7.44-Funktion, Eintrag zu v7.44),
+      Pipe innerhalb eines Codespans (der eigentliche Fix, inkl. Prüfung
+      des GFM-korrekten Ladeergebnisses `"a|b code"` OHNE Backslash), je
+      ein dreizyklischer Nachweis (dreimal Laden+Speichern verändert den
+      Zellinhalt nicht mehr) und ein expliziter Nicht-Regressions-Test für
+      reinen Text (war schon vorher stabil).
+    - **Aktiv verifiziert, dass der neue Test ohne den Fix rot ist:** Den
+      `state.text`-Patch testweise auskommentiert (nur `state.esc`
+      aktiv, wie vor diesem Fix) – GENAU der Codespan-Test lief rot
+      (`` `a\|b` `` verlor beim ersten Speichern seinen Backslash), alle
+      übrigen 7 Tests blieben grün (sie testen reinen Text/HTML-`<br>`,
+      die schon vorher über `state.esc` funktionierten). Patch
+      wiederhergestellt, alle 8 Tests wieder grün.
+    - **Bewusstes Restrisiko:** Ein Pipe innerhalb eines HARTEN Umbruchs
+      (`<br>`)-getrennten Codespans in derselben Zelle (Codespan +
+      `<br>` + weiterer Codespan mit Pipe) wurde nicht als eigener Testfall
+      geführt – die Fix-Logik ist aber unabhängig von der Zeilenaufteilung
+      innerhalb einer Zelle (patcht `state.text` global während
+      `state.inTable`), strukturell also mit abgedeckt, nur nicht explizit
+      belegt.
+
+94. **v7.46, Fehler 2 (Datenkorruption, ECHTER Bug): Ein gezäunter
+    Codeblock in einem Listenpunkt gewann bei JEDEM Laden+Speichern eine
+    zusätzliche Leerzeile innerhalb des Zauns.** Auftrag vermutete das
+    Zusammenspiel von Listen-Serializer (prosemirror-markdown), dem
+    projekteigenen `FencedCodeBlock`-Serializer und/oder der
+    Fence-Erkennung beim Wiedereinlesen (`FENCE_OPEN_RE`/`matchFenceBlock`,
+    `code.jsx`) – die Vermutung war im Kern richtig, nur eine Ebene früher
+    als Serializer/Fence-Erkennung: die eigentliche Lücke liegt im
+    HTML→ProseMirror-PARSE-Schritt dazwischen.
+    - **Ursache, empirisch belegt** (Doc-JSON-Dump eines geladenen
+      Editors): `node.textContent` eines geladenen `codeBlock`-Knotens
+      trug IMMER ein zusätzliches `"\n"` am Ende, das in der Quelle nie
+      vorhanden war (`"- Eins\n\n  \`\`\`\n  code\n  \`\`\`"` lud als
+      Text `"code\n"` statt `"code"`). Grund: markdown-it rendert einen
+      Zaun laut CommonMark IMMER als `<pre><code>Inhalt\n</code></pre>`
+      – das eine `"\n"` direkt vor `</code>` ist ein STRUKTURELLES
+      Artefakt des Zeilen-Zusammenbaus (`state.getLines` mit
+      `keepLastLF:true`, `markdown-it/lib/rules_block/fence.mjs`) und
+      steht dort IMMER, unabhängig davon, ob die Quelle vor dem
+      Schluss-Zaun eine echte Leerzeile hatte. `@tiptap/extension-code-block`
+      übernimmt diesen Text per `preserveWhitespace:"full"` unverändert.
+      **tiptap-markdowns EIGENE `codeBlock`-Node bringt für genau dieses
+      Problem einen `parse.updateDOM`-Hook mit**
+      (`node_modules/tiptap-markdown/src/extensions/nodes/code-block.js`:
+      `element.innerHTML.replace(/\n<\/code><\/pre>/g, '</code></pre>')`)
+      – `FencedCodeBlock` (`DocEditor.jsx`) ERSETZT diese Node komplett
+      (identischer Node-Name `codeBlock`, `StarterKit.configure({codeBlock:
+      false})`), hatte aber `parse: {}` (kein Hook) – der Hook lief seit
+      Einführung von `FencedCodeBlock` (v7.7) nie mehr mit.
+    - **Warum nur INNERHALB einer Liste sichtbar:** `MarkdownSerializerState
+      #write` (`prosemirror-markdown`) fügt vor jeder per `state.text()`
+      geschriebenen Zeile `state.delim` ein, aber NUR wenn `state.delim`
+      wahr ist (nicht-leerer String). Am Dokumentanfang ist `state.delim
+      === ""` (falsy) – die überzählige leere "Zeile" aus dem Parse-Bug
+      hinterlässt dort GAR KEINE Spur (0 Zeichen ohne Präfix bleiben
+      unsichtbar), weshalb `tests/docEditorCode.test.jsx` (keine
+      Codeblöcke in Listen) trotz dieses Bugs immer schon grün war.
+      INNERHALB eines Listenpunkts ist `state.delim` der Einzug-Präfix
+      (z. B. `"  "`) – der wird vor die überzählige leere Zeile GENAUSO
+      geschrieben wie vor jede echte, macht sie dadurch zu einer
+      SICHTBAREN Leerzeile zwischen Code und Schluss-Zaun. Diese Zeile
+      gilt beim nächsten Laden selbst wieder als legitimer Code-Inhalt
+      (`matchFenceBlock` kennt keine "künstliche" vs. "echte" Leerzeile),
+      UND markdown-it sattelt beim erneuten Rendern erneut ihr eigenes
+      strukturelles `"\n"` auf – die Lücke wächst dadurch mit jedem
+      weiteren Zyklus um eine weitere Zeile (genau das gemessene Muster).
+    - **Fix, Teil 1 (Lade-Pfad):** `FencedCodeBlock.addStorage().markdown
+      .parse.updateDOM` bekommt GENAU denselben Hook wie tiptap-markdowns
+      Original (1:1 übernommen) – entfernt EIN `"\n"` unmittelbar vor
+      `</code></pre>` aus dem gesamten gerenderten Dokument-HTML, bevor
+      ProseMirror es parst. `"Inhalt\n"` → `"Inhalt"` (0 Leerzeilen, der
+      Normalfall) und `"Inhalt\n\n"` → `"Inhalt\n"` (1 ECHTE Leerzeile
+      bleibt erhalten). Die Regel trifft `</code></pre>` als literales
+      HTML-Tag-Paar – ein im Code-Inhalt selbst vorkommendes
+      `</code></pre>` wäre durch `escapeHtml()` bereits entschärft
+      (`&lt;/code&gt;…`) und kann nie versehentlich matchen (identische
+      Sicherheits-Überlegung wie beim tiptap-markdown-Original).
+    - **Fix, Teil 2 (Serializer, beim Testschreiben für Teil 1 selbst
+      gefundene, schmalere Regression):** Ohne Anpassung hätte Teil 1
+      allein eine ECHTE, vom Nutzer bewusst vor dem Schluss-Zaun
+      freigelassene Leerzeile verlieren können – der bisherige Serializer
+      (`state.text(node.textContent, false); state.ensureNewLine();`)
+      funktionierte VOR Teil 1 nur, weil sich die Lade-seitige
+      Extra-Zeile und diese Serializer-Lücke gegenseitig zufällig
+      aufhoben: `state.text()` hängt hinter der LETZTEN Zeile eines
+      Strings nie selbst einen Zeilenumbruch an (wie bei `Array#join`
+      werden Umbrüche nur ZWISCHEN den Zeilen eingefügt) – eine echte
+      Leerzeile am Ende des Codes (`node.textContent` endet auf `"\n"`)
+      erzeugt dadurch keinen zusätzlichen Zeilenumbruch, und
+      `state.ensureNewLine()` hält den bereits vorhandenen letzten
+      Umbruch (vom vorletzten Segment) für ausreichend. Nach Teil 1 (kein
+      geschenkter Extra-Umbruch mehr) wäre das am DOKUMENTANFANG jetzt
+      sichtbar geworden (empirisch belegt: `"# T\n\n\`\`\`js\ncode\n\n\`\`\`"`
+      verlor die Leerzeile nach Teil 1 allein) – INNERHALB einer Liste
+      blieb dieser Teilaspekt dagegen zufällig weiterhin korrekt (die
+      Delim-Einfügung kompensiert dort anders, siehe Test). Fix: JEDE
+      Zeile aus `node.textContent.split("\n")` (auch eine leere
+      Schlusszeile) bekommt über `state.write()` explizit ihr eigenes
+      Einzug-Präfix UND einen eigenen, selbst geschriebenen `"\n"` –
+      unabhängig von `ensureNewLine()`s Heuristik. Nur der ECHT LEERE
+      Codeblock (`node.textContent === ""`) bleibt Sonderfall (weiterhin
+      `state.ensureNewLine()`): `"".split("\n")` läge fälschlich bei
+      einem Element (`""`), nicht bei null Zeilen – ein Leerstring und
+      "eine einzelne, komplett leere Zeile" sind über join/split
+      strukturell nicht unterscheidbar (dieselbe Lücke wie beim Lesen,
+      `matchFenceBlock`).
+    - **Tests:** `tests/docEditorCodeInList.test.jsx` (neu, 9 Tests):
+      Kernbefund (kein Wachstum über drei Zyklen), ein dreizyklischer
+      Nachweis mit je einer ECHTEN Änderung an anderer Stelle (neuer
+      Absatz am Dokumentende über `insertContentAt`) zwischen den
+      Zyklen, mit/ohne Sprach-Angabe, Backtick-Serien im Inhalt (K1-Zaun-
+      Verlängerung bleibt kompatibel), unter einem Checklisten-Punkt,
+      unter einem gewöhnlichen Aufzählungspunkt (explizit ohne
+      Checkliste), eine VERSCHACHTELTE Listenebene (über ProseMirror-JSON
+      aufgebaut, um die exakte CommonMark-Einrückung nicht erraten zu
+      müssen), eine ECHTE Leerzeile vor dem Schluss-Zaun (Teil-2-Fix) und
+      ein expliziter Nicht-Regressions-Test für den Top-Level-Fall ohne
+      Liste.
+    - **Aktiv verifiziert, dass die neuen Tests ohne die Fixes rot sind:**
+      Teil 1 (`updateDOM`-Hook) auskommentiert – ALLE 9 Tests der neuen
+      Datei liefen rot (jeder mit einer zusätzlichen Leerzeile pro
+      Zyklus). Teil 1 wiederhergestellt, NUR Teil 2 (Serializer-Schleife)
+      zusätzlich auf die alte `state.text(...)+state.ensureNewLine()`-Form
+      zurückgesetzt – GENAU der Top-Level-Test mit echter Leerzeile lief
+      rot, alle 8 übrigen (inkl. des Kernbefunds und der Listen-Variante
+      mit echter Leerzeile, die von diesem Teilaspekt zufällig nicht
+      betroffen ist) blieben grün. Beide Teile wiederhergestellt, alle 9
+      Tests wieder grün.
+    - **Bewusstes Restrisiko:** Eine ECHTE Leerzeile vor dem Schluss-Zaun
+      INNERHALB eines Listenpunkts stabilisiert sich erst NACH dem ersten
+      Zyklus auf eine Zeile, die nur aus dem Listen-Einzug besteht (z. B.
+      zwei Leerzeichen) statt auf eine komplett leere Zeile – ab dann
+      idempotent (kein weiteres Wachstum), aber nicht byte-identisch zu
+      einer von Hand mit einer wirklich leeren Zeile geschriebenen Quelle.
+      Dieselbe, bereits an anderer Stelle akzeptierte Eigenheit von
+      prosemirror-markdowns Listen-Serializer gilt gleichermaßen für
+      GEWÖHNLICHE (Nicht-Code-)Fortsetzungsinhalte in einem Listenpunkt –
+      kein neues, sondern ein bestehendes, hier nur erstmals für
+      Codeblöcke explizit dokumentiertes Verhalten. Betrifft ausschließlich
+      den seltenen Randfall "Nutzer lässt bewusst eine Leerzeile direkt
+      vor dem Schluss-Zaun eines Codeblocks in einem Listenpunkt frei" –
+      der im Auftrag gemessene und primär geforderte Fall (keine
+      Leerzeile im Original) bleibt vollständig byte-identisch.

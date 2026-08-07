@@ -659,6 +659,27 @@ ungewöhnlich hoch wird. Zur Kontrolle: Eine Zelle OHNE jeden Umbruch
 verhält sich unverändert wie bisher (normaler Fließtext, kein zusätzlicher
 Abstand).
 
+**D2c [VERBUNDEN] Maskiertes Pipe in einer Tabellenzelle über mehrere
+Zyklen (v7.46-Fix, vorher 🔴-Finding: Inhalt ging verloren, DECISIONS
+#93).** Im Editor eine 2×1-Tabelle anlegen (Kopfzeile „QA-Spalte“, eine
+Datenzeile). In die Datenzelle tippen: „QA-Wert A“, dann über den
+Inline-Code-Knopf (oder Markdown-Kürzel per Backtick) einen Codespan mit
+einem Pipe-Zeichen DARIN einfügen, z. B. `` `a|b` `` (das Pipe-Zeichen
+selbst normal eintippen, NICHT maskieren – der Editor speichert die
+nötige Maskierung selbst). Speichern. Erwartet: kein Fehler, Tabelle
+bleibt eine gewöhnliche 2×1-Tabelle mit EINER Spalte. Editor erneut
+öffnen: Erwartet, die Zelle zeigt weiterhin „QA-Wert A“ gefolgt vom
+Codespan mit „a|b“ (Pipe lesbar, Codespan optisch abgehoben), NICHT als
+zwei getrennte Spalten. Ohne etwas zu ändern speichern (No-op),
+Editor ein DRITTES Mal öffnen und erneut ohne Änderung speichern.
+Erwartet: Nach allen drei Zyklen ist die Tabelle weiterhin eine
+gewöhnliche 2×1-Tabelle mit demselben Inhalt – NICHT zu einem einzigen
+Fließtext-Absatz zerfallen (das war der eigentliche, mehrzyklische
+Datenverlust vor diesem Fix). Zur Kontrolle zusätzlich ein Pipe-Zeichen
+DIREKT als normaler Text (kein Codespan) an den Zellenanfang und ans
+Zellenende einer weiteren Zelle tippen, speichern, Editor erneut öffnen:
+Erwartet, beide Pipe-Zeichen bleiben an ihrer Position lesbar erhalten.
+
 **D3 [VERBUNDEN] Checkliste.** Im Editor eine Checkliste mit zwei
 Einträgen anlegen, speichern, dann in der ANSICHT ein Kästchen anklicken.
 Erwartet: Haken bleibt nach Reload erhalten (eigener Commit).
@@ -714,6 +735,22 @@ keine Phantom-Überschrift), Dollarzeichen, Pipe-Zeichen UND die
 führende „#“ im Code bleiben wörtlich erhalten (keine Formel-, Tabellen-
 oder Struktur-Fehlinterpretation), alle anderen Inhalte (inkl.
 eventueller Formeln aus D5) unverändert.
+
+**D6b [VERBUNDEN] Codeblock in einem Listenpunkt über mehrere Zyklen
+(v7.46-Fix, vorher 🔴-Finding: eine zusätzliche Leerzeile pro
+Speicherzyklus, DECISIONS #94).** Im Editor eine Stichpunkt-Aufzählung
+mit einem Eintrag „QA-Punkt“ anlegen, im SELBEN Listenpunkt per Enter
+eine neue Zeile öffnen und über den Toolbar-Knopf „Codeblock“ (`</>`)
+einen Codeblock EINFÜGEN, hinein „qa code zeile“ tippen. Speichern.
+Erwartet: kein Fehler, der Codeblock erscheint monospaced UNTERHALB von
+„QA-Punkt“, sichtbar eingerückt (Teil des Listenpunkts). Editor erneut
+öffnen, ohne etwas zu ändern speichern (No-op), Editor ein DRITTES Mal
+öffnen und – diesmal an einer ANDEREN Stelle im Dokument (z. B. einem
+späteren Absatz) – eine kleine, harmlose Änderung vornehmen (z. B. ein
+Wort ergänzen) und speichern. Erwartet: Nach allen drei Zyklen zeigt der
+Codeblock im Listenpunkt weiterhin GENAU „qa code zeile“ – KEINE
+zusätzliche Leerzeile zwischen dem Code und dem unteren Rand des
+Kastens, unabhängig davon, wie oft geöffnet/gespeichert wurde.
 
 **D7 [VERBUNDEN] Link-Dialog im Editor.** Editor öffnen, etwas Text
 markieren, Link-Knopf (Kettensymbol) in der Toolbar anklicken. Erwartet:

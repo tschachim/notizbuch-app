@@ -551,6 +551,53 @@ export const BlockImage = Image.extend({
 // ergänzt. Nicht als GFM darstellbare Tabellen (verbundene Zellen oder mehrere
 // Absätze in einer Zelle – nur per Paste erreichbar) landen wie im Original
 // als HTML, damit beim nächsten Öffnen nichts verloren geht.
+//
+// v7.46-Fix (Datenkorruption, ECHTER Bug, "Escaptes Pipe in einer
+// Tabellenzelle: Inhalt geht verloren", mehrzyklisch bis zum Totalzerfall
+// der Tabelle in EINEN einzigen Absatz): Ursache GENAU eingegrenzt (Auftrag:
+// "markdown-it-Tabellenregel vs. gerendertes HTML vs. MdTable-Parse-Pfad")
+// – keiner der drei, sondern eine Lücke GENAU HIER im SERIALIZER, in der
+// "state.esc"-Ergänzung oben. markdown-its GFM-Tabellenregel selbst löst
+// "\|" schon IMMER korrekt auf (rules_block/table.mjs#escapedSplit) UND
+// GENAU wie GFM es verlangt sogar innerhalb eines Codespans (offizielles
+// GFM-Spec-Beispiel: "`\|`" in einer Zelle rendert zu "<code>|</code>" –
+// bewusst OHNE Backslash, siehe Test) – das LADEN war nie das Problem.
+// Die Lücke liegt beim erneuten SPEICHERN GENAU eines solchen Codespans:
+// prosemirror-markdown behandelt den "code"-Mark mit "escape:false"
+// (node_modules/prosemirror-markdown/src/to_markdown.ts, MarkSerializerSpec)
+// – für Text INNERHALB eines Codespans ruft "state.renderInline()" NIE
+// "state.esc()" auf (dort Zeile ~388: der komplette String aus öffnenden/
+// schließenden Backticks + Roh-Text wird direkt über "state.text(str,
+// false)" geschrieben) – der obige "state.esc"-Patch, der "|" sonst in
+// JEDER Zelle zuverlässig maskiert, greift für einen Codespan-Inhalt
+// deshalb NIE. Ein im Editor getippter ODER – wie hier – beim GFM-
+// spec-konformen Laden aus "`\|`" entstandener roher Pipe INNERHALB eines
+// Codespans landet dadurch beim Speichern UNMASKIERT in der Tabellenzeile.
+// Bis zum NÄCHSTEN Laden ist optisch nichts falsch (der Codespan zeigt
+// weiterhin "|") – aber genau dieses ungemaskierte "|" trennt beim
+// erneuten Öffnen (markdown-its Tabellenregel kennt beim Zeilen-Split noch
+// KEINE Codespans, das läuft strukturell VOR der Inline-Erkennung) die
+// Zelle in eine zusätzliche Spalte auf; über weitere Speicher-Zyklen
+// wächst die Spaltenzahl gegen die Kopfzeile, bis markdown-it die Zeile(n)
+// gar nicht mehr als gültige GFM-Tabelle erkennt und der gesamte Block zu
+// einem einzigen, nicht mehr tabellarischen Absatz zusammenfällt (siehe
+// Test "mehrzyklischer Nachweis").
+//
+// Fix: zusätzlich zu "state.esc" auch "state.text" patchen (state.text ist
+// die Stelle, über die JEDE Textausgabe läuft – ESCAPE:TRUE ODER FALSE),
+// aber NUR für den escape===false-Fall (escape:true bleibt unverändert:
+// der bereits gepatchte state.esc greift dort weiterhin wie bisher, ein
+// zusätzlicher Pipe-Ersatz HIER würde sonst doppelt maskieren, "a\|b" also
+// fälschlich zu "a\\|b"). Bewusst NICHT auf den "code"-Mark beschränkt
+// (state.text kennt beim Schreiben keinen Mark-Kontext mehr) – JEDES
+// "|" in JEDEM mit escape:false geschriebenen Text INNERHALB einer
+// Tabellenzeile (state.inTable) wird maskiert. Trifft aktuell praktisch nur
+// Codespans (der einzige Mark mit escape:false, siehe oben) und die
+// öffnenden/schließenden Markdown-Sequenzen anderer Marks (**, *, [...](),
+// die selbst nie ein "|" enthalten, also folgenlos) – ein Pipe in einer
+// LINK-URL/einem -Titel INNERHALB einer Tabellenzelle wird als Nebeneffekt
+// gleich mit abgesichert (vorher ebenfalls unmaskiert, aber außerhalb des
+// hier verlangten Testumfangs).
 const cellHasSpan = (cell) => cell.attrs.colspan > 1 || cell.attrs.rowspan > 1;
 // Eine Zelle, deren einziger Inhalt ein oder mehrere harte Zeilenumbrüche
 // sind (Umschalt+Enter in einer sonst leeren Zelle), muss für die
@@ -595,6 +642,13 @@ export const MdTable = Table.extend({
           state.inTable = true; // lässt harte Umbrüche in Zellen als <br> serialisieren
           const esc = state.esc.bind(state);
           state.esc = (str, startOfLine) => esc(str, startOfLine).replace(/\|/g, "\\|");
+          // v7.46-Fix (siehe Kopfkommentar oben): state.text() zusätzlich
+          // patchen, aber NUR für escape===false – dieser Pfad umgeht
+          // state.esc() komplett (Codespans, escape:false) und blieb ohne
+          // diesen Patch ungeschützt.
+          const text = state.text.bind(state);
+          state.text = (str, escapeArg) =>
+            text(escapeArg === false ? String(str).replace(/\|/g, "\\|") : str, escapeArg);
           try {
             node.forEach((row, _o, i) => {
               state.write("| ");
@@ -623,6 +677,7 @@ export const MdTable = Table.extend({
             });
           } finally {
             state.esc = esc;
+            state.text = text;
             state.inTable = false;
           }
           state.closeBlock(node);
@@ -653,6 +708,89 @@ export const MdTable = Table.extend({
 // tests/docEditorCode.test.jsx). state.text(...,false) bleibt roh (kein
 // state.esc()) wie beim StarterKit-Original – nur die Zaunlänge ändert
 // sich, der restliche Inhalt bleibt byte-genau.
+//
+// v7.46-Fix (Datenkorruption, ECHTER Bug, "Codeblock in einem Listenpunkt
+// wächst bei jedem Speichern"): "parse: {}" (bis v7.45.1) übernahm KEINEN
+// der beiden "parse"-Hooks, die tiptap-markdowns EIGENE codeBlock-Node
+// (node_modules/tiptap-markdown/src/extensions/nodes/code-block.js)
+// mitbringt – FencedCodeBlock ERSETZT diese Node komplett (gleicher
+// Node-Name "codeBlock", siehe StarterKit.configure({codeBlock:false}) im
+// useEditor()-Aufbau unten), das ORIGINAL wird dadurch nie mehr in die
+// Extensions-Liste aufgenommen und sein "updateDOM"-Hook lief nie mehr mit.
+// Ursache, GENAU eingegrenzt (Auftrag: "Zusammenspiel Listen-Serializer +
+// FencedCodeBlock-Serializer und/oder Fence-Erkennung beim Wiedereinlesen"
+// – es ist KEINS von beiden, sondern der HTML->ProseMirror-PARSE-Schritt
+// dazwischen): markdown-it rendert einen Zaun laut CommonMark IMMER als
+// "<pre><code>Inhalt\n</code></pre>" – das eine "\n" direkt vor "</code>"
+// ist ein STRUKTURELLES Artefakt des Zeilen-Zusammenbaus (state.getLines
+// mit keepLastLF:true, node_modules/markdown-it/lib/rules_block/fence.mjs)
+// und steht dort IMMER, unabhängig davon, ob die Quelle vor dem Schluss-
+// Zaun eine echte Leerzeile hatte oder nicht (siehe DECISIONS für die
+// Herleitung: 0 Leerzeilen -> "Inhalt\n", 1 Leerzeile -> "Inhalt\n\n", …).
+// Der StarterKit-codeBlock (preserveWhitespace:"full" in
+// @tiptap/extension-code-block) übernimmt diesen Text UNVERÄNDERT in den
+// ProseMirror-Knoten – "node.textContent" trug dadurch IMMER ein
+// zusätzliches, in der Quelle nie vorhandenes Zeilenende. Am DOKUMENTANFANG
+// (state.delim === "", top-level) verschluckt MarkdownSerializerState#write
+// diese "leere Zusatzzeile" beim Speichern folgenlos (ein leerer String ohne
+// Einzug-Präfix hinterlässt keine Spur, siehe DECISIONS) – GENAU DESHALB
+// bestand tests/docEditorCode.test.jsx trotz dieses Bugs schon immer:
+// dort steht kein Codeblock in einer Liste. INNERHALB eines Listenpunkts
+// ist "state.delim" dagegen der Einzug-Präfix (z. B. "  ") – WriteState#write
+// schreibt diesen Präfix vor JEDE Zeile, die per state.text() geschrieben
+// wird, AUCH vor die überzählige leere Zeile, UND state.ensureNewLine()
+// direkt danach schließt sie mit einem echten Zeilenumbruch ab: aus der
+// einen überzähligen Leerzeile wird dadurch eine SICHTBARE Leerzeile
+// zwischen Code-Inhalt und Schluss-Zaun. Da diese Zeile beim nächsten Laden
+// selbst wieder als LEGITIMER Code-Inhalt gilt (matchFenceBlock/code.jsx
+// kennt keine "künstliche" vs. "echte" Leerzeile), UND markdown-it beim
+// erneuten Rendern erneut ihr eigenes strukturelles "\n" aufsattelt, wächst
+// die Lücke mit jedem Zyklus um eine weitere Zeile.
+//
+// FIX an der vom Auftrag selbst nahegelegten "richtigen Stelle" (Vermutung
+// bestätigt, nur eine Ebene früher als Listen-Serializer/Fence-Erkennung):
+// GENAU der "updateDOM"-Hook, den tiptap-markdowns EIGENE codeBlock-Node für
+// exakt dieses Problem mitbringt (s.o.), hier 1:1 nachgezogen – entfernt
+// EIN "\n" unmittelbar vor "</code></pre>" aus dem GESAMTEN gerenderten
+// Dokument-HTML, bevor ProseMirror es parst. "Inhalt\n" -> "Inhalt" (0
+// Leerzeilen, der Normalfall) und "Inhalt\n\n" -> "Inhalt\n" (1 ECHTE
+// Leerzeile bleibt erhalten, siehe Test) – die Regel trifft "</code></pre>"
+// als LITERALES HTML-Tag-Paar; ein im Code-Inhalt selbst vorkommendes
+// "</code></pre>" wäre durch escapeHtml() bereits zu "&lt;/code&gt;…"
+// entschärft und kann diese Regel nie versehentlich matchen (identische
+// Sicherheits-Überlegung wie beim tiptap-markdown-Original). "g"-Flag: ein
+// Dokument mit MEHREREN Codeblöcken bekommt jeden einzeln bereinigt (ein
+// einzelner MarkdownParser#parse()-Lauf ruft "updateDOM" genau einmal mit
+// dem KOMPLETTEN Dokument-Element auf, siehe MarkdownParser.js).
+//
+// ZWEITE, beim Testschreiben für DIESEN Fix gefundene Hälfte (ohne die der
+// obige Lade-Fix eine neue, schmalere Regression eingeführt hätte): Der
+// SERIALIZER nutzte bisher "state.text(node.textContent, false)" gefolgt
+// von "state.ensureNewLine()" – das funktionierte VOR diesem Fix nur, weil
+// sich die Lade-seitige Extra-Zeile und diese Serializer-Lücke GEGENSEITIG
+// zufällig aufhoben (siehe DECISIONS): "state.text()" hängt hinter der
+// LETZTEN Zeile eines Strings NIE selbst einen Zeilenumbruch an (sie werden
+// wie bei Array#join NUR ZWISCHEN den Zeilen eingefügt) – eine ECHTE
+// Leerzeile am Ende des Codes (node.textContent endet auf "\n", z. B. ein
+// vom Nutzer bewusst vor dem Schluss-Zaun freigelassener Absatz) erzeugt
+// dadurch KEINEN zusätzlichen Zeilenumbruch, und "state.ensureNewLine()"
+// hält den bereits vorhandenen letzten Umbruch (vom vorletzten Segment) für
+// bereits ausreichend – die letzte, WIRKLICH leere Zeile geht verloren.
+// Nach dem Lade-Fix oben (kein "geschenkter" Extra-Umbruch mehr, der das
+// vorher zufällig kompensierte) wäre das jetzt IMMER sichtbar, nicht nur in
+// Listen. Fix: JEDE Zeile aus "node.textContent.split(\"\\n\")" (auch eine
+// leere Schlusszeile) bekommt ÜBER "state.write()" explizit ihr eigenes
+// Einzug-Präfix (in einer Liste "state.delim", sonst "") UND einen eigenen,
+// selbst geschriebenen "\n" – dadurch verschwindet die Abhängigkeit von
+// "ensureNewLine()"s Heuristik komplett. Nur der ECHT LEERE Codeblock
+// (node.textContent === "", z. B. "```\n```" ohne jeden Inhalt) bleibt
+// Sonderfall: "".split("\n")" läge fälschlich bei EINEM Element (""), nicht
+// bei null Zeilen – ein Leerstring UND "eine einzelne, komplett leere Zeile"
+// sind über join/split strukturell nicht unterscheidbar (dieselbe Lücke wie
+// beim LESEN, siehe matchFenceBlock/code.jsx: "".join("\n")" ergibt für
+// BEIDE Fälle ""). Der leere Sonderfall bleibt deshalb bewusst bei der
+// ORIGINAL-Logik (state.ensureNewLine() statt der neuen Schleife) – exakt
+// wie zuvor, kein Verhaltenswechsel für einen inhaltslosen Codeblock.
 export const FencedCodeBlock = CodeBlockExtension.extend({
   addStorage() {
     return {
@@ -662,12 +800,34 @@ export const FencedCodeBlock = CodeBlockExtension.extend({
           const fenceLen = Math.max(3, ...runs.map((r) => r.length + 1));
           const fence = "`".repeat(fenceLen);
           state.write(fence + (node.attrs.language || "") + "\n");
-          state.text(node.textContent, false);
-          state.ensureNewLine();
+          if (node.textContent) {
+            // Review-Nachbesserung zu v7.46: NICHT state.write() vor jeder
+            // Zeile – das schriebe den Listen-Einzug AUCH vor eine leere
+            // Zeile und hinterließe eine Zeile aus reinem Whitespace im
+            // committeten Markdown. prosemirror-markdown selbst macht das
+            // nicht: flushClose() trimmt das Delimiter für Leerzeilen
+            // ausdrücklich (delimMin), gewöhnliche Fortsetzungs-Leerzeilen
+            // in einer Liste sind deshalb WIRKLICH leer. Hier dieselbe
+            // Logik, sonst entstünde Diff-Rauschen und – weil viele
+            // Editoren trailing whitespace beim Öffnen strippen – beim
+            // nächsten Speichern erneut eine Änderung.
+            const delim = state.delim;
+            node.textContent.split("\n").forEach((line) => {
+              state.flushClose();
+              // roh, kein state.esc() – wie bisher escape:false
+              state.out += (line ? delim : delim.replace(/\s+$/, "")) + line + "\n";
+            });
+          } else {
+            state.ensureNewLine();
+          }
           state.write(fence);
           state.closeBlock(node);
         },
-        parse: {},
+        parse: {
+          updateDOM(element) {
+            element.innerHTML = element.innerHTML.replace(/\n<\/code><\/pre>/g, "</code></pre>");
+          },
+        },
       },
     };
   },
