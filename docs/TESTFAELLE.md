@@ -1361,6 +1361,26 @@ je Text einzutippen) und denselben Zyklus einmal durchlaufen: bleibt
 ebenfalls dauerhaft angehakt UND leer, statt zu einem angehakten Symbol
 als Literaltext zu werden.
 
+**D19-Nachtrag 2 [VERBUNDEN] Ein leerer ERSTER Punkt einer Checkliste
+bleibt ebenfalls erhalten (v7.45.1, Review-Nachbesserung zu D19-Nachtrag –
+siehe DECISIONS #92).** Editor öffnen, per Toolbar-Knopf „Checkliste“ eine
+neue Checkliste beginnen, den ALLERERSTEN Punkt bewusst LEER lassen (Enter
+drücken, ohne Text einzutippen), direkt danach einen zweiten Punkt mit
+Text füllen („QA-LeerErst zwei“). Speichern, Seite neu laden. Erwartet:
+Der erste Punkt bleibt eine leere Checkbox (nicht verschwunden, nicht
+Literaltext). Editor erneut öffnen und OHNE Änderung schließen: kein
+Commit (No-op-Roundtrip). Wiederholen für:
+- den leeren ersten Punkt als EINZIGEN Punkt eines ganzen Abschnitts
+  (Checkliste anlegen, sofort wieder verlassen, ohne einen zweiten Punkt
+  anzulegen) – bleibt nach Speichern/Neuladen weiterhin eine leere
+  Checkbox, verschwindet NICHT (auch nicht nach mehrfachem erneuten Öffnen
+  ohne Änderung),
+- einen leeren ersten Punkt einer VERSCHACHTELTEN Unterliste (Checkbox-
+  Elternpunkt mit Text, darunter per Tab eingerückt ein neuer, leer
+  gelassener erster Unterpunkt, danach ein zweiter, ausgefüllter
+  Unterpunkt) – bleibt ebenfalls über mehrere Speicherzyklen hinweg
+  erhalten.
+
 GEWOLLTE Nebenwirkung (v7.41.2, KEIN Fehler – nicht als Finding melden):
 Steht in einer Liste, die (an anderer Stelle) eine Checkliste enthält,
 eine bewusste Leerzeile zwischen zwei NICHT-Checklisten-Punkten (z. B.

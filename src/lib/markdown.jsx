@@ -1124,6 +1124,24 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
     } else if (taskM) {
       ensure("task", indentLevel(line));
       const checked = taskM[2].toLowerCase() === "x";
+      // v7.45.1 (Review-Finding 🔵): Eine INHALTSLEERE Checkbox (taskM[4]
+      // === "", seit v7.45 ausdrücklich legitimer Nutzerinhalt statt
+      // Datenkorruption, siehe DECISIONS #91) ließ dieses <span> bisher
+      // komplett leer (0×0) – die Checkbox selbst blieb über <input>
+      // klickbar, aber daneben gab es weder eine sichtbare noch eine
+      // klickbare Fläche, die den Punkt als eigene Zeile erkennbar machte.
+      // "inline-block" + Mindesthöhe/-breite geben NUR dem leeren Fall
+      // spürbaren Platz (eine Zeile mit echtem Text braucht das Minimum
+      // ohnehin nie, ihr eigener Inhalt ist stets höher/breiter) – bewusst
+      // KEIN zusätzlicher Klick-Handler hier: nach wie vor löst
+      // ausschließlich das <input> selbst onToggleTask aus (unveränderter
+      // Vertrag mit App.jsx#toggleTask), dies ist eine rein optische/
+      // Trefferflächen-Korrektur.
+      const emptyLabel = !taskM[4];
+      const labelClass = [
+        checked ? "line-through text-slate-400" : "",
+        emptyLabel ? "inline-block min-h-[1.375rem] min-w-[1rem]" : "",
+      ].filter(Boolean).join(" ");
       list.items.push(
         <li key={kp + key++} className="flex items-start gap-2 text-slate-700 leading-relaxed">
           <input
@@ -1132,7 +1150,7 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
             onChange={() => onToggleTask && onToggleTask(idx, !checked)}
             className="mt-1 shrink-0 accent-indigo-600 cursor-pointer"
           />
-          <span className={checked ? "line-through text-slate-400" : ""}>
+          <span className={labelClass}>
             <Inline text={taskM[4]} />
           </span>
         </li>

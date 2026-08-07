@@ -8359,6 +8359,15 @@ aus `referenz-app.jsx` übernommen.
         ist das nicht mehr zuverlässig von echtem Nutzerinhalt zu
         unterscheiden, und `SplitMixedTaskLists` verhindert ohnehin, dass
         NEUE Fälle dieser Art überhaupt entstehen.
+        - **⚠️ Seit v7.45.1 WEITER VERENGT, siehe Eintrag #92:** Der
+          "Blockanfang" allein (diese Nachbesserung) reichte nach der
+          Einführung von `EmptyTaskMarkdownIt` (Eintrag #91, v7.45) nicht
+          mehr als Phantom-Signal – eine bewusst leer gelassene Checkbox
+          ist seitdem ausdrücklich legitimer Nutzerinhalt, AUCH als erster
+          Punkt einer Liste. Eintrag #92 ergänzt die zusätzliche
+          Bedingung "gefolgt von einer ECHTEN Nicht-Checkbox-Listenzeile"
+          – dort auch die Begründung, warum das keinen realen
+          Bestandsfall verliert.
       - **Zwei Begleitfunde (Re-Review), beide über eine robustere
         Folgeinhalts-Suche behoben:** (1) Stand ein echtes Kind per
         Leerzeile abgesetzt vom Phantom (`"- [ ] \n\n  - Kind"`), verwaiste
@@ -9360,3 +9369,131 @@ aus `referenz-app.jsx` übernommen.
       extrem unüblich (wer eine Checkbox-Klammer als reinen Text in einem
       Listenpunkt haben will, hat dafür ohnehin keinen verlässlichen Weg
       in diesem Dialekt) und deshalb bewusst in Kauf genommen.
+
+92. **Nachbesserung zu Eintrag #91 (v7.45.1, Review-Finding 🟡): Eine
+    bewusst leere Checkbox AM ANFANG eines Listenblocks wurde von
+    `dropEmptyCheckboxLines` weiterhin gelöscht.** Gemessen (Reviewer):
+    `"# T\n\n- [ ]\n- [ ] Zwei"` → `"# T\n\n- [ ] Zwei"` (erster Punkt weg)
+    und `"# T\n\n## A\n\n- [ ]"` → `"# T\n\n## A\n"` (einziger Punkt weg,
+    zusätzlich NICHT idempotent – ein zweiter Zyklus normalisierte nur noch
+    die Schlusszeile). Ursache: Die "Blockanfang"-Bedingung aus Eintrag #84
+    (v7.41.2) war zum damaligen Zeitpunkt die richtige Abwägung, WEIL eine
+    leere Checkbox VOR v7.45 ohnehin nie überlebte (Eintrag #91) –
+    "Phantom" und "absichtlich leerer erster Checklistenpunkt" waren
+    textuell identisch UND beide gleichermaßen unerwünscht, die Bedingung
+    musste sie nicht unterscheiden. Seit `EmptyTaskMarkdownIt` (Eintrag
+    #91) ist Letzteres aber ausdrücklicher, legitimer Nutzerinhalt – die
+    beiden Fälle sind seitdem intern widersprüchlich geworden: "Checklisten-
+    Knopf drücken, ersten Punkt noch leer lassen, speichern" verlor den
+    Punkt lautlos, während derselbe Punkt an zweiter/mittlerer/letzter
+    Stelle längst überlebte (Eintrag #84, "Positionsbedingung"-Nach-
+    besserung) – genau die Klasse Fehler, die der Nutzer ursprünglich
+    gemeldet hatte, jetzt nur noch am Blockanfang.
+    - **Verengte Signatur (Vorgabe des Reviewers, hier verifiziert statt
+      nur übernommen):** Seit `SplitMixedTaskLists` (Eintrag #83, v7.42)
+      können NEUE Phantome beim Laden gar nicht mehr entstehen –
+      `dropEmptyCheckboxLines` heilt seitdem AUSSCHLIESSLICH noch
+      Bestandsdokumente, deren Korruption vor diesem Fix entstanden ist.
+      Deren Ursache (Eintrag #84) ist strukturell EINDEUTIG: Der Phantom
+      entstand IMMER aus "eine gewöhnliche Stichpunktliste GEFOLGT von
+      einer Checkliste MIT DEMSELBEN Marker" – der Phantom-Punkt wird
+      dabei von ProseMirrors Schema-Reparatur IMMER unmittelbar VOR die
+      (jetzt fälschlich in dieselbe Liste gezwungenen) NICHT-Checkbox-
+      Stichpunkte gesetzt. Ein Bestands-Phantom hat deshalb IMMER eine
+      ECHTE Nicht-Checkbox-Listenzeile als unmittelbaren Nachfolger (nach
+      Überspringen weiterer, ebenso leerer Checkbox-Zeilen aus mehreren
+      Bearbeitungszyklen UND loser Leerzeilen) – NIE eine weitere Checkbox
+      MIT Text, NIE das Abschnitts-/Dokumentende. Aktiv geprüft (wie vom
+      Reviewer verlangt, statt nur behauptet): "Checkliste zuerst bleibt
+      UNVERÄNDERT sicher" (Eintrag #84, eigener Test in
+      `tests/docEditorGhostCheckbox.test.jsx`) belegt bereits, dass die
+      Parser-Lücke NIE greift, wenn Checkbox-Punkte VOR den Nicht-Checkbox-
+      Punkten stehen – die Lücke (Eintrag #84) tritt strukturell nur bei
+      "Nicht-Task-Bullets ZUERST" auf. Es gibt also KEINEN historischen
+      Phantom-Fall, dessen Folgezeile eine weitere ECHTE Checkbox ist – die
+      Verengung verliert dadurch KEINEN Bestandsfall. Im Review zusätzlich
+      EMPIRISCH belegt statt nur strukturell abgeleitet: 13 über den
+      historischen Erzeugungspfad (Editor OHNE `SplitMixedTaskLists`)
+      konstruierte Konstellationen – inkl. `*`-Marker, leerer Bullet als
+      Nachbar, verschachtelte Liste, über Abschnittsgrenzen und dreifach
+      akkumuliert – erzeugten in KEINEM Fall ein Phantom mit einer
+      Checkbox-Zeile als Nachfolger; die Gegenproben ("Checkliste zuerst",
+      "Bullet + LEERE Checkbox") erzeugten erwartungsgemäß gar kein Phantom.
+    - **Zwei Randbedingungen der Signatur (Review-🔵, bewusst festgehalten
+      – die Begründung oben deckt sie NICHT ab):** (a) Sie setzt voraus,
+      dass der ZEUGE noch vorhanden ist. Wird ein Altdokument von Hand so
+      bearbeitet, dass die Nicht-Checkbox-Zeile verschwindet, bleibt das
+      Phantom dauerhaft stehen. Folgenlos, weil es dann von einer seit
+      v7.45 legitimen leeren Checkbox nicht mehr unterscheidbar IST – aber
+      es ist der einzige Weg, auf dem die Heilung nicht mehr greift.
+      (b) Ausnahme 3 greift ohnehin erst NACH Ausnahme 2: Das seit v7.41.2
+      dokumentierte verschachtelte Bestands-Phantom (`- Eltern` /
+      `  - [ ]` / `  - Kind`) scheitert bereits an `startsBlock`, NICHT am
+      fehlenden Zeugen – der wäre dort sogar vorhanden.
+    - **`dropEmptyCheckboxLines` (`DocEditor.jsx`), neue "Ausnahme 3":**
+      Ein Lauf aus einer oder mehreren leeren Checkbox-Zeilen am
+      Blockanfang gilt nur noch als Phantom, wenn nach dem Überspringen
+      ALLER direkt aufeinanderfolgenden leeren Checkbox-/Leerzeilen
+      tatsächlich eine ECHTE Nicht-Checkbox-Listenzeile folgt
+      (`isPhantomWitness`) – fehlt diese Folgezeile (Abschnitts-/
+      Dokumentende) oder folgt stattdessen eine WEITERE Checkbox (mit oder
+      ohne Text), bleibt die Zeile stehen. Die Vorschau MUSS über die
+      GESAMTE Serie hinwegschauen (nicht nur die unmittelbar nächste
+      Zeile) – sonst würde bei mehreren KASKADIERENDEN Phantomen
+      (`"- [ ]\n- [ ]\n- [ ]\n- Notiz"`) schon der zweite Phantom (seine
+      direkt nächste Zeile ist ja noch ein weiterer Phantom) fälschlich
+      als Nicht-Phantom gewertet – die bereits bestehenden Kaskaden-Tests
+      aus Eintrag #84 bleiben dadurch unverändert grün.
+    - **Nebenbefund des Reviewers behoben:** `"# T\n\n## A\n\n- [ ]"` war
+      der einzige gemessene, NICHT idempotente Fall (zweiter Zyklus
+      normalisierte nur noch die Schlusszeile) – da diese Zeile jetzt gar
+      nicht mehr angefasst wird, ist sie trivial idempotent (siehe Test
+      "ist idempotent für alle neu erhaltenen Fälle").
+    - **Zwei 🔵 aus demselben Review mitgenommen:**
+      1. Der Kommentar an `EmptyTaskMarkdownIt` (Eintrag #91) suggerierte
+         pauschal "unabhängig von der Listenposition/Priorität" – das gilt
+         NUR für die Position DER REGEL innerhalb von markdown-its eigener,
+         fest verdrahteten Regelkette (`core.ruler.before("inline", …)`
+         sortiert IMMER unmittelbar vor "inline" ein, unabhängig davon, wo
+         die Extension in der `useEditor()`-Liste steht), NICHT für die
+         Reihenfolge, in der tiptap-markdown mehrere `parse.setup(md)`-
+         Hooks VERSCHIEDENER Extensions aufruft (die folgt sehr wohl der
+         nach Priorität sortierten Extensions-Liste). Aktuell folgenlos
+         (keine zweite Extension registriert relativ zu "inline"), aber
+         die Formulierung wurde präzisiert, um bei einem künftigen zweiten
+         solchen Hook nicht in die Irre zu führen.
+      2. Eine inhaltsleere Checkbox rendert in `renderBlocks`
+         (`lib/markdown.jsx`) ein `<span>` OHNE jeden Inhalt (0×0) neben
+         der Checkbox – klickbar bleibt zwar weiterhin ausschließlich das
+         `<input>` selbst (unveränderter Vertrag mit `onToggleTask`), aber
+         der Punkt als GANZE Zeile war optisch/als Trefferfläche kaum
+         wahrzunehmen. Fix: NUR wenn das Label leer ist, bekommt das
+         `<span>` `inline-block` plus eine Mindesthöhe/-breite
+         (`min-h-[1.375rem] min-w-[1rem]`) – ein Punkt MIT echtem Text
+         bleibt unverändert (sein eigener Inhalt ist stets größer als
+         dieses Minimum). Bewusst KEIN zusätzlicher Klick-Handler auf dem
+         Label/der Zeile (Scope-Grenze, nur die vom Reviewer angefragte
+         Sichtbarkeits-/Platzkorrektur, keine Verhaltensänderung).
+    - **Tests:** `tests/docEditorGhostCheckbox.test.jsx` erweitert – die
+      bisherige Erwartung `dropEmptyCheckboxLines("- [ ]") === ""` wurde
+      auf `=== "- [ ]"` KORRIGIERT (mit Begründung im Testkommentar, siehe
+      dort) und ein neuer Block "v7.45.1: ein leerer ERSTER Punkt einer
+      ECHTEN, absichtlich leeren Checkliste bleibt erhalten" mit 10 Tests
+      ergänzt (ohne/mit Folgepunkten, mehrere leere Punkte am Block-
+      anfang, verschachtelt, `[x]`/`[X]`, Gegenprobe auf echte Bestands-
+      Phantome, Idempotenz). `tests/markdown.test.jsx` bekam einen Test
+      für die neue Mindesthöhe/-breite des leeren Checkbox-Labels.
+    - **Aktiv verifiziert, dass die neuen Tests ohne den Fix rot sind:**
+      Die neue Zusatzbedingung (`isPhantomWitness`-Prüfung) testweise durch
+      `true` ersetzt (alte, rein positionsbasierte Regel) – genau die 10
+      neuen Tests liefen rot, alle 31 vorher bestehenden Tests blieben
+      unverändert grün (kein Kollateralschaden an der eigentlichen
+      Phantom-Heilung). Fix wiederhergestellt, alle 41 Tests in der Datei
+      wieder grün, gesamt 1775/1775.
+    - **Bewusstes Restrisiko (unverändert gegenüber Eintrag #84):** Ein
+      BEREITS bestehendes Phantom, das GENAU als verschachtelter erster
+      Kindpunkt direkt nach seinem Elternpunkt in einem Bestandsdokument
+      steht, heilt dieses Sicherheitsnetz weiterhin NICHT automatisch (aus
+      reinem Text nicht mehr zuverlässig von einem echten, absichtlich
+      leeren Kindpunkt zu unterscheiden) – unverändert gegenüber Eintrag
+      #84, durch diese Nachbesserung weder verschärft noch gelöst.

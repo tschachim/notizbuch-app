@@ -230,12 +230,13 @@ export const stripEmptyCheckboxTrailingSpace = (md) =>
 // Blanko-Überschlag würde "- [ ] \n\n  - Kind" das Kind verwaisen lassen
 // (Review-Finding, v7.41.2 Nachbesserung).
 //
-// Ausnahme 2 (Review-Finding, v7.41.2 Nachbesserung): NUR eine Checkbox AM
-// ANFANG eines Listenblocks gilt als Phantom-Kandidat. Gemessen (v7.41.1
-// wie v7.41.2): Phantome entstehen AUSSCHLIESSLICH als ERSTES Element
-// ihres (ggf. bereits mehrfach akkumulierten) Listenblocks – nie als
-// zweiter/mittlerer/letzter Punkt. "Zeile anlegen und später ausfüllen"
-// ist dagegen ein Alltagsfall (Enter am Ende eines Checklistenpunkts legt
+// Ausnahme 2 (Review-Finding, v7.41.2 Nachbesserung, v7.45.1 WEITER
+// VERENGT – siehe DECISIONS #92): NUR eine Checkbox AM ANFANG eines
+// Listenblocks gilt überhaupt als Phantom-KANDIDAT. Gemessen (v7.41.1 wie
+// v7.41.2): Phantome entstehen AUSSCHLIESSLICH als ERSTES Element ihres
+// (ggf. bereits mehrfach akkumulierten) Listenblocks – nie als zweiter/
+// mittlerer/letzter Punkt. "Zeile anlegen und später ausfüllen" ist
+// dagegen ein Alltagsfall (Enter am Ende eines Checklistenpunkts legt
 // GENAU so einen neuen, noch leeren Punkt an) – OHNE diese Bedingung würde
 // die Funktion genau das lautlos wieder löschen. "Blockanfang" heißt
 // konkret: die zuvor bereits entschiedene (in "out" landende) Zeile davor
@@ -255,13 +256,62 @@ export const stripEmptyCheckboxTrailingSpace = (md) =>
 // automatisch – von SplitMixedTaskLists (verhindert NEUE Fälle beim Laden)
 // abgesehen bräuchte das eine Positionsinformation, die aus reinem Text
 // nicht mehr zuverlässig von echtem Nutzerinhalt zu unterscheiden ist.
+//
+// Ausnahme 3 (v7.45.1 NEU, siehe DECISIONS #92): "Blockanfang" (Ausnahme 2)
+// allein reicht seit v7.45 NICHT MEHR als Phantom-Signal – seit
+// EmptyTaskMarkdownIt (siehe dort) ist eine bewusst leer gelassene Checkbox
+// AUSDRÜCKLICHER, legitimer Nutzerinhalt, auch als ERSTER Punkt einer
+// Liste ("Checklisten-Knopf drücken, ersten Punkt noch leer lassen,
+// speichern" – GENAU der vom Nutzer gemeldete Fall). Ein TATSÄCHLICHES
+// Bestands-Phantom hat aber eine ZUSÄTZLICHE, eindeutige Signatur: Es
+// entstand IMMER aus "gewöhnliche Stichpunktliste GEFOLGT von einer
+// Checkliste MIT DEMSELBEN Marker" (siehe SplitMixedTaskLists oben) – der/
+// die Phantom-Punkt(e) steht/stehen deshalb IMMER unmittelbar VOR einer
+// ECHTEN Nicht-Checkbox-Listenzeile (nie vor einer weiteren Checkbox MIT
+// Text, nie am Ende eines Abschnitts/Dokuments ohne jede Folgezeile – die
+// Geister-Checkbox-Lücke griff laut Ursachenanalyse nur, wenn die
+// zusammengeführte Liste tatsächlich gemischten Inhalt hatte). Ein Lauf
+// aus einer oder mehreren leeren Checkbox-Zeilen am Blockanfang gilt
+// deshalb NUR NOCH dann als Phantom, wenn nach dem Überspringen ALLER
+// direkt aufeinanderfolgenden leeren Checkbox-/Leerzeilen tatsächlich eine
+// ECHTE Nicht-Checkbox-Listenzeile folgt (`isPhantomWitness` unten) – fehlt
+// diese Folgezeile (Abschnitts-/Dokumentende) oder folgt stattdessen eine
+// WEITERE Checkbox (mit oder ohne Text), bleibt die Zeile stehen. Aktiv
+// geprüft (siehe DECISIONS #92 und Tests): Die historische Phantom-
+// Erzeugung kann strukturell NIE "Phantom, gefolgt von einer weiteren
+// echten Checkbox" erzeugen ("Checkliste zuerst" ist laut
+// SplitMixedTaskLists-Ursachenanalyse nie betroffen) – die Verengung
+// verliert dadurch KEINEN realen Bestandsfall. Im Review zu v7.45.1
+// zusätzlich empirisch belegt: 13 über den HISTORISCHEN Erzeugungspfad
+// konstruierte Phantom-Konstellationen (inkl. "*"-Marker, leerer Bullet
+// als Nachbar, verschachtelt, über Abschnittsgrenzen, dreifach
+// akkumuliert) – in KEINER folgte auf ein Phantom eine Checkbox-Zeile.
+//
+// Zwei Randbedingungen, die diese Begründung NICHT abdeckt (Review-🔵,
+// damit die nächste Änderung hier nicht von einer Garantie ausgeht, die
+// es nicht gibt):
+//  (a) Die Signatur setzt voraus, dass der ZEUGE noch da ist. Wird ein
+//      Altdokument von Hand so bearbeitet, dass die Nicht-Checkbox-Zeile
+//      verschwindet, bleibt das Phantom dauerhaft stehen. Folgenlos, weil
+//      es dann von einer seit v7.45 legitimen leeren Checkbox nicht mehr
+//      unterscheidbar IST – aber die Heilung greift dort nicht mehr.
+//  (b) Diese Ausnahme greift ohnehin erst NACH Ausnahme 2: Das bekannte,
+//      seit v7.41.2 dokumentierte verschachtelte Bestands-Phantom
+//      ("- Eltern" / "  - [ ]" / "  - Kind") scheitert bereits an
+//      "startsBlock", NICHT am fehlenden Zeugen – der wäre dort sogar
+//      vorhanden.
+const BARE_EMPTY_CHECKBOX_RE = /^([ \t]*)- \[[ xX]\][ \t]*$/;
+const CHECKBOX_LINE_RE = /^[ \t]*[-*]\s+\[[ xX]\]/;
 export const dropEmptyCheckboxLines = (md) => {
   const lines = md.split("\n");
   const isListLine = (l) => /^[ \t]*(?:[-*]\s|\d+[.)]\s)/.test(l);
+  // Siehe "Ausnahme 3" oben: Phantom-Signatur ist "… gefolgt von einer
+  // ECHTEN Nicht-Checkbox-Listenzeile", NICHT irgendeine Folgezeile.
+  const isPhantomWitness = (l) => l !== undefined && isListLine(l) && !CHECKBOX_LINE_RE.test(l);
   const out = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const m = /^([ \t]*)- \[[ xX]\][ \t]*$/.exec(line);
+    const m = BARE_EMPTY_CHECKBOX_RE.exec(line);
     if (m) {
       const indent = m[1].length;
       // Folgeinhalt: direkt nächste Zeile, oder (loses Paar) eine Zeile
@@ -281,11 +331,24 @@ export const dropEmptyCheckboxLines = (md) => {
       const prev = out.length ? out[out.length - 1] : "";
       const startsBlock = prev.trim() === "" || !isListLine(prev);
       if (!hasChild && startsBlock) {
-        // Die Zeile selbst UND eine EINZELNE direkt folgende Leerzeile
-        // überspringen (sonst bliebe eine doppelte Leerzeile zurück, falls
-        // das Phantom vom nächsten Block per Leerzeile abgesetzt war).
-        if (lines[i + 1] === "") i++;
-        continue;
+        // Phantom-Zeuge (siehe "Ausnahme 3"): über die GESAMTE Serie
+        // direkt aufeinanderfolgender Leerzeilen UND weiterer, ebenfalls
+        // leerer Checkbox-Zeilen hinweg nach vorn schauen (nicht nur die
+        // unmittelbar nächste Zeile) – sonst würde bei mehreren
+        // KASKADIERENDEN Phantomen ("- [ ]\n- [ ]\n- [ ]\n- Notiz") schon
+        // der zweite Phantom (seine direkt nächste Zeile ist ja noch ein
+        // weiterer Phantom, keine "echte" Zeile) fälschlich als
+        // NICHT-Phantom gewertet.
+        let w = i + 1;
+        while (lines[w] === "" || BARE_EMPTY_CHECKBOX_RE.test(lines[w])) w++;
+        if (isPhantomWitness(lines[w])) {
+          // Die Zeile selbst UND eine EINZELNE direkt folgende Leerzeile
+          // überspringen (sonst bliebe eine doppelte Leerzeile zurück,
+          // falls das Phantom vom nächsten Block per Leerzeile abgesetzt
+          // war).
+          if (lines[i + 1] === "") i++;
+          continue;
+        }
       }
     }
     out.push(line);
@@ -2791,9 +2854,21 @@ export default function DocEditor({
       // #91): behebt eine ANDERE Parser-Lücke als SplitMixedTaskLists
       // (eine INHALTSLEERE Checkbox-Zeile wird von markdown-it-task-lists
       // beim Laden nie als Checkbox erkannt) – Reihenfolge zu
-      // SplitMixedTaskLists/TaskList irrelevant, der "parse.setup(md)"-Hook
-      // registriert seine core-Regel selbst positionsfest VOR "inline"
-      // (siehe dort), unabhängig von der Listenposition/Priorität hier.
+      // SplitMixedTaskLists/TaskList irrelevant, WEIL "md.core.ruler.
+      // before('inline', …)" seine Regel innerhalb von markdown-its EIGENER
+      // Regelkette IMMER unmittelbar vor der (einzigen, fest verdrahteten)
+      // "inline"-Kernregel einsortiert – unabhängig davon, an welcher
+      // Position/Priorität EmptyTaskMarkdownIt in DIESER Extensions-Liste
+      // steht. Das gilt NICHT allgemein für die Reihenfolge, in der
+      // tiptap-markdown mehrere "parse.setup(md)"-Hooks VERSCHIEDENER
+      // Extensions aufruft (die folgt sehr wohl der nach Priorität
+      // sortierten "extensionManager.extensions"-Liste, siehe
+      // MarkdownParser.js#parse und SplitMixedTaskLists' eigener
+      // "priority: 101" oben) – hier bleibt es folgenlos, weil aktuell
+      // KEINE andere Extension ebenfalls eine Regel relativ zu "inline"
+      // registriert; ein künftiger zweiter solcher Hook müsste diese
+      // Aufruf-Reihenfolge (und ob "before"/"after" dabei stabil bleibt)
+      // erneut prüfen.
       EmptyTaskMarkdownIt,
       TaskList,
       // nested:true (v7.41, Auftrag "Einrückungen"): Checklisten müssen

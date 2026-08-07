@@ -1297,6 +1297,20 @@ describe("DocView: inhaltsleere Checkbox an jeder Position (v7.45)", () => {
     expect(html).not.toContain(">[ ]");
   });
 
+  // v7.45.1 (Review-Finding 🔵): Ohne eigenen Text hatte das <span> neben
+  // der Checkbox bisher 0×0 Ausdehnung – die Checkbox selbst blieb zwar
+  // über <input> klickbar, der Punkt als Ganzes war aber schwer als eigene
+  // Zeile wahrzunehmen. Eine Mindesthöhe/-breite gibt ihm jetzt sichtbaren
+  // Platz, NUR wenn er wirklich leer ist – ein Punkt MIT echtem Text bleibt
+  // unverändert (sein eigener Inhalt ist ohnehin größer als das Minimum).
+  it("eine leere Checkbox bekommt eine Mindesthöhe/-breite fürs Label (Klickfläche/Sichtbarkeit), eine Checkbox MIT Text bleibt unverändert", () => {
+    const htmlEmpty = render("# T\n\n## A\n\n- [ ]");
+    expect(htmlEmpty).toMatch(/<span class="inline-block min-h-\[1\.375rem\] min-w-\[1rem\]">/);
+    const htmlText = render("# T\n\n## A\n\n- [ ] Text");
+    expect(htmlText).not.toContain("min-h-[1.375rem]");
+    expect(htmlText).toMatch(/<span class="">/);
+  });
+
   it("ein Dokument, dessen EINZIGER Inhalt eine leere Checkbox ist, rendert trotzdem eine Checkbox (kein Absturz, kein Literaltext)", () => {
     const html = render("# T\n\n## A\n\n- [ ]");
     expect(html.match(/type="checkbox"/g)).toHaveLength(1);

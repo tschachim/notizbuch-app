@@ -266,8 +266,24 @@ describe("dropEmptyCheckboxLines (v7.41.2, zusätzliches Sicherheitsnetz in save
     expect(dropEmptyCheckboxLines("- [ ]\n- Geschwister")).toBe("- Geschwister");
   });
 
-  it("funktioniert am Dokumentende ohne abschließenden Zeilenumbruch (Phantom ist hier das EINZIGE Element, kein Vorgänger)", () => {
-    expect(dropEmptyCheckboxLines("- [ ]")).toBe("");
+  // v7.45.1 KORRIGIERT (Review-Finding 🟡, siehe DECISIONS #92): Diese
+  // Erwartung stammte aus der Zeit VOR v7.45, in der eine leer angelegte
+  // Checkbox ohnehin nie als solche überlebte – "Phantom" und "absichtlich
+  // leerer, einziger Checklistenpunkt eines Abschnitts" waren textuell
+  // identisch UND beide unerwünscht. Seit v7.45 ist Letzteres ausdrücklich
+  // legitimer Nutzerinhalt (siehe EmptyTaskMarkdownIt) – ein KOMPLETT
+  // ALLEINSTEHENDES "- [ ]" (kein Vorgänger, KEINE Folgezeile) ist deshalb
+  // NICHT mehr automatisch ein Phantom (echte Bestands-Phantome haben immer
+  // eine ECHTE Nicht-Checkbox-Listenzeile als Nachfolger, siehe "Ausnahme
+  // 3" oben) und bleibt jetzt stehen. Exakt das vom Reviewer gemessene
+  // Nebenbefund-Muster ("# T\n\n## A\n\n- [ ]" → "# T\n\n## A\n", nicht
+  // idempotent) verschwindet dadurch ebenfalls ersatzlos.
+  it("ein KOMPLETT ALLEINSTEHENDES '- [ ]' (kein Vorgänger, keine Folgezeile) ist KEIN Phantom mehr und bleibt stehen (v7.45.1)", () => {
+    expect(dropEmptyCheckboxLines("- [ ]")).toBe("- [ ]");
+    expect(dropEmptyCheckboxLines("# T\n\n## A\n\n- [ ]")).toBe("# T\n\n## A\n\n- [ ]");
+    // Nebenbefund des Reviewers (nicht-idempotenter Fall) ist damit behoben.
+    const once = dropEmptyCheckboxLines("# T\n\n## A\n\n- [ ]");
+    expect(dropEmptyCheckboxLines(once)).toBe(once);
   });
 
   // Review-Finding v7.41.2 (🟡 1): Die Regel darf NUR den ersten Punkt eines
@@ -309,6 +325,74 @@ describe("dropEmptyCheckboxLines (v7.41.2, zusätzliches Sicherheitsnetz in save
       // nimmt diese schmale Luecke bewusst in Kauf.
       const md = "- Eltern\n  - [ ] ";
       expect(dropEmptyCheckboxLines(md)).toBe(md);
+    });
+  });
+
+  // v7.45.1 (Review-Finding 🟡, siehe DECISIONS #92): "Blockanfang" allein
+  // reichte bisher als Phantom-Signal – seit v7.45 ist eine bewusst leer
+  // gelassene Checkbox aber ausdrücklich legitimer Nutzerinhalt, AUCH als
+  // erster Punkt ("Checklisten-Knopf drücken, ersten Punkt noch leer
+  // lassen, speichern" – genau der vom Nutzer gemeldete Fall). Die Regel
+  // verlangt jetzt zusätzlich die ECHTE Phantom-Signatur: eine folgende
+  // NICHT-Checkbox-Listenzeile (siehe "Ausnahme 3" in DocEditor.jsx).
+  describe("v7.45.1: ein leerer ERSTER Punkt einer ECHTEN, absichtlich leeren Checkliste bleibt erhalten", () => {
+    it("ohne jeden Folgepunkt, ALS EINZIGER Punkt eines Abschnitts (Reviewer-Beispiel 2)", () => {
+      const md = "# T\n\n## A\n\n- [ ]";
+      expect(dropEmptyCheckboxLines(md)).toBe(md);
+    });
+
+    it("ohne jeden Folgepunkt, mitten im Dokument (danach folgt ein NEUER Abschnitt, keine Listenzeile)", () => {
+      const md = "# T\n\n## A\n\n- [ ]\n\n## B\n\nText";
+      expect(dropEmptyCheckboxLines(md)).toBe(md);
+    });
+
+    it("MIT Folgepunkten – gefolgt von einer WEITEREN echten Checkbox MIT Text (Reviewer-Beispiel 1)", () => {
+      const md = "# T\n\n- [ ]\n- [ ] Zwei";
+      expect(dropEmptyCheckboxLines(md)).toBe(md);
+    });
+
+    it("MIT mehreren echten Folge-Checkboxen", () => {
+      const md = "- [ ]\n- [ ] A\n- [ ] B";
+      expect(dropEmptyCheckboxLines(md)).toBe(md);
+    });
+
+    it("mehrere leere Punkte am Anfang, gefolgt von WEITEREN echten Checkboxen (KEIN Nicht-Checkbox-Folger) – bleiben alle erhalten", () => {
+      const md = "- [ ]\n- [ ]\n- [ ] A";
+      expect(dropEmptyCheckboxLines(md)).toBe(md);
+    });
+
+    it("verschachtelt: leerer erster Punkt einer eingerückten Unterliste MIT Folgepunkt bleibt erhalten", () => {
+      const md = "# T\n\n## A\n\n  - [ ]\n  - [ ] Zwei";
+      expect(dropEmptyCheckboxLines(md)).toBe(md);
+    });
+
+    it("verschachtelt: leerer erster Punkt einer eingerückten Unterliste als EINZIGER Punkt bleibt erhalten", () => {
+      const md = "# T\n\n## A\n\n  - [ ]";
+      expect(dropEmptyCheckboxLines(md)).toBe(md);
+    });
+
+    it("'- [x]'/'- [X]' (erledigt, leer) als erster Punkt bleiben ebenfalls erhalten, wenn kein Nicht-Checkbox-Folger kommt", () => {
+      expect(dropEmptyCheckboxLines("- [x]\n- [ ] Zwei")).toBe("- [x]\n- [ ] Zwei");
+      expect(dropEmptyCheckboxLines("- [X]")).toBe("- [X]");
+    });
+
+    it("Gegenprobe: ECHTE Bestands-Phantome (gefolgt von einer Nicht-Checkbox-Listenzeile) werden weiterhin entfernt – die Verengung heilt Altbestände unverändert", () => {
+      expect(dropEmptyCheckboxLines("- [ ]\n- Notiz")).toBe("- Notiz");
+      expect(dropEmptyCheckboxLines("- [ ]\n- [ ]\n- [ ]\n- Notiz")).toBe("- Notiz");
+      expect(dropEmptyCheckboxLines("## Abschnitt\n\n- [ ]\n- Notiz")).toBe("## Abschnitt\n\n- Notiz");
+    });
+
+    it("ist idempotent für alle neu erhaltenen Fälle", () => {
+      const cases = [
+        "# T\n\n## A\n\n- [ ]",
+        "# T\n\n- [ ]\n- [ ] Zwei",
+        "- [ ]\n- [ ] A\n- [ ] B",
+        "# T\n\n## A\n\n  - [ ]\n  - [ ] Zwei",
+      ];
+      for (const md of cases) {
+        expect(dropEmptyCheckboxLines(md)).toBe(md);
+        expect(dropEmptyCheckboxLines(dropEmptyCheckboxLines(md))).toBe(md);
+      }
     });
   });
 
