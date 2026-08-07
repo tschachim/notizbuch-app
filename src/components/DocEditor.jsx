@@ -614,6 +614,33 @@ function cellHasRenderableContent(cell) {
   });
   return has;
 }
+// v7.47-Fix (Datenkorruption, ECHTER Bug, "Bild/Formel als EINZIGER Inhalt
+// einer Tabellenzelle geht beim Speichern verloren"): BlockImage UND
+// MathBlock sind beide group:"block" (siehe Kommentare dort) – eine Zelle,
+// deren kompletter Inhalt NUR aus einem solchen Block-Atom besteht, hat
+// dadurch GAR KEINEN umschließenden Absatz mehr: Entweder weil markdown-it
+// Zelleninhalt ohnehin nie in ein <p> wrapt (Bild direkt beim Laden aus
+// rohem "| ![…](img:x) |") oder weil tiptap-markdowns normalizeBlocks
+// (MarkdownParser.js#extractElement) den nach dem Herausheben leeren <p>
+// komplett entfernt (Text+Bild-Fall, siehe Kopfkommentar bei
+// cellHasRenderableContent). "cell.childCount > 1" (Fall: Bild MIT Text
+// davor/danach) griff bereits vorher richtig – die Lücke war GENAU der
+// Fall "childCount === 1, aber dieses eine Kind ist kein Absatz, sondern
+// das Bild-/Formel-Atom selbst": cellHasRenderableContent prüft
+// "p.childCount === 0" auf cell.firstChild und hält ein Atom (childCount
+// immer 0, es hat ja keine eigenen Kinder) fälschlich für eine LEERE
+// Zelle – der Inhalt fiel beim Speichern lautlos weg (siehe
+// tests/docEditorTableBlockCells.test.jsx, aktiv als rot verifiziert).
+// Fix (Empfehlung Code-Reviewer, geprüft): eine solche Zelle zusätzlich
+// als NICHT GFM-darstellbar werten, GENAU wie eine Zelle mit mehreren
+// Absätzen – der bereits vorhandene HTML-Fallback (getHTMLFromFragment)
+// rendert das Atom über dessen eigene renderHTML()-Regel (funktioniert
+// nachweislich schon für den Text+Bild-Fall) und rettet den Inhalt. Trifft
+// NUR die drei tatsächlich problematischen Fälle (Bild/Formel ALLEIN,
+// ohne jeden Begleittext) – eine normale Textzelle (ein einzelner Absatz,
+// ggf. mit hartem Umbruch/Aufzählung, v7.44) bleibt unverändert im
+// schlankeren GFM-Pipe-Format, weil ihr einziges Kind weiterhin ein
+// "paragraph" ist.
 function gfmSerializable(table) {
   let ok = true;
   table.forEach((row, _o, i) => {
@@ -621,7 +648,8 @@ function gfmSerializable(table) {
       const headerOk = i === 0
         ? cell.type.name === "tableHeader"
         : cell.type.name !== "tableHeader";
-      if (!headerOk || cellHasSpan(cell) || cell.childCount > 1) ok = false;
+      const bareBlockAtom = cell.childCount === 1 && cell.firstChild.type.name !== "paragraph";
+      if (!headerOk || cellHasSpan(cell) || cell.childCount > 1 || bareBlockAtom) ok = false;
     });
   });
   return ok;

@@ -112,6 +112,48 @@ export async function ghListDir(cfg, path) {
   return data.filter((f) => f.type === "file").map((f) => ({ name: f.name, path: f.path, sha: f.sha }));
 }
 
+/* --- Notizbuch-Abgleich für den Hintergrund-Refresh (v7.47) --- */
+
+// Gleicht die lokal bekannte Notizbuch-Liste gegen die IDs ab, die eine
+// ghListDir-Auflistung von "notizbuecher/" (+ Root) tatsächlich noch
+// kennt (siehe App.jsx, maybeRefresh): Notizbücher, die remote nicht mehr
+// existieren (z. B. auf einem anderen Gerät gelöscht), werden lokal
+// ebenfalls entfernt; war eines davon das aktive Notizbuch, wechselt die
+// Aktivität auf das erste verbleibende. Bewusst OHNE jeden Seiteneffekt
+// (kein State/Ref) – der Aufrufer räumt docCache/docShas/collapsedAll/
+// quickNotesAll anhand von "removedIds" auf und ruft React-Setter nur bei
+// "changed:true" auf.
+//
+// v7.47-Fix (E2E-Befund, Race Condition): Ursache eines Fehlers, bei dem
+// ein GERADE ERST angelegtes (und sofort im Anschluss verschobenes)
+// Notizbuch kurzzeitig aus dem Verwalten-Dialog verschwand UND das aktive
+// Notizbuch unerwartet zur Wissensbasis wechselte, war NICHT diese
+// Zuordnungslogik selbst (sie verhält sich für eine tatsächlich veraltete
+// Eingabe korrekt), sondern dass "remoteIds" aus einer ghListDir-Anfrage
+// stammen kann, die VOR der lokalen Neuanlage gestartet wurde und deren
+// Antwort danach ankommt – das frisch angelegte Notizbuch fehlt in dieser
+// Momentaufnahme naturgemäß noch, obwohl es lokal (und remote, nach dem
+// bereits abgeschlossenen Commit) längst existiert. Diese Funktion kann
+// "wie alt" ihre Eingabe ist nicht selbst beurteilen (sie kennt keine
+// Epoche) – das übernimmt der Aufrufer (App.jsx, "notebookEpoch"-Ref,
+// analog zum bereits bestehenden "taskEpoch"-Muster bei
+// toggleTask/commitDocNb): eine Auflistung, die vor der letzten lokalen
+// Notizbuch-Anlage/-Löschung gestartet wurde, wird dort verworfen, statt
+// hier angewendet zu werden. Siehe tests/github.test.js für die reine
+// Zuordnungslogik und DECISIONS für die Herleitung des Gesamt-Fixes.
+export function reconcileNotebooksWithRemote(localNotebooks, activeId, remoteIds) {
+  const known = new Set(remoteIds);
+  const removedIds = localNotebooks.filter((n) => !known.has(n.id)).map((n) => n.id);
+  if (!removedIds.length) return { changed: false, notebooks: [...localNotebooks], activeId, removedIds: [] };
+  const kept = localNotebooks.filter((n) => known.has(n.id));
+  // Bliebe NICHTS übrig (z. B. eine komplett leere/kurzzeitig unlesbare
+  // Auflistung), lieber gar nichts tun, als den Nutzer vor einer leeren
+  // Notizbuch-Liste stehen zu lassen (wie zuvor in App.jsx inline).
+  if (!kept.length) return { changed: false, notebooks: [...localNotebooks], activeId, removedIds: [] };
+  const nextActiveId = removedIds.includes(activeId) ? kept[0].id : activeId;
+  return { changed: true, notebooks: kept, activeId: nextActiveId, removedIds };
+}
+
 /* --- Schreiben (serialisiert) --- */
 
 let writeQueue = Promise.resolve();

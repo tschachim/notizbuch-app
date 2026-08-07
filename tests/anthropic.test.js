@@ -350,6 +350,38 @@ describe("buildSystem", () => {
     expect(sys).toContain("NIEMALS ```-Codeblöcke oder Unicode");
   });
 
+  // v7.47, E2E-Befund: Das Modell behauptete nach einer manuellen Bearbeitung
+  // im Chat, eingerückte Zeilen ("![](img:…)"/"$x²+y²$" mit vier führenden
+  // Leerzeichen) würden deshalb NICHT als Bild/KaTeX dargestellt – nachgeprüft
+  // rendert beides seit v7.42 einwandfrei (Einzugs-Konvention, siehe
+  // DocEditor.jsx/lib/math.jsx). Der Systemprompt kannte diese seit v7.42
+  // bestehende Konvention bis dahin gar nicht, sodass das Modell mit
+  // veraltetem Weltwissen über Markdown-Einrückung (CommonMark: 4+
+  // Leerzeichen = Codeblock) argumentierte. Die neue Regel stellt richtig,
+  // OHNE die bestehende "nur gezäunte Codeblöcke"-Regel zu widersprechen.
+  it("kennt die Einzugs-Konvention (v7.42) und dementiert vorab, dass Einrückung Bilder/Formeln/Stichpunkte breche", () => {
+    const sys = buildSystem(nbs, "Wissensbasis", null);
+    expect(sys).toContain("Führende Leerzeichen am Zeilenanfang sind seit v7.42 die EINZUGS-KONVENTION der App");
+    expect(sys).toContain("2 Leerzeichen = eine Ebene");
+    // Review-Nachbesserung zu v7.47: Die 6-Ebenen-Grenze gilt NUR für das
+    // indent-Attribut (Absatz/Bild/Formel). Strukturelle Listen-
+    // verschachtelung ist bewusst unbegrenzt (siehe D15/D23) – ohne diesen
+    // Zusatz könnte das Modell ableiten, eine siebte Listenebene sei
+    // unzulässig.
+    expect(sys).toContain("die Grenze von 6 Ebenen gilt für Absätze, Bilder und Formeln");
+    expect(sys).toContain("verschachtelte Listen sind unbegrenzt tief");
+    expect(sys).toMatch(/Stichpunkte, Absätze, Bilder samt Bildunterschrift und Formeln werden .* korrekt eingerückt DARGESTELLT und funktionieren normal/);
+    expect(sys).toContain("behaupte im Chat NIEMALS, eine solche Einrückung breche die Darstellung");
+    // Bestehende Erhaltungs-/Nicht-selbst-Ändern-Konvention (Muster wie bei
+    // Farb-Auszeichnungen direkt darunter): eine vorhandene Einrückung bleibt
+    // unangetastet, statt vom Modell "korrigiert" zu werden.
+    expect(sys).toContain("Erhalte eine bestehende Einrückung beim Bearbeiten unverändert");
+    // Keine widersprüchliche Aussage: weiterhin AUSSCHLIESSLICH gezäunte
+    // Codeblöcke, nie über Einrückung erzeugt (konsistent mit der
+    // Codeblock-Regel direkt darüber).
+    expect(sys).toContain("KEINE eingerückten Codeblöcke");
+  });
+
   // v7.33 (E2E-Finding 🟡 C9b, Live-Befund): eine explizite Speicheranweisung
   // ("Notiere den Satz des Pythagoras…") blieb wirkungslos, weil ein
   // ähnlicher Eintrag in einem ANDEREN Notizbuch bereits existierte – das

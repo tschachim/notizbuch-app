@@ -1506,6 +1506,64 @@ describe("v7.44 Finding B1 nachgebessert: Absatz/Bild/Formel DIREKT nach einer 2
     // GANZER Punkt gehoben, unverändertes Alt-Verhalten für Nummerierungen.
     expect(out).toBe("# T\n\nEins\n\nFortsetzung3sp");
   });
+
+  // v7.47, docs/TESTFAELLE.md D23-Korrektur (E2E-Befund gegen v7.45.1): der
+  // Tester konnte "Einzug vergrößern" ein ZWEITES Mal klicken, bevor der
+  // Knopf ausgraut - D23 verlangte bis dahin "graut SOFORT nach dem ersten
+  // Klick aus". Ursache GENAU eingegrenzt (Auftrag: "Prüfe am Code, ab
+  // welcher Ebene der Knopf ausgraut" statt zu schätzen): Der ERSTE Klick
+  // nimmt die Fortsetzung IMMER strukturell in den Listenpunkt auf (Finding
+  // B1, oben). Ob danach schon ausgegraut ist, hängt an der generischen
+  // sinkListItem-Prüfung für den ZWEITEN Klick: die braucht einen
+  // VORANGEHENDEN Geschwister-Listenpunkt, unter den der GESAMTE Punkt
+  // (samt frisch aufgenommener Fortsetzung) eine Ebene tiefer sinken kann -
+  // keine feste Tiefenbegrenzung für strukturelle Listen-Verschachtelung
+  // (siehe "Finding 4" oben). Ohne einen solchen vorangehenden Punkt (wie im
+  // Test oben, "- Parent" ist der einzige Punkt seiner Liste) graut der
+  // Knopf schon nach dem ersten Klick aus - MIT einem vorangehenden Punkt
+  // (wie im gemeinsam genutzten QA-Test-Notizbuch nach vielen Testfällen der
+  // Normalfall) bleibt er nach dem ersten Klick noch aktiv.
+  it("mit einem VORANGEHENDEN Stichpunkt in derselben Liste bleibt der Knopf nach dem ersten Klick aktiv – erst der zweite Klick graut ihn aus", () => {
+    const md = "# T\n\n- Vorheriger Punkt\n- QA-Einzug-Punkt\n\nQA-Einzug-Fortsetzung";
+    const editor = buildEditor(md);
+    editor.commands.setTextSelection(posOfHeadingOrText(editor, "QA-Einzug-Fortsetzung"));
+
+    const applied1 = changeIndent(editor, 1); // 1. Klick: strukturelle Aufnahme, wie immer
+    const afterClick1 = saveLike(editor);
+    const canIncAfter1 = canChangeIndent(editor, 1); // NICHT ausgegraut (der eigentliche Fix-Nachweis)
+
+    const applied2 = changeIndent(editor, 1); // 2. Klick: sinkt eine Ebene tiefer unter "Vorheriger Punkt"
+    const afterClick2 = saveLike(editor);
+    const canIncAfter2 = canChangeIndent(editor, 1); // JETZT ausgegraut
+
+    editor.destroy();
+
+    expect(applied1).toBe(true);
+    expect(afterClick1).toBe("# T\n\n- Vorheriger Punkt\n- QA-Einzug-Punkt\n\n  QA-Einzug-Fortsetzung");
+    expect(canIncAfter1).toBe(true);
+
+    expect(applied2).toBe(true);
+    expect(afterClick2).toBe("# T\n\n- Vorheriger Punkt\n  - QA-Einzug-Punkt\n\n    QA-Einzug-Fortsetzung");
+    expect(canIncAfter2).toBe(false);
+
+    // Reload: der KNOPF-ZUSTAND bleibt stabil (die eigentliche D23-Garantie)
+    // – der Rohtext selbst normalisiert sich dabei EINMAL (eine zusätzliche
+    // Leerzeile vor der jetzt verschachtelten Unterliste, weil "Vorheriger
+    // Punkt" durch die aufgenommene Fortsetzung von "eng" auf "locker"
+    // wechselt – dieselbe, bereits als unkritisch dokumentierte Eigenheit
+    // wie bei Finding B2 oben) und ist AB DANN byte-identisch stabil.
+    const editor2 = buildEditor(afterClick2);
+    editor2.commands.setTextSelection(posOfHeadingOrText(editor2, "QA-Einzug-Fortsetzung"));
+    const canIncReload = canChangeIndent(editor2, 1);
+    const afterReload1 = saveLike(editor2);
+    editor2.destroy();
+    expect(canIncReload).toBe(false); // Knopf-Zustand UNVERÄNDERT über den Reload hinweg
+
+    const editor3 = buildEditor(afterReload1);
+    const afterReload2 = saveLike(editor3);
+    editor3.destroy();
+    expect(afterReload2).toBe(afterReload1); // ab dem zweiten Zyklus stabil
+  });
 });
 
 // Finding B2 (einmalige, NICHT-destruktive Markdown-Reformatierung –

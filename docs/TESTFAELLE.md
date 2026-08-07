@@ -1511,17 +1511,40 @@ DECISIONS #90 – löst die vormalige Finding-B1-Dokumentation aus #86 ab).**
 Editor öffnen, Stichpunkt „QA-Einzug-Punkt“ anlegen. Direkt danach einen
 normalen, NICHT eingerückten Absatz „QA-Einzug-Fortsetzung“ anlegen
 (z. B. Enter, dann Umschalt+Tab, um aus der Liste herauszuspringen).
-Cursor in diesen Absatz setzen, einmal „Einzug vergrößern“ klicken.
-Erwartet: Der Absatz rückt sichtbar unter „QA-Einzug-Punkt“ ein, UND
-„Einzug vergrößern“ wird SOFORT (noch VOR dem Speichern) ausgegraut,
-während „Einzug verkleinern“ aktiv bleibt. Speichern, Editor erneut
-öffnen: Erwartet, GENAU derselbe Knopf-Zustand („Einzug vergrößern“
-ausgegraut, „Einzug verkleinern“ aktiv) UND dieselbe Optik – KEIN Wechsel
-zwischen den beiden Sitzungen. Jetzt „Einzug verkleinern“ klicken:
-Erwartet, NUR „QA-Einzug-Fortsetzung“ löst sich aus dem Listenpunkt
-(erscheint danach als eigenständiger Absatz direkt nach der Liste),
-„QA-Einzug-Punkt“ bleibt UNVERÄNDERT ein Stichpunkt mit sichtbarem
-Aufzählungszeichen (NICHT der komplette Listenpunkt wird mit angehoben).
+Cursor in diesen Absatz setzen, „Einzug vergrößern“ klicken. Erwartet:
+Der Absatz rückt sichtbar unter „QA-Einzug-Punkt“ ein (er wird beim
+ERSTEN Klick strukturell Teil des Listenpunkts – kein bloßes optisches
+Einrücken). **Berichtigt (v7.47, E2E-Befund gegen v7.45.1 – das
+ursprünglich dokumentierte „graut SOFORT nach dem ersten Klick aus“ war
+zu eng gefasst, das eigentliche Verhalten ist gewollt):** Ob „Einzug
+vergrößern“ danach schon ausgegraut ist, hängt davon ab, ob VOR
+„QA-Einzug-Punkt“ bereits (mindestens) ein weiterer Stichpunkt in
+DERSELBEN Liste steht – im länger genutzten QA-Test-Notizbuch nach den
+vorangehenden Testfällen der Normalfall. Ist das so, bleibt der Knopf
+nach dem ersten Klick noch AKTIV: Ein zweiter Klick lässt „QA-Einzug-
+Punkt“ samt seiner Fortsetzung eine Ebene TIEFER unter den vorherigen
+Stichpunkt sinken (sichtbar an einer weiteren, spürbar größeren
+Einrückung – strukturelle Listenverschachtelung kennt bewusst keine feste
+Tiefenbegrenzung, siehe D15). Am Code nachgeprüft: Bei GENAU
+einem vorangehenden Stichpunkt graut der Knopf GENAU nach diesem zweiten
+Klick aus; steht „QA-Einzug-Punkt“ dagegen als ERSTER/EINZIGER Stichpunkt
+seiner Liste da, graut er schon nach dem ersten Klick aus. Beide Fälle
+sind korrekt – **so oft „Einzug vergrößern“ klicken, bis der Knopf
+tatsächlich ausgraut**, und sich die Klickzahl (dafür „Einzug
+verkleinern“ gleich oft) für den folgenden Reload-Vergleich merken.
+Speichern, Editor erneut öffnen: Erwartet, GENAU derselbe Knopf-Zustand
+(„Einzug vergrößern“ ausgegraut, „Einzug verkleinern“ aktiv) UND dieselbe
+Optik – KEIN Wechsel zwischen den beiden Sitzungen. Jetzt „Einzug
+verkleinern“ genau so oft klicken, wie zuvor „Einzug vergrößern“ nötig
+war: Erwartet, jeder Klick macht GENAU eine Verschachtelungsebene
+rückgängig (bei mehr als einem vorherigen Vergrößern-Klick sinkt „QA-
+Einzug-Punkt“ zwischenzeitlich wieder eine Ebene nach oben, bleibt dabei
+aber durchgehend ein Stichpunkt mit sichtbarem Aufzählungszeichen); erst
+der LETZTE Klick löst „QA-Einzug-Fortsetzung“ tatsächlich aus dem
+Listenpunkt heraus (erscheint danach als eigenständiger Absatz direkt
+nach der Liste). Am Ende in jedem Fall: „QA-Einzug-Punkt“ bleibt
+UNVERÄNDERT ein Stichpunkt an seiner ursprünglichen Stelle in der Liste
+(NICHT der komplette Listenpunkt wird mit angehoben).
 Zusätzlich: Ein Bild direkt unter „QA-Einzug-Punkt“ einfügen, gefolgt von
 einer kursiven Bildunterschrift, BEIDE zusammen markieren (Mausauswahl
 vom Bild bis ans Ende der Unterschrift) und EINMAL „Einzug vergrößern“

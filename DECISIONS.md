@@ -9705,3 +9705,171 @@ aus `referenz-app.jsx` übernommen.
       vor dem Schluss-Zaun eines Codeblocks in einem Listenpunkt frei" –
       der im Auftrag gemessene und primär geforderte Fall (keine
       Leerzeile im Original) bleibt vollständig byte-identisch.
+
+95. **v7.47, Fehler 1 (Datenkorruption, ECHTER Bug): Ein Bild oder eine
+    Formel als EINZIGER Inhalt einer Tabellenzelle ging beim Speichern
+    verloren.** Vom Code-Reviewer ohne jedes Pipe im Spiel gemessen:
+    `"| x | ![alt](img:x) |"` wurde nach Laden+Speichern zu `"| x |  |"`
+    (Bild weg); stand zusätzlich Begleittext in der Zelle
+    (`"| x | Text ![alt](img:x) Text |"`), blieb alles erhalten.
+    - **Ursache, genau eingegrenzt:** `BlockImage` UND `MathBlock`
+      (`DocEditor.jsx`) sind beide `group:"block"` (siehe deren eigene
+      Kommentare) – eine Zelle, deren KOMPLETTER Inhalt nur aus einem
+      solchen Block-Atom besteht, hat dadurch GAR KEINEN umschließenden
+      Absatz mehr: markdown-it wrapt Zellinhalt beim Laden ohnehin nie in
+      ein `<p>` (GFM-Tabellenzellen sind reiner Inline-Kontext), und selbst
+      wenn eine Zelle vorher Text+Bild enthielt und der Text entfernt
+      wurde, entfernt tiptap-markdowns `normalizeBlocks`
+      (`MarkdownParser.js#extractElement`) ein dadurch leer gewordenes
+      `<p>` komplett. `cellHasRenderableContent` (`MdTable`, `DocEditor.jsx`)
+      prüfte bislang nur `cell.firstChild.childCount === 0`, um eine LEERE
+      Zelle zu erkennen – ein Atom (Bild/Formel) hat aber IMMER
+      `childCount === 0` (es hat keine eigenen Kinder), wurde dadurch
+      fälschlich für leer gehalten, und `state.renderInline(cell.firstChild)`
+      wurde nie aufgerufen. `gfmSerializable`s bestehende Prüfung
+      `cell.childCount > 1` (Fall: Bild MIT Text davor/danach – dort bleibt
+      neben dem Bild mindestens ein zweiter Absatz-Rest übrig) griff aus
+      demselben Grund NICHT: bei einem BLOSSEN Bild/einer BLOSSEN Formel
+      bleibt `cell.childCount === 1` (nur das Atom selbst), die Zelle galt
+      also fälschlich als GFM-darstellbar.
+    - **Fix (Empfehlung des Code-Reviewers, geprüft und übernommen):**
+      `gfmSerializable` wertet eine Zelle zusätzlich als NICHT
+      GFM-darstellbar, wenn sie genau EIN Kind hat, das KEIN `paragraph`
+      ist (`cell.childCount === 1 && cell.firstChild.type.name !== "paragraph"`)
+      – der bereits vorhandene HTML-Fallback (`getHTMLFromFragment`)
+      rendert das Atom dann über dessen eigene `renderHTML()`-Regel (exakt
+      derselbe, bereits für den Text+Bild-Fall bewährte Mechanismus) und
+      rettet den Inhalt. Eine gewöhnliche Textzelle (ein einziger Absatz,
+      ggf. mit hartem Umbruch/Aufzählung, v7.44) bleibt davon unberührt und
+      weiterhin im schlankeren GFM-Pipe-Format, weil ihr einziges Kind ein
+      `paragraph` ist.
+    - **Aktiv verifiziert, dass die neuen Tests ohne den Fix rot sind**
+      (`tests/docEditorTableBlockCells.test.jsx`, per `git stash` auf den
+      unveränderten Stand zurückgesetzt): genau die 5 Tests, die ein Bild
+      bzw. eine Formel ALLEIN in einer Zelle betreffen, lieferten
+      `"| x |  |"` bzw. `"|  | 4 |"` (Inhalt weg) – alle anderen (Text+Bild,
+      zwei Absätze, `<br>`+Aufzählung, leere/gewöhnliche Zelle) waren schon
+      vorher grün. Fix wiederhergestellt, alle 12 Tests grün.
+    - **Formelblock ($$…$$) als einziger Zellinhalt entsteht NICHT über
+      eine rohe Markdown-Zeile** (`mathToPlaceholders`/`DISPLAY_MATH_START_RE`
+      verlangt `"$$"` am Zeilenanfang – innerhalb einer Pipe-Zeile bleibt
+      `"$$…$$"` deshalb bewusst literaler Text, siehe `math.jsx`), IST aber
+      über den Formel-Knopf/Paste erreichbar, während der Cursor in einer
+      Tabellenzelle steht (ProseMirror erlaubt jeden `"block"`-Node in
+      einer Zelle mit `content:"block+"`) – die Tests bauen diesen Fall
+      deshalb direkt über ProseMirror-JSON auf, statt ihn (erfolglos) über
+      einen Markdown-String zu laden.
+    - **Bewusste Grenze:** Der HTML-Fallback ist optisch/im Rohtext
+      schlechter lesbar als eine reine GFM-Pipe-Zeile – er greift deshalb
+      bewusst NUR in genau den drei problematischen Fällen (Bild allein,
+      Formel allein, mehrere Absätze), nicht bei jeder Zelle mit
+      irgendeinem Nicht-Text-Inhalt.
+
+96. **v7.47, Fehler 2 (E2E-Befund gegen v7.41, Race Condition): Ein gerade
+    angelegtes Notizbuch verschwand nach einer unmittelbar folgenden
+    Sortier-Aktion kurzzeitig aus dem Verwalten-Dialog, UND das aktive
+    Notizbuch wechselte unerwartet zur Wissensbasis.** Reload zeigte wieder
+    alle Einträge in der alten Reihenfolge (kein Datenverlust); ein
+    zweiter, identischer Klick funktionierte einwandfrei.
+    - **NICHT als Live-Timing-Race reproduziert** (Auftrag: ausdrücklich
+      berichten, falls nicht reproduzierbar, statt einen Fix ins Blaue zu
+      bauen) – ein originalgetreuer Nachbau hätte den gesamten
+      `connect()`-Abhängigkeitsgraphen (ca. ein Dutzend GitHub-Endpunkte in
+      fester Reihenfolge) UND eine exakte Netzwerk-Timing-Verzahnung mit
+      einem 25s-Hintergrund-Poll simulieren müssen – genau die Grenze, die
+      `vitest.config.js` bewusst zieht ("Unit-Tests decken `src/lib` ab,
+      die UI wird über End-to-End-Testfälle geprüft"). Stattdessen den
+      Mechanismus per Code-Analyse GENAU eingegrenzt und über eine isolierte
+      Unit-Testsuite belegt, die exakt den fehlerhaften Zustand nachbildet.
+    - **Ursache, genau eingegrenzt:** WEDER die Sortier-Aktion selbst noch
+      ein verschluckter SHA-Konflikt beim Schreiben von `state.json` (ein
+      solcher Konflikt betrifft ausschließlich "order"/"chat" INNERHALB von
+      `state.json`, niemals das im React-State gehaltene `notebooks`-Array
+      selbst, siehe `flushState`, unverändert) – sondern `maybeRefresh`
+      (App.jsx, Fokus-/Poll-Refresh, Eintrag #4): dessen `ghListDir`-
+      Momentaufnahme des `notizbuecher/`-Ordners läuft KOMPLETT
+      unabhängig vom Schreib-Warteschlangen-Mechanismus in `lib/github.js`
+      (der serialisiert nur `ghPutFile`/`ghDeleteFile`, niemals Lesezugriffe)
+      und kann – ausgelöst durch den alle 25s laufenden Hintergrund-Poll,
+      unabhängig vom Klick auf „nach oben“ – bereits VOR einer Notizbuch-
+      Neuanlage gestartet worden sein und erst NACH ihr auswerten. Eine
+      SOLCHE veraltete Auflistung kennt das frisch angelegte (lokal längst
+      bekannte) Notizbuch naturgemäß noch nicht; die bisherige Logik
+      behandelte es dadurch identisch zu einem ECHTEN „auf einem anderen
+      Gerät gelöscht“ – inklusive Aktiv-Wechsel, falls es das aktive
+      Notizbuch war (`nbs[0]` als neues aktives Notizbuch, typischerweise
+      die Wissensbasis). Die anschließende Reihenfolge-Änderung durch
+      „nach oben“ ging dabei nicht separat verloren, sondern WAR bereits
+      Teil des lokalen `notebooksRef.current`-Stands, den `maybeRefresh`
+      komplett durch die veraltete, gefilterte Liste ersetzte.
+    - **Fix:** `notebookEpoch`-Ref (App.jsx, exakt nach dem Muster des
+      bereits bestehenden `taskEpoch` bei `toggleTask`/`commitDocNb`) –
+      erhöht sich bei jeder strukturellen Notizbuch-Änderung (Anlegen/
+      Löschen; Umbenennen/Verschieben ändern die REMOTE-Dateimenge nicht
+      und bleiben deshalb außen vor). `maybeRefresh` stempelt seine
+      `ghListDir`-Momentaufnahme beim Start (VOR beiden Listing-Aufrufen,
+      nicht erst danach) mit dem aktuellen Epochenwert; weicht dieser beim
+      Auswerten ab, gilt die Momentaufnahme als zu alt – der komplette
+      Abgleich (inkl. der "als neu entdeckt"-Zweig, der spiegelbildlich ein
+      GERADE GELÖSCHTES Notizbuch fälschlich wiederbeleben könnte) wird für
+      diesen Durchlauf übersprungen, der nächste 15s-gedrosselte Poll holt
+      eine frische Liste. Die reine Zuordnungslogik (welche Notizbücher bei
+      gegebenen, GARANTIERT frischen Remote-IDs entfernt werden und wohin
+      die Aktivität wechselt) wandert dafür als pure, seiteneffektfreie
+      Funktion `reconcileNotebooksWithRemote` nach `lib/github.js` – das
+      macht sie unit-testbar (App.jsx-Orchestrierung bleibt laut
+      `vitest.config.js` bewusst E2E-Territorium).
+    - **Tests** (`tests/github.test.js`, neu, 7 Fälle): nichts entfernt
+      (unveränderte Referenz zurück, kein Re-Render-Trigger), ein
+      NICHT-aktives Notizbuch entfernt (Aktivität bleibt), das AKTIVE
+      Notizbuch entfernt (Aktivität wechselt aufs erste verbleibende),
+      mehrere gleichzeitig entfernt, kein einziges bleibt übrig (No-op),
+      leere lokale Liste (No-op), UND explizit der Vertrag dokumentiert,
+      dass diese Funktion selbst eine zu alte Eingabe NICHT erkennen kann
+      (sie bekommt nur IDs, keine Epoche) – GENAU deshalb prüft App.jsx die
+      Epoche VOR dem Aufruf, statt es dieser Funktion aufzubürden.
+    - **Beim Testschreiben gefundener, zusätzlicher ECHTER Bug (vor dem
+      eigentlichen Fix behoben):** Der ursprüngliche Refactoring-Entwurf
+      ließ `reconcileNotebooksWithRemote` im unveränderten Fall dieselbe
+      Array-Referenz wie `notebooksRef.current` zurückgeben; die
+      nachfolgende Schleife (Namens-Sync/neu entdeckte Notizbücher)
+      mutierte diese Liste bei Bedarf per `push`/Index-Zuweisung – träfe
+      das GENAU die Referenz, die React bereits als `notebooks`-State
+      kennt, hätte `setNotebooks(nbs)` wegen `Object.is`-Gleichheit KEINEN
+      Re-Render ausgelöst, selbst wenn sich der Inhalt änderte. Behoben,
+      indem `nbs` in JEDEM Fall eine frische Kopie ist.
+    - **Bewusste Grenze:** Ein analoges Risiko besteht theoretisch auch für
+      den NAME-Abgleich beim Umbenennen (derselbe `maybeRefresh`-Durchlauf,
+      separater Codepfad) – nicht Teil dieses Auftrags (der E2E-Befund
+      betraf ausschließlich Anlegen+Sortieren) und deshalb bewusst nicht
+      mit angefasst, um den Diff auf den gemeldeten Fall zu beschränken.
+
+97. **v7.47, Fehler 3: Der Systemprompt kannte die seit v7.42 bestehende
+    Einzugs-Konvention nicht und ließ das Modell im Chat fälschlich
+    behaupten, eingerückte Bilder/Formeln würden NICHT dargestellt.**
+    E2E-Befund: Nach einer manuellen Bearbeitung kommentierte das Modell,
+    eingerückte Zeilen `![](img:…)`/`$x²+y²$` (vier Leerzeichen) seien
+    deshalb „NICHT als Bild“ bzw. „NICHT als KaTeX“ gerendert – nachgeprüft
+    rendert beides einwandfrei (drei Bilder mit `naturalWidth`>0, zwei
+    `.katex`-Elemente, null Codeblöcke). Ursache: Der Systemprompt
+    (`lib/anthropic.js`) erwähnte Einrückung mit keinem Wort – das Modell
+    argumentierte stattdessen mit seinem allgemeinen Markdown-Weltwissen
+    (CommonMark: 4+ Leerzeichen = eingerückter Codeblock), das für DIESE
+    App seit der v7.42-Einzugs-Konvention (2 Leerzeichen je Ebene, bis 6
+    Ebenen, siehe `DocEditor.jsx`/`lib/math.jsx`) nicht mehr gilt.
+    - **Fix:** Neue Regel in KONVENTIONEN IN JEDEM NOTIZBUCH, direkt bei der
+      bestehenden Codeblock-Regel (thematische Nähe: beide behandeln, was
+      Einrückung/Zäune bedeuten): führende Leerzeichen sind die
+      Einzugs-Konvention der App; Stichpunkte, Absätze, Bilder samt
+      Bildunterschrift und Formeln werden dabei korrekt eingerückt
+      dargestellt und funktionieren normal. Bestehende Einrückung soll
+      erhalten, nicht "korrigiert" werden, und das Modell soll im Chat
+      NIEMALS behaupten, Einrückung breche die Darstellung. Ausdrücklich
+      klargestellt, dass das die bestehende "nur gezäunte Codeblöcke"-Regel
+      NICHT aufweicht (keine eingerückten Codeblöcke).
+    - **Geprüft, ob der Prompt an anderer Stelle etwas Gegenteiliges sagt:**
+      Keine weitere Erwähnung von Einrückung/führenden Leerzeichen im
+      gesamten Prompt (Volltextsuche) – nichts aufzuräumen.
+    - **Test:** `tests/anthropic.test.js`, neuer Vertragstest im Stil der
+      bestehenden FORMELN-/Codeblock-Tests (`toContain`/`toMatch` auf den
+      gebauten System-Prompt).

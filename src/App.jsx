@@ -19,7 +19,7 @@ import { MODELS, callClaude } from "./lib/anthropic.js";
 import { buildFeedbackTrigger, isNoFeedback, dedupeFeedbackParagraphs } from "./lib/feedback.js";
 import {
   ShaConflictError, utf8ToB64, ghGetFile, ghGetBlob, ghListDir, ghPutFile,
-  ghDeleteFile, ghListCommits, ghCommitMeta, ghCheckRepo,
+  ghDeleteFile, ghListCommits, ghCommitMeta, ghCheckRepo, reconcileNotebooksWithRemote,
 } from "./lib/github.js";
 import {
   KNOWLEDGE_EXTS, knowledgeDir, safeFileName, extractPathFor, isExtractPath,
@@ -617,6 +617,22 @@ export default function NotizbuchApp() {
   const knowledgeFileRef = useRef(null);
   const taskChain = useRef(Promise.resolve());
   const taskEpoch = useRef(0);
+  // v7.47: erhöht sich bei JEDER lokalen Notizbuch-Änderung – Anlegen,
+  // Löschen, Umbenennen UND Verschieben. maybeRefresh (Fokus-Refresh)
+  // stempelt seine ghListDir-Momentaufnahme beim Start mit dem aktuellen
+  // Wert; weicht er beim Auswerten ab, gilt die Momentaufnahme als zu alt.
+  // Sie schützt zwei Pfade (Review-Nachbesserung zu v7.47 – anfangs war nur
+  // der erste gesehen, was genau ein Symptom des E2E-Befunds offenließ):
+  //  (1) den Reconcile – sonst würde ein lokal frisch angelegtes Notizbuch,
+  //      das in der älteren Fernliste noch fehlt, als "remote gelöscht"
+  //      gewertet (siehe reconcileNotebooksWithRemote in lib/github.js);
+  //  (2) das ZURÜCKSCHREIBEN der Liste am Ende von maybeRefresh: "nbs" ist
+  //      dort eine Momentaufnahme von VOR der ghGetFile-Schleife (mit einem
+  //      await je Eintrag). Wird währenddessen verschoben oder umbenannt,
+  //      schriebe setNotebooks(nbs) die alte Reihenfolge bzw. den alten
+  //      Namen zurück. Deshalb erhöhen moveNotebook/renameNotebook die
+  //      Epoche mit, obwohl sie die REMOTE-Dateimenge nicht verändern.
+  const notebookEpoch = useRef(0);
   const connectedRef = useRef(false);
   const busyRef = useRef(false);
   const editingRef = useRef(false);
@@ -1121,6 +1137,11 @@ export default function NotizbuchApp() {
         // Alle Notizbuch-Dateien nachziehen: neue entdecken, geänderte laden.
         // Die Root-SHA kommt aus dem Wurzel-Listing – so lädt der Poll das
         // Root-Dokument nur bei echter Änderung statt bei jedem Durchgang.
+        // "nbReadEpoch" hält fest, auf welchem lokalen Notizbuch-Stand DIESE
+        // Momentaufnahme beruht (siehe notebookEpoch-Deklaration oben) – erst
+        // NACH beiden Listings gelesen wäre bereits zu spät (ein Anlegen
+        // GENAU zwischen den beiden ghListDir-Aufrufen bliebe unentdeckt).
+        const nbReadEpoch = notebookEpoch.current;
         const rootList = await ghListDir(cfg, "");
         const rootEntry = rootList.find((f) => f.name === "wissensbasis.md");
         const entries = [{ id: ROOT_NB_ID, path: "wissensbasis.md", sha: rootEntry ? rootEntry.sha : null }];
@@ -1132,42 +1153,49 @@ export default function NotizbuchApp() {
           }
         }
         // Seit dem ghListDir-await kann ein send()/edit gestartet sein –
-        // dann docCache/aktives Notizbuch nicht mehr anfassen.
-        if (busyRef.current || editingRef.current) return;
+        // dann docCache/aktives Notizbuch nicht mehr anfassen. GENAUSO, wenn
+        // zwischenzeitlich ein Notizbuch angelegt/gelöscht wurde (v7.47-Fix,
+        // siehe DECISIONS): "entries" ist dann eine zu alte Momentaufnahme,
+        // die das neue/gelöschte Notizbuch naturgemäß noch nicht kennt – ein
+        // darauf gestützter Abgleich würde es fälschlich als "anderswo
+        // gelöscht" behandeln (und ggf. das aktive Notizbuch wegschalten).
+        // Der nächste, 15s-gedrosselte Durchlauf holt eine frische Liste.
+        if (busyRef.current || editingRef.current || notebookEpoch.current !== nbReadEpoch) return;
         let nbsChanged = false;
-        let nbs = [...notebooksRef.current];
-        // Auf einem anderen Gerät gelöschte Notizbücher auch hier entfernen
-        // (Root nur, wenn andere existieren – sonst legt connect sie neu an).
-        const known = new Set(entries.map((e) => e.id));
-        if (nbs.some((n) => !known.has(n.id))) {
-          const removed = nbs.filter((n) => !known.has(n.id));
-          nbs = nbs.filter((n) => known.has(n.id));
-          if (nbs.length) {
-            nbsChanged = true;
-            for (const r of removed) {
-              delete docCache.current[r.id];
-              delete docShas.current[r.id];
-            }
-            setCollapsedAll((prev) => {
-              const next = { ...prev };
-              for (const r of removed) delete next[r.id];
-              return next;
-            });
-            setQuickNotesAll((prev) => {
-              const next = { ...prev };
-              for (const r of removed) delete next[r.id];
-              return next;
-            });
-            if (removed.some((r) => r.id === activeNbRef.current)) {
-              const first = nbs[0];
-              setActiveNb(first.id);
-              activeNbRef.current = first.id;
-              setDoc(docCache.current[first.id] ?? INITIAL_DOC);
-              setActiveSec(0);
-              refreshMeta(cfg, first.path);
-            }
-          } else {
-            nbs = [...notebooksRef.current]; // nichts übrig – lieber nichts tun
+        const reconciled = reconcileNotebooksWithRemote(
+          notebooksRef.current, activeNbRef.current, entries.map((e) => e.id)
+        );
+        // Immer eine FRISCHE Kopie (auch im "changed:false"-Fall liefert
+        // reconcileNotebooksWithRemote dieselbe Referenz wie
+        // notebooksRef.current zurück) - der Schleife unten mutiert "nbs"
+        // ggf. per push/Index-Zuweisung; träfe das die IDENTISCHE Referenz,
+        // die React bereits als "notebooks"-State kennt, würde
+        // "setNotebooks(nbs)" unten wegen Object.is-Gleichheit KEINEN
+        // Re-Render auslösen, selbst wenn "nbsChanged" true ist.
+        let nbs = [...reconciled.notebooks];
+        if (reconciled.changed) {
+          nbsChanged = true;
+          for (const rid of reconciled.removedIds) {
+            delete docCache.current[rid];
+            delete docShas.current[rid];
+          }
+          setCollapsedAll((prev) => {
+            const next = { ...prev };
+            for (const rid of reconciled.removedIds) delete next[rid];
+            return next;
+          });
+          setQuickNotesAll((prev) => {
+            const next = { ...prev };
+            for (const rid of reconciled.removedIds) delete next[rid];
+            return next;
+          });
+          if (reconciled.activeId !== activeNbRef.current) {
+            const nextActive = nbs.find((n) => n.id === reconciled.activeId);
+            setActiveNb(reconciled.activeId);
+            activeNbRef.current = reconciled.activeId;
+            setDoc(docCache.current[reconciled.activeId] ?? INITIAL_DOC);
+            setActiveSec(0);
+            if (nextActive) refreshMeta(cfg, nextActive.path);
           }
         }
         for (const en of entries) {
@@ -1189,6 +1217,17 @@ export default function NotizbuchApp() {
             refreshMeta(cfg, en.path);
           }
         }
+        // Epoche ERNEUT prüfen (Review-Nachbesserung zu v7.47): Die Schleife
+        // oben enthält pro Eintrag ein await, "nbs" ist eine Momentaufnahme
+        // von VOR der Schleife. Hat der Nutzer währenddessen verschoben,
+        // umbenannt, angelegt oder gelöscht (alle vier erhöhen die Epoche,
+        // siehe Deklaration), schriebe setNotebooks(nbs) hier den ALTEN
+        // Stand zurück – genau das dritte Symptom des E2E-Befunds
+        // ("angelegt UND SOFORT VERSCHOBEN"). Die Prüfung VOR der Schleife
+        // allein reicht dafür nicht, weil das Fenster erst danach entsteht.
+        // Verworfen wird nur dieser eine Durchlauf; der nächste (15 s
+        // gedrosselt) holt eine frische Liste.
+        if (notebookEpoch.current !== nbReadEpoch) return;
         if (nbsChanged) { setNotebooks(nbs); notebooksRef.current = nbs; }
 
         // Chat/Modell/Klappzustände nur übernehmen, wenn lokal weder eine
@@ -1858,6 +1897,7 @@ export default function NotizbuchApp() {
       const nbs = [...notebooksRef.current, { id, path, name }];
       setNotebooks(nbs);
       notebooksRef.current = nbs;
+      notebookEpoch.current++; // siehe Deklaration oben: schützt vor einem gleichzeitigen, veralteten Fokus-Refresh
       setActiveNb(id);
       activeNbRef.current = id;
       setDoc(init);
@@ -1882,6 +1922,15 @@ export default function NotizbuchApp() {
     [nbs[i], nbs[j]] = [nbs[j], nbs[i]];
     setNotebooks(nbs);
     notebooksRef.current = nbs;
+    // Schützt zusätzlich den RÜCKSCHREIB-Pfad von maybeRefresh (Review-Fund
+    // zu v7.47): Dort ist "nbs" eine Momentaufnahme von VOR der
+    // ghGetFile-Schleife. Verschiebt der Nutzer währenddessen ein
+    // Notizbuch, würde ein anderweitig ausgelöstes setNotebooks(nbs) die
+    // ALTE Reihenfolge zurückschreiben – genau das dritte Symptom des
+    // E2E-Befunds ("angelegt UND SOFORT VERSCHOBEN"). Die Remote-Dateimenge
+    // ändert sich dabei zwar nicht, die Epoche schützt aber nicht nur den
+    // Reconcile, sondern auch dieses Zurückschreiben.
+    notebookEpoch.current++;
   };
 
   // Umbenennen = H1-Titelzeile der Datei ändern (die Datei ist die einzige
@@ -1912,6 +1961,10 @@ export default function NotizbuchApp() {
       const nbs = notebooksRef.current.map((n) => (n.id === id ? { ...n, name } : n));
       setNotebooks(nbs);
       notebooksRef.current = nbs;
+      // Wie bei moveNotebook (siehe dort): schützt den Rückschreib-Pfad von
+      // maybeRefresh davor, den ALTEN Namen aus seiner Momentaufnahme
+      // zurückzuschreiben, wenn währenddessen umbenannt wurde.
+      notebookEpoch.current++;
       if (id === activeNbRef.current) setDoc(newText);
       setNbRenameId(null);
     } catch (e) {
@@ -2015,6 +2068,7 @@ export default function NotizbuchApp() {
       const nbs = notebooksRef.current.filter((n) => n.id !== id);
       setNotebooks(nbs);
       notebooksRef.current = nbs;
+      notebookEpoch.current++; // siehe Deklaration oben: schützt vor einem gleichzeitigen, veralteten Fokus-Refresh
       delete docCache.current[id];
       delete docShas.current[id];
       delete knowledgeIndex.current[id];
@@ -2827,7 +2881,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.46</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.47</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"

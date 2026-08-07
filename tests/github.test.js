@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   utf8ToB64, b64ToUtf8, ghGetFile, ghGetBlob, ghListDir, ghPutFile, ghDeleteFile,
-  ghListCommits, ghCommitMeta, ghCheckRepo, ShaConflictError,
+  ghListCommits, ghCommitMeta, ghCheckRepo, ShaConflictError, reconcileNotebooksWithRemote,
 } from "../src/lib/github.js";
 
 const CFG = { owner: "o", repo: "r", pat: "PAT" };
@@ -193,5 +193,100 @@ describe("Historie & Verbindungscheck", () => {
     expect(await ghCheckRepo(CFG)).toBe(true);
     fetch.mockResolvedValueOnce({ ok: false, status: 403 });
     await expect(ghCheckRepo(CFG)).rejects.toThrow(/Contents: Read and write/);
+  });
+});
+
+// v7.47, Fehler 2 (E2E-Befund gegen v7.41): "Notizbuch anlegen und direkt
+// danach einmal 'nach oben' klicken" ließ das gerade angelegte Notizbuch
+// kurzzeitig aus dem Verwalten-Dialog verschwinden UND das aktive Notizbuch
+// unerwartet zur Wissensbasis wechseln. Ursache GENAU eingegrenzt (Auftrag:
+// "Ursache eingrenzen"): NICHT die Sortier-Aktion selbst und KEIN
+// verschluckter SHA-Konflikt beim Schreiben von state.json (ein solcher
+// Konflikt betrifft nur "order"/"chat" INNERHALB von state.json, niemals das
+// "notebooks"-Array selbst) - sondern maybeRefresh (App.jsx, Fokus-/Poll-
+// Refresh, DECISIONS #4): dessen ghListDir-Momentaufnahme des
+// "notizbuecher/"-Ordners kann - unabhängig vom Klick auf "nach oben" -
+// bereits VOR der Neuanlage gestartet worden sein (z. B. durch den
+// 25s-Hintergrund-Poll) und erst NACH ihr auswerten. Wird ein frisch
+// angelegtes (lokal längst bekanntes) Notizbuch in einer SOLCHEN veralteten
+// Auflistung noch nicht gefunden, behandelt die bisherige Logik es identisch
+// zu einem ECHTEN "auf einem anderen Gerät gelöscht" - inklusive
+// Aktiv-Wechsel, falls es das aktive Notizbuch war.
+//
+// reconcileNotebooksWithRemote selbst KANN "Alter"/Frische ihrer Eingabe
+// nicht beurteilen (sie bekommt nur IDs, keine Epoche) - das ist bewusst so
+// (siehe Kopfkommentar in github.js): der eigentliche Fix ist der
+// "notebookEpoch"-Guard in App.jsx (maybeRefresh verwirft eine zu alte
+// Momentaufnahme VOR dem Aufruf dieser Funktion komplett, siehe
+// "Momentaufnahme zu alt"-Test unten, der genau diesen Vertrag dokumentiert,
+// statt ihn stillschweigend vorauszusetzen). Die Tests hier decken die REINE
+// Zuordnungslogik ab (bei einer GARANTIERT frischen Eingabe).
+describe("reconcileNotebooksWithRemote (v7.47, Notizbuch-Abgleich beim Fokus-Refresh)", () => {
+  const NBS = [
+    { id: "wissensbasis", path: "wissensbasis.md", name: "Wissensbasis" },
+    { id: "projekt-a", path: "notizbuecher/projekt-a.md", name: "Projekt A" },
+    { id: "projekt-b", path: "notizbuecher/projekt-b.md", name: "Projekt B" },
+  ];
+
+  it("nichts entfernt: liefert changed:false, inhaltsgleiche Liste – aber IMMER eine frische Kopie", () => {
+    const res = reconcileNotebooksWithRemote(NBS, "projekt-a", ["wissensbasis", "projekt-a", "projekt-b"]);
+    expect(res).toEqual({ changed: false, notebooks: NBS, activeId: "projekt-a", removedIds: [] });
+    // Review-Nachbesserung zu v7.47: NICHT dieselbe Referenz. Der Aufrufer
+    // (App.jsx#maybeRefresh) mutiert die Liste anschließend per push/
+    // Index-Zuweisung; träfe das die identische Referenz, die React bereits
+    // als "notebooks"-State kennt, bliebe setNotebooks() wegen
+    // Object.is-Gleichheit folgenlos. Genau daran ist der erste Entwurf
+    // gescheitert – der Kontrakt gehört in die Funktion, nicht in die
+    // Disziplin jedes künftigen Aufrufers.
+    expect(res.notebooks).not.toBe(NBS);
+    expect(res.notebooks).toEqual(NBS);
+  });
+
+  it("ein NICHT aktives Notizbuch fehlt remote: wird entfernt, aktives Notizbuch bleibt UNVERÄNDERT", () => {
+    const res = reconcileNotebooksWithRemote(NBS, "wissensbasis", ["wissensbasis", "projekt-a"]);
+    expect(res.changed).toBe(true);
+    expect(res.notebooks.map((n) => n.id)).toEqual(["wissensbasis", "projekt-a"]);
+    expect(res.activeId).toBe("wissensbasis"); // unverändert - war nicht betroffen
+    expect(res.removedIds).toEqual(["projekt-b"]);
+  });
+
+  it("das AKTIVE Notizbuch fehlt remote: wird entfernt, Aktivität wechselt auf das erste verbleibende", () => {
+    const res = reconcileNotebooksWithRemote(NBS, "projekt-b", ["wissensbasis", "projekt-a"]);
+    expect(res.changed).toBe(true);
+    expect(res.notebooks.map((n) => n.id)).toEqual(["wissensbasis", "projekt-a"]);
+    expect(res.activeId).toBe("wissensbasis"); // erstes verbleibendes, wie in App.jsx vor v7.47 (nbs[0])
+    expect(res.removedIds).toEqual(["projekt-b"]);
+  });
+
+  it("mehrere Notizbücher fehlen remote gleichzeitig: alle werden entfernt, activeId wechselt nur wenn nötig", () => {
+    const res = reconcileNotebooksWithRemote(NBS, "projekt-a", ["wissensbasis"]);
+    expect(res.changed).toBe(true);
+    expect(res.notebooks.map((n) => n.id)).toEqual(["wissensbasis"]);
+    expect(res.activeId).toBe("wissensbasis");
+    expect(res.removedIds.sort()).toEqual(["projekt-a", "projekt-b"]);
+  });
+
+  it("KEIN einziges lokales Notizbuch bleibt remote übrig: bewusstes No-op (lieber nichts tun als eine leere Liste anzeigen)", () => {
+    const res = reconcileNotebooksWithRemote(NBS, "projekt-a", []);
+    expect(res).toEqual({ changed: false, notebooks: NBS, activeId: "projekt-a", removedIds: [] });
+  });
+
+  it("eine leere lokale Liste bleibt ein No-op (keine Division durch/Zugriff auf ein nicht existentes erstes Element)", () => {
+    const res = reconcileNotebooksWithRemote([], "irgendwas", ["wissensbasis"]);
+    expect(res).toEqual({ changed: false, notebooks: [], activeId: "irgendwas", removedIds: [] });
+  });
+
+  it("Vertrag dokumentiert (Momentaufnahme zu alt): mit einer VERALTETEN Eingabe (frisch angelegtes Notizbuch fehlt noch remote) würde diese Funktion es fälschlich entfernen - GENAU deshalb prüft App.jsx die notebookEpoch VOR dem Aufruf und ruft die Funktion bei einer zu alten Momentaufnahme gar nicht erst auf", () => {
+    // "projekt-c" ist LOKAL bereits bekannt (gerade angelegt), aber die
+    // übergebene "remoteIds"-Liste stammt aus einer Anfrage, die VOR dem
+    // Anlegen gestartet wurde und kennt es folglich noch nicht.
+    const withNew = [...NBS, { id: "projekt-c", path: "notizbuecher/projekt-c.md", name: "Projekt C" }];
+    const staleRemoteIds = ["wissensbasis", "projekt-a", "projekt-b"]; // kennt "projekt-c" noch nicht
+    const res = reconcileNotebooksWithRemote(withNew, "projekt-c", staleRemoteIds);
+    // Isoliert betrachtet "korrekt" (die Funktion kann die Staleness nicht
+    // erkennen) - genau DAS ist der Grund für den Epoch-Guard in App.jsx.
+    expect(res.changed).toBe(true);
+    expect(res.removedIds).toEqual(["projekt-c"]);
+    expect(res.activeId).toBe("wissensbasis"); // aktives Notizbuch würde ungewollt wechseln
   });
 });
