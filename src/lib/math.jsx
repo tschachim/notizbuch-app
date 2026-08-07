@@ -447,7 +447,33 @@ export function mathToPlaceholders(md) {
         // unveränderter, unindented Formel-Block byte-identisch bleibt.
         const lvl = indentLevelForMath(line);
         const indentAttr = lvl > 0 ? ' data-indent="' + lvl + '"' : "";
-        out.push("<" + MATH_BLOCK_TAG + indentAttr + ' data-tex="' + escapeHtmlAttr(block.tex) + '"></' + MATH_BLOCK_TAG + ">");
+        // BUGFIX (v7.42, ECHTER Bug, Auftrag "Einzug im Editor sichtbar
+        // machen" Teil B, Finding B4): Die ursprüngliche Zeile begann HIER
+        // IMMER bei Spalte 0 – die führende Einrückung der Quellzeile ging
+        // dadurch für markdown-its EIGENE Block-Struktur-Erkennung komplett
+        // verloren, BEVOR sie überhaupt zu laufen beginnt (anders als beim
+        // Bild, dessen Zeile unangetastet bleibt, siehe IMG_LINE_RE_FOR_MATH
+        // oben). Für einen freistehenden (nicht in einer Liste steckenden)
+        // Formel-Block war das unschädlich (das "data-indent"-Attribut trug
+        // die Information ohnehin schon vollständig). Für eine Formel
+        // INNERHALB eines Listenpunkts (z. B. als Fortsetzung unter
+        // "- Parent") entschied genau diese fehlende Spalten-Position aber
+        // darüber, ob markdown-it den Block überhaupt noch als Teil der
+        // Liste erkennt ("lazy continuation" braucht mindestens die
+        // Content-Spalte des Listenpunkts) – ohne Einrückung viel der Block
+        // fälschlich aus der Liste heraus (eigener, TOP-LEVEL Absatz statt
+        // Listenpunkt-Inhalt), WEIT BEVOR IndentMarkdownIt (DocEditor.jsx)
+        // die "kein doppelter Einzug"-Tiefenprüfung überhaupt anwenden
+        // konnte. Die führende Einrückung der Quellzeile bleibt jetzt
+        // erhalten (wie bei Bild/Absatz) – markdown-it verschachtelt den
+        // Platzhalter-Tag dadurch korrekt, IndentMarkdownIts Tiefenprüfung
+        // entfernt das (hier weiterhin vorsorglich gesetzte) "data-indent"
+        // anschließend bei Bedarf wieder (siehe dort, "Formel-Sonderfall").
+        // "md.disable(\"code\")" (IndentMarkdownIt) schützt wie bei Absatz/
+        // Bild davor, dass die Einrückung stattdessen einen Codeblock
+        // auslöst.
+        const leadWs = /^[ \t]*/.exec(line)[0];
+        out.push(leadWs + "<" + MATH_BLOCK_TAG + indentAttr + ' data-tex="' + escapeHtmlAttr(block.tex) + '"></' + MATH_BLOCK_TAG + ">");
         i = block.endIdx;
         continue;
       }

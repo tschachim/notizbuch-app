@@ -382,6 +382,17 @@ export const BlockImage = Image.extend({
         img.style.width = cur.attrs.width ? cur.attrs.width + "px" : "";
         // Feste Breite + max-height würde das Seitenverhältnis verzerren
         img.style.maxHeight = cur.attrs.width ? "none" : "";
+        // Einzug SOFORT sichtbar (v7.42, Auftrag "Einzug im Editor sichtbar
+        // machen"): Diese NodeView baut ihr DOM selbst und ruft renderHTML()
+        // NIE auf – "data-indent" (indentAttrSpec.renderHTML) käme dadurch
+        // NIE im echten Editor-DOM an, ProseMirror nutzt bei einer NodeView
+        // ausschließlich deren eigenes "dom" statt des Schema-toDOM. Das
+        // Attribut wird deshalb explizit auf den Wrapper gespiegelt – die
+        // generische "[data-indent]"-Regel in index.css greift dadurch auch
+        // hier, und weil apply() sowohl beim Erzeugen ALS AUCH aus update()
+        // (siehe unten) läuft, wirkt eine Änderung sofort, ohne Neuaufbau.
+        if (cur.attrs.indent) wrap.setAttribute("data-indent", String(cur.attrs.indent));
+        else wrap.removeAttribute("data-indent");
       };
       apply();
       wrap.appendChild(img);
@@ -629,6 +640,19 @@ function mathNodeView(displayMode) {
     const wrap = document.createElement(displayMode ? "div" : "span");
     wrap.className = "math-node " + (displayMode ? "math-node-block" : "math-node-inline");
 
+    // Einzug SOFORT sichtbar (v7.42, wie bei BlockImage oben): Diese
+    // NodeView baut ihr DOM ebenfalls selbst, "data-indent" (nur MathBlock
+    // hat dieses Attribut, siehe dort – bei MathInline ist cur.attrs.indent
+    // stets undefined/falsy) käme über renderHTML() NIE im echten Editor-DOM
+    // an. Auf den Wrapper gespiegelt, damit dieselbe generische
+    // "[data-indent]"-Regel (index.css) greift; läuft sowohl beim Erzeugen
+    // als auch in update() unten, damit eine Änderung sofort sichtbar ist.
+    const applyIndentAttr = () => {
+      if (cur.attrs.indent) wrap.setAttribute("data-indent", String(cur.attrs.indent));
+      else wrap.removeAttribute("data-indent");
+    };
+    applyIndentAttr();
+
     const rendered = document.createElement("span");
     rendered.className = "math-node-rendered";
     rendered.title = "Klicken zum Bearbeiten";
@@ -736,6 +760,9 @@ function mathNodeView(displayMode) {
       update: (updated) => {
         if (updated.type.name !== cur.type.name) return false;
         cur = updated;
+        // Unabhängig vom Bearbeitungsmodus (auch WÄHREND der Eingabe soll
+        // ein per Knopf/Tab geänderter Einzug sofort sichtbar sein).
+        applyIndentAttr();
         if (!editing) renderView();
         return true;
       },
@@ -977,6 +1004,25 @@ export const FileLinkMarkdownIt = Extension.create({
 /*    "image"-Inline-Kind gesetzt (das companion "inline"-Token folgt im    */
 /*    flachen Token-Array laut markdown-it immer direkt auf                */
 /*    "paragraph_open", siehe rules_block/paragraph.mjs).                   */
+/*                                                                          */
+/*    Formel-Sonderfall (v7.42, ECHTER Bug, beim Testschreiben für Auftrag  */
+/*    "Einzug im Editor sichtbar machen" Teil B gefunden – siehe DECISIONS  */
+/*    Finding B4): mathToPlaceholders (math.jsx) schreibt "data-indent" auf */
+/*    den generierten <math-block>-Tag als reine TEXT-Vorverarbeitung VOR   */
+/*    jedem markdown-it-Lauf – zu diesem Zeitpunkt ist noch NICHTS über     */
+/*    Listen-/Blockquote-/Tabellen-Verschachtelung bekannt (anders als beim */
+/*    Bild-Sonderfall oben, wo das Attribut erst HIER, NACH der Tiefen-     */
+/*    prüfung, gesetzt wird). Eine Formel INNERHALB eines Listenpunkts      */
+/*    (z. B. als Fortsetzung unter "- Parent", genau wie ein Absatz/Bild)   */
+/*    behielt dadurch ihr rohes indent-Attribut UNGEPRÜFT – "kein doppelter */
+/*    Einzug" galt bisher nur für Absatz/Bild, nicht für die Formel. Ein    */
+/*    <math-block>-Tag allein auf einer Zeile landet bei markdown-it (siehe */
+/*    Test) als "html_inline"-Kinderpaar (Öffnungs-/Schluss-Tag) INNERHALB  */
+/*    desselben "paragraph_open"/"inline"-Paars wie ein normaler Absatz –   */
+/*    bei depth!==0 wird das bereits vorhandene "data-indent" deshalb HIER  */
+/*    direkt aus dem rohen Tag-Text entfernt (parseHTML liest es dann als   */
+/*    "0", identisch zum Absatz-Verhalten).                                */
+const NESTED_MATH_INDENT_RE = new RegExp("^<" + MATH_BLOCK_TAG + "\\b");
 export const IndentMarkdownIt = Extension.create({
   name: "indentMarkdownIt",
   addStorage() {
@@ -1001,11 +1047,39 @@ export const IndentMarkdownIt = Extension.create({
                   depth--;
                   continue;
                 }
-                if (depth !== 0 || token.type !== "paragraph_open" || !token.map) continue;
+                if (token.type !== "paragraph_open" || !token.map) continue;
+                const inlineToken = tokens[i + 1];
+                if (depth !== 0) {
+                  // Formel-Sonderfall (siehe Kopfkommentar) – NUR hier
+                  // relevant, auf oberster Ebene bleibt ein bereits von
+                  // mathToPlaceholders gesetztes Attribut unangetastet.
+                  // Schleife statt fester Kinder-Anzahl (BUGFIX beim
+                  // Testschreiben gefunden): Steht die Formel TIGHT direkt
+                  // unter einem Listenpunkt OHNE Leerzeile ("- Parent\n
+                  // $$x^2$$"), verschmilzt markdown-it sie über einen
+                  // "softbreak" MIT dem Text davor zu EINEM gemeinsamen
+                  // "inline"-Token (Kinder: text("Parent"), softbreak,
+                  // html_inline(Öffnung), html_inline(Schluss)) – das
+                  // öffnende/schließende Tag-Paar steht dann NICHT mehr an
+                  // Index 0/1.
+                  if (inlineToken && inlineToken.type === "inline" && inlineToken.children) {
+                    const children = inlineToken.children;
+                    for (let ci = 0; ci < children.length - 1; ci++) {
+                      const openTag = children[ci], closeTag = children[ci + 1];
+                      if (
+                        openTag.type === "html_inline" && closeTag.type === "html_inline" &&
+                        NESTED_MATH_INDENT_RE.test(openTag.content) &&
+                        closeTag.content === "</" + MATH_BLOCK_TAG + ">"
+                      ) {
+                        openTag.content = openTag.content.replace(/ data-indent="\d+"/, "");
+                      }
+                    }
+                  }
+                  continue;
+                }
                 const level = indentLevel(lines[token.map[0]] || "");
                 if (level <= 0) continue;
                 token.attrSet("data-indent", String(level));
-                const inlineToken = tokens[i + 1];
                 if (
                   inlineToken && inlineToken.type === "inline" &&
                   inlineToken.children && inlineToken.children.length === 1 &&

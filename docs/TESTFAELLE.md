@@ -1319,6 +1319,66 @@ Editor-Text zu klicken, dann OHNE Pause weitertippen.
 Speichern, Editor erneut öffnen: alle oben genannten Ergänzungen
 erscheinen unverändert an der erwarteten Stelle.
 
+**D21 [VERBUNDEN] Einzug ist SOFORT im Editor sichtbar – Absatz, Bild,
+Formel (v7.42, Nutzer-Befund „Einzug vergrößern hat keine sichtbare
+Auswirkung im Editor, nur in der Anzeige nach dem Speichern“, DECISIONS
+#86 Teil A).** Editor öffnen, einen Absatz „QA-Sichtbar Absatz“ anlegen,
+Cursor hineinsetzen, „Einzug vergrößern“ zweimal klicken. Erwartet: Der
+Absatz rückt BEREITS IM EDITOR (nicht erst nach dem Speichern) bei jedem
+Klick sichtbar nach rechts. „Einzug verkleinern“ einmal klicken: Erwartet,
+der Absatz rückt sofort wieder ein Stück zurück. Direkt darunter ein Bild
+einfügen (Bild-Knopf), Cursor hineinsetzen, „Einzug vergrößern“ klicken:
+Erwartet, das Bild rückt SOFORT sichtbar mit ein (nicht erst nach dem
+Speichern) – das ist der eigentliche Kern dieses Fixes, vorher passierte
+beim Bild optisch GAR NICHTS im Editor. Eine Formel einfügen (Sigma-Knopf,
+abgesetzt), Cursor hineinsetzen, „Einzug vergrößern“ klicken: Erwartet,
+die Formel rückt ebenfalls SOFORT sichtbar ein (vorher ebenfalls keine
+Reaktion im Editor). Speichern, Editor erneut öffnen: alle drei zeigen
+exakt denselben Versatz wie unmittelbar vor dem Speichern (kein
+sichtbarer Sprung). Zusätzlich (Finding B3, DECISIONS #86 – rein
+informativ, NICHT als Fehler melden): Verschachtelte Aufzählungen wirken
+seit diesem Fix minimal (ca. 4 px pro Ebene) weiter eingerückt als vorher
+– bewusste, leicht rückgängig zu machende Angleichung an den Einzug der
+Dokument-Ansicht. Nur melden, falls der Abstand zwischen Aufzählungszeichen
+und Text dadurch unangenehm groß wirkt.
+
+**D22 [VERBUNDEN] Formel als Fortsetzung unter einem Listenpunkt bekommt
+keinen doppelten Einzug mehr (v7.42, ECHTER Bug, DECISIONS #86 Finding
+B4).** Editor öffnen, Stichpunkt „QA-Formel-Liste“ anlegen, Enter, direkt
+danach eine abgesetzte Formel einfügen (Sigma-Knopf, z. B. `x^2`) OHNE
+weitere manuelle Einrückung. Erwartet: Die Formel erscheint auf GLEICHER
+Einzugstiefe wie der Text von „QA-Formel-Liste“ (kein zusätzlicher Versatz
+nach rechts, obwohl sie technisch als Fortsetzung UNTER dem Listenpunkt
+steht). Cursor in die Formel setzen: „Einzug verkleinern“ ist AKTIV (die
+Formel verhält sich wie der gesamte Listenpunkt, analog zu einem Absatz an
+derselben Stelle), „Einzug vergrößern“ ist AUSGEGRAUT. Speichern, Editor
+erneut öffnen und OHNE weitere Änderung erneut speichern: KEIN Commit
+(No-op-Roundtrip).
+
+**D23 [OFFEN, informativ] Ein Absatz/Bild/eine Formel DIREKT nach einer
+Liste kann beim erneuten Öffnen zum Listenpunkt-Inhalt werden (v7.42,
+bekanntes, bewusst dokumentiertes Restrisiko, DECISIONS #86 Finding B1 –
+Markdown selbst kann „eigene Einrückung“ und „Fortsetzung des
+Listenpunkts“ bei 2 Leerzeichen nicht unterscheiden).** Editor öffnen,
+Stichpunkt „QA-Grenzfall eins“ anlegen. Direkt danach einen normalen,
+NICHT eingerückten Absatz „QA-Grenzfall Fortsetzung“ anlegen (z. B. Enter,
+dann Umschalt+Tab, um aus der Liste herauszuspringen). Cursor in diesen
+Absatz setzen, einmal „Einzug vergrößern“ klicken. Speichern. Editor
+erneut öffnen. **Nicht als Fehler melden, falls:** Der Absatz jetzt
+strukturell wie ein Teil des Listenpunkts behandelt wird (z. B. „Einzug
+verkleinern“ hebt jetzt plötzlich den KOMPLETTEN vorherigen Listenpunkt aus
+der Liste, statt nur den Absatz zurückzunehmen) – das ist die oben
+beschriebene, bekannte Markdown-Ambiguität. **Ebenfalls nicht als Fehler
+melden:** Hat man den Absatz VOR dem Speichern zweimal eingerückt
+(Ebene 2), steht er nach dem erneuten Öffnen nur noch auf Ebene 1. Auch
+das folgt zwingend aus derselben Ambiguität – Markdown kann in dieser
+Position keine tiefere Ebene als die Content-Spalte des Listenpunkts
+ausdrücken. Der Rückfall passiert EINMALIG, danach ist der Zustand
+stabil. **Als Fehler melden, falls:**
+Text/Inhalt dabei VERLOREN geht, oder sich das Dokument bei WIEDERHOLTEM
+Öffnen+Speichern (mehr als ein weiterer Zyklus) IMMER WEITER verändert
+statt sich zu stabilisieren.
+
 ## E. Schnellnotizen
 
 **E1 [OFFEN] Post-it-Lebenszyklus.** „Schnellnotiz“-Knopf (Desktop:

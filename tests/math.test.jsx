@@ -257,6 +257,48 @@ describe("mathToPlaceholders (Lade-Pfad des WYSIWYG-Editors)", () => {
     expect(out).not.toContain("data-indent");
   });
 
+  // v7.42 (Auftrag "Einzug im Editor sichtbar machen" Teil B, ECHTER Bug
+  // Finding B4, siehe DECISIONS #86): Die Platzhalter-Zeile begann bisher
+  // IMMER bei Spalte 0 – die führende Einrückung der Quellzeile ging dadurch
+  // für markdown-its EIGENE Listen-Fortsetzungs-Erkennung ("lazy
+  // continuation") komplett verloren, BEVOR IndentMarkdownIt (DocEditor.jsx)
+  // die "kein doppelter Einzug"-Tiefenprüfung überhaupt anwenden konnte –
+  // eine Formel INNERHALB eines Listenpunkts fiel dadurch strukturell aus
+  // der Liste heraus. Die führende Einrückung bleibt jetzt VOR dem
+  // generierten Tag erhalten (wie bereits bei Bild/Absatz).
+  describe("führende Einrückung der Quellzeile bleibt VOR dem generierten Tag erhalten (Finding B4)", () => {
+    it("2 Leerzeichen vor $$…$$ stehen jetzt VOR dem Tag (nicht mehr verworfen)", () => {
+      const out = mathToPlaceholders("  $$x$$");
+      expect(out).toBe('  <' + MATH_BLOCK_TAG + ' data-indent="1" data-tex="x"></' + MATH_BLOCK_TAG + '>');
+    });
+
+    it("ein Tab vor $$…$$ bleibt als Tab-ZEICHEN erhalten (nur die Ebenen-Arithmetik zählt ihn wie 2 Leerzeichen, siehe indentLevelForMath)", () => {
+      const out = mathToPlaceholders("\t$$x$$");
+      expect(out).toBe('\t<' + MATH_BLOCK_TAG + ' data-indent="1" data-tex="x"></' + MATH_BLOCK_TAG + '>');
+    });
+
+    it("Ebene 6 (12 Leerzeichen) bleibt VOLLSTÄNDIG als Leerraum vor dem Tag erhalten", () => {
+      const out = mathToPlaceholders(" ".repeat(12) + "$$x$$");
+      expect(out).toBe(" ".repeat(12) + '<' + MATH_BLOCK_TAG + ' data-indent="6" data-tex="x"></' + MATH_BLOCK_TAG + '>');
+    });
+
+    it("keine Einrückung bleibt weiterhin byte-identisch OHNE führenden Leerraum (keine Regression für den unveränderten Fall)", () => {
+      const out = mathToPlaceholders("$$x$$");
+      expect(out).toBe("<" + MATH_BLOCK_TAG + ' data-tex="x"></' + MATH_BLOCK_TAG + ">");
+    });
+
+    it("eine eingerückte MEHRZEILIGE Formel behält die Einrückung nur vor der GESAMTEN Platzhalter-Zeile (Attribut bezieht sich auf den ganzen Block)", () => {
+      const out = mathToPlaceholders("  $$\na^2\n$$");
+      // extractAttr() (oben) geht von GENAU "data-tex" direkt nach dem
+      // Tag-Namen aus – mit einem vorangestellten "data-indent" (wie hier)
+      // reicht ein eigener, direkter Regex statt den gemeinsamen Helfer für
+      // diesen Sonderfall umzubauen (analog zum bestehenden Tab-Test oben).
+      expect(out.startsWith('  <' + MATH_BLOCK_TAG + ' data-indent="1"')).toBe(true);
+      const m = /data-tex="([\s\S]*?)"><\//.exec(out);
+      expect(decodeHtmlAttr(m[1])).toBe("\na^2\n");
+    });
+  });
+
   it("escaped &, <, >, \" im TeX-Inhalt korrekt (verlustfrei umkehrbar)", () => {
     const tex = 'x < 5 & y > 3 "quoted"';
     const out = mathToPlaceholders("$" + tex + "$");

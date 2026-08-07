@@ -8615,3 +8615,231 @@ aus `referenz-app.jsx` übernommen.
       kein aktivierter Ausgangszustand herstellen lässt. Zusätzlich ein
       Editor-Ebenen-Test (kein DOM), der Analyse-Punkt 1 belegt (siehe
       oben, mit UND ohne `NestedListToggle`).
+
+86. **Einzug im Editor SICHTBAR gemacht + systematische Vermessung der
+    Listen-Kontexte (v7.42, Nutzer-Befund: „Einzug vergrößern hat keine
+    sichtbare Auswirkung im Editor, nur in der Anzeige nach dem Speichern.
+    Es verhält sich komisch, wenn ich das in einem Block mache, der eine
+    Checkbox oder Aufzählung hat“).**
+
+    ## Teil A – Einzug im Editor sichtbar machen
+
+    **Root Cause 1 (CSS):** `src/index.css` hatte für `.tiptap-doc` KEINE
+    einzige `[data-indent]`-Regel – `indentAttrSpec.renderHTML`
+    (`DocEditor.jsx`) schrieb das Attribut zwar korrekt ins DOM, aber ohne
+    Styling passierte optisch nichts. Fix: `.tiptap-doc [data-indent="1"]`
+    … `[data-indent="6"]` mit `margin-left: 1.5rem` … `9rem` – EXAKT
+    dieselbe Schrittweite wie die Ansicht (`lib/markdown.jsx#
+    INDENT_REM_PER_LEVEL`), sonst würde der Inhalt beim Speichern springen.
+
+    **Root Cause 2 (NodeViews):** Bild (`BlockImage`) UND Formelblock
+    (`MathBlock`) haben je eine EIGENE NodeView (Anfasser zum Skalieren
+    bzw. Formel-Bearbeitung), die ihr DOM komplett selbst baut. Hat ein
+    Node-Typ eine `addNodeView()`, nutzt ProseMirror für die LIVE-Anzeige
+    im Editor AUSSCHLIESSLICH deren `dom` – das über `renderHTML()`
+    berechnete Schema-`toDOM` (und damit `indentAttrSpec.renderHTML`) wird
+    dafür NIE aufgerufen (es bleibt relevant für Clipboard-Serialisierung/
+    `getHTMLFromFragment`, aber nicht für die Editor-Anzeige). Verifiziert
+    am echten, gerenderten `editor.view.dom` (siehe Tests unten) – vor dem
+    Fix landete `data-indent` NUR beim Absatz (der keine eigene NodeView
+    hat) tatsächlich im sichtbaren DOM. Fix: `BlockImage`s `apply()` UND
+    `mathNodeView()`s neue `applyIndentAttr()` spiegeln `cur.attrs.indent`
+    explizit auf den jeweiligen Wrapper (`.img-resize-wrap` /
+    `.math-node-block`/`.math-node-inline`) – dieselbe generische
+    CSS-Regel greift dadurch automatisch auch dort. Beide laufen sowohl
+    beim Erzeugen der NodeView ALS AUCH in ihrem `update()` – ein per
+    Knopf/Tab geänderter Einzug ist dadurch SOFORT sichtbar, ohne dass der
+    Editor neu aufgebaut werden muss (Auftragsanforderung).
+
+    **Tests (`tests/docEditorIndentVisual.test.jsx`, neu):** Prüft
+    AUSSCHLIESSLICH das, was ohne echten Browser beweisbar ist –
+    Anwesenheit/Wert von `data-indent` am echten `editor.view.dom` für alle
+    DREI Knotentypen (geladen UND sofort nach `changeIndent`, inkl.
+    Rücksprung auf 0 und Obergrenze 6), sowie die CSS-Regeln selbst über
+    den Quelltext von `src/index.css` (Regex auf die exakten `margin-left`-
+    Werte). jsdom berechnet KEIN Layout – `getComputedStyle` liefert dort
+    keine aus externen Stylesheets aufgelösten Werte, eine „X Pixel weiter
+    rechts“-Behauptung ist damit bewusst NICHT Teil dieser Tests. Aktiv
+    verifiziert, dass die Tests ohne den Fix rot sind: `git stash` auf
+    `DocEditor.jsx`/`index.css`, 9 von 15 Tests liefen rot (die drei
+    Bild-/Formel-Nachweise, alle sechs CSS-Regel-Prüfungen, die
+    Mehrfachauswahl-Prüfung), Fix wiederhergestellt, alle 15 wieder grün.
+
+    ## Teil B – Systematische Vermessung der Listen-Kontexte
+
+    Vollständige Matrix (auch die unauffälligen Zeilen), gemessen über
+    echte TipTap-Editor-Instanzen (`new Editor()`, wie in
+    `tests/docEditorIndent.test.jsx`), nicht vermutet:
+
+    | Kontext | Knopf-Zustand (`+1`/`-1`) | Tab/Knopf-Wirkung | Editor-Optik | Nach Speichern (Ansicht) | Roundtrip |
+    |---|---|---|---|---|---|
+    | Aufzählung/Nummerierung/Checkliste, Ebene 0, ERSTER Punkt | `false`/`true` | `+1` No-op, `-1` hebt aus der Liste (Word-Verhalten) | unauffällig | unauffällig | stabil |
+    | dieselben drei Typen, Ebene 0, NICHT-erster Punkt | `true`/`true` | sinkt/hebt strukturell | unauffällig | unauffällig | stabil |
+    | dieselben drei Typen, Ebene 1 (einziges Kind einer Unterliste) | `false`/`true` | `+1` No-op, `-1` hebt eine Ebene | unauffällig | unauffällig | stabil |
+    | Absatz als STRUKTURELLE Fortsetzung im selben Listenpunkt (2 Leerzeichen = Content-Spalte von `- `) | `false`/`true` (wirkt auf den GANZEN Listenpunkt) | `-1` hebt Punkt samt Fortsetzung heraus | flush mit dem Bullet-Text, kein extra Einzug | unauffällig | idempotent |
+    | Bild+Bildunterschrift als Fortsetzung im selben Listenpunkt (Nutzerfall) | wie oben | wie oben | unauffällig | unauffällig | idempotent |
+    | Formel als Fortsetzung im selben Listenpunkt | **vor v7.42: `true`/`true`, indent blieb 1 (Finding B4, siehe unten)** → jetzt wie Absatz/Bild | wie oben | **vor v7.42: unerwünschter Zusatz-Einzug** → jetzt unauffällig | jetzt unauffällig | jetzt idempotent |
+    | Formel TIGHT (keine Leerzeile) als zweiter Block im selben Listenpunkt | wie oben | wie oben | unauffällig | unauffällig | **einmalige Leerzeilen-Normalisierung beim ersten Speichern (siehe unten), danach stabil** |
+    | Bullet unter Checkbox / Checkbox unter Bullet (verschachtelt gemischt) | konsistent (seit v7.41.1, D-Fälle) | Tab/Knopf stimmen überein | unauffällig | unauffällig | stabil |
+    | Formel/Bild in einer Tabellenzelle | n/a | Formel via `$$…$$` dort technisch gar nicht erreichbar (siehe unten) | – | – | – |
+    | Absatz/Bild/Formel per Attribut auf Ebene 1, DIREKT nach einer Liste mit 2-Zeichen-Marker (`-`/`- [ ]`) | ändert sich beim Neuladen von „eigene Attribut-Einrückung“ zu „Teil des vorangehenden Listenpunkts“ (**Finding B1**) | ändert sich mit | unauffällig VOR dem Speichern | sieht NACH dem Neuladen anders aus – und eine Attribut-Ebene ≥ 2 fällt dabei EINMALIG auf die Content-Spalte des Listenpunkts zurück (Ebene 2 → 1), weil Markdown die tiefere Ebene in dieser Position gar nicht ausdrücken kann (im Review gemessen) | kein Datenverlust, stabil ab dem Ergebnis |
+    | dieselbe Situation nach einer NUMMERIERTEN Liste mit einstelligem Marker (`1. `, Content-Spalte 3) | bleibt Attribut-Einrückung | bleibt gleich | unauffällig | unauffällig | stabil (2 Leerzeichen reichen hier NICHT zum Verschlucken) |
+    | Mehrfachauswahl: ein Listenpunkt (sinkt) + ein direkt folgender Top-Level-Absatz (bekommt Attribut-Einzug) in EINER Auswahl | beide Teile wirken unabhängig, EIN Undo-Schritt | wie D16 | unauffällig | unauffällig | **einmalige Leerzeilen-Normalisierung beim ersten Speichern (Finding B2), danach stabil** |
+    | Optische Tiefe: strukturell verschachtelte Liste vs. Attribut-Einzug, PRO EBENE | – | – | **gemessen unterschiedlich, siehe Finding B3** | „ | – |
+
+    **Finding B4 (ECHTER Bug, behoben).** `mathToPlaceholders`
+    (`lib/math.jsx`) baut das `<math-block>`-Tag als reine
+    Text-Vorverarbeitung VOR jedem markdown-it-Lauf – zu diesem Zeitpunkt
+    ist noch nichts über Listen-/Blockquote-/Tabellen-Verschachtelung
+    bekannt, anders als bei Absatz/Bild, deren `indent`-Attribut ERST
+    NACHTRÄGLICH über eine Tiefenprüfung in `IndentMarkdownIt` gesetzt wird
+    (siehe DECISIONS #81, „kein doppelter Einzug“). ZWEI verschränkte
+    Ursachen:
+    - Die generierte Platzhalter-Zeile begann bisher IMMER bei Spalte 0 –
+      die führende Einrückung der Quellzeile ging dadurch für markdown-its
+      EIGENE Listen-Fortsetzungs-Erkennung („lazy continuation“, braucht
+      mindestens die Content-Spalte des Markers) komplett verloren, BEVOR
+      die Tiefenprüfung überhaupt laufen konnte – eine Formel als
+      Fortsetzung unter einem Listenpunkt fiel dadurch strukturell schon
+      aus der Liste heraus (`doc > paragraph`, nicht `doc > bulletList >
+      listItem > … > mathBlock`). Fix: die führende Einrückung der
+      Quellzeile bleibt jetzt erhalten (wie bei Bild/Absatz bereits seit
+      v7.41), `md.disable("code")` (`IndentMarkdownIt`) schützt davor,
+      dass sie stattdessen einen Codeblock auslöst.
+    - Selbst mit korrekt erkannter Verschachtelung hätte das `data-indent`,
+      das `mathToPlaceholders` bereits VORAB in den rohen `<math-block>`-
+      Tag geschrieben hatte, die Tiefenprüfung in `IndentMarkdownIt`
+      unverändert überlebt (die bisherige Prüfung kannte nur den
+      „Bild-Sonderfall“, kein „Formel-Sonderfall“). `IndentMarkdownIt`
+      entfernt ein bereits gesetztes `data-indent` jetzt zusätzlich
+      explizit aus dem rohen `html_inline`-Tag-Text, sobald der
+      Tiefenzähler `depth !== 0` meldet – als Schleife über ALLE
+      Kind-Token-Paare (nicht nur Index 0/1), weil eine TIGHT (ohne
+      Leerzeile) an den Vorgängertext angehängte Formel über einen
+      `softbreak` MIT diesem in EINEM gemeinsamen `inline`-Token landet.
+    - Symptom vor dem Fix (erst durch Teil A SICHTBAR geworden): eine
+      Formel als Fortsetzung unter einem Listenpunkt bekam einen
+      UNERWÜNSCHTEN zusätzlichen Einzug (Attribut UND Listen-Verschachtelung
+      gleichzeitig) UND ihr Knopf-Zustand widersprach dem identischen
+      Absatz-/Bild-Fall an derselben Stelle (`[true,true]` statt
+      `[false,true]`).
+    - **Bewusst NICHT angetastet:** Formel in einer Tabellenzelle. Ein
+      `$$…$$`-Block ist laut `DISPLAY_MATH_START_RE` (`^\s*\$\$`)
+      zeilenanfang-verankert – innerhalb einer einzeiligen GFM-Tabellenzeile
+      (`| $$x^2$$ |`) beginnt die Zeile mit `|`, `mathToPlaceholders`
+      erkennt dort deshalb gar keinen Formel-BLOCK (per Token-Dump
+      verifiziert). Der `table_open`/`table_close`-Zweig der Tiefenprüfung
+      bleibt für Formeln damit unerreichbar – kein Fix nötig, kein Test
+      für einen nicht existierenden Fall.
+
+    **Finding B1 (Markdown-inhärente Ambiguität, DOKUMENTIERT statt
+    behoben).** Ein Absatz/Bild/eine Formel, der/die per Attribut auf
+    Ebene 1 eingerückt wird (2 Leerzeichen) UND unmittelbar (nur durch eine
+    Leerzeile getrennt) einer Liste mit 2-Zeichen-Marker (`- `/`- [ ] `)
+    folgt, erzeugt exakt denselben Rohtext wie eine STRUKTURELLE
+    Fortsetzung DESSELBEN Listenpunkts. CommonMarks „lazy continuation“
+    entscheidet rein über die Spalten-Tiefe – beim nächsten Laden wird der
+    Block deshalb in den vorangehenden Listenpunkt aufgenommen, UNABHÄNGIG
+    davon, ob der Nutzer das als „eigene Einrückung“ oder als „Teil des
+    Listenpunkts“ gemeint hatte. Gemessen: NICHT destruktiv (kein
+    Datenverlust, sofort roundtrip-stabil), aber das Knopf-/Tab-Verhalten
+    wechselt dadurch unbemerkt von „eigene Attribut-Einrückung“ (0..6,
+    einzelner Block) auf „sinkt/hebt den GANZEN vorangehenden
+    Listenpunkt“ – exakt das vom Nutzer beschriebene „komisch“. Betrifft
+    NICHT Nummerierungen mit einstelligem Marker (`1. `, Content-Spalte 3 –
+    2 Leerzeichen reichen dort nicht zum Verschlucken, gemessen und als
+    Gegenbeispiel gepinnt).
+    - **Optionen:**
+      (a) Unverändert lassen und dokumentieren (gewählt). Jede technische
+      Gegenmaßnahme (z. B. ein Absatz nach einer Liste bekäme künstlich
+      IMMER einen zusätzlichen Sicherheits-Leerraum oder eine andere
+      Ebenen-Arithmetik als Listen-Fortsetzungen) würde die „2 Leerzeichen
+      pro Ebene“-Konvention verlassen, die seit v7.41 durchgängig für
+      Absatz/Bild/Formel UND für die Interpretation beim Laden gilt, und
+      an anderer Stelle neue Inkonsistenzen erzeugen (z. B. einen
+      sichtbaren Bruch zwischen „so tief siehst du es im Editor“ und „so
+      tief steht es im Markdown“).
+      (b) `canChangeIndent`/`changeIndent` könnten das Einrücken auf GENAU
+      die Ebene verweigern, die zum Verschlucken führen würde, wenn der
+      Block unmittelbar (nur Leerzeile dazwischen) einer Liste folgt.
+      Deutlich aufwendiger (Content-Spalte hängt vom Markertyp UND von der
+      tatsächlichen Verschachtelungstiefe der Liste ab, siehe die
+      Nummerierungs-Ausnahme oben) und würde ein an sich harmloses
+      Verhalten (kein Datenverlust) präventiv verbieten, wo Nutzer es
+      eventuell absichtlich so wollen (Fortsetzungstext SOLL manchmal
+      strukturell zum Listenpunkt gehören). NICHT umgesetzt.
+    - Empfehlung: (a), wie umgesetzt. Rückholbar, falls Nutzer-Feedback aus
+      dem E2E-Lauf etwas anderes nahelegt (siehe `docs/TESTFAELLE.md` D23).
+
+    **Finding B2 (einmalige, nicht-destruktive Reformatierung,
+    dokumentiert).** Eine „Excel-Style“-Mehrfachauswahl über EINEN
+    Listenpunkt (sinkt strukturell) UND einen direkt folgenden Top-Level-
+    Absatz (bekommt Attribut-Einzug) in EINER Auswahl erzeugt in einem
+    Rutsch beides. Der äußere Listenpunkt hat dadurch nach dem Speichern
+    ZWEI Block-Kinder (die neu verschachtelte Unterliste UND den jetzt als
+    Fortsetzung angehängten Absatz) – für tiptap-markdown/
+    prosemirror-markdown macht das den Listenpunkt „locker“ statt „eng“,
+    was beim NÄCHSTEN Laden+Speichern EINMALIG eine zusätzliche Leerzeile
+    vor der Unterliste einfügt. Ab diesem Ergebnis stabil (per Test über 3
+    Zyklen verifiziert), kein Inhaltsverlust. Dieselbe „locker“-
+    Normalisierung tritt bereits VOR diesem Auftrag bei jedem TIGHT
+    eingefügten zweiten Block-Kind auf (gemessen auch für ein TIGHT
+    eingefügtes Bild als zweiten Block – reines, formel-/einzug-
+    unabhängiges Verhalten des Serializers, siehe Finding B4-Test
+    „TIGHT … Leerzeilen-Normalisierung ist ein VORBESTEHENDES … Verhalten“)
+    – kein neuer Bug, nicht behoben, nur gepinnt.
+
+    **Finding B3 (optische Ungleichheit, GEMESSEN, teilweise angeglichen).**
+    Strukturelle Listen-Verschachtelung und Attribut-Einzug nutzen
+    UNTERSCHIEDLICHE CSS-Mechanismen und werden dadurch NIE pixelgenau
+    identisch: Der Editor verschachtelt Listen ECHT (jede Ebene ein
+    eigenes `<ul>`/`<ol>`, dessen `padding-left` sich mit dem der
+    Vorfahren-Listen AUFSUMMIERT), die Ansicht rendert dagegen FLACH
+    (`padding-left` bleibt konstant, der Ebenen-Versatz kommt ausschließlich
+    über `marginLeft = Ebene × 1,5rem`, siehe `indentStyle()`,
+    `lib/markdown.jsx`) – Attribut-Einzug (Absatz/Bild/Formel) nutzt in
+    BEIDEN (Editor UND Ansicht) exakt dieselbe `marginLeft`-Formel. Gemessen
+    (`padding-left` vorher 1,25rem): eine verschachtelte Aufzählung lag im
+    Editor auf Ebene 1 bei kumulativ 2,5rem, ein gleich tief attribut-
+    eingerückter Absatz an derselben Stelle bei 1,5rem, die ANSICHT zeigt
+    für dieselbe Listen-Ebene 2,75rem (1,5rem Marge + 1,25rem Basis-
+    Gutter) – drei unterschiedliche Werte für „dieselbe Tiefe“.
+    - **Optionen:**
+      (a) `padding-left` der Editor-Listen (`.tiptap-doc ul`/`ol`) von
+      1,25rem auf 1,5rem anheben (gewählt, siehe unten): eine EINZELNE,
+      leicht rückgängig zu machende CSS-Zahl, gleicht die SCHRITTWEITE pro
+      Ebene zwischen Editor-Liste und Attribut-Einzug/Ansicht an (nicht
+      pixelgenau, aber näher: 3rem statt 2,5rem auf Ebene 1). Betrifft
+      ALLE Listen im Editor, nicht nur eingerückte – eine geringfügige
+      (0,25rem ≈ 4px), aber sichtbare, globale kosmetische Änderung.
+      (b) Unverändert lassen: geringeres Risiko (keine globale optische
+      Änderung), belässt aber eine bereits seit v7.41 bestehende, vom
+      Nutzer nicht explizit bemängelte Diskrepanz.
+      (c) Die Ansicht auf echte `<ul>`-Verschachtelung umstellen, um exakt
+      dieselbe Kumulierung wie der Editor zu erzeugen: würde die
+      etablierte, seit v7.41 bewusst gewählte „Padding-Ansatz statt echter
+      Verschachtelung“-Architektur der Ansicht verwerfen (siehe DECISIONS
+      #81, A1) – deutlich zu invasiv für diesen Auftrag.
+    - Empfehlung: (a), wie umgesetzt (`src/index.css`). **Rückholbar** –
+      eine einzelne Zahl zurückdrehen, falls im E2E-Lauf negativ auffällt.
+    - Jsdom-Grenze: Keine dieser Zahlen ist per `getComputedStyle`/Layout
+      in Vitest verifizierbar (kein Renderer) – die Werte oben sind aus dem
+      CSS-Quelltext selbst hergeleitet (Rechnung, keine Messung im
+      Browser); der tester-Subagent sollte die tatsächliche Optik im
+      E2E-Lauf stichprobenhaft gegenprüfen.
+
+    **Tests:** `tests/docEditorIndent.test.jsx` (neue Describe-Blöcke
+    „v7.42 …“) deckt Finding B4 (inkl. TIGHT-Fall, Tabellenzellen-
+    Nichterreichbarkeit, Regressionsschutz für den freistehenden Fall),
+    die vollständige Matrix 1 (Knopf-Zustand für alle drei Listentypen,
+    erster/nicht-erster Punkt, Ebene 0/1, datengetrieben über `it.each`),
+    Matrix 2 (strukturelle Fortsetzung für Absatz/Bild/Formel, inkl.
+    Checkbox-Elternpunkt), sowie PINNENDE Regressionstests für Finding B1
+    (inkl. Nummerierungs-Gegenbeispiel) und B2 (3-Zyklen-Stabilitätsnachweis,
+    Inhalts-Erhalt). `tests/math.test.jsx` deckt den Finding-B4-Fix auf
+    Ebene der reinen Funktion `mathToPlaceholders` ab (führende Einrückung
+    bleibt jetzt erhalten, inkl. Tab/Ebene 6/mehrzeilig/Regressionsschutz
+    für den unveränderten Fall). Aktiv verifiziert, dass die vier
+    Finding-B4-Tests ohne den Fix rot sind: `git stash` auf
+    `DocEditor.jsx`/`math.jsx` (Test-Datei blieb liegen), 4 von 89 Tests
+    liefen rot wie erwartet, Fix wiederhergestellt, alle 89 wieder grün.

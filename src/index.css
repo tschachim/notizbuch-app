@@ -42,14 +42,30 @@ html, body { overflow-x: hidden; }
   margin-top: 0.75rem;
 }
 .tiptap-doc p { margin-bottom: 0.5rem; }
+/* padding-left 1,5rem (v7.42, Auftrag "Einzug im Editor sichtbar machen",
+   Teil B/Finding B3): war vorher 1,25rem (Tailwinds "pl-5") – NICHT
+   dieselbe Schrittweite wie die Ansicht (lib/markdown.jsx#INDENT_REM_PER_
+   LEVEL, 1,5rem PRO Ebene). Editor-Listen sind ECHT verschachtelt (jede
+   Ebene ein eigenes <ul>/<ol>, dessen padding-left sich mit dem der
+   Vorfahren-Listen AUFSUMMIERT), die Ansicht dagegen flach gerendert
+   (padding-left bleibt konstant, der Ebenen-Versatz kommt über
+   marginLeft = Ebene * 1,5rem, siehe indentStyle()) – beide Mechanismen
+   sind strukturell verschieden und werden dadurch NIE pixelgenau
+   identisch. 1,5rem gleicht wenigstens die SCHRITTWEITE pro Ebene an
+   (gemessen: Ebene 1 einer verschachtelten Aufzählung lag im Editor vorher
+   bei kumulativ 2,5rem, in der Ansicht bei 2,75rem – Differenz 0,25rem pro
+   Ebene). Bewusste, aber RÜCKHOLBARE Empfehlung (eine einzelne CSS-Zahl,
+   siehe Abschlussbericht) – betrifft ALLE Listen im Editor, nicht nur
+   eingerückte. taskList bleibt unverändert (0,25rem, eigene Optik ohne
+   Aufzählungszeichen, siehe unten). */
 .tiptap-doc ul {
   list-style: disc;
-  padding-left: 1.25rem;
+  padding-left: 1.5rem;
   margin-bottom: 0.75rem;
 }
 .tiptap-doc ol {
   list-style: decimal;
-  padding-left: 1.25rem;
+  padding-left: 1.5rem;
   margin-bottom: 0.75rem;
 }
 .tiptap-doc li { margin-bottom: 0.25rem; }
@@ -230,3 +246,31 @@ html, body { overflow-x: hidden; }
   outline-style: solid;
 }
 .tiptap-doc .katex-error { cursor: text; }
+
+/* Einzug SICHTBAR im Editor (v7.42, Nutzer-Befund "Einzug vergrößern hat
+   keine sichtbare Auswirkung im Editor, nur in der Anzeige nach dem
+   Speichern"). Vorher gab es HIER keine einzige "[data-indent]"-Regel –
+   das "data-indent"-Attribut (indentAttrSpec.renderHTML, DocEditor.jsx)
+   landete zwar korrekt im DOM, blieb aber ungestylt. GENAU derselbe
+   Versatz wie die Ansicht (lib/markdown.jsx#INDENT_REM_PER_LEVEL/
+   indentStyle, 1,5rem PRO Ebene) – sonst würde der Inhalt beim Speichern
+   sichtbar springen. EIN generischer Attribut-Selektor deckt alle DREI
+   Knotentypen ab, die "indent" tragen (Absatz, Bild, Formelblock):
+    - Absatz (IndentParagraph) hat KEINE eigene NodeView – ProseMirror
+      rendert ihn über das normale Schema-toDOM (renderHTML),
+      "data-indent" landet dadurch direkt auf dem <p>.
+    - Bild (BlockImage) UND Formelblock (MathBlock) haben dagegen JEWEILS
+      eine EIGENE NodeView (Bild: Anfasser zum Skalieren; Formel: Klick-
+      zum-Bearbeiten) – die bauen ihr DOM selbst und rufen renderHTML() NIE
+      auf, "data-indent" käme dort NIE an. Beide NodeViews spiegeln das
+      Attribut deshalb explizit auf ihren jeweiligen Wrapper
+      (".img-resize-wrap" bzw. ".math-node-block"/".math-node-inline",
+      siehe apply()/applyIndentAttr() in DocEditor.jsx) – dieselbe Regel
+      hier greift dadurch automatisch auch dort.
+   Ebene 0 (kein Attribut) bleibt absichtlich ungestylt. */
+.tiptap-doc [data-indent="1"] { margin-left: 1.5rem; }
+.tiptap-doc [data-indent="2"] { margin-left: 3rem; }
+.tiptap-doc [data-indent="3"] { margin-left: 4.5rem; }
+.tiptap-doc [data-indent="4"] { margin-left: 6rem; }
+.tiptap-doc [data-indent="5"] { margin-left: 7.5rem; }
+.tiptap-doc [data-indent="6"] { margin-left: 9rem; }

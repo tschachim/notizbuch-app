@@ -1125,3 +1125,293 @@ describe("Finding 5 (v7.41.1): Tab in einer Überschrift wird geschluckt (verlä
     expect(out).toBe("# T\n\n## Abschnitt\n\nAbsatz");
   });
 });
+
+/* ======================================================================= */
+/* v7.42 – Auftrag "Einzug im Editor sichtbar machen", Teil B: systematische */
+/* Vermessung von Listen-Kontexten (Nutzer-Befund "es verhält sich komisch, */
+/* wenn ich das in einem Block mache, der eine Checkbox oder Aufzählung     */
+/* hat"). Die VOLLSTÄNDIGE Matrix (auch die unauffälligen Zeilen) steht im  */
+/* Abschlussbericht/DECISIONS #86 – hier nur die Tests, die daraus folgen.  */
+/* ======================================================================= */
+
+// Finding B4 (ECHTER Bug, beim Vermessen für Teil B gefunden): Eine Formel
+// bekommt ihr "indent"-Attribut NICHT über die core-Regel in IndentMarkdownIt
+// (wie Absatz/Bild), sondern VORAB über mathToPlaceholders (lib/math.jsx) –
+// eine reine Text-Vorverarbeitung, die lange vor jeder Block-Struktur-
+// Erkennung läuft. Die "kein doppelter Einzug"-Tiefenprüfung (siehe
+// IndentMarkdownIt oben) kannte diesen Sonderfall bisher nicht: Eine Formel
+// als Fortsetzung UNTER einem Listenpunkt behielt ihr rohes indent-Attribut
+// UNGEPRÜFT – nach dem v7.42-Sichtbarkeits-Fix (Teil A) hätte das einen
+// SICHTBAREN, unerwünschten doppelten Einzug erzeugt (einmal durch die
+// Listen-Verschachtelung selbst, einmal durch das jetzt gestylte
+// "data-indent"). ROOT CAUSE (siehe DECISIONS #86 für Details): die
+// Platzhalter-Zeile begann bisher IMMER bei Spalte 0 – die führende
+// Einrückung der Quellzeile ging dadurch für markdown-its EIGENE
+// Listen-Fortsetzungs-Erkennung komplett verloren, der Formel-Block fiel
+// dadurch strukturell schon VOR jeder Tiefenprüfung aus der Liste heraus.
+// Fix: mathToPlaceholders erhält die führende Einrückung der Quellzeile
+// jetzt (wie Absatz/Bild), IndentMarkdownIt entfernt ein bereits gesetztes
+// "data-indent" bei einer NUN korrekt erkannten Verschachtelung zusätzlich
+// explizit aus dem rohen HTML-Tag-Text (siehe "Formel-Sonderfall" dort).
+describe("v7.42 Finding B4 (ECHTER Bug): Formel als Fortsetzung unter einem Listenpunkt bekam einen DOPPELTEN Einzug", () => {
+  it("eine Formel als zweiter Block IM SELBEN Listenpunkt bekommt jetzt indent:0 wie ein Absatz/Bild (kein doppelter Einzug)", () => {
+    const md = "# T\n\n- Parent\n\n  $$x^2$$";
+    const editor = buildEditor(md);
+    let indent = "not-found";
+    editor.state.doc.descendants((n) => { if (n.type.name === "mathBlock") indent = n.attrs.indent; });
+    editor.destroy();
+    expect(indent).toBe(0);
+  });
+
+  it("canChangeIndent auf der Formel verhält sich jetzt konsistent zu einem Absatz/Bild an derselben Stelle (sink scheitert, lift hebt den ganzen Listenpunkt)", () => {
+    const md = "# T\n\n- Parent\n\n  $$x^2$$";
+    const editor = buildEditor(md);
+    let mathPos = null;
+    editor.state.doc.descendants((n, p) => { if (n.type.name === "mathBlock") mathPos = p; });
+    editor.commands.setTextSelection(mathPos);
+    const canInc = canChangeIndent(editor, 1);
+    const canDec = canChangeIndent(editor, -1);
+    editor.destroy();
+    expect(canInc).toBe(false);
+    expect(canDec).toBe(true);
+  });
+
+  it("bleibt roundtrip-stabil (kein Sprung/keine zusätzliche Leerzeile durch den Fix)", () => {
+    const md = "# T\n\n- Parent\n\n  $$x^2$$";
+    expect(roundtrip(md)).toBe(md);
+  });
+
+  // WICHTIG (beim Testschreiben gefunden, PRE-EXISTING, NICHT Teil von
+  // Finding B4): Anders als der Absatz-Fall (der TIGHT, also ohne Leerzeile,
+  // per "lazy continuation" in DIESELBE Paragraph-Zeile wie "Parent"
+  // verschmilzt – reines CommonMark-Verhalten) kann eine Formel (wie ein
+  // Bild) NICHT in eine Fließtext-Zeile verschmelzen (beides sind eigene
+  // BLOCK-Gruppen-Nodes). Ein Listenpunkt mit ZWEI separaten Block-Kindern
+  // gilt für tiptap-markdown/prosemirror-markdown als "loose" – das fügt
+  // beim ERSTEN Speichern NACH dem Laden einmalig eine Leerzeile ein
+  // (GENAU dasselbe, bereits VOR diesem Auftrag bestehende Verhalten wie bei
+  // einem TIGHT eingefügten Bild als zweitem Block, siehe Kommentar bei
+  // "kein Datenverlust" unten – NICHT durch den B4-Fix verursacht, sondern
+  // eine Eigenschaft des Serializers). Ab dem Ergebnis dieser einmaligen
+  // Normalisierung ist der Roundtrip stabil.
+  it("Regression: eine TIGHT (ohne Leerzeile) unter einem Listenpunkt stehende Formel bekommt ebenfalls indent:0 (Leerzeilen-Normalisierung ist ein VORBESTEHENDES, formel-unabhängiges Serializer-Verhalten, kein B4-Nebeneffekt)", () => {
+    const md = "# T\n\n- Parent\n  $$x^2$$";
+    const editor = buildEditor(md);
+    let indent = "not-found";
+    editor.state.doc.descendants((n) => { if (n.type.name === "mathBlock") indent = n.attrs.indent; });
+    editor.destroy();
+    expect(indent).toBe(0);
+    const cycle0 = roundtrip(md);
+    expect(cycle0).toBe("# T\n\n- Parent\n\n  $$x^2$$"); // einmalige Normalisierung
+    expect(roundtrip(cycle0)).toBe(cycle0); // ab hier stabil, kein Weiterdriften
+  });
+
+  it("Regression: eine FREISTEHENDE (nicht in einer Liste steckende) Formel behält ihren eigenen Einzug unverändert (Finding 6, v7.41 – keine Nebenwirkung des B4-Fixes)", () => {
+    const md = "# T\n\n  $$x^2$$";
+    const editor = buildEditor(md);
+    let indent = "not-found";
+    editor.state.doc.descendants((n) => { if (n.type.name === "mathBlock") indent = n.attrs.indent; });
+    editor.destroy();
+    expect(indent).toBe(1);
+    expect(roundtrip(md)).toBe(md);
+  });
+
+  // HINWEIS (beim Testschreiben geprüft, dann verworfen): Ein "$$…$$" MITTEN
+  // in einer Tabellenzeile ("| $$x^2$$ |") startet NICHT am Zeilenanfang –
+  // DISPLAY_MATH_START_RE (math.jsx) verlangt genau das für einen
+  // Formel-BLOCK, eine Tabellenzelle kann also über diesen Weg gar keinen
+  // mathBlock-Node erzeugen (bestätigt per Token-Dump: mathToPlaceholders
+  // lässt die Zeile unangetastet). Der "table_open/table_close"-Zweig der
+  // Tiefenprüfung ist damit für Formeln nicht erreichbar – ein eigener Test
+  // dafür wäre ein Test eines nicht existierenden Falls und entfällt bewusst
+  // (die bereits bestehende Tabellen-Absatz-Tiefenprüfung ist unverändert
+  // durch "eine eingerückte Zeile INNERHALB einer Tabellenzelle bekommt kein
+  // indent-Attribut" oben abgedeckt).
+});
+
+// Matrix-Teil "Cursor in einem Listenpunkt" (Auftrag Teil B, Punkt 1):
+// Aufzählung/Checkliste/Nummerierung verhalten sich UNTEREINANDER identisch
+// (unauffällige Zeilen, siehe Bericht) – erster Punkt einer Ebene kann nicht
+// weiter sinken (canChangeIndent(+1)=false), aber IMMER heraushebbar
+// (canChangeIndent(-1)=true, Finding 3 aus v7.41.1 gilt für ALLE drei
+// Listentypen gleichermaßen); ein NICHT-erster Punkt kann beides.
+describe("v7.42 Auftrag Teil B, Matrix 1: Knopf-Zustand für Aufzählung/Nummerierung/Checkliste, erster/nicht-erster Punkt, Ebene 0/tiefer", () => {
+  it.each([
+    { label: "Aufzählung, Ebene 0, erster Punkt", md: "# T\n\n- Eins\n- Zwei", text: "Eins", can1: false, can2: true },
+    { label: "Aufzählung, Ebene 0, zweiter Punkt", md: "# T\n\n- Eins\n- Zwei", text: "Zwei", can1: true, can2: true },
+    { label: "Aufzählung, Ebene 1 (verschachtelt, einziges Kind)", md: "# T\n\n- Eins\n  - Zwei", text: "Zwei", can1: false, can2: true },
+    { label: "Nummerierung, Ebene 0, erster Punkt", md: "# T\n\n1. Eins\n2. Zwei", text: "Eins", can1: false, can2: true },
+    { label: "Nummerierung, Ebene 0, zweiter Punkt", md: "# T\n\n1. Eins\n2. Zwei", text: "Zwei", can1: true, can2: true },
+    { label: "Nummerierung, Ebene 1 (verschachtelt, einziges Kind)", md: "# T\n\n1. Eins\n   1. Zwei", text: "Zwei", can1: false, can2: true },
+    { label: "Checkliste, Ebene 0, erster Punkt", md: "# T\n\n- [ ] Eins\n- [ ] Zwei", text: "Eins", can1: false, can2: true },
+    { label: "Checkliste, Ebene 0, zweiter Punkt", md: "# T\n\n- [ ] Eins\n- [ ] Zwei", text: "Zwei", can1: true, can2: true },
+    { label: "Checkliste, Ebene 1 (verschachtelt, einziges Kind)", md: "# T\n\n- [ ] Eins\n  - [ ] Zwei", text: "Zwei", can1: false, can2: true },
+  ])("$label", ({ md, text, can1, can2 }) => {
+    const editor = buildEditor(md);
+    const pos = posOfHeadingOrText(editor, text);
+    editor.commands.setTextSelection(pos);
+    const r1 = canChangeIndent(editor, 1);
+    const r2 = canChangeIndent(editor, -1);
+    editor.destroy();
+    expect(r1).toBe(can1);
+    expect(r2).toBe(can2);
+  });
+});
+
+// Matrix-Teil "Absatz/Bild/Formel als STRUKTURELLE Fortsetzung direkt
+// UNTER einem Listenpunkt" (Auftrag Teil B, Punkt 2/3: "typischer
+// Fortsetzungstext", "Bild und Bildunterschrift"). Alle drei Knotentypen
+// verhalten sich HIER (Inhalt bleibt strukturell im selben Listenpunkt,
+// 2-Leerzeichen-Einrückung entspricht GENAU der Content-Spalte von "- ")
+// identisch und unauffällig: indent:0 (kein doppelter Einzug, siehe
+// IndentMarkdownIt), canChangeIndent(+1)=false/( -1)=true (die "sink"-Regel
+// betrifft den GESAMTEN Listenpunkt, nicht das einzelne Fortsetzungs-Element,
+// siehe Kopfkommentar bei runIndentChange), und Laden+Speichern ist
+// idempotent (keine Formatierungsänderung durch einen zweiten Zyklus).
+describe("v7.42 Auftrag Teil B, Matrix 2: strukturelle Fortsetzung (Absatz/Bild/Formel) direkt unter einem Listenpunkt – unauffällig", () => {
+  it.each([
+    { label: "Absatz", md: "# T\n\n- Parent\n\n  Fortsetzung", nodeType: "paragraph", text: "Fortsetzung" },
+    { label: "Formel", md: "# T\n\n- Parent\n\n  $$x^2$$", nodeType: "mathBlock", text: null },
+  ])("$label: indent:0, canChangeIndent [false,true], idempotenter Roundtrip", ({ md, nodeType, text }) => {
+    const editor = buildEditor(md);
+    let indent = "not-found", pos = null;
+    editor.state.doc.descendants((n, p) => {
+      if (n.type.name === nodeType && (text === null || n.textContent === text)) { indent = n.attrs.indent; pos = p; }
+    });
+    editor.commands.setTextSelection(pos);
+    const can1 = canChangeIndent(editor, 1);
+    const can2 = canChangeIndent(editor, -1);
+    const out = saveLike(editor);
+    editor.destroy();
+    expect(indent).toBe(0);
+    expect(can1).toBe(false);
+    expect(can2).toBe(true);
+    expect(out).toBe(md);
+    expect(roundtrip(out)).toBe(out); // idempotent
+  });
+
+  it("Bild + Bildunterschrift direkt unter einem Listenpunkt (der ursprüngliche Nutzerfall): beide bleiben strukturell im selben Listenpunkt, idempotent", () => {
+    const md = "# T\n\n- Parent\n\n  ![Bild](img:xyz)\n\n  *Unterschrift*";
+    const editor = buildEditor(md);
+    let imageIndent = "not-found";
+    editor.state.doc.descendants((n) => { if (n.type.name === "image") imageIndent = n.attrs.indent; });
+    const out = saveLike(editor);
+    editor.destroy();
+    expect(imageIndent).toBe(0);
+    expect(out).toBe(md);
+    expect(roundtrip(out)).toBe(out);
+  });
+
+  it("dasselbe unter einem CHECKBOX-Elternpunkt (nicht nur Aufzählung) verhält sich identisch", () => {
+    const md = "# T\n\n- [ ] Parent\n\n  Fortsetzung";
+    const editor = buildEditor(md);
+    let indent = "not-found";
+    editor.state.doc.descendants((n) => { if (n.type.name === "paragraph" && n.textContent === "Fortsetzung") indent = n.attrs.indent; });
+    const out = saveLike(editor);
+    editor.destroy();
+    expect(indent).toBe(0);
+    expect(out).toBe(md);
+  });
+});
+
+// Finding B1 (Markdown-inhärente Ambiguität, DOKUMENTIERT statt behoben –
+// siehe DECISIONS #86 für die Optionen-Abwägung): Ein Absatz/Bild/eine
+// Formel, der/die per Attribut auf Ebene 1 eingerückt wird (2 Leerzeichen) UND
+// UNMITTELBAR (nur durch eine Leerzeile getrennt) einer Liste folgt, erzeugt
+// exakt denselben Rohtext wie eine STRUKTURELLE Fortsetzung DESSELBEN
+// Listenpunkts (siehe Matrix 2 oben) – CommonMarks "lazy continuation"-Regel
+// entscheidet rein über die Spalten-Tiefe, unabhängig davon, WELCHER der
+// beiden Mechanismen den Text erzeugt hat. Der Block wird beim NÄCHSTEN Laden
+// deshalb strukturell in den vorangehenden Listenpunkt aufgenommen –
+// NICHT-DESTRUKTIV (kein Datenverlust, stabilisiert sich sofort/spätestens
+// nach einem weiteren Zyklus), aber das Knopf-/Tab-Verhalten wechselt dadurch
+// unbemerkt von "eigene Attribut-Einrückung" auf "sinkt/hebt den GANZEN
+// vorangehenden Listenpunkt" – genau das vom Nutzer beschriebene "komisch".
+// Empfehlung (siehe DECISIONS #86): NICHT versuchen, dies durch eine andere
+// Zeichenkodierung zu vermeiden (jeder Versuch würde die "2 Leerzeichen pro
+// Ebene"-Konvention verlassen und an anderer Stelle neue Inkonsistenzen
+// erzeugen) – stattdessen dokumentieren und sicherstellen, dass daraus NIE
+// Datenverlust oder unbegrenzte Verschlechterung über mehrere Zyklen wird
+// (siehe die zweite Zusicherung unten).
+describe("v7.42 Finding B1 (dokumentierte Markdown-Ambiguität): Absatz DIREKT nach einer Liste wird beim Neuladen zu deren Fortsetzung", () => {
+  it("ein per Knopf auf Ebene 1 eingerückter Absatz direkt nach einer Liste wird beim Neuladen zum STRUKTURELLEN Listenpunkt-Inhalt (indent fällt auf 0, kein Datenverlust)", () => {
+    const md = "# T\n\n- Parent\n\nFortsetzung ohne Einrueckung";
+    const editor = buildEditor(md);
+    editor.commands.setTextSelection(posOfHeadingOrText(editor, "Fortsetzung ohne Einrueckung"));
+    const applied = changeIndent(editor, 1);
+    const out = saveLike(editor);
+    editor.destroy();
+    expect(applied).toBe(true);
+    // Rohtext ist ab hier TEXTUELL UNUNTERSCHEIDBAR von einer echten
+    // Listenpunkt-Fortsetzung (Matrix 2) – exakt die beschriebene Ambiguität.
+    expect(out).toBe("# T\n\n- Parent\n\n  Fortsetzung ohne Einrueckung");
+
+    const editor2 = buildEditor(out);
+    let indent = "not-found", parentType = null;
+    editor2.state.doc.descendants((n, p) => {
+      if (n.type.name === "paragraph" && n.textContent === "Fortsetzung ohne Einrueckung") {
+        indent = n.attrs.indent;
+        parentType = editor2.state.doc.resolve(p).node(editor2.state.doc.resolve(p).depth).type.name;
+      }
+    });
+    const stableOut = saveLike(editor2);
+    editor2.destroy();
+    expect(indent).toBe(0); // NICHT mehr die eigene Attribut-Einrückung
+    expect(parentType).toBe("listItem"); // strukturell Teil von "Parent" geworden
+    expect(stableOut).toBe(out); // KEIN Datenverlust, sofort roundtrip-stabil
+  });
+
+  it("derselbe Effekt gilt NICHT für eine Ebene-1-Einrückung nach einer NUMMERIERTEN Liste mit einstelligem Marker (Content-Spalte 3, 2 Leerzeichen reichen nicht zum Verschlucken)", () => {
+    // Bewusst als Gegenbeispiel gepinnt: die Ambiguität aus Finding B1 ist
+    // KEIN allgemeines Attribut-Einzug-Problem, sondern hängt exakt von der
+    // Marker-Breite ab ("- "/"- [ ] " brauchen nur 2 Leerzeichen, "1. " braucht
+    // mindestens 3) – siehe DECISIONS #86 für die vollständige Matrix.
+    const md = "# T\n\n1. Eins\n\n  Fortsetzung2sp";
+    const editor = buildEditor(md);
+    let indent = "not-found", parentType = null;
+    editor.state.doc.descendants((n, p) => {
+      if (n.type.name === "paragraph" && n.textContent === "Fortsetzung2sp") {
+        indent = n.attrs.indent;
+        parentType = editor.state.doc.resolve(p).node(editor.state.doc.resolve(p).depth).type.name;
+      }
+    });
+    editor.destroy();
+    expect(indent).toBe(1); // bleibt die eigene Attribut-Einrückung
+    expect(parentType).toBe("doc"); // bleibt TOP-LEVEL, nicht Teil der Liste
+  });
+});
+
+// Finding B2 (einmalige, NICHT-destruktive Markdown-Reformatierung –
+// dokumentiert statt behoben, siehe DECISIONS #86): Eine "Excel-Style"-
+// Mehrfachauswahl über EINEN Listenpunkt (der dadurch sinkt) UND einen
+// direkt folgenden Top-Level-Absatz (der dadurch seine eigene Attribut-
+// Einrückung bekommt) erzeugt in EINEM Rutsch beides gleichzeitig. Der so
+// entstandene Rohtext normalisiert sich beim NÄCHSTEN Laden+Speichern EINMAL
+// (eine zusätzliche Leerzeile vor der neu verschachtelten Unterliste, weil
+// der äußere Listenpunkt durch den jetzt angehängten Absatz "locker" statt
+// "eng" wird) und ist AB DANN stabil – kein Inhaltsverlust, keine
+// fortlaufende Verschlechterung.
+describe("v7.42 Finding B2 (einmalige, nicht-destruktive Reformatierung): gemischte Mehrfachauswahl aus Listenpunkt-Sink + Absatz-Einzug", () => {
+  it("stabilisiert sich nach GENAU einem zusätzlichen Zyklus (kein endloses Weiterdriften, kein Datenverlust)", () => {
+    const md = "# T\n\n- Eins\n- Zwei\n\nAbsatz danach";
+    const editor = buildEditor(md);
+    editor.commands.setTextSelection({ from: posOfHeadingOrText(editor, "Zwei"), to: editor.state.doc.content.size - 1 });
+    const applied = changeIndent(editor, 1);
+    const cycle0 = saveLike(editor);
+    editor.destroy();
+    expect(applied).toBe(true);
+    expect(cycle0).toBe("# T\n\n- Eins\n  - Zwei\n\n  Absatz danach");
+
+    const cycle1 = roundtrip(cycle0);
+    expect(cycle1).toBe("# T\n\n- Eins\n\n  - Zwei\n\n  Absatz danach"); // EINMALIGE Normalisierung
+    expect(roundtrip(cycle1)).toBe(cycle1); // ab hier stabil
+    expect(roundtrip(roundtrip(cycle1))).toBe(cycle1); // bleibt stabil (kein Weiterdriften)
+
+    // Kein Inhalt verloren: alle drei Textfragmente stecken in JEDEM Zyklus.
+    for (const text of [cycle0, cycle1]) {
+      expect(text).toContain("Eins");
+      expect(text).toContain("Zwei");
+      expect(text).toContain("Absatz danach");
+    }
+  });
+});
