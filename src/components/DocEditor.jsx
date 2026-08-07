@@ -175,6 +175,29 @@ export const collapseChecklistGaps = (md) =>
     .replace(/^([ \t]*- \[[ xX]\][^\n]*)\n\n(?=[ \t]*(?:[-*]\s|\d+[.)]\s))/gm, "$1\n")
     .replace(/^([ \t]*(?:[-*]\s|\d+[.)]\s)[^\n]*)\n\n(?=[ \t]*- \[[ xX]\])/gm, "$1\n");
 
+// v7.45-Fix (Datenkorruption, E2E-Finding 🔴, siehe DECISIONS #91): Der
+// Markdown-Serializer (prosemirror-markdown, "taskItem"-Node) schreibt für
+// eine INHALTSLEERE Checkbox zuverlässig "[ ] " MIT einem abschließenden
+// Leerzeichen (state.write("[ ] ") + renderContent() eines leeren
+// Absatzes). Dieses Leerzeichen ist reiner Serializer-ZUFALL, kein
+// verlässliches Signal – EmptyTaskMarkdownIt (siehe oben) macht Editor UND
+// TASK_RE (lib/markdown.jsx) beim Laden bzw. Rendern bewusst UNABHÄNGIG
+// davon, ob es vorhanden ist. Ohne diese Normalisierung würde ein
+// bestehendes "trim()" auf das GESAMTE Dokument (App.jsx#saveEdit) das
+// Leerzeichen NUR dann fressen, wenn die leere Checkbox zufällig die
+// LETZTE Zeile des gesamten Dokuments ist (trim() wirkt nur an den beiden
+// Enden des Gesamtstrings) – eine leere Checkbox in der Mitte behielte ihr
+// Leerzeichen dagegen unverändert. Diese POSITIONSABHÄNGIGE Asymmetrie
+// (Leerzeichen mal da, mal nicht, ohne fachlichen Grund) wäre unnötig
+// fragil und in Diffs/Git schwer nachvollziehbar – deshalb wird das
+// Leerzeichen HIER, für JEDE Position gleichermaßen, bewusst entfernt statt
+// dem Zufall (bzw. App.jsx' trim()) überlassen. Nur "-" als Marker nötig
+// (wie bei dropEmptyCheckboxLines unten): Der Serializer normalisiert den
+// Marker ohnehin auf "-" (Markdown.configure({bulletListMarker:"-"})),
+// "*" kann aus DIESEM Pfad nie kommen.
+export const stripEmptyCheckboxTrailingSpace = (md) =>
+  md.replace(/^([ \t]*- \[[ xX]\])[ \t]+$/gm, "$1");
+
 // v7.41.2, Geister-Checkbox (siehe SplitMixedTaskLists oben und DECISIONS):
 // zusätzliches Sicherheitsnetz in save() (siehe dort), NACH
 // collapseChecklistGaps angewendet. SplitMixedTaskLists verhindert nur
@@ -1240,6 +1263,84 @@ export const SplitMixedTaskLists = Extension.create({
                 });
               });
               ul.remove();
+            });
+          },
+        },
+      },
+    };
+  },
+});
+
+/* -------------------------------------------------------------------- */
+/* Leere Checkbox geht beim erneuten Laden verloren (v7.45, ECHTER Bug,   */
+/* E2E-Finding 🔴 – siehe DECISIONS #91 für die vollständige Analyse).    */
+/* Ein bewusst leer angelegter Checkbox-Punkt ("- [ ]" ohne jeden          */
+/* Folgetext, z. B. per Enter im Editor erzeugt) wird von markdown-it     */
+/* NIE als Task-Item erkannt – UNABHÄNGIG davon, ob die Quellzeile ein     */
+/* abschließendes Leerzeichen trägt oder nicht: markdown-its EIGENE        */
+/* Absatz-Regel (rules_block/paragraph.mjs) fasst alle Zeilen eines        */
+/* Absatzes zusammen und wendet darauf EINMAL asciiTrim() an – ein         */
+/* einzelnes Leerzeichen am Ende (kein "harter Umbruch", der bräuchte      */
+/* zwei) fällt dabei IMMER weg, bevor markdown-it-task-lists (das          */
+/* separate "core.ruler.after('inline', …)"-Plugin, das TaskList lädt)     */
+/* den resultierenden Absatztext überhaupt zu sehen bekommt. Dessen        */
+/* eigene Erkennung (startsWithTodoMarkdown in node_modules/               */
+/* markdown-it-task-lists/index.js) verlangt zwingend die vier Zeichen     */
+/* "[ ] "/"[x] "/"[X] " (MIT Leerzeichen) am Anfang des Absatztexts – bei   */
+/* einem leeren Punkt bleibt nach dem Trimmen aber IMMER nur "[ ]" (drei    */
+/* Zeichen) übrig, egal was im Markdown stand. Jedes "Leerzeichen am        */
+/* Zeilenende erhalten"-Rezept (z. B. eine reine Textvorverarbeitung VOR    */
+/* dem Laden, wie es andere Hooks in dieser Datei für Einzug/Formeln        */
+/* nutzen) würde deshalb NICHTS bewirken – markdown-it nimmt es beim        */
+/* eigenen Parsen sofort wieder weg (empirisch verifiziert, siehe           */
+/* Abschlussbericht/DECISIONS: "- [ ]" UND "- [ ] " liefern nach dem        */
+/* Laden IDENTISCH eine normale Aufzählung mit Literaltext "[ ]").          */
+/*                                                                          */
+/* Fix: eine EIGENE core-Regel, GENAU wie IndentMarkdownIt oben über         */
+/* denselben "parse.setup(md)"-Hook registriert, korrigiert den bereits      */
+/* getrimmten Absatztext, BEVOR die "inline"-Kernregel ihn tokenisiert       */
+/* ("core.ruler.before('inline', …)", nicht "after") – markdown-it-task-     */
+/* lists selbst hängt sich erst NACH "inline" ein (siehe oben) und sieht     */
+/* dadurch immer schon den korrigierten String. Erkennungsbedingung          */
+/* bewusst IDENTISCH zu "isTodoItem" in markdown-it-task-lists selbst        */
+/* nachgebaut (inline-Token, davor paragraph_open, davor list_item_open) –   */
+/* eine Fehlzündung auf einen normalen Absatz mit dem reinen Text "[ ]"      */
+/* (kein Listenpunkt) ist dadurch strukturell ausgeschlossen.                */
+/*                                                                          */
+/* Leerzeichen-Artefakt bewusst vermieden: Die Regel hängt NUR an           */
+/* "token.content" (der internen, rein für die spätere Mustererkennung       */
+/* gebrauchten STRING-Repräsentation) ein Leerzeichen an – die "inline"-      */
+/* Regel tokenisiert danach zwar aus dem gepolsterten String, aber           */
+/* markdown-it-task-lists' eigenes "todoify()" schneidet die ersten drei     */
+/* Zeichen ("[ ]") wieder vom (einzigen) Text-Kind ab; übrig bleibt ein       */
+/* Text-Kind mit GENAU einem Leerzeichen. Empirisch geprüft (siehe           */
+/* DECISIONS/Testdatei): ProseMirrors HTML-Parser verwirft dieses             */
+/* Leerzeichen-Textkind beim Aufbau des Dokuments vollständig – der           */
+/* entstehende taskItem ist danach ein ECHTES leeres Element (kein            */
+/* unsichtbares Leerzeichen im Dokumentmodell), identisch zu einem im         */
+/* Editor per Enter frisch angelegten leeren Checkbox-Punkt.                  */
+const EMPTY_TASK_MARKER_RE = /^\[( |x|X)\]$/;
+export const EmptyTaskMarkdownIt = Extension.create({
+  name: "emptyTaskMarkdownIt",
+  addStorage() {
+    return {
+      markdown: {
+        parse: {
+          setup(md) {
+            if (md.__emptyTaskPatched) return;
+            md.__emptyTaskPatched = true;
+            md.core.ruler.before("inline", "docEmptyTaskMarker", (state) => {
+              const tokens = state.tokens;
+              for (let i = 2; i < tokens.length; i++) {
+                if (
+                  tokens[i].type === "inline" &&
+                  tokens[i - 1].type === "paragraph_open" &&
+                  tokens[i - 2].type === "list_item_open" &&
+                  EMPTY_TASK_MARKER_RE.test(tokens[i].content)
+                ) {
+                  tokens[i].content += " ";
+                }
+              }
             });
           },
         },
@@ -2686,6 +2787,14 @@ export default function DocEditor({
       // ausführlichen Kommentar dort). Position hier bleibt als
       // Lese-Konvention stehen.
       SplitMixedTaskLists,
+      // EmptyTaskMarkdownIt (v7.45, siehe Kopfkommentar dort und DECISIONS
+      // #91): behebt eine ANDERE Parser-Lücke als SplitMixedTaskLists
+      // (eine INHALTSLEERE Checkbox-Zeile wird von markdown-it-task-lists
+      // beim Laden nie als Checkbox erkannt) – Reihenfolge zu
+      // SplitMixedTaskLists/TaskList irrelevant, der "parse.setup(md)"-Hook
+      // registriert seine core-Regel selbst positionsfest VOR "inline"
+      // (siehe dort), unabhängig von der Listenposition/Priorität hier.
+      EmptyTaskMarkdownIt,
       TaskList,
       // nested:true (v7.41, Auftrag "Einrückungen"): Checklisten müssen
       // verschachtelbar sein (der Nutzer-Fall hat eine Checkliste als
@@ -3005,7 +3114,9 @@ export default function DocEditor({
     if (!editor || saving || uploading) return;
     const md = editor.storage.markdown.getMarkdown();
     if (md === baseline.current) { onCancel(); return; } // nichts geändert
-    let out = dropEmptyCheckboxLines(collapseChecklistGaps(unescapeMd(unresolveImgs(md, imgMap))));
+    let out = dropEmptyCheckboxLines(
+      stripEmptyCheckboxTrailingSpace(collapseChecklistGaps(unescapeMd(unresolveImgs(md, imgMap))))
+    );
     // Sicherheitsnetz (siehe UNRESOLVED_IMG_RE oben für die ausführliche
     // Begründung): eine Bildreferenz OHNE img:-Ziel darf nicht gespeichert
     // werden – seit v7.41 Teil B nur noch der Ausnahmefall (z. B. ohne

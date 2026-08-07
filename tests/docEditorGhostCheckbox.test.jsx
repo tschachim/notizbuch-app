@@ -30,16 +30,21 @@ import TableCell from "@tiptap/extension-table-cell";
 import { Markdown } from "tiptap-markdown";
 import {
   FencedCodeBlock, BlockImage, IndentParagraph, IndentMarkdownIt, IndentKeymap, MdTable,
-  MathInline, MathBlock, NestedListToggle, SplitMixedTaskLists,
+  MathInline, MathBlock, NestedListToggle, SplitMixedTaskLists, EmptyTaskMarkdownIt,
   unescapeMd, collapseChecklistGaps, dropEmptyCheckboxLines,
 } from "../src/components/DocEditor.jsx";
 import { mathToPlaceholders } from "../src/lib/math.jsx";
 
 // Exakt die Verdrahtung aus DocEditor.jsx (useEditor()) – SplitMixedTaskLists
 // VOR TaskList/TaskItem (siehe Kommentar an der Extension selbst).
+// EmptyTaskMarkdownIt (v7.45) mit aufgenommen, damit diese Datei die REALE
+// Verdrahtung nicht durch Drift stillschweigend verlässt (siehe Kommentar
+// oben) – die eigentlichen Regressionstests für den v7.45-Fix leben separat
+// in tests/docEditorEmptyCheckbox.test.jsx.
 function buildEditor(md) {
   return new Editor({
     extensions: [
+      EmptyTaskMarkdownIt,
       IndentKeymap,
       StarterKit.configure({ heading: { levels: [1, 2, 3] }, codeBlock: false, blockquote: false, paragraph: false }),
       IndentParagraph,

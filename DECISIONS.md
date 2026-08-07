@@ -9193,3 +9193,170 @@ aus `referenz-app.jsx` übernommen.
       des gefixten Features liegt statt in einem Randfall – deshalb
       ausdrücklich in `docs/TESTFAELLE.md` (D23) als "nicht als Fehler
       melden" hinterlegt, damit der E2E-Lauf keinen Fehlalarm produziert.
+
+91. **Eine bewusst LEER angelegte Checkbox degradiert zu bedeutungslosem
+    Literaltext (v7.45, ECHTER Bug, E2E-Finding 🔴 des Testers gegen die
+    Live-App, höchste Priorität – Datenkorruption).** Repro (Tester):
+    Checkliste mit Text-Punkten anlegen, dazu mehrere bewusst leere Punkte
+    (mittig, verschachtelt als Unterpunkt, als letzter Punkt des
+    Dokuments), speichern, Seite neu laden. Beobachtet: Der MITTLERE und
+    der VERSCHACHTELTE leere Punkt rendern in der Dokument-Ansicht
+    zunächst noch korrekt, der LETZTE Punkt sofort NICHT mehr (normaler
+    Aufzählungspunkt mit Literaltext "[ ]"). Öffnet man danach den Editor
+    OHNE jede Änderung erneut, degradieren SÄMTLICHE leeren Checkboxen
+    (auch die vorher intakten) sofort beim Parsen zu Literaltext – nach
+    dem nächsten Speichern (auch an ganz anderer Stelle) dauerhaft im
+    Daten-Repo persistiert. Die Korruption breitet sich mit jedem
+    Bearbeitungszyklus aus.
+    - **Ursache, Ebene 1 – warum das abschließende Leerzeichen beim
+      Speichern manchmal fehlt (Auslöser für den LETZTEN Punkt):**
+      `prosemirror-markdown` (`taskItem`-Serializer, `tiptap-markdown/src/
+      extensions/nodes/task-item.js`) schreibt für eine inhaltsleere
+      Checkbox ZUVERLÄSSIG `state.write("[ ] ")` MIT einem abschließenden
+      Leerzeichen, gefolgt von `state.renderContent(node)` auf einem
+      leeren Absatz (schreibt nichts). Das Leerzeichen landet dadurch
+      unabhängig von der Position der Checkbox im `state.out` (empirisch
+      mit einer isoliert aufgebauten `Editor`-Instanz nachgewiesen, drei
+      Positionen geprüft: mittig, verschachtelt, letzter Block des
+      Dokuments – in ALLEN DREI Fällen bleibt das Leerzeichen im rohen
+      `editor.storage.markdown.getMarkdown()`-Ergebnis erhalten, auch am
+      Dokumentende). Der eigentliche Leerzeichen-Verlust für den LETZTEN
+      Punkt passiert ERST in `App.jsx#saveEdit`:
+      `resolvedMd.replace(/\n{3,}/g, "\n\n").trim() + "\n"` – dieses
+      `.trim()` wirkt auf den GESAMTEN Dokument-String und frisst deshalb
+      NUR dann etwas, wenn die leere Checkbox zufällig die LETZTE Zeile
+      des gesamten Dokuments ist (kein anderer Text folgt mehr). Eine
+      leere Checkbox in der Mitte behält ihr Leerzeichen dagegen
+      unverändert – eine rein zufällige, positionsabhängige Asymmetrie
+      ohne fachlichen Grund.
+    - **Ursache, Ebene 2 – der eigentliche Kern des Bugs, UNABHÄNGIG von
+      Ebene 1 (warum degradieren dann auch die vorher intakten mittigen/
+      verschachtelten Punkte beim erneuten Laden?):** markdown-it
+      (`rules_block/paragraph.mjs`, `asciiTrim()`) fasst alle Zeilen eines
+      Absatzes zusammen und trimmt das Ergebnis EINMAL an BEIDEN Enden,
+      BEVOR `markdown-it-task-lists` (`node_modules/markdown-it-task-
+      lists/index.js#startsWithTodoMarkdown`) den Absatztext überhaupt zu
+      sehen bekommt. Dessen Erkennung verlangt zwingend die VIER Zeichen
+      `"[ ] "`/`"[x] "`/`"[X] "` (MIT Leerzeichen) am Anfang – nach dem
+      Trimmen bleibt bei einer leeren Checkbox aber IMMER nur `"[ ]"`
+      (drei Zeichen) übrig, VÖLLIG UNABHÄNGIG davon, ob die Quellzeile ein
+      abschließendes Leerzeichen trägt oder nicht. Empirisch verifiziert
+      (isolierte `Editor`-Instanz, `editor.getJSON()` verglichen): sowohl
+      `"- [ ] A\n- [ ]\n- [ ] B"` als auch `"- [ ] A\n- [ ] \n- [ ] B"`
+      (mit UND ohne Leerzeichen in der Quelle) liefern nach dem Laden
+      IDENTISCH eine normale Aufzählung mit Literaltext `"[ ]"` für den
+      leeren Punkt – ein Leerzeichen in der Quelldatei allein hätte den
+      Ladepfad also NIE repariert. Genau das erklärt den zweiten
+      beobachteten Effekt: Der Viewer (`TASK_RE`, Ebene 1 unten) zeigte
+      die mittigen/verschachtelten Punkte nach dem ERSTEN Speichern zwar
+      noch korrekt an (ihr Leerzeichen war ja noch da), aber der EDITOR
+      erkannte sie beim erneuten Laden bereits NICHT mehr – unabhängig
+      vom Viewer, rein am Ladepfad. Das erneute Speichern schrieb dann den
+      bereits kaputten Zustand (Literaltext) fest.
+    - **Fix, drei Ebenen, bewusst NICHT auf ein fragiles abschließendes
+      Leerzeichen verlassen (Auftrag):**
+      1. **Viewer (`TASK_RE`, `lib/markdown.jsx`):** `\]\s+` (mindestens
+         ein Leerzeichen zwingend) wird zu `\]\s+|\]\s*$` (Leerzeichen
+         weiterhin zwingend, WENN Text folgt – ein leerer Rest am
+         Zeilenende ist zusätzlich zulässig). Bewusst NICHT einfach
+         `\]\s*` ohne Endanker: Das hätte eine neue, unerwünschte
+         Fehldeutung eingeführt – `"- [ ]Text"` (kein Trennzeichen
+         zwischen `"]"` und Text) wäre dann fälschlich zur Checkbox mit
+         Text "Text" geworden, obwohl weder GFM noch
+         `markdown-it-task-lists` das je akzeptiert hätten (Editor und
+         Viewer wären dadurch auseinandergelaufen). Die vier Capture-
+         Gruppen (Marker+"[", Zustand, "]"+Trennzeichen, Resttext) bleiben
+         in Bedeutung/Reihenfolge unverändert – `toggleTask` (App.jsx) und
+         `renderBlocks` funktionieren unverändert weiter (siehe Tests:
+         Abhaken einer leeren Checkbox erzeugt weiterhin eine stabile,
+         korrekt formatierte Zeile ohne neu eingeführtes Leerzeichen).
+      2. **Editor-Ladepfad (`EmptyTaskMarkdownIt`, neue Extension,
+         `DocEditor.jsx`):** Da markdown-it das Leerzeichen ohnehin immer
+         wegtrimmt (Ebene 2 oben), kann der Fix nur NACH diesem Trimmen
+         ansetzen. Eine eigene `core.ruler.before("inline", …)`-Regel
+         (registriert über denselben etablierten `parse.setup(md)`-Hook
+         wie `IndentMarkdownIt`/`FileLinkMarkdownIt`, inkl. `__patched`-
+         Guard gegen Mehrfachregistrierung bei jedem `parse()`-Aufruf auf
+         derselben `md`-Instanz) erkennt jedes `inline`-Token, dessen
+         Inhalt nach dem Trimmen exakt `"[ ]"`/`"[x]"`/`"[X]"` ist UND
+         dessen zwei Vorgänger-Tokens `paragraph_open`/`list_item_open`
+         sind (dieselbe Struktur-Bedingung wie `isTodoItem` in
+         `markdown-it-task-lists` selbst, damit ein normaler Absatz mit
+         dem reinen TEXT `"[ ]"` – kein Listenpunkt – strukturell
+         garantiert NICHT betroffen ist), und hängt ein Leerzeichen an die
+         interne `token.content`-STRING-Repräsentation an, BEVOR die
+         `inline`-Kernregel sie tokenisiert. `markdown-it-task-lists`
+         selbst hängt sich erst NACH `inline` ein und sieht dadurch immer
+         den bereits korrigierten String. Leerzeichen-Artefakt bewusst
+         geprüft statt geraten: `todoify()` (in `markdown-it-task-lists`)
+         schneidet die ersten drei Zeichen `"[ ]"` vom (einzigen)
+         Text-Kind ab, übrig bleibt ein Text-Kind mit GENAU einem
+         Leerzeichen – ProseMirrors HTML-Parser verwirft dieses
+         Leerzeichen-Textkind beim Aufbau des Dokuments nachweislich
+         vollständig (`editor.getJSON()` zeigt einen taskItem mit einem
+         KOMPLETT LEEREN Absatz, kein Leerzeichen-Textknoten), der
+         entstehende `taskItem` ist danach identisch zu einem im Editor
+         per Enter frisch angelegten leeren Checkbox-Punkt.
+      3. **Speicherpfad (`stripEmptyCheckboxTrailingSpace`, neu, direkt
+         vor `dropEmptyCheckboxLines` in `save()`):** Weil weder Viewer
+         noch Editor-Ladepfad ab jetzt ein abschließendes Leerzeichen
+         BRAUCHEN, wird es bewusst NICHT dem Zufall (bzw. `App.jsx`s
+         Dokumentend-`trim()`) überlassen, ob es im persistierten Text
+         steht oder nicht – die neue Funktion entfernt es explizit, für
+         JEDE Position gleichermaßen (`/^([ \t]*- \[[ xX]\])[ \t]+$/gm`).
+         Damit ist der gespeicherte Text an jeder Position identisch
+         formatiert (kein zufälliges Trailing-Whitespace-Byte, das Git-
+         Diffs/Editoren ohnehin gerne stillschweigend entfernen), UND das
+         bestehende `trim()` in `App.jsx#saveEdit` hat für eine leere
+         Checkbox am Dokumentende gar nichts mehr zu tun (es findet dort
+         nach dieser Normalisierung kein Leerzeichen mehr vor). Bewusste
+         Entscheidung (Auftrag erlaubt ausdrücklich beide Richtungen):
+         Trailing Whitespace NICHT verlässlich erhalten, sondern aktiv
+         entfernt – robuster als der Versuch, `App.jsx`s `trim()`
+         chirurgisch nur für den Dokumentend-Fall zu umgehen, und
+         konsistent mit der Tatsache, dass dieses Zeichen ohnehin nirgends
+         in der App eine zweite Bedeutung hat (kein Hard-Break-Konvention
+         über doppeltes Leerzeichen in diesem Dialekt).
+    - **Geister-Checkbox-Heilung (v7.41.2, `dropEmptyCheckboxLines`)
+      bleibt unberührt und funktioniert weiterhin NEBENEINANDER mit
+      diesem Fix.** Deren eigene Erkennung (rein textuell, auf dem bereits
+      serialisierten Markdown) war UNABHÄNGIG vom hier behobenen
+      Ladepfad-Bug bereits tolerant gegenüber fehlendem Leerzeichen
+      (`/^([ \t]*)- \[[ xX]\][ \t]*$/`) – das Zusammenspiel wurde aktiv
+      geprüft: `tests/docEditorGhostCheckbox.test.jsx` bekam
+      `EmptyTaskMarkdownIt` in seine Verdrahtung aufgenommen (hält die
+      Datei synchron zur echten `useEditor()`-Konfiguration), alle
+      31 Tests bleiben grün. Zusätzlich neu geprüft (beim Testschreiben
+      als potenzielles Risiko identifiziert, aber EMPIRISCH widerlegt):
+      Erkennt der neue Fix eine leere Checkbox jetzt AM ANFANG einer
+      Liste, deren übrige Punkte KEINE Checkbox sind (z. B.
+      `"- [ ] \n- Notiz\n- [ ] B"`), bleibt die Aufteilung durch
+      `SplitMixedTaskLists` bzw. ProseMirrors eigenes Schema-Matching
+      trotzdem sauber (kein Datenverlust, "Notiz" bleibt als eigener
+      Aufzählungspunkt erhalten) – ProseMirrors HTML-Parser trennt einen
+      zur Laufzeit nicht ins `taskItem+`-Schema passenden mittleren/
+      späteren `<li>`-Kandidaten nachweislich OHNE fremde Hilfe in einen
+      eigenen Geschwister-Block auf (kein neues Phantom entsteht dabei) –
+      dieses Verhalten bestand bereits VOR diesem Fix und wurde hier nur
+      zusätzlich verifiziert, nicht neu geschaffen.
+    - **Aktiv verifiziert, dass alle neuen Tests ohne den jeweiligen Fix
+      rot sind** (separat je Ebene): `TASK_RE` testweise auf die alte
+      Fassung `\]\s+` zurückgesetzt – 11 neue Tests in
+      `tests/markdown.test.jsx` liefen rot, 191 blieben grün.
+      `EmptyTaskMarkdownIt`s Erkennungs-Regex testweise auf eine nie
+      treffende Regel gesetzt – 12 der 24 neuen Tests in
+      `tests/docEditorEmptyCheckbox.test.jsx` liefen rot (genau die, die
+      Erkennung beim Laden prüfen). `stripEmptyCheckboxTrailingSpace`
+      testweise zur Identitätsfunktion gemacht – die 5 zugehörigen
+      Regressionstests liefen rot. Alle drei Fixes wiederhergestellt,
+      danach alle 1764 Tests wieder grün.
+    - **Bewusstes Restrisiko:** Ein Absatz, der aus reinem, vom Nutzer
+      GETIPPTEM Text besteht und zufällig EXAKT `"[ ]"`/`"[x]"`/`"[X]"`
+      lautet, aber ALS Listenpunkt (nicht als freier Absatz) eingegeben
+      wurde, wird nach diesem Fix beim Laden zu einer Checkbox statt
+      literalem Text – strukturell nicht von einer absichtlich leeren
+      Checkbox unterscheidbar, exakt dieselbe Ambiguität, die bei
+      `"- [ ] "` (MIT Leerzeichen) schon immer bestand. In der Praxis
+      extrem unüblich (wer eine Checkbox-Klammer als reinen Text in einem
+      Listenpunkt haben will, hat dafür ohnehin keinen verlässlichen Weg
+      in diesem Dialekt) und deshalb bewusst in Kauf genommen.

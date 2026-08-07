@@ -19,7 +19,34 @@ import { FILE_URL_RE, fileUrlToWinPath, buildProtocolUrl } from "./filelinks.js"
 export const IMG_LINE_RE = /^!\[([^\]]*)\]\(img:([a-zA-Z0-9]+)\)$/;
 export const IMG_REF_RE = /!\[[^\]]*\]\(img:([a-zA-Z0-9]+)\)/g;
 
-export const TASK_RE = /^(\s*[-*]\s+\[)( |x|X)(\]\s+)(.*)$/;
+// v7.45-Fix (Datenkorruption, E2E-Finding 🔴): Das ursprüngliche "\]\s+"
+// verlangte nach "]" MINDESTENS ein Leerzeichen – ein bewusst LEER
+// angelegter Checkbox-Punkt ("- [ ]" ohne jeden Folgetext, z. B. per Enter
+// im Editor erzeugt) endet aber je nach Speicherpfad OHNE dieses
+// Leerzeichen (siehe DECISIONS: prosemirror-markdown schreibt zwar "[ ] ",
+// aber ein "trim()" am Dokumentende in App.jsx#saveEdit frisst das
+// Leerzeichen der LETZTEN Zeile; markdown-it selbst schneidet es beim
+// erneuten Laden über ALLE Positionen hinweg ohnehin ab, siehe unten) –
+// "- [ ]" fiel dadurch durch UL_RE in den normalen Aufzählungs-Zweig und
+// "[ ]" erschien als bedeutungsloser Literaltext.
+//
+// Die Alternative "\]\s*$" (zusätzlich zu "\]\s+") lässt eine leere Klammer
+// GENAU dann ohne jedes Leerzeichen zu, wenn NACH ihr nichts mehr folgt
+// (Zeilenende) – "\]\s+" bleibt für JEDEN Fall mit echtem Folgetext
+// weiterhin verbindlich. Das verhindert eine sonst neu eingeführte
+// Fehldeutung: Ein (in der Praxis nie absichtlich getipptes, aber
+// theoretisch denkbares) "- [ ]Text" OHNE jedes Trennzeichen zwischen "]"
+// und "Text" bleibt bewusst weiterhin KEINE Checkbox (wie schon vor diesem
+// Fix) – markdown-it-task-lists verlangt beim Laden ebenfalls zwingend ein
+// Leerzeichen direkt nach "] ", ein hier abweichend permissiveres "\]\s*"
+// ohne Endanker hätte Editor und Viewer auseinanderlaufen lassen (siehe
+// DECISIONS #91 für den vollständigen Soll/Ist-Vergleich).
+//
+// Die vier Capture-Gruppen (Marker+"[", Zustand, "]"+Trennzeichen, Rest-
+// text) bleiben UNVERÄNDERT in Bedeutung und Reihenfolge – toggleTask
+// (App.jsx) baut die Zeile aus genau diesen vier Teilen wieder zusammen
+// und renderBlocks (unten) liest taskM[2]/taskM[4].
+export const TASK_RE = /^(\s*[-*]\s+\[)( |x|X)(\]\s+|\]\s*$)(.*)$/;
 const OL_RE = /^\s*\d+[.)]\s+(.*)$/;
 const UL_RE = /^\s*[-*]\s+(.*)$/;
 const TABLE_LINE_RE = /^\s*\|.*\|\s*$/;

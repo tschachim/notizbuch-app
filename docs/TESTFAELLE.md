@@ -1324,6 +1324,43 @@ Marker-Wechsel unterstützt: probeweise die Stichpunktliste mit `*` statt
 auch hier darf über mehrere Speicherzyklen hinweg keine leere Checkbox
 entstehen.
 
+**D19-Nachtrag [VERBUNDEN] Bewusst LEER angelegte Checkbox bleibt an JEDER
+Position dauerhaft eine Checkbox (v7.45, ECHTER Bug, jetzt behoben – siehe
+DECISIONS #91).** Anderer Bug als oben (dort: eine leere Checkbox ENTSTAND
+ungewollt VOR einer Liste; hier: eine ABSICHTLICH leer gelassene Checkbox
+degradierte beim erneuten Laden zu bedeutungslosem Literaltext). Editor
+öffnen, eine Checkliste mit mehreren Text-Punkten anlegen
+(„QA-Leer eins“, „QA-Leer zwei“, „QA-Leer drei“), dazwischen UND danach
+gezielt drei bewusst leere Punkte einfügen (Enter drücken, aber NICHTS
+eintippen):
+- einen LEEREN Punkt MITTEN in der Liste (z. B. zwischen „QA-Leer eins“
+  und „QA-Leer zwei“),
+- einen LEEREN Punkt als VERSCHACHTELTEN Unterpunkt (Tab drücken, um ihn
+  einzurücken, z. B. unter „QA-Leer zwei“),
+- einen LEEREN Punkt als LETZTEN Punkt der gesamten Liste/des Dokuments
+  (nichts folgt mehr danach).
+
+Speichern, Seite neu laden. Erwartet in der Dokument-Ansicht: ALLE DREI
+leeren Punkte erscheinen weiterhin als echte, leere Checkboxen – NICHT als
+normaler Aufzählungspunkt mit dem sichtbaren Text „[ ]“ (das war das
+gemeldete Symptom, besonders auffällig beim LETZTEN Punkt). Editor erneut
+öffnen (OHNE jede Änderung): alle drei leeren Punkte erscheinen weiterhin
+als Checkboxen im Editor selbst (nicht als literaler Text „[ ]“ in einem
+normalen Aufzählungspunkt) – schließen löst keinen Commit aus
+(No-op-Roundtrip). Jetzt eine Bearbeitung an GANZ ANDERER Stelle im
+Dokument vornehmen (z. B. „QA-Leer eins“ in „QA-Leer eins geändert“
+umbenennen) und speichern. Erwartet: alle drei leeren Checkboxen bleiben
+weiterhin Checkboxen. Diesen Zyklus (Editor öffnen, Änderung an anderer
+Stelle, speichern) noch ZWEI weitere Male wiederholen (insgesamt drei
+Zyklen) – nach JEDEM Zyklus müssen alle drei leeren Punkte weiterhin
+Checkboxen sein (der frühere Bug hätte hier bereits nach dem ERSTEN
+erneuten Öffnen alle drei in Literaltext verwandelt, und ab dem nächsten
+Speichern wäre das dauerhaft im Daten-Repo persistiert gewesen). Zusätzlich
+eine bereits ERLEDIGTE, aber leere Checkbox anlegen (Häkchen setzen, ohne
+je Text einzutippen) und denselben Zyklus einmal durchlaufen: bleibt
+ebenfalls dauerhaft angehakt UND leer, statt zu einem angehakten Symbol
+als Literaltext zu werden.
+
 GEWOLLTE Nebenwirkung (v7.41.2, KEIN Fehler – nicht als Finding melden):
 Steht in einer Liste, die (an anderer Stelle) eine Checkliste enthält,
 eine bewusste Leerzeile zwischen zwei NICHT-Checklisten-Punkten (z. B.

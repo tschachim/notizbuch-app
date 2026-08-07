@@ -1218,10 +1218,163 @@ describe("exportierte Regexe", () => {
     expect(TASK_RE.test("  - [x] fertig")).toBe(true);
     expect(TASK_RE.test("- [y] kaputt")).toBe(false);
   });
+
+  // v7.45-Fix (Datenkorruption, E2E-Finding 🔴 – siehe DECISIONS #91): eine
+  // INHALTSLEERE Checkbox-Zeile ("- [ ]" ganz ohne abschließendes
+  // Leerzeichen, z. B. per Enter im Editor erzeugt und dann durch
+  // App.jsx#saveEdit's Dokumentend-trim() oder einfach ohne jedes
+  // Leerzeichen gespeichert) muss GENAUSO als Checkbox erkannt werden wie
+  // die klassische Form MIT Leerzeichen – ohne den Fix war "\]\s+"
+  // zwingend, "- [ ]" fiel durch UL_RE in den normalen Aufzählungs-Zweig.
+  describe("TASK_RE erkennt eine INHALTSLEERE Checkbox ohne abschließendes Leerzeichen (v7.45)", () => {
+    it("bare '- [ ]' am Zeilenende (kein Leerzeichen nach der Klammer)", () => {
+      const m = TASK_RE.exec("- [ ]");
+      expect(m).not.toBeNull();
+      expect(m[1]).toBe("- [");
+      expect(m[2]).toBe(" ");
+      expect(m[3]).toBe("]");
+      expect(m[4]).toBe("");
+    });
+
+    it("bare '- [x]'/'- [X]' (erledigt, leer) werden ebenfalls erkannt", () => {
+      expect(TASK_RE.test("- [x]")).toBe(true);
+      expect(TASK_RE.test("- [X]")).toBe(true);
+      expect(TASK_RE.exec("- [x]")[2]).toBe("x");
+    });
+
+    it("weiterhin MIT abschließendem Leerzeichen erkannt (Kompatibilität zum bisherigen Verhalten)", () => {
+      const m = TASK_RE.exec("- [ ] ");
+      expect(m[3]).toBe("] ");
+      expect(m[4]).toBe("");
+    });
+
+    it("'*' als Marker, leer, ohne Leerzeichen", () => {
+      expect(TASK_RE.test("* [ ]")).toBe(true);
+    });
+
+    it("mehrfach eingerückt, leer, ohne Leerzeichen", () => {
+      const m = TASK_RE.exec("      - [ ]");
+      expect(m).not.toBeNull();
+      expect(m[1]).toBe("      - [");
+    });
+
+    it("bewusste Grenze: '- [ ]Text' OHNE jedes Trennzeichen bleibt weiterhin KEINE Checkbox (Konsistenz zu markdown-it-task-lists, siehe DECISIONS #91)", () => {
+      expect(TASK_RE.test("- [ ]Text")).toBe(false);
+      expect(TASK_RE.test("- [x]Text")).toBe(false);
+    });
+
+    it("echter Text nach der Klammer bleibt unverändert im Verhalten (Regressionsschutz)", () => {
+      const m = TASK_RE.exec("- [ ] Erledige X");
+      expect(m[3]).toBe("] ");
+      expect(m[4]).toBe("Erledige X");
+    });
+  });
+
   it("IMG_LINE_RE matcht nur reine Bildzeilen mit img:-Referenz", () => {
     expect(IMG_LINE_RE.test("![t](img:abc123)")).toBe(true);
     expect(IMG_LINE_RE.test("![t](https://x.de/a.png)")).toBe(false);
     expect(IMG_LINE_RE.test("Text ![t](img:abc) Text")).toBe(false);
+  });
+});
+
+// v7.45-Fix (Datenkorruption, E2E-Finding 🔴 – siehe DECISIONS #91): eine
+// leere Checkbox muss an JEDER Position (mittig, verschachtelt, als letzter
+// Punkt des Dokuments, als einziger Punkt) als echte Checkbox gerendert
+// werden, NICHT als Aufzählungspunkt mit dem Literaltext "[ ]".
+describe("DocView: inhaltsleere Checkbox an jeder Position (v7.45)", () => {
+  it("mittig, verschachtelt UND als letzter Punkt des Dokuments (ohne abschließenden Zeilenumbruch) rendern alle als echte Checkbox", () => {
+    // Zeilen-Indizes (0-basiert): 0 "# T", 1 "", 2 "## A", 3 "",
+    // 4 "- [ ] Eins", 5 "- [ ]" (mittig), 6 "- [ ] Zwei",
+    // 7 "  - [ ]" (verschachtelt/eingerückt), 8 "- [ ]" (letzte Zeile,
+    // KEIN abschließendes "\n").
+    const doc =
+      "# T\n\n## A\n\n- [ ] Eins\n- [ ]\n- [ ] Zwei\n  - [ ]\n- [ ]";
+    const html = render(doc);
+    expect(html.match(/type="checkbox"/g)).toHaveLength(5);
+    // Keine der leeren Checkboxen darf als Literaltext "[ ]" im Fließtext
+    // auftauchen (das wäre das gemeldete Symptom: <li ...>[ ]</li>).
+    expect(html).not.toContain("[ ]<");
+    expect(html).not.toContain(">[ ]");
+  });
+
+  it("ein Dokument, dessen EINZIGER Inhalt eine leere Checkbox ist, rendert trotzdem eine Checkbox (kein Absturz, kein Literaltext)", () => {
+    const html = render("# T\n\n## A\n\n- [ ]");
+    expect(html.match(/type="checkbox"/g)).toHaveLength(1);
+    expect(html).not.toContain("[ ]<");
+  });
+
+  it("eine bereits erledigte (checked), aber leere Checkbox ('- [x]') rendert ebenfalls korrekt, inkl. checked-Attribut", () => {
+    const html = render("# T\n\n## A\n\n- [x]");
+    expect(html).toContain('type="checkbox"');
+    expect(html).toContain("checked=");
+  });
+
+  it("'*' als Marker, leer, wird ebenfalls erkannt", () => {
+    const html = render("# T\n\n## A\n\n* [ ]");
+    expect(html.match(/type="checkbox"/g)).toHaveLength(1);
+  });
+
+  // Regressionsschutz für die Geister-Checkbox-Heilung (v7.41.2, siehe
+  // DECISIONS #91 "Randbedingung"): dropEmptyCheckboxLines (DocEditor.jsx)
+  // entfernt bewusst ein leeres "- [ ]" AM ANFANG eines Listenblocks direkt
+  // beim Speichern – das betrifft nur den EDITOR-Speicherpfad, NICHT die
+  // reine Anzeige hier. TASK_RE/DocView zeigen eine leere Checkbox ÜBERALL
+  // an, unabhängig von ihrer Position – die Positionsregel gehört
+  // ausschließlich zu dropEmptyCheckboxLines (siehe
+  // tests/docEditorGhostCheckbox.test.jsx), nicht zum Viewer.
+  it("auch eine leere Checkbox GANZ AM ANFANG einer Liste rendert hier als Checkbox (Positionsregel gilt nur beim Speichern, nicht in der Anzeige)", () => {
+    const html = render("# T\n\n## A\n\n- [ ]\n- Notiz");
+    expect(html.match(/type="checkbox"/g)).toHaveLength(1);
+  });
+
+  // Klick-Test (echtes DOM, Muster wie "Checkbox-Zeilenindex" oben in
+  // dieser Datei): eine leere Checkbox mittig, verschachtelt UND als
+  // letzter Punkt hakt beim Klick GENAU ihre eigene, richtige Zeile ab –
+  // nicht die eines Nachbarpunkts.
+  it("Klick auf eine leere Checkbox (mittig/verschachtelt/letzte Zeile) meldet den KORREKTEN Original-Zeilenindex", () => {
+    const doc = "# T\n\n## A\n\n- [ ] Eins\n- [ ]\n- [ ] Zwei\n  - [ ]\n- [ ]";
+    const onToggleTask = vi.fn();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <DocView text={doc} collapsed={{}} onToggle={() => {}} imgMap={{}} onImgClick={() => {}} onToggleTask={onToggleTask} />
+      );
+    });
+    const boxes = container.querySelectorAll('input[type="checkbox"]');
+    expect(boxes).toHaveLength(5);
+
+    act(() => { boxes[1].click(); }); // "- [ ]" mittig, Zeile 5
+    expect(onToggleTask).toHaveBeenLastCalledWith(5, true);
+
+    act(() => { boxes[3].click(); }); // "  - [ ]" verschachtelt, Zeile 7
+    expect(onToggleTask).toHaveBeenLastCalledWith(7, true);
+
+    act(() => { boxes[4].click(); }); // "- [ ]" letzte Zeile, Zeile 8
+    expect(onToggleTask).toHaveBeenLastCalledWith(8, true);
+
+    expect(onToggleTask).toHaveBeenCalledTimes(3);
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  // Simuliert App.jsx#toggleTask (m[1] + Zustand + m[3] + m[4]) direkt
+  // gegen TASK_RE, um zu belegen, dass das Abhaken einer INHALTSLEEREN
+  // Checkbox eine korrekte, stabile Zeile erzeugt (kein zusätzliches
+  // Leerzeichen, kein verlorener Text) – App.jsx selbst ist laut
+  // Projekt-Konvention nicht Teil der Unit-Test-Coverage (E2E deckt die UI
+  // ab), die zugrunde liegende Logik (TASK_RE) aber sehr wohl.
+  it("Abhaken einer leeren Checkbox (App.jsx#toggleTask-Logik nachgebaut) erzeugt eine stabile, korrekt formatierte Zeile", () => {
+    const toggleLine = (line, checked) => {
+      const m = TASK_RE.exec(line);
+      return m[1] + (checked ? "x" : " ") + m[3] + m[4];
+    };
+    expect(toggleLine("- [ ]", true)).toBe("- [x]");
+    expect(toggleLine("- [x]", false)).toBe("- [ ]");
+    expect(toggleLine("  - [ ]", true)).toBe("  - [x]");
+    // Ein Umschalten hin und zurück liefert wieder exakt die Ausgangszeile.
+    expect(toggleLine(toggleLine("- [ ]", true), false)).toBe("- [ ]");
   });
 });
 
