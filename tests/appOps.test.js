@@ -405,6 +405,25 @@ describe("findSensitiveUrlParams: Zugangsdaten-artige Parameter erkennen, damit 
     expect(findSensitiveUrlParams("?design=x")).toEqual([]);
   });
 
+  // v7.43 (Review-Fund): Seit die Zugangsdaten-Felder für Passwortmanager in
+  // echte <form>s liegen, heißen die Provider-Felder "link-provider-<typ>-pat"
+  // bzw. "-token". Ruft eine Manager-Erweiterung HTMLFormElement.submit()
+  // direkt auf, umgeht sie onSubmit/preventDefault – dann MUSS die Endung
+  // erkannt werden, die exakte Blockliste greift dort nicht.
+  it("erkennt zusammengesetzte Feldnamen über ihre Endung (link-provider-…-pat)", () => {
+    expect(findSensitiveUrlParams("?link-provider-azure-devops-pat=x")).toEqual(["link-provider-azure-devops-pat"]);
+    expect(findSensitiveUrlParams("?link-provider-confluence-pat=x")).toEqual(["link-provider-confluence-pat"]);
+    expect(findSensitiveUrlParams("?github-pat=x")).toEqual(["github-pat"]);
+    expect(findSensitiveUrlParams("?anthropic-api-key=x")).toEqual(["anthropic-api-key"]);
+    // Nur "-"-getrennte Endungen: harmlose Namen fallen weiterhin durch.
+    expect(findSensitiveUrlParams("?keyword=x")).toEqual([]);
+    expect(findSensitiveUrlParams("?monkey=x")).toEqual([]);
+    expect(findSensitiveUrlParams("?update=x")).toEqual([]);
+    // Der E-Mail-Teil eines Provider-Logins ist KEIN Geheimnis und bleibt
+    // unbehelligt (er ist der Benutzername, nicht das Token).
+    expect(findSensitiveUrlParams("?link-provider-confluence-email=x")).toEqual([]);
+  });
+
   it("erkennt gängige Varianten (api_key, access_token, secret, password)", () => {
     expect(findSensitiveUrlParams("?api_key=x")).toEqual(["api_key"]);
     expect(findSensitiveUrlParams("?access_token=x")).toEqual(["access_token"]);

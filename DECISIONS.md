@@ -8843,3 +8843,166 @@ aus `referenz-app.jsx` übernommen.
     Finding-B4-Tests ohne den Fix rot sind: `git stash` auf
     `DocEditor.jsx`/`math.jsx` (Test-Datei blieb liegen), 4 von 89 Tests
     liefen rot wie erwartet, Fix wiederhergestellt, alle 89 wieder grün.
+
+87. **Zugangsdaten-Felder als ECHTE `<form>`-Elemente – Passwortmanager
+    soll ausfüllen können (v7.43, Nutzerwunsch: "ich möchte, dass zukünftig
+    der Passwortmanager das automatisch ausfüllt").** `SettingsDialog.jsx`
+    hatte für PAT/API-Key/Provider-Zugangsdaten weder ein `<form>` noch
+    `name`/`id`-Attribute (nur `autoComplete="off"` auf reinen `onClick`-
+    Buttons) – genau daran scheitert JEDER Passwortmanager (KeePassXC-
+    Erweiterung, Chrome-/Firefox-Manager): ohne `<form>` + `submit`-Event
+    gibt es kein erkennbares "Login", das gespeichert/ausgefüllt werden
+    könnte.
+    - **Drei getrennte `<form>`-Elemente statt einem einzigen (Kern-
+      entscheidung).** Geprüft und verworfen: EIN gemeinsames Formular für
+      GitHub-PAT + Anthropic-API-Key. Beide sind `type="password"`-Felder
+      für VÖLLIG unabhängige Dienste (GitHub vs. Anthropic) – zwei
+      Passwort-Felder in einem Formular verwirren viele Manager beim
+      Zuordnen ("welches Passwort gehört zu welchem Login?"), und die
+      Trennung ist auch INHALTLICH korrekt, nicht nur Manager-Kosmetik.
+      Gewählt: `settings-github-form` (Owner als `autocomplete="username"`
+      + Repo + PAT als `current-password`) und `settings-anthropic-form`
+      (nur der API-Key, PASSWORT-ONLY – Anthropic hat serverseitig keinen
+      Benutzernamen, ein erfundenes Benutzername-Feld wäre irreführende
+      Metadaten im gespeicherten Manager-Eintrag). Das Link-Provider-
+      Formular (Azure DevOps/Confluence/eigener Anbieter) bekam ein
+      DRITTES, eigenes `<form>` mit PRO-TYP unterscheidbaren Feldnamen
+      (`link-provider-azure-devops-pat`, `link-provider-confluence-email`
+      + `link-provider-confluence-pat`, Confluence-E-Mail als
+      `autocomplete="username"` – dort ist E-Mail+Token ein echtes
+      Login-Paar) – ein Manager darf diese PATs NIE mit dem GitHub-PAT
+      verwechseln.
+    - **Kein natives Absenden, IMMER `preventDefault()`.** Jedes `onSubmit`
+      ruft ausschließlich `e.preventDefault()` + die BESTEHENDE, UNVERÄNDERTE
+      Verbinden-/Speichern-Logik auf (`submit()` bzw. `saveProviderForm()`)
+      – kein `action`, `method="post"` als reine Tiefenverteidigung (sollte
+      `preventDefault()` aus irgendeinem Grund nicht greifen, landen die
+      Werte wenigstens NICHT als GET-Query in der URL, konsistent zur
+      bestehenden `?pat=`-Warnung in `App.jsx`). Bewusst KEIN
+      `e.stopPropagation()` – ein Manager, der `submit` global/in der
+      Capture-Phase beobachtet, um "Passwort speichern?" anzubieten, muss
+      das Event weiterhin sehen; `preventDefault()` unterdrückt nur die
+      Navigation, nicht die Beobachtbarkeit.
+    - **Enter soll "Verbinden" auslösen, nicht die Seite neu laden.** Jedes
+      der beiden Zugangsdaten-Formulare bekam einen UNSICHTBAREN, aber
+      ECHTEN `<button type="submit" className="hidden" aria-hidden="true"
+      tabIndex={-1} />` – definiert das "default button" der
+      Formular-Spezifikation, damit Enter in JEDEM der drei Felder des
+      GitHub-Formulars zuverlässig ein `submit`-Event auslöst (ohne
+      definierten Default-Button garantiert die Spezifikation implizites
+      Abschicken per Enter nur bei GENAU einem Textfeld). Im Provider-
+      Formular übernimmt stattdessen der ohnehin vorhandene, jetzt echte
+      `type="submit"`-Button ("Hinzufügen"/"Übernehmen") diese Rolle – der
+      bisherige `onClick`-Handler wurde entfernt (sonst hätte ein Klick
+      SOWOHL den `onClick` ALS AUCH das neue `onSubmit` ausgelöst und bei
+      einem neuen Eintrag wegen der bei jedem Aufruf frisch vergebenen
+      `lp-`-id einen DOPPELTEN Eintrag erzeugt – beim Umbau erkannt und
+      vermieden). "Abbrechen" bekam deshalb EXPLIZIT `type="button"` (der
+      HTML-Default eines `<button>` ist `type="submit"` – innerhalb eines
+      echten `<form>` hätte ein Klick auf "Abbrechen" sonst das Formular
+      versehentlich mit abgesendet, statt nur abzubrechen).
+    - **Feld-Semantik:** GitHub-Owner = `autocomplete="username"` (einziger
+      natürlicher Benutzername-Kandidat fürs PAT), Repo =
+      `autocomplete="off"` (kein Zugangsdatum, aber kein Autofill-Rauschen),
+      alle PAT-/Token-/API-Key-Felder bleiben `type="password"` mit
+      `autocomplete="current-password"`. Jedes Feld bekam eine stabile,
+      sprechende `id` + zugehöriges `<label htmlFor=…>` (vorher nur
+      visuell benachbarter Text ohne Assoziation) – hilft sowohl
+      Screenreadern als auch der Feld-Erkennung mancher Manager.
+    - **Layout unverändert:** `<form>` ist ein reiner Block-Container ohne
+      UA-Default-Margin/-Padding – das Einfügen der `<form>`-Wrapper um
+      bestehende, bisher unverpackte Geschwister-Elemente verändert das
+      Box-Modell/Margin-Collapsing nicht sichtbar (das Provider-Formular
+      übernahm exakt die bisherige `className` des `<div>`, das es
+      ersetzt). Nicht im Vitest verifizierbar (kein Layout-Renderer,
+      jsdom-Grenze) – der tester-Subagent prüft die Optik im E2E-Lauf.
+    - **Nicht verifizierbar in dieser Session (ehrlich benannt):** Ob ein
+      KONKRETER Passwortmanager (KeePassXC-Erweiterung, Chrome-/Firefox-
+      Manager) die drei Formulare tatsächlich als Login erkennt und zum
+      Ausfüllen/Speichern anbietet, kann nur ein echter Browser mit
+      installierter Erweiterung zeigen – dafür wurde in
+      `docs/TESTFAELLE.md` ein neuer E2E-Fall ergänzt, der NUR die
+      Formular-Semantik prüft (Attribute, kein Navigieren bei Enter),
+      OHNE dass der Tester jemals echte Zugangsdaten eintippt (Datentopf-/
+      Zugangsdaten-Konvention aus `CLAUDE.md`).
+    - **Tests:** `tests/settingsDialogForms.test.jsx` (neu, `@vitest-
+      environment jsdom`, echtes DOM per `createRoot`/`act`, KEIN
+      `@testing-library/react` – Muster wie
+      `tests/docEditorToolbarFocus.test.jsx`): prüft `name`/`id`/
+      `autocomplete`/`type`-Attribute aller drei Formulare, dass Owner-
+      und API-Key-/PAT-Felder in UNTERSCHIEDLICHEN Formularen liegen, dass
+      ein dispatchtes `submit`-Event IMMER `defaultPrevented` ist (auch bei
+      unvollständigen Daten), dass ein VOLLSTÄNDIGES Formular `onSave`/
+      `onProvidersChange` mit den korrekten (getrimmten) Werten aufruft,
+      und dass "Abbrechen" `type="button"`/"Hinzufügen" `type="submit"`
+      ist. jsdom-Grenze offen benannt: jsdom implementiert NICHT die
+      Browser-Konvenienz "Enter im Textfeld löst implizit `submit` aus" –
+      die Tests dispatchen das `submit`-Event deshalb direkt (das ist
+      GENAU das Event, das ein Browser bei Enter oder beim Default-Button
+      erzeugt), statt ein wirkungsloses `keydown`-Enter zu simulieren.
+      `tests/settingsDialog.test.jsx` (bestehend, Node-Umgebung) bleibt
+      unverändert grün. Restrisiko: reines UI-Verhalten in ECHTEN
+      Browsern/Managern bleibt bis zum E2E-Lauf unverifiziert.
+
+88. **OPS-Prompt: "heading" als Pflichtfeld nirgends benannt – Live-Befund
+    (v7.43).** Der Nutzer bat das Modell, einen reinkopierten HTML-Block in
+    eine echte Tabelle umzuwandeln; das Modell meldete Erfolg, die App
+    zeigte aber `⚠️ Nicht angewendet: replace_section in "<Notizbuch>"
+    (fehlende Abschnitts-Überschrift)` – das Modell hatte `replace_section`
+    OHNE `heading` geschickt, `ops.js#applyOne`/`explainSkip` verwerfen die
+    Op dann korrekt (KEINE Code-Änderung nötig/vorgenommen), aber der
+    System-Prompt (`src/lib/anthropic.js`) nannte diese Pflicht NIRGENDS
+    ausdrücklich – nur implizit über die Beispiele in der Ops-Liste.
+    - **Zwei neue Regeln im OPS-ZUVERLÄSSIGKEIT-Block:** (1) `"heading"`
+      ist bei `append_to_section`/`replace_section`/`delete_section`
+      PFLICHT, ohne sie wird die Op ERSATZLOS verworfen – mit dem
+      REALEN Fehlerfall (HTML-Block → Tabelle, `replace_section` ohne
+      `heading`, reply meldete Erfolg trotzdem) als Negativbeispiel, dem
+      Hinweis auf `append_to_chapter` für reinen Kapitel-Freitext OHNE
+      Abschnittsnamen, und der Klarstellung "`replace_chapter` GIBT ES
+      NICHT" (Ersatz: `replace_section` des umschließenden ##-Abschnitts
+      oder `rewrite` bei mehreren betroffenen Kapiteln). (2) Auftrags-Audit
+      "weitere Pflichtfelder ohne Prompt-Hinweis" ergab: `content` wird bei
+      `append_to_section`/`append_to_chapter`/`rewrite`/`memory_append`
+      GENAUSO ersatzlos verworfen, wenn leer (`ops.js`/`memory.js`
+      `explainSkip`) – bei `replace_section`/`memory_replace` ist ein
+      LEERER `content` dagegen eine BEWUSSTE, gültige Option (leert den
+      Abschnitt bzw. löscht das Gedächtnis) und wird angewendet. Beides war
+      im Tool-Schema bisher nur TEILWEISE (`append_to_chapter`/
+      `memory_append`) als "Pflicht" markiert – jetzt einheitlich sowohl im
+      Fließtext (OPS-ZUVERLÄSSIGKEIT) als auch DIREKT an den
+      `heading`/`content`-Schema-Feldern selbst ergänzt (Modell konsultiert
+      potenziell beide Stellen). `delete_chapter`/`append_to_chapter`s
+      `chapter`-Pflicht war dagegen bereits als "PFLICHT-Adressfeld"
+      dokumentiert (seit v7.32/v7.40) – keine Lücke, keine Änderung nötig.
+    - **Meldungstext handlungsleitender:** `ops.js#explainSkip` lieferte
+      bisher nur "fehlende Abschnitts-Überschrift" – jetzt "fehlende
+      Abschnitts-Überschrift – heading mit der exakten ##-Zeile angeben".
+      Landet über `buildOpsWarning` (`App.jsx`) unverändert als
+      SYSTEM-HINWEIS im nächsten Turn in der Historie; die neue
+      OPS-ZUVERLÄSSIGKEIT-Regel "Erscheint … eine ⚠️-Meldung … korrigiere
+      sie im nächsten Turn" (v7.21, unverändert) weist das Modell bereits
+      an, darauf zu reagieren. KEINE Code-Logik in `ops.js` aufgeweicht –
+      eine Op ohne `heading` wird weiterhin ausnahmslos verworfen, nur
+      Prompt- und Meldungstext wurden geschärft.
+    - **Tests:** `tests/ops.test.js` – bestehender Test an den neuen
+      Wortlaut angepasst, neuer Test für `replace_section` ohne `heading`
+      (derselbe Op-Typ wie im realen Fehlerfall) mit derselben Meldung.
+      `tests/anthropic.test.js` – vier neue `describe`-Blöcke: die neue
+      `heading`-Pflicht-Regel inkl. Negativbeispiel und Positionsprüfung
+      (steht im OPS-ZUVERLÄSSIGKEIT-Block, vor der ###-Regel), die neue
+      `content`-Pflicht-Regel, sowie die gespiegelten Schema-Property-
+      Tests für `heading`/`content`. Ein bestehender Schema-Test
+      ("content-description … nicht bei append_to_chapter") musste
+      ANGEPASST werden: er prüfte pauschal, dass `content.description`
+      das Wort `append_to_chapter` NIRGENDS enthält – das ist mit der
+      neuen, korrekten "PFLICHT bei … append_to_chapter …"-Klarstellung
+      nicht mehr haltbar; die eigentliche Kernaussage des Tests (die
+      `"Entfällt bei …"`-Aufzählung nennt weiterhin NUR delete_section/
+      delete_chapter) bleibt als geschärfte Regex erhalten. Alle Tests
+      reine Prompt-/Meldungstext-Vertragstests, kein Modell-Aufruf.
+    - **Restrisiko:** reiner Prompt-Text, keine Code-Durchsetzung – ein
+      Modell kann `heading` trotzdem weglassen (wie jede andere
+      Prompt-Regel dieser Datei auch); die verbesserte ⚠️-Meldung soll das
+      im NÄCHSTEN Turn selbst korrigieren, verhindert den ersten Fehlversuch
+      aber nicht.

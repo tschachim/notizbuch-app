@@ -1202,11 +1202,25 @@ describe("applyOpsDetailed: Gründe für NICHT angewendete Ops", () => {
     });
   });
 
-  it("fehlende Abschnitts-Überschrift (heading leer/fehlt)", () => {
+  // v7.43 (Live-Befund, DECISIONS #87): Meldung nennt jetzt zusätzlich die
+  // Handlungsanweisung ("heading mit der exakten ##-Zeile angeben") statt
+  // nur den fehlenden Zustand – Regressionsschutz für den exakten Wortlaut.
+  it("fehlende Abschnitts-Überschrift (heading leer/fehlt) – Meldung nennt die Abhilfe", () => {
     const { results } = applyOpsDetailed(DOC, [{ type: "append_to_section", content: "- x" }]);
     expect(results[0]).toEqual({
       index: 0, type: "append_to_section", heading: undefined, applied: false,
-      reason: "fehlende Abschnitts-Überschrift",
+      reason: "fehlende Abschnitts-Überschrift – heading mit der exakten ##-Zeile angeben",
+    });
+  });
+
+  // Dieselbe Ergänzung gilt für replace_section/delete_section (derselbe
+  // Code-Zweig, siehe explainSkip) – hier stellvertretend für replace_section
+  // geprüft, genau der Op-Typ aus dem realen Live-Fehlerfall.
+  it("replace_section OHNE heading: dieselbe Abhilfe-Meldung wie append_to_section", () => {
+    const { results } = applyOpsDetailed(DOC, [{ type: "replace_section", content: "neuer Inhalt" }]);
+    expect(results[0]).toEqual({
+      index: 0, type: "replace_section", heading: undefined, applied: false,
+      reason: "fehlende Abschnitts-Überschrift – heading mit der exakten ##-Zeile angeben",
     });
   });
 

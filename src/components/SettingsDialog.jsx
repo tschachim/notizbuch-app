@@ -151,6 +151,28 @@ export default function SettingsDialog({
     });
   };
 
+  // v7.43 (Nutzerwunsch "Passwortmanager soll die Zugangsdaten automatisch
+  // ausfüllen", siehe DECISIONS #87): die Zugangsdaten-Felder stecken jetzt
+  // in echten <form>-Elementen (siehe unten) – ein Passwortmanager
+  // (KeePassXC-Erweiterung, Chrome-/Firefox-Manager) bietet Ausfüllen/
+  // Speichern nämlich nur für Felder INNERHALB eines <form> an, das ein
+  // 'submit'-Event auslöst; ein reiner onClick-Handler auf einem Button
+  // sieht für einen Manager wie ein ganz normaler Klick aus, kein Login.
+  // preventDefault() verhindert IMMER die native Formular-Navigation –
+  // Zugangsdaten dürfen unter KEINEN Umständen als GET-Query in einer URL
+  // landen (siehe die bestehende "?pat="-Warnung in App.jsx). WICHTIG: KEIN
+  // e.stopPropagation() – ein Manager, der 'submit' global/in der Capture-
+  // Phase beobachtet, um "Passwort speichern?" anzubieten, muss das Event
+  // weiterhin sehen; preventDefault() unterdrückt nur die Navigation, nicht
+  // die Beobachtbarkeit des Events selbst. submit() bleibt dabei
+  // UNVERÄNDERT (dieselbe Funktion wie der bestehende Button-Klick) – Enter
+  // in einem der beiden Formulare löst dieselbe Verbinden-Logik aus wie ein
+  // Klick auf "Speichern & Verbinden".
+  const handleCredentialSubmit = (e) => {
+    e.preventDefault();
+    submit();
+  };
+
   const startAddProvider = () => setProviderForm(emptyProviderForm("azure-devops"));
   const startEditProvider = (p) => setProviderForm({ ...p });
   const cancelProviderForm = () => setProviderForm(null);
@@ -193,6 +215,19 @@ export default function SettingsDialog({
     setLinkProvidersState(next);
     onProvidersChange(next);
     setProviderForm(null);
+  };
+
+  // v7.43 (Passwortmanager-Auftrag, siehe handleCredentialSubmit oben):
+  // gleiches Muster wie dort – das Provider-Formular (PAT/E-Mail von Azure
+  // DevOps/Confluence) bekommt ebenfalls ein echtes <form>, damit ein
+  // Manager auch DIESE Zugangsdaten (mit eigenen, vom GitHub-PAT
+  // unterscheidbaren Feldnamen, siehe JSX unten) anbieten kann.
+  // saveProviderForm() prüft providerFormValid bereits selbst erneut – ein
+  // per Enter ausgelöstes Submit bei ungültigem Formular bleibt dadurch
+  // ein No-op, konsistent mit dem disabled-Zustand des sichtbaren Buttons.
+  const handleProviderSubmit = (e) => {
+    e.preventDefault();
+    saveProviderForm();
   };
 
   const deleteProvider = (id) => {
@@ -239,27 +274,62 @@ export default function SettingsDialog({
             </p>
           )}
 
-          <label className={label}>GitHub-Owner (Benutzername)</label>
-          <input className={field} value={owner} onChange={(e) => setOwner(e.target.value)}
-            placeholder="z. B. tschachim" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
+          {/* v7.43 (Nutzerwunsch "Passwortmanager soll ausfüllen können",
+              siehe DECISIONS #87): GitHub-Owner + PAT stecken jetzt in
+              einem ECHTEN <form> mit sprechenden name/id/autocomplete-
+              Attributen – ohne <form> und ohne diese Attribute bietet KEIN
+              Passwortmanager (KeePassXC-Erweiterung, Chrome-/Firefox-
+              Manager) das Ausfüllen/Speichern an. EIGENES <form>, GETRENNT
+              vom Anthropic-API-Key weiter unten: zwei type="password"-
+              Felder in EINEM Formular verwirren viele Manager beim
+              Zuordnen (welches Passwort gehört zu welchem Dienst?) – PAT
+              und API-Key gehören ohnehin zu unterschiedlichen Diensten
+              (GitHub vs. Anthropic), die Trennung ist also auch inhaltlich
+              korrekt, nicht nur Manager-Kosmetik. Owner ist dabei der
+              natürliche "Benutzername" fürs PAT (identifiziert den
+              gespeicherten Eintrag). method="post" + kein "action" ist
+              reine Tiefenverteidigung (siehe handleCredentialSubmit oben):
+              sollte preventDefault() aus irgendeinem Grund nicht greifen,
+              landen die Werte wenigstens nicht als GET-Query in der URL. */}
+          <form id="settings-github-form" method="post" onSubmit={handleCredentialSubmit}>
+            <label className={label} htmlFor="settings-owner">GitHub-Owner (Benutzername)</label>
+            <input className={field} id="settings-owner" name="github-owner" autoComplete="username"
+              value={owner} onChange={(e) => setOwner(e.target.value)}
+              placeholder="z. B. tschachim" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
 
-          <label className={label}>Daten-Repo (privat)</label>
-          <input className={field} value={repo} onChange={(e) => setRepo(e.target.value)}
-            placeholder="notizbuch-data" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
+            <label className={label} htmlFor="settings-repo">Daten-Repo (privat)</label>
+            <input className={field} id="settings-repo" name="github-repo" autoComplete="off"
+              value={repo} onChange={(e) => setRepo(e.target.value)}
+              placeholder="notizbuch-data" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
 
-          <label className={label}>Fine-grained PAT (nur dieses Repo, „Contents: Read and write“)</label>
-          <input className={field} type="password" value={pat} onChange={(e) => setPat(e.target.value)}
-            placeholder="github_pat_…" autoComplete="off" />
-          <p className="text-xs text-slate-400 mt-1">
-            Erstellen unter GitHub → Settings → Developer settings → Fine-grained tokens.
-          </p>
+            <label className={label} htmlFor="settings-pat">Fine-grained PAT (nur dieses Repo, „Contents: Read and write“)</label>
+            <input className={field} id="settings-pat" name="github-pat" type="password" autoComplete="current-password"
+              value={pat} onChange={(e) => setPat(e.target.value)}
+              placeholder="github_pat_…" />
+            <p className="text-xs text-slate-400 mt-1">
+              Erstellen unter GitHub → Settings → Developer settings → Fine-grained tokens.
+            </p>
 
-          <label className={label}>Anthropic-API-Key</label>
-          <input className={field} type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)}
-            placeholder="sk-ant-…" autoComplete="off" />
-          <p className="text-xs text-slate-400 mt-1">
-            Erstellen unter console.anthropic.com → API Keys. Budgetlimit setzen!
-          </p>
+            {/* Unsichtbarer, aber ECHTER Submit-Button (v7.43): definiert
+                das "default button" der Formular-Spezifikation, damit Enter
+                in JEDEM der drei Felder oben zuverlässig ein 'submit'-Event
+                auslöst – ohne ihn ist "Enter sendet ab" bei MEHREREN
+                Textfeldern browserabhängig (die Spezifikation garantiert
+                implizites Abschicken ohne Submit-Button nur bei GENAU einem
+                Textfeld). Rein funktional, nie sichtbar, kein Tab-Stop. */}
+            <button type="submit" className="hidden" aria-hidden="true" tabIndex={-1} />
+          </form>
+
+          <form id="settings-anthropic-form" method="post" onSubmit={handleCredentialSubmit}>
+            <label className={label} htmlFor="settings-api-key">Anthropic-API-Key</label>
+            <input className={field} id="settings-api-key" name="anthropic-api-key" type="password" autoComplete="current-password"
+              value={apiKey} onChange={(e) => setApiKey(e.target.value)}
+              placeholder="sk-ant-…" />
+            <p className="text-xs text-slate-400 mt-1">
+              Erstellen unter console.anthropic.com → API Keys. Budgetlimit setzen!
+            </p>
+            <button type="submit" className="hidden" aria-hidden="true" tabIndex={-1} />
+          </form>
 
           <label className={label}>Modell für die Strukturierung</label>
           <select className={field} value={model} onChange={(e) => onModelChange(e.target.value)}>
@@ -332,27 +402,61 @@ export default function SettingsDialog({
                 <Plus size={13} /> Provider hinzufügen
               </button>
             ) : (
-              <div className="p-2.5 rounded-lg border border-indigo-200 bg-indigo-50/40">
-                <label className={label + " mt-0"}>Typ</label>
-                <select className={field} value={providerForm.type} onChange={(e) => changeProviderType(e.target.value)}>
+              // v7.43 (Passwortmanager-Auftrag, siehe DECISIONS #87): auch
+              // dieses Formular ist jetzt ein ECHTES <form> (statt <div>,
+              // Box-Styling unverändert übernommen) mit eigenen, PRO
+              // PROVIDER-TYP unterscheidbaren name/id/autocomplete-
+              // Attributen – ein Manager darf das Azure-DevOps-PAT nie mit
+              // dem GitHub-PAT (settings-github-form oben) oder dem
+              // Confluence-API-Token verwechseln. Confluence hat mit
+              // E-Mail+API-Token ein echtes Login-Paar (E-Mail =
+              // Benutzername) – Azure DevOps dagegen nur ein PAT ohne
+              // Benutzernamen-Gegenstück (analog zum Anthropic-API-Key
+              // oben, kein erfundenes Benutzername-Feld). Der sichtbare
+              // "Hinzufügen"/"Übernehmen"-Button ist jetzt der ECHTE
+              // Submit-Button (type="submit", kein onClick mehr nötig) –
+              // "Abbrechen" bekommt deshalb explizit type="button", sonst
+              // würde ein Klick darauf (Standard-Typ eines <button> ist
+              // "submit") das Formular versehentlich mit absenden statt nur
+              // abzubrechen.
+              // method="post" wie bei den beiden Zugangsdaten-Formularen oben
+              // (Review-Fund zu v7.43 – hier fehlte es als einzigem): Manche
+              // Passwortmanager-Erweiterungen rufen nach dem Ausfüllen
+              // HTMLFormElement.submit() DIREKT auf, und das löst weder ein
+              // "submit"-Event aus noch ruft es onSubmit – preventDefault()
+              // greift dann nicht. Ohne method stünde der Azure-/Confluence-
+              // Token danach per GET in der URL, und die App-seitige Abwehr
+              // (SENSITIVE_URL_PARAM_KEYS, App.jsx) fängt ihn nur wegen der
+              // dort ergänzten "-pat"/"-token"-Endungsprüfung ab.
+              <form
+                className="p-2.5 rounded-lg border border-indigo-200 bg-indigo-50/40"
+                method="post"
+                onSubmit={handleProviderSubmit}
+              >
+                <label className={label + " mt-0"} htmlFor="settings-provider-type">Typ</label>
+                <select className={field} id="settings-provider-type" name="link-provider-type"
+                  value={providerForm.type} onChange={(e) => changeProviderType(e.target.value)}>
                   <option value="azure-devops">Azure DevOps</option>
                   <option value="confluence">Confluence</option>
                   <option value="custom">Eigener Anbieter</option>
                 </select>
 
-                <label className={label}>Name</label>
-                <input className={field} value={providerForm.name}
+                <label className={label} htmlFor="settings-provider-name">Name</label>
+                <input className={field} id="settings-provider-name" name="link-provider-name" autoComplete="off"
+                  value={providerForm.name}
                   onChange={(e) => setProviderForm((f) => ({ ...f, name: e.target.value }))} />
 
-                <label className={label}>URL-Präfix</label>
-                <input className={field} value={providerForm.prefix}
+                <label className={label} htmlFor="settings-provider-prefix">URL-Präfix</label>
+                <input className={field} id="settings-provider-prefix" name="link-provider-prefix"
+                  value={providerForm.prefix}
                   onChange={(e) => setProviderForm((f) => ({ ...f, prefix: e.target.value }))}
                   placeholder="https://…" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
 
                 {providerForm.type === "azure-devops" && (
                   <>
-                    <label className={label}>Personal Access Token (Work Items: Read)</label>
-                    <input className={field} type="password" autoComplete="off" value={providerForm.pat}
+                    <label className={label} htmlFor="settings-provider-azure-pat">Personal Access Token (Work Items: Read)</label>
+                    <input className={field} id="settings-provider-azure-pat" name="link-provider-azure-devops-pat"
+                      type="password" autoComplete="current-password" value={providerForm.pat}
                       onChange={(e) => setProviderForm((f) => ({ ...f, pat: e.target.value }))}
                       placeholder="optional – schaltet Titel-Ermittlung frei" />
                   </>
@@ -360,12 +464,14 @@ export default function SettingsDialog({
 
                 {providerForm.type === "confluence" && (
                   <>
-                    <label className={label}>E-Mail (Atlassian-Konto)</label>
-                    <input className={field} value={providerForm.email} autoComplete="off"
+                    <label className={label} htmlFor="settings-provider-confluence-email">E-Mail (Atlassian-Konto)</label>
+                    <input className={field} id="settings-provider-confluence-email" name="link-provider-confluence-email"
+                      autoComplete="username" value={providerForm.email}
                       onChange={(e) => setProviderForm((f) => ({ ...f, email: e.target.value }))}
                       placeholder="optional – für Titel-Ermittlung" />
-                    <label className={label}>API-Token</label>
-                    <input className={field} type="password" autoComplete="off" value={providerForm.pat}
+                    <label className={label} htmlFor="settings-provider-confluence-pat">API-Token</label>
+                    <input className={field} id="settings-provider-confluence-pat" name="link-provider-confluence-pat"
+                      type="password" autoComplete="current-password" value={providerForm.pat}
                       onChange={(e) => setProviderForm((f) => ({ ...f, pat: e.target.value }))}
                       placeholder="optional – schaltet Titel-Ermittlung frei" />
                     <p className="text-xs text-slate-400 mt-1">
@@ -377,8 +483,9 @@ export default function SettingsDialog({
 
                 {providerForm.type === "custom" && (
                   <>
-                    <label className={label}>Icon (Emoji)</label>
-                    <input className={field} value={providerForm.icon} maxLength={4}
+                    <label className={label} htmlFor="settings-provider-icon">Icon (Emoji)</label>
+                    <input className={field} id="settings-provider-icon" name="link-provider-icon"
+                      value={providerForm.icon} maxLength={4}
                       onChange={(e) => setProviderForm((f) => ({ ...f, icon: e.target.value }))}
                       placeholder="🔗" />
                   </>
@@ -386,19 +493,19 @@ export default function SettingsDialog({
 
                 <div className="flex items-center gap-1.5 mt-3">
                   <button
-                    onClick={saveProviderForm}
+                    type="submit"
                     disabled={!providerFormValid}
                     className={"px-2 py-1 rounded bg-indigo-700 text-white text-xs " +
                       (providerFormValid ? "hover:bg-indigo-800" : "opacity-40")}
                   >
                     {providerForm.id ? "Übernehmen" : "Hinzufügen"}
                   </button>
-                  <button onClick={cancelProviderForm}
+                  <button type="button" onClick={cancelProviderForm}
                     className="px-2 py-1 rounded border border-slate-300 text-slate-600 text-xs hover:bg-slate-50">
                     Abbrechen
                   </button>
                 </div>
-              </div>
+              </form>
             )}
           </div>
 

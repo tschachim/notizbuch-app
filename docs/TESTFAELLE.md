@@ -65,6 +65,39 @@ zusätzlich mit einem offensichtlich sensiblen Parameter öffnen, z. B.
 (der Parameter wird nie gelesen), und die Adresszeile zeigt den
 `pat`-Parameter nach dem Laden nicht mehr an.
 
+**A2c [OFFEN] Formular-Semantik für Passwortmanager (v7.43).** Prüft NUR,
+dass die Zugangsdaten-Felder für einen Passwortmanager erkennbar sind –
+**niemals echte oder auch nur testweise Zugangsdaten in ein
+`type="password"`-Feld eintippen.** Einstellungs-Dialog öffnen. Per
+Rechtsklick → „Untersuchen“ (DevTools-Elements-Panel) NUR inspizieren
+(nicht ausfüllen):
+- Das GitHub-Owner-Feld liegt innerhalb eines `<form id="settings-github-
+  form">`, hat `name="github-owner"` und `autocomplete="username"`.
+- Das Fine-grained-PAT-Feld liegt im SELBEN `<form>`, ist weiterhin
+  `type="password"`, hat `name="github-pat"` und
+  `autocomplete="current-password"`.
+- Das Anthropic-API-Key-Feld liegt dagegen in einem EIGENEN, ZWEITEN
+  `<form id="settings-anthropic-form">` (NICHT im selben Formular wie das
+  GitHub-PAT), bleibt `type="password"`, hat `name="anthropic-api-key"`
+  und `autocomplete="current-password"`.
+- Beide `<form>`-Elemente haben KEIN `action`-Attribut und `method="post"`.
+
+Danach in das NICHT sensible Feld „Daten-Repo (privat)“ einen beliebigen
+Platzhaltertext eintippen (z. B. „test“) und darin Enter drücken. Erwartet:
+Die Seite lädt NICHT neu, die Adresszeile ändert sich NICHT (insbesondere
+erscheint KEIN Feldwert als Query-Parameter darin), der Dialog bleibt
+offen – Enter hat das Formular also abgeschickt (JavaScript hat es
+abgefangen), aber KEINE Browser-Navigation ausgelöst. Eingetragenen
+Platzhaltertext wieder löschen/Dialog schließen, ohne zu speichern.
+
+Zusatzcheck Link-Provider: „Provider hinzufügen“ klicken, Typ „Azure
+DevOps“ (Default) belassen. Per Inspektion prüfen, dass das dortige PAT-
+Feld `name="link-provider-azure-devops-pat"` trägt (NICHT `github-pat`) –
+NICHTS eintragen. Typ auf „Confluence“ wechseln: das E-Mail-Feld hat
+`autocomplete="username"`, das API-Token-Feld `type="password"` mit
+`name="link-provider-confluence-pat"`. Danach „Abbrechen“ klicken (NICHT
+Hinzufügen).
+
 **A3 [OFFEN] Responsive-Umschaltung.** Fenster schmal machen (< 768 px).
 Erwartet: Umschalter Chat/Wissensbasis erscheint; Abschnitts-Leiste rechts
 verschwindet; im Dokument-Modus öffnet der Gliederungs-Knopf den Drawer

@@ -664,10 +664,17 @@ describe("buildSystem", () => {
       expect(props.chapter.description).toMatch(/KAPITEL-FREITEXT aus 'content'/);
     });
 
-    it("content-description bleibt korrekt: entfällt weiterhin NUR bei delete_section/delete_chapter, nicht bei append_to_chapter", () => {
+    // v7.43-Anpassung: content.description nennt append_to_chapter jetzt
+    // ZUSÄTZLICH in der neuen "PFLICHT (nicht leer) bei ..."-Klarstellung
+    // (siehe DECISIONS #87) – das ist beabsichtigt (append_to_chapter
+    // BRAUCHT content zwingend) und widerspricht der ursprünglichen Aussage
+    // dieses Tests NICHT: die "Entfällt bei ..."-Aufzählung (für Ops, die
+    // GAR KEIN content-Feld verwenden) bleibt weiterhin exakt
+    // delete_section/delete_chapter, OHNE append_to_chapter darin.
+    it("content-description bleibt korrekt: 'Entfällt bei ...' nennt weiterhin NUR delete_section/delete_chapter, nicht append_to_chapter", () => {
       const props = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties;
       expect(props.content.description).toContain("Entfällt bei delete_section und delete_chapter.");
-      expect(props.content.description).not.toMatch(/append_to_chapter/);
+      expect(props.content.description).not.toMatch(/Entfällt bei delete_section und delete_chapter[^.]*append_to_chapter/);
     });
   });
 
@@ -960,6 +967,93 @@ describe("buildSystem", () => {
       expect(opsListAt).toBeGreaterThan(-1);
       expect(zuverlaessigAt).toBeGreaterThan(opsListAt);
       expect(zuverlaessigAt).toBeLessThan(reineFragenAt);
+    });
+  });
+
+  // v7.43 (Live-Befund, siehe DECISIONS #87): Der Nutzer bat, einen
+  // eingefügten HTML-Block in eine echte Tabelle umzuwandeln – das Modell
+  // schickte replace_section OHNE "heading" (verwechselte offenbar den
+  // Notizbuch-Namen mit der gesuchten Abschnitts-Überschrift), reply
+  // kündigte die Umwandlung bereits an, die Op wurde aber ERSATZLOS
+  // verworfen ("fehlende Abschnitts-Überschrift"). Der System-Prompt nannte
+  // "heading" bisher NIRGENDS ausdrücklich als Pflichtfeld – nur implizit
+  // über die Beispiele in der Ops-Liste.
+  describe("OPS-ZUVERLÄSSIGKEIT: 'heading' ist Pflicht bei append_to_section/replace_section/delete_section (v7.43, Live-Befund)", () => {
+    it("nennt die Pflicht ausdrücklich, mit dem konkreten Fehlerfall als Negativbeispiel", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain(
+        '"heading" ist bei append_to_section/replace_section/delete_section PFLICHT'
+      );
+      expect(sys).toContain("OHNE \"heading\" wird die Op ERSATZLOS verworfen");
+      // Der reale Fehlerfall aus dem Auftrag: reply meldete Erfolg, obwohl
+      // die Op verworfen wurde.
+      expect(sys).toContain("HTML-Block");
+      expect(sys).toContain("in eine echte Tabelle umzuwandeln");
+      expect(sys).toContain("replace_section OHNE \"heading\"");
+      expect(sys).toContain("fehlende Abschnitts-Überschrift");
+    });
+
+    it("klärt die Alternative bei reinem Kapitel-Freitext (append_to_chapter statt heading-loser Op)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("nutze append_to_chapter statt einer heading-losen Op");
+    });
+
+    it("stellt klar, dass es KEIN 'replace_chapter' gibt, und nennt den Ersatz (replace_section des ##-Abschnitts oder rewrite)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain('Ein "replace_chapter" GIBT ES NICHT');
+      expect(sys).toContain("ersetzt du stattdessen den betroffenen ##-Abschnitt per replace_section");
+      expect(sys).toContain("nutzt bei mehreren betroffenen Kapiteln rewrite");
+    });
+
+    it("steht im OPS-ZUVERLÄSSIGKEIT-Block, VOR der ###-Regel (delete_section/replace_section adressieren nur ##-Hauptabschnitte)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      const zuverlaessigAt = sys.indexOf("OPS-ZUVERLÄSSIGKEIT (WICHTIG):");
+      const headingPflichtAt = sys.indexOf('"heading" ist bei append_to_section/replace_section/delete_section PFLICHT');
+      const dreifachRegelAt = sys.indexOf("delete_section/replace_section adressieren nur ##-Hauptabschnitte");
+      expect(headingPflichtAt).toBeGreaterThan(zuverlaessigAt);
+      expect(headingPflichtAt).toBeLessThan(dreifachRegelAt);
+    });
+  });
+
+  // v7.43 (Audit lt. Auftrag: "weitere Ops mit fehlendem, nicht als Pflicht
+  // benanntem Feld"): append_to_section/append_to_chapter/rewrite/
+  // memory_append verwerfen leeren content GENAUSO ersatzlos wie ein
+  // fehlendes heading (siehe ops.js#explainSkip "leerer content"), ohne
+  // dass der Prompt das bisher als Pflicht benannte – NUR append_to_chapter
+  // und memory_append waren zuvor schon explizit als "content ist Pflicht"
+  // markiert (im Tool-Schema, nicht im OPS-ZUVERLÄSSIGKEIT-Fließtext).
+  describe("OPS-ZUVERLÄSSIGKEIT: 'content' ist Pflicht bei append_to_section/append_to_chapter/rewrite/memory_append (v7.43)", () => {
+    it("benennt die Pflicht-Ops UND grenzt replace_section/memory_replace als bewusst leerbar ab", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain(
+        '"content" ist ebenso PFLICHT (nicht leer) bei append_to_section, append_to_chapter, rewrite und memory_append'
+      );
+      expect(sys).toContain("leerer content wird ERSATZLOS verworfen");
+      expect(sys).toContain("Bei replace_section und memory_replace ist ein LEERER content dagegen eine bewusste, gültige Option");
+    });
+  });
+
+  // Tool-Schema (NOTEBOOK_TOOL): dieselbe Klarstellung noch einmal DIREKT an
+  // den Feldern selbst (heading/content), redundant zum Fließtext oben, aber
+  // an der Stelle, die das Modell beim Aufbau der ops-Objekte tatsächlich
+  // konsultiert (JSON-Schema-Property-Beschreibungen).
+  describe("NOTEBOOK_TOOL-Schema: heading/content nennen ihre Pflicht-Fälle direkt am Feld (v7.43)", () => {
+    it("heading-Beschreibung nennt die drei Pflicht-Ops und die Verwerfungs-Konsequenz", () => {
+      const props = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties;
+      expect(props.heading.description).toMatch(
+        /PFLICHT bei append_to_section\/replace_section\/delete_section/
+      );
+      expect(props.heading.description).toMatch(/ERSATZLOS verworfen/);
+    });
+
+    it("content-Beschreibung nennt Pflicht-Ops UND die bewusst leerbaren Gegenbeispiele", () => {
+      const props = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties;
+      expect(props.content.description).toMatch(
+        /PFLICHT \(nicht leer\) bei append_to_section, append_to_chapter, rewrite und memory_append/
+      );
+      expect(props.content.description).toMatch(/bewusste, gültige Option/);
+      // Bestehende delete_section/delete_chapter-Aussage bleibt unverändert erhalten.
+      expect(props.content.description).toContain("Entfällt bei delete_section und delete_chapter");
     });
   });
 });

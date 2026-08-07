@@ -146,7 +146,17 @@ export function findSensitiveUrlParams(search) {
   const params = new URLSearchParams(search || "");
   const found = [];
   for (const k of params.keys()) {
-    if (SENSITIVE_URL_PARAM_KEYS.includes(k.toLowerCase()) && !found.includes(k)) found.push(k);
+    const lower = k.toLowerCase();
+    // Zusätzlich zur exakten Liste eine ENDUNGS-Prüfung (v7.43,
+    // Review-Fund): Die Link-Provider-Felder heißen seit den
+    // Passwortmanager-Formularen "link-provider-<typ>-pat" bzw.
+    // "-token"/"-key"/"-secret"/"-password". Ruft eine Manager-Erweiterung
+    // HTMLFormElement.submit() direkt auf (umgeht onSubmit/preventDefault),
+    // landen sie unter GENAU diesen Namen in der URL – die exakte Liste
+    // oben würde sie nicht erkennen. Nur "-"-getrennte Endungen, damit
+    // harmlose Namen wie "keyword" oder "update" weiterhin durchfallen.
+    const suffixHit = /-(pat|token|key|apikey|api_key|secret|password|auth|credentials)$/.test(lower);
+    if ((SENSITIVE_URL_PARAM_KEYS.includes(lower) || suffixHit) && !found.includes(k)) found.push(k);
   }
   return found;
 }
@@ -2817,7 +2827,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.42</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.43</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"

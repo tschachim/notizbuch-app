@@ -519,8 +519,17 @@ function explainSkip(text, op) {
     if (!content) return "leerer content";
     return "keine inhaltliche Änderung";
   }
+  // v7.43 (Live-Befund, siehe DECISIONS #87): Meldung um eine konkrete
+  // Handlungsanweisung ergänzt (statt nur "fehlende Abschnitts-
+  // Überschrift") – landet über buildOpsWarning (App.jsx) im nächsten Turn
+  // als SYSTEM-HINWEIS in der Historie und soll dem Modell direkt sagen,
+  // WAS zu tun ist (heading nachreichen), statt nur DASS etwas fehlte. Der
+  // Live-Fall: das Modell schickte replace_section OHNE heading (wollte
+  // einen Abschnitt per HTML-Reinkopie in eine Tabelle umwandeln), reply
+  // kündigte die Änderung bereits an – die Op wurde trotzdem ERSATZLOS
+  // verworfen, ohne dass die ursprüngliche Meldung einen Ausweg nannte.
   const disp = dispHead(op.heading);
-  if (!disp) return "fehlende Abschnitts-Überschrift";
+  if (!disp) return "fehlende Abschnitts-Überschrift – heading mit der exakten ##-Zeile angeben";
   const lines = text.split("\n");
   let range = null;
   if (typeof op.chapter === "string" && op.chapter.trim()) {

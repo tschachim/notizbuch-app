@@ -346,6 +346,8 @@ Erlaubte ops (werden in Reihenfolge angewendet; append_to_section/replace_sectio
 OPS-ZUVERLÄSSIGKEIT (WICHTIG):
 - Kündige NIEMALS eine Änderung an, die nicht im SELBEN Tool-Aufruf als op mitgesendet wird – reply-Text ersetzt keine ops. Wenn du sagst, dass du etwas speicherst/löschst/überträgst, MÜSSEN die passenden ops im selben Aufruf stehen.
 - Es gibt NUR diese op-Typen: append_to_section, replace_section, delete_section, delete_chapter, append_to_chapter, rewrite, memory_append, memory_replace. Erfinde keine Varianten (z. B. memory_add) – unbekannte Typen werden verworfen und dir als ⚠️ gemeldet.
+- "heading" ist bei append_to_section/replace_section/delete_section PFLICHT (die exakte "## …"-Zeile des Zielabschnitts) – OHNE "heading" wird die Op ERSATZLOS verworfen, auch wenn du die Änderung im reply bereits angekündigt hast (Live-Fehlerfall: Auftrag, einen eingefügten HTML-Block im Notizbuch in eine echte Tabelle umzuwandeln → du schickst replace_section OHNE "heading", reply meldet die Umwandlung bereits als erledigt → die Op wird verworfen mit „fehlende Abschnitts-Überschrift“, die Tabelle bleibt tatsächlich unverändert). Ist dabei GAR KEIN ##-Abschnitt gemeint, sondern reiner Freitext direkt im Kapitel ohne eigenen Abschnittsnamen: nutze append_to_chapter statt einer heading-losen Op. Ein "replace_chapter" GIBT ES NICHT – für eine echte Umgliederung eines ganzen #-Kapitels ersetzt du stattdessen den betroffenen ##-Abschnitt per replace_section (mit "heading") oder nutzt bei mehreren betroffenen Kapiteln rewrite.
+- "content" ist ebenso PFLICHT (nicht leer) bei append_to_section, append_to_chapter, rewrite und memory_append – leerer content wird ERSATZLOS verworfen ("leerer content"). Bei replace_section und memory_replace ist ein LEERER content dagegen eine bewusste, gültige Option (leert den Abschnitt bzw. löscht das Gedächtnis) und wird angewendet, nicht verworfen.
 - delete_section/replace_section adressieren nur ##-Hauptabschnitte. Um ein ###-Unterthema zu entfernen/ändern: replace_section des gesamten ##-Abschnitts mit dem bereinigten Inhalt. Ein GANZES #-Kapitel löschst du dagegen mit delete_chapter (NICHT mit mehreren delete_section-Aufrufen und NICHT mit rewrite) – delete_chapter entfernt Kapitelzeile UND alle enthaltenen ##-Abschnitte in einem Schritt, sodass keine verwaiste Kapitelzeile zurückbleibt.
 - Kein Kapitelnamen-Duplikat: Lege NIEMALS einen ##-Abschnitt an, der nur den Namen seines #-Kapitels wiederholt (z. B. "## KPIs" unter "# KPIs"). Sollen Einträge ohne genannten Abschnittsnamen "in ein Kapitel", nutze stattdessen append_to_chapter (Freitext direkt im Kapitel) ODER einen inhaltlich sinnvoll benannten ##-Abschnitt – niemals ein Namens-Duplikat.
 - Kapitel-Sprachgebrauch (ebenen-unabhängig): Der Nutzer benutzt „Kapitel“/„Unterkapitel“/„Abschnitt“ austauschbar und EBENEN-UNABHÄNGIG – ein „Kapitel“ kann bei ihm „Unterkapitel“ eines anderen „Kapitels“ sein, beliebig verschachtelt. Welche Markdown-Ebene (#/##/###) gemeint ist, ergibt sich NIE aus dem verwendeten Wort selbst, sondern aus dem genannten BEZUGSOBJEKT – oder aus einer EXPLIZITEN Ebenen-Angabe des Nutzers (z. B. „H1“/„H2“/„###“), die IMMER Vorrang hat. „Y als Unterkapitel von X“ bedeutet IMMER: Y liegt GENAU EINE Ebene UNTER X. Ist X ein #-Kapitel, ist Y ein ##-Hauptabschnitt DIREKT in diesem Kapitel gemeint (append_to_section/replace_section mit chapter:"# X") – NIEMALS ein ###-Unterthema innerhalb eines bereits bestehenden ##-Abschnitts dieses Kapitels. Ist X dagegen ein ##-Abschnitt, ist Y ein ###-Unterthema in dessen content gemeint (replace_section des ##-Abschnitts). Nennt der Nutzer ein „Kapitel Y“ OHNE Bezugsobjekt, suche Y auf ALLEN Ebenen des Dokuments (#, ## UND ###) statt nur unter den #-Kapiteln – erst wenn Y nirgends existiert, ist ein NEUES Y gemeint (Ebene dann aus dem Kontext der Anweisung, im Zweifel als #-Kapitel). Existiert X bzw. Y mehrdeutig auf mehreren Ebenen, frage in reply kurz nach, statt zu raten.
@@ -424,12 +426,18 @@ export const NOTEBOOK_TOOL = {
             },
             heading: {
               type: "string",
-              description: 'Betroffener ##-Hauptabschnitt, z. B. "## Aufgaben". Entfällt bei rewrite, delete_chapter, append_to_chapter, memory_append und memory_replace.',
+              description:
+                'Betroffener ##-Hauptabschnitt, z. B. "## Aufgaben" – PFLICHT bei append_to_section/replace_section/' +
+                'delete_section (die exakte "## …"-Zeile); OHNE "heading" wird die Op ERSATZLOS verworfen, siehe ' +
+                "OPS-ZUVERLÄSSIGKEIT. Entfällt bei rewrite, delete_chapter, append_to_chapter, memory_append und memory_replace.",
             },
             content: {
               type: "string",
               description:
-                "Inhalt gemäß den Konventionen. Entfällt bei delete_section und delete_chapter. " +
+                "Inhalt gemäß den Konventionen. PFLICHT (nicht leer) bei append_to_section, append_to_chapter, " +
+                "rewrite und memory_append – leer wird die Op verworfen. Bei replace_section und memory_replace ist " +
+                "ein LEERER content dagegen eine bewusste, gültige Option (leert den Abschnitt bzw. löscht das " +
+                "Gedächtnis). Entfällt bei delete_section und delete_chapter. " +
                 'Aussagen aus der Websuche MIT <cite index="…">…</cite> markieren (wird zur Quellen-Fußnote). ' +
                 "Bei memory_append/memory_replace ist dies der Gedächtnistext (siehe GEDÄCHTNIS-Abschnitt).",
             },
