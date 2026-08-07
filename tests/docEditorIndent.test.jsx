@@ -1314,70 +1314,197 @@ describe("v7.42 Auftrag Teil B, Matrix 2: strukturelle Fortsetzung (Absatz/Bild/
   });
 });
 
-// Finding B1 (Markdown-inhärente Ambiguität, DOKUMENTIERT statt behoben –
-// siehe DECISIONS #86 für die Optionen-Abwägung): Ein Absatz/Bild/eine
-// Formel, der/die per Attribut auf Ebene 1 eingerückt wird (2 Leerzeichen) UND
-// UNMITTELBAR (nur durch eine Leerzeile getrennt) einer Liste folgt, erzeugt
-// exakt denselben Rohtext wie eine STRUKTURELLE Fortsetzung DESSELBEN
-// Listenpunkts (siehe Matrix 2 oben) – CommonMarks "lazy continuation"-Regel
-// entscheidet rein über die Spalten-Tiefe, unabhängig davon, WELCHER der
-// beiden Mechanismen den Text erzeugt hat. Der Block wird beim NÄCHSTEN Laden
-// deshalb strukturell in den vorangehenden Listenpunkt aufgenommen –
-// NICHT-DESTRUKTIV (kein Datenverlust, stabilisiert sich sofort/spätestens
-// nach einem weiteren Zyklus), aber das Knopf-/Tab-Verhalten wechselt dadurch
-// unbemerkt von "eigene Attribut-Einrückung" auf "sinkt/hebt den GANZEN
-// vorangehenden Listenpunkt" – genau das vom Nutzer beschriebene "komisch".
-// Empfehlung (siehe DECISIONS #86): NICHT versuchen, dies durch eine andere
-// Zeichenkodierung zu vermeiden (jeder Versuch würde die "2 Leerzeichen pro
-// Ebene"-Konvention verlassen und an anderer Stelle neue Inkonsistenzen
-// erzeugen) – stattdessen dokumentieren und sicherstellen, dass daraus NIE
-// Datenverlust oder unbegrenzte Verschlechterung über mehrere Zyklen wird
-// (siehe die zweite Zusicherung unten).
-describe("v7.42 Finding B1 (dokumentierte Markdown-Ambiguität): Absatz DIREKT nach einer Liste wird beim Neuladen zu deren Fortsetzung", () => {
-  it("ein per Knopf auf Ebene 1 eingerückter Absatz direkt nach einer Liste wird beim Neuladen zum STRUKTURELLEN Listenpunkt-Inhalt (indent fällt auf 0, kein Datenverlust)", () => {
+// Finding B1 – v7.42 hatte dies nur DOKUMENTIERT (siehe DECISIONS #86):
+// Ein Absatz/Bild/eine Formel, der/die per Attribut auf Ebene 1 eingerückt
+// wird (2 Leerzeichen) UND UNMITTELBAR (nur Leerzeile dazwischen) einer
+// Liste mit 2-Zeichen-Marker folgt, erzeugte exakt denselben Rohtext wie
+// eine STRUKTURELLE Fortsetzung desselben Listenpunkts (CommonMark "lazy
+// continuation") – der Block wurde beim NÄCHSTEN Laden strukturell
+// aufgenommen, wodurch Knopf-/Tab-Verhalten zwischen zwei Sitzungen
+// unbemerkt wechselte ("komisch", Nutzer-Befund).
+//
+// v7.44 LÖST DAS AUF (DECISIONS #86 damit ÜBERHOLT, siehe neuer Eintrag):
+// runIndentChange wählt in GENAU dieser Position SOFORT die strukturelle
+// Variante (siehe chainList/trailingContinuationRun, DocEditor.jsx) –
+// Knopf-Zustand und Tab-Wirkung sind dadurch bereits VOR dem ersten
+// Speichern identisch zu dem, was nach einem Reload gilt. Die Tests unten
+// ersetzen die alten "dokumentiert, aber unverändert lassen"-Belege durch
+// den Nachweis, dass ein Reload jetzt NICHTS mehr ändert.
+describe("v7.44 Finding B1 nachgebessert: Absatz/Bild/Formel DIREKT nach einer 2-Zeichen-Marker-Liste wird SOFORT strukturell aufgenommen", () => {
+  it("changeIndent(+1) fügt den Absatz OHNE Reload strukturell in den Listenpunkt ein – kein Attribut, Knopf-Zustand sofort konsistent", () => {
     const md = "# T\n\n- Parent\n\nFortsetzung ohne Einrueckung";
     const editor = buildEditor(md);
     editor.commands.setTextSelection(posOfHeadingOrText(editor, "Fortsetzung ohne Einrueckung"));
     const applied = changeIndent(editor, 1);
-    const out = saveLike(editor);
-    editor.destroy();
-    expect(applied).toBe(true);
-    // Rohtext ist ab hier TEXTUELL UNUNTERSCHEIDBAR von einer echten
-    // Listenpunkt-Fortsetzung (Matrix 2) – exakt die beschriebene Ambiguität.
-    expect(out).toBe("# T\n\n- Parent\n\n  Fortsetzung ohne Einrueckung");
-
-    const editor2 = buildEditor(out);
-    let indent = "not-found", parentType = null;
-    editor2.state.doc.descendants((n, p) => {
-      if (n.type.name === "paragraph" && n.textContent === "Fortsetzung ohne Einrueckung") {
-        indent = n.attrs.indent;
-        parentType = editor2.state.doc.resolve(p).node(editor2.state.doc.resolve(p).depth).type.name;
-      }
-    });
-    const stableOut = saveLike(editor2);
-    editor2.destroy();
-    expect(indent).toBe(0); // NICHT mehr die eigene Attribut-Einrückung
-    expect(parentType).toBe("listItem"); // strukturell Teil von "Parent" geworden
-    expect(stableOut).toBe(out); // KEIN Datenverlust, sofort roundtrip-stabil
-  });
-
-  it("derselbe Effekt gilt NICHT für eine Ebene-1-Einrückung nach einer NUMMERIERTEN Liste mit einstelligem Marker (Content-Spalte 3, 2 Leerzeichen reichen nicht zum Verschlucken)", () => {
-    // Bewusst als Gegenbeispiel gepinnt: die Ambiguität aus Finding B1 ist
-    // KEIN allgemeines Attribut-Einzug-Problem, sondern hängt exakt von der
-    // Marker-Breite ab ("- "/"- [ ] " brauchen nur 2 Leerzeichen, "1. " braucht
-    // mindestens 3) – siehe DECISIONS #86 für die vollständige Matrix.
-    const md = "# T\n\n1. Eins\n\n  Fortsetzung2sp";
-    const editor = buildEditor(md);
+    // SOFORT (ohne jeden Reload) prüfen – das war GENAU die Lücke aus
+    // Finding B1: vorher stimmte dieser Zustand erst nach dem Speichern+
+    // Neuladen.
     let indent = "not-found", parentType = null;
     editor.state.doc.descendants((n, p) => {
-      if (n.type.name === "paragraph" && n.textContent === "Fortsetzung2sp") {
+      if (n.type.name === "paragraph" && n.textContent === "Fortsetzung ohne Einrueckung") {
         indent = n.attrs.indent;
         parentType = editor.state.doc.resolve(p).node(editor.state.doc.resolve(p).depth).type.name;
       }
     });
+    const canInc = canChangeIndent(editor, 1);
+    const canDec = canChangeIndent(editor, -1);
+    const out = saveLike(editor);
     editor.destroy();
+    expect(applied).toBe(true);
+    expect(indent).toBe(0); // KEIN Attribut mehr, sofort
+    expect(parentType).toBe("listItem"); // sofort strukturell Teil von "Parent"
+    expect(canInc).toBe(false); // konsistent mit Matrix 2 (strukturelle Fortsetzung)
+    expect(canDec).toBe(true);
+    // Rohtext ist (wie schon vor v7.44) textuell identisch zu einer ECHTEN
+    // Listenpunkt-Fortsetzung – nur der WEG dorthin ist jetzt direkt.
+    expect(out).toBe("# T\n\n- Parent\n\n  Fortsetzung ohne Einrueckung");
+
+    // Reload ändert jetzt NICHTS mehr (das war der eigentliche Fix-Zweck):
+    const editor2 = buildEditor(out);
+    let indent2 = "not-found", parentType2 = null;
+    editor2.state.doc.descendants((n, p) => {
+      if (n.type.name === "paragraph" && n.textContent === "Fortsetzung ohne Einrueckung") {
+        indent2 = n.attrs.indent;
+        parentType2 = editor2.state.doc.resolve(p).node(editor2.state.doc.resolve(p).depth).type.name;
+      }
+    });
+    const stableOut = saveLike(editor2);
+    editor2.destroy();
+    expect(indent2).toBe(indent);
+    expect(parentType2).toBe(parentType);
+    expect(stableOut).toBe(out);
+  });
+
+  it("Rückweg: Einzug verkleinern auf dem strukturell aufgenommenen Absatz löst NUR ihn heraus – 'Parent' bleibt ein Listenpunkt (nicht das ganze Item wird gehoben)", () => {
+    // Startpunkt: bereits strukturell (wie nach obigem Test ODER wie ein von
+    // Anfang an so verfasstes Dokument, siehe Matrix 2) – die Reparatur muss
+    // für BEIDE Entstehungswege identisch funktionieren.
+    const md = "# T\n\n- Parent\n\n  Fortsetzung";
+    const editor = buildEditor(md);
+    editor.commands.setTextSelection(posOfHeadingOrText(editor, "Fortsetzung"));
+    expect(canChangeIndent(editor, -1)).toBe(true);
+    const applied = changeIndent(editor, -1);
+    const out = saveLike(editor);
+    editor.destroy();
+    expect(applied).toBe(true);
+    // "Parent" bleibt Listenpunkt, "Fortsetzung" wird wieder ein GENUINER
+    // Top-Level-Absatz direkt danach – NICHT (der alte Bug) "- Parent" samt
+    // Fortsetzung komplett aus der Liste gehoben (was "Parent" zu einem
+    // normalen Absatz OHNE Bullet gemacht hätte).
+    expect(out).toBe("# T\n\n- Parent\n\nFortsetzung");
+
+    const editor2 = buildEditor(out);
+    let parentIsListItem = false, fortsetzungIsListItem = false;
+    editor2.state.doc.descendants((n, p) => {
+      const $p = editor2.state.doc.resolve(p);
+      const parentType = $p.depth ? $p.node($p.depth).type.name : "doc";
+      if (n.type.name === "paragraph" && n.textContent === "Parent") parentIsListItem = parentType === "listItem";
+      if (n.type.name === "paragraph" && n.textContent === "Fortsetzung") fortsetzungIsListItem = parentType === "listItem";
+    });
+    editor2.destroy();
+    expect(parentIsListItem).toBe(true); // "Parent" IST noch der Listenpunkt
+    expect(fortsetzungIsListItem).toBe(false); // "Fortsetzung" ist TOP-LEVEL
+  });
+
+  it("derselbe Rückweg funktioniert unter einem CHECKBOX-Elternpunkt (der ursprüngliche Nutzerfall betraf u. a. Checklisten)", () => {
+    const md = "# T\n\n- [ ] Parent\n\n  Fortsetzung";
+    const editor = buildEditor(md);
+    editor.commands.setTextSelection(posOfHeadingOrText(editor, "Fortsetzung"));
+    const applied = changeIndent(editor, -1);
+    const out = saveLike(editor);
+    editor.destroy();
+    expect(applied).toBe(true);
+    expect(out).toBe("# T\n\n- [ ] Parent\n\nFortsetzung");
+  });
+
+  it("Bild + Bildunterschrift werden in EINEM Tab-Druck GEMEINSAM strukturell aufgenommen (Mehrfachauswahl, ein Undo-Schritt) – der ursprüngliche Nutzerfall", () => {
+    const md = "# T\n\n- [ ] Parent\n\n![Bild](img:xyz)\n\n*Unterschrift*";
+    const editor = buildEditor(md);
+    let imgPos = null, capPos = null;
+    editor.state.doc.descendants((n, p) => {
+      if (n.type.name === "image") imgPos = p;
+      if (n.type.name === "paragraph" && n.textContent === "Unterschrift") capPos = p + n.nodeSize - 1;
+    });
+    editor.commands.setTextSelection({ from: imgPos, to: capPos });
+    const applied = changeIndent(editor, 1);
+    let imageIndent = "not-found", imageParent = null, capParent = null;
+    editor.state.doc.descendants((n, p) => {
+      const $p = editor.state.doc.resolve(p);
+      const parentType = $p.depth ? $p.node($p.depth).type.name : "doc";
+      if (n.type.name === "image") { imageIndent = n.attrs.indent; imageParent = parentType; }
+      if (n.type.name === "paragraph" && n.textContent === "Unterschrift") capParent = parentType;
+    });
+    const out = saveLike(editor);
+    editor.destroy();
+    expect(applied).toBe(true);
+    expect(imageIndent).toBe(0);
+    expect(imageParent).toBe("taskItem"); // BEIDE strukturell im selben Checklistenpunkt
+    expect(capParent).toBe("taskItem");
+    expect(out).toBe("# T\n\n- [ ] Parent\n\n  ![Bild](img:xyz)\n\n  *Unterschrift*");
+
+    // Idempotent: erneutes Laden ändert nichts mehr.
+    expect(roundtrip(out)).toBe(out);
+  });
+
+  it('"Einzug verkleinern" auf der Bildunterschrift löst NUR SIE heraus, das Bild bleibt strukturell im Checklistenpunkt', () => {
+    // Regressions-Grenze (bewusst NICHT Teil der "gemeinsam"-Garantie oben):
+    // trailingContinuationRun greift auf den SUFFIX der Selektion – steht
+    // der Cursor NUR in der Unterschrift (kein Mehrfachauswahl übers Bild),
+    // wird nur sie herausgelöst. Das Bild bliebe dann als LETZTES Kind
+    // zurück und ist damit selbst wieder ein gültiges Ziel für einen
+    // weiteren Shift-Tab-Druck (siehe nächster Test).
+    const md = "# T\n\n- [ ] Parent\n\n  ![Bild](img:xyz)\n\n  *Unterschrift*";
+    const editor = buildEditor(md);
+    editor.commands.setTextSelection(posOfHeadingOrText(editor, "Unterschrift"));
+    const applied = changeIndent(editor, -1);
+    const out = saveLike(editor);
+    editor.destroy();
+    expect(applied).toBe(true);
+    expect(out).toBe("# T\n\n- [ ] Parent\n\n  ![Bild](img:xyz)\n\n*Unterschrift*");
+  });
+
+  it("derselbe Effekt gilt NICHT für eine NUMMERIERTE Liste mit einstelligem Marker (Content-Spalte 3, 2 Leerzeichen reichen nicht zum Verschlucken) – changeIndent bleibt beim Attribut-Weg", () => {
+    // Bewusst als Gegenbeispiel gepinnt: die Ambiguität aus Finding B1 ist
+    // KEIN allgemeines Attribut-Einzug-Problem, sondern hängt exakt von der
+    // Marker-Breite ab ("- "/"- [ ] " brauchen nur 2 Leerzeichen, "1. "
+    // braucht mindestens 3) – siehe DECISIONS für die vollständige Matrix.
+    // Die neue Sonderbehandlung darf HIER NICHT greifen (Auftrag).
+    const md = "# T\n\n1. Eins\n\nFortsetzung ohne Einrueckung";
+    const editor = buildEditor(md);
+    editor.commands.setTextSelection(posOfHeadingOrText(editor, "Fortsetzung ohne Einrueckung"));
+    const applied = changeIndent(editor, 1);
+    let indent = "not-found", parentType = null;
+    editor.state.doc.descendants((n, p) => {
+      if (n.type.name === "paragraph" && n.textContent === "Fortsetzung ohne Einrueckung") {
+        indent = n.attrs.indent;
+        parentType = editor.state.doc.resolve(p).node(editor.state.doc.resolve(p).depth).type.name;
+      }
+    });
+    const out = saveLike(editor);
+    editor.destroy();
+    expect(applied).toBe(true);
     expect(indent).toBe(1); // bleibt die eigene Attribut-Einrückung
     expect(parentType).toBe("doc"); // bleibt TOP-LEVEL, nicht Teil der Liste
+    expect(out).toBe("# T\n\n1. Eins\n\n  Fortsetzung ohne Einrueckung");
+  });
+
+  it("die Rückwärts-Sonderbehandlung greift ebenfalls NICHT bei einer nummerierten Liste – eine dort STRUKTURELL geladene Fortsetzung wird weiterhin (wie vor v7.44) mit dem GANZEN Punkt gehoben", () => {
+    // Auch das ist eine bewusste Grenze (Auftrag: "Prüfe die Marker-Breite
+    // tatsächlich, statt sie zu raten" + "keine Inkonsistenz, die es vorher
+    // nicht gab") – eine echte 3-Leerzeichen-Fortsetzung unter "1. " ist
+    // KEIN Bestandteil dieses Bugs (siehe DECISIONS #86, Gegenbeispiel), die
+    // Rückwärts-Sonderbehandlung bleibt deshalb konsequent auf bulletList/
+    // taskList beschränkt.
+    const md = "# T\n\n1. Eins\n\n   Fortsetzung3sp";
+    const editor = buildEditor(md);
+    editor.commands.setTextSelection(posOfHeadingOrText(editor, "Fortsetzung3sp"));
+    const applied = changeIndent(editor, -1);
+    const out = saveLike(editor);
+    editor.destroy();
+    expect(applied).toBe(true);
+    // "Eins" verliert dabei (wie schon vor v7.44) seine Nummerierung -
+    // GANZER Punkt gehoben, unverändertes Alt-Verhalten für Nummerierungen.
+    expect(out).toBe("# T\n\nEins\n\nFortsetzung3sp");
   });
 });
 
@@ -1391,6 +1518,18 @@ describe("v7.42 Finding B1 (dokumentierte Markdown-Ambiguität): Absatz DIREKT n
 // der äußere Listenpunkt durch den jetzt angehängten Absatz "locker" statt
 // "eng" wird) und ist AB DANN stabil – kein Inhaltsverlust, keine
 // fortlaufende Verschlechterung.
+//
+// v7.44 UNVERÄNDERT (bewusst, siehe chainList/"touched" in runIndentChange):
+// Die Liste ("Eins"/"Zwei") ist hier SELBST Teil derselben Selektion, die
+// auch den Absatz berührt – die neue Struktur-Sofort-Übernahme aus Finding
+// B1 greift deshalb ABSICHTLICH NICHT (chainList.touched === true bricht
+// die Kette), der Absatz bekommt wie bisher das Attribut. Empirisch
+// geprüft (siehe Kommentar bei "touched" in DocEditor.jsx): Für GENAU
+// dieses Beispiel wäre das Endergebnis textuell sogar identisch, wenn die
+// Kette hier NICHT bräche – die Grenze ist trotzdem bewusst gezogen, damit
+// dieser bereits vermessene Mehrfachauswahl-Fall unverändert bleibt, statt
+// stillschweigend einen zusätzlichen, hier nicht beauftragten Verhaltens-
+// wechsel mitzunehmen. Dieser Test bleibt dadurch identisch zu v7.42.
 describe("v7.42 Finding B2 (einmalige, nicht-destruktive Reformatierung): gemischte Mehrfachauswahl aus Listenpunkt-Sink + Absatz-Einzug", () => {
   it("stabilisiert sich nach GENAU einem zusätzlichen Zyklus (kein endloses Weiterdriften, kein Datenverlust)", () => {
     const md = "# T\n\n- Eins\n- Zwei\n\nAbsatz danach";

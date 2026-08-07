@@ -637,6 +637,28 @@ Listenpunkts eingefügt, landet sie im Editor-DOM innerhalb des `<li>`
 statt danach – die Ansicht rendert trotzdem korrekt und der Roundtrip
 bleibt byte-stabil, siehe DECISIONS.md.
 
+**D2b [VERBUNDEN] Umbrüche und Aufzählungen in Tabellenzellen (v7.44,
+Nutzerwunsch – die App hatte fälschlich behauptet, das ginge nicht,
+DECISIONS #89).** Im Editor eine 2×1-Tabelle anlegen (eine Spalte, eine
+Datenzeile). In die Zelle klicken und tippen: „QA-Zelle Zeile1“,
+Umschalt+Enter (harter Zeilenumbruch INNERHALB der Zelle, kein neuer
+Absatz/keine neue Zeile der Tabelle), dann „QA-Zelle Zeile2“. Erwartet:
+Beide Zeilen erscheinen SICHTBAR UNTEREINANDER innerhalb DERSELBEN Zelle,
+bereits im Editor. Speichern, Editor erneut öffnen: Erwartet, beide
+Zeilen erscheinen weiterhin untereinander in derselben Zelle (Roundtrip),
+NICHT als Roh-Text „<br>“. In der Dokument-ANSICHT (nicht im Editor) prüft
+sich derselbe Effekt: Umbruch bleibt sichtbar, „<br>“ erscheint NIE als
+Literaltext. Danach in derselben Zelle nach einem weiteren Umbruch zwei
+Zeilen mit „- QA-Punkt eins“ und „- QA-Punkt zwei“ eintippen (jeweils mit
+Umschalt+Enter getrennt, NICHT Enter – sonst startet ein neuer
+Tabellen-Absatz). Speichern, Editor erneut öffnen und die ANSICHT prüfen:
+Erwartet, die beiden Punkte erscheinen in der ANSICHT als kompakte
+Aufzählung MIT sichtbaren Aufzählungszeichen innerhalb der Zelle (nicht
+nur als Fließtext mit „- “ davor), ohne dass die Tabellenzeile dadurch
+ungewöhnlich hoch wird. Zur Kontrolle: Eine Zelle OHNE jeden Umbruch
+verhält sich unverändert wie bisher (normaler Fließtext, kein zusätzlicher
+Abstand).
+
 **D3 [VERBUNDEN] Checkliste.** Im Editor eine Checkliste mit zwei
 Einträgen anlegen, speichern, dann in der ANSICHT ein Kästchen anklicken.
 Erwartet: Haken bleibt nach Reload erhalten (eigener Commit).
@@ -1388,29 +1410,39 @@ derselben Stelle), „Einzug vergrößern“ ist AUSGEGRAUT. Speichern, Editor
 erneut öffnen und OHNE weitere Änderung erneut speichern: KEIN Commit
 (No-op-Roundtrip).
 
-**D23 [OFFEN, informativ] Ein Absatz/Bild/eine Formel DIREKT nach einer
-Liste kann beim erneuten Öffnen zum Listenpunkt-Inhalt werden (v7.42,
-bekanntes, bewusst dokumentiertes Restrisiko, DECISIONS #86 Finding B1 –
-Markdown selbst kann „eigene Einrückung“ und „Fortsetzung des
-Listenpunkts“ bei 2 Leerzeichen nicht unterscheiden).** Editor öffnen,
-Stichpunkt „QA-Grenzfall eins“ anlegen. Direkt danach einen normalen,
-NICHT eingerückten Absatz „QA-Grenzfall Fortsetzung“ anlegen (z. B. Enter,
-dann Umschalt+Tab, um aus der Liste herauszuspringen). Cursor in diesen
-Absatz setzen, einmal „Einzug vergrößern“ klicken. Speichern. Editor
-erneut öffnen. **Nicht als Fehler melden, falls:** Der Absatz jetzt
-strukturell wie ein Teil des Listenpunkts behandelt wird (z. B. „Einzug
-verkleinern“ hebt jetzt plötzlich den KOMPLETTEN vorherigen Listenpunkt aus
-der Liste, statt nur den Absatz zurückzunehmen) – das ist die oben
-beschriebene, bekannte Markdown-Ambiguität. **Ebenfalls nicht als Fehler
-melden:** Hat man den Absatz VOR dem Speichern zweimal eingerückt
-(Ebene 2), steht er nach dem erneuten Öffnen nur noch auf Ebene 1. Auch
-das folgt zwingend aus derselben Ambiguität – Markdown kann in dieser
-Position keine tiefere Ebene als die Content-Spalte des Listenpunkts
-ausdrücken. Der Rückfall passiert EINMALIG, danach ist der Zustand
-stabil. **Als Fehler melden, falls:**
-Text/Inhalt dabei VERLOREN geht, oder sich das Dokument bei WIEDERHOLTEM
-Öffnen+Speichern (mehr als ein weiterer Zyklus) IMMER WEITER verändert
-statt sich zu stabilisieren.
+**D23 [VERBUNDEN] Einzug unter einem Listenpunkt bleibt über Speichern+
+Neuladen KONSTANT (v7.44, Nutzer-Befund „verhält sich komisch, wenn ich
+das in einem Block mache, der eine Checkbox oder Aufzählung hat“,
+DECISIONS #90 – löst die vormalige Finding-B1-Dokumentation aus #86 ab).**
+Editor öffnen, Stichpunkt „QA-Einzug-Punkt“ anlegen. Direkt danach einen
+normalen, NICHT eingerückten Absatz „QA-Einzug-Fortsetzung“ anlegen
+(z. B. Enter, dann Umschalt+Tab, um aus der Liste herauszuspringen).
+Cursor in diesen Absatz setzen, einmal „Einzug vergrößern“ klicken.
+Erwartet: Der Absatz rückt sichtbar unter „QA-Einzug-Punkt“ ein, UND
+„Einzug vergrößern“ wird SOFORT (noch VOR dem Speichern) ausgegraut,
+während „Einzug verkleinern“ aktiv bleibt. Speichern, Editor erneut
+öffnen: Erwartet, GENAU derselbe Knopf-Zustand („Einzug vergrößern“
+ausgegraut, „Einzug verkleinern“ aktiv) UND dieselbe Optik – KEIN Wechsel
+zwischen den beiden Sitzungen. Jetzt „Einzug verkleinern“ klicken:
+Erwartet, NUR „QA-Einzug-Fortsetzung“ löst sich aus dem Listenpunkt
+(erscheint danach als eigenständiger Absatz direkt nach der Liste),
+„QA-Einzug-Punkt“ bleibt UNVERÄNDERT ein Stichpunkt mit sichtbarem
+Aufzählungszeichen (NICHT der komplette Listenpunkt wird mit angehoben).
+Zusätzlich: Ein Bild direkt unter „QA-Einzug-Punkt“ einfügen, gefolgt von
+einer kursiven Bildunterschrift, BEIDE zusammen markieren (Mausauswahl
+vom Bild bis ans Ende der Unterschrift) und EINMAL „Einzug vergrößern“
+klicken – erwartet, BEIDE (Bild UND Unterschrift) rücken gemeinsam unter
+den Listenpunkt (der ursprüngliche gemeldete Fall). **Nicht als Fehler
+melden:** Eine NUMMERIERTE Liste (`1.`) verhält sich hier bewusst ANDERS
+(unverändert wie zuvor, keine Sonderbehandlung) – ein direkt danach per
+Knopf eingerückter Absatz bleibt dort ein eigener, unverschmolzener
+Absatz, Knopf-Zustand und Optik ändern sich dort auch nach dem Neuladen
+nicht. **Ebenfalls nicht als Fehler melden:** Hatte die Liste VOR dem
+Einrücken MEHR ALS EINEN Punkt, stehen ihre Punkte nach dem nächsten
+Laden mit einer Leerzeile dazwischen (die Liste wird „lose“). Das ist die
+bekannte Loose/Tight-Normalisierung von markdown-it/prosemirror-markdown,
+passiert EINMALIG, geht mit keinerlei Inhaltsverlust einher und ist ab
+dem zweiten Zyklus stabil.
 
 ## E. Schnellnotizen
 

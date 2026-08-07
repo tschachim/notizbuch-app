@@ -9006,3 +9006,190 @@ aus `referenz-app.jsx` übernommen.
       Prompt-Regel dieser Datei auch); die verbesserte ⚠️-Meldung soll das
       im NÄCHSTEN Turn selbst korrigieren, verhindert den ersten Fehlversuch
       aber nicht.
+
+89. **Umbrüche und Aufzählungen in Tabellenzellen (v7.44, Nutzerwunsch,
+    nachdem die App fälschlich behauptet hatte, das ginge nicht).** Die
+    ursprüngliche Chat-Antwort diagnostizierte falsch: "GFM-Pipe-Tabellen
+    können keine echte mehrzeilige Zelle" (strukturell richtig) UND "der
+    Editor akzeptiert kein HTML in Zellen, `<br>` wird deshalb entfernt"
+    (FALSCH). Verifiziert: `DocEditor.jsx#MdTable` setzt beim Serialisieren
+    bewusst `state.inTable = true`, wodurch prosemirror-markdown einen
+    harten Zeilenumbruch in einer Zelle bereits seit Einführung der
+    Tabellen als `<br>` schreibt – und `Markdown.configure({html:true})`
+    liest ein `<br>` beim Laden korrekt wieder als echten hardBreak-Knoten
+    ein (siehe `tests/docEditorTableBreaks.test.jsx`, empirisch mit
+    echten TipTap-Editor-Instanzen belegt). Die Lücke war ausschließlich
+    der SCHREIBGESCHÜTZTE Anzeige-Renderer (`DocView`, `lib/markdown.jsx`):
+    `renderTable` schob den rohen Zelltext unverändert durch `<Inline>`,
+    ein `<br>` erschien dort deshalb als Literaltext statt als Umbruch –
+    keine GFM-Grenze, sondern eine reine Anzeige-Lücke.
+    - **`splitCellLines` (neu, `lib/markdown.jsx`, exportiert):** zerlegt
+      den rohen Zelltext an `<br>`/`<br/>`/`<br />` (case-insensitiv), aber
+      schützt drei Konstrukte davor, selbst aufgetrennt zu werden:
+      Codespans (`` `…` ``) und Formeln (`$…$`/`$$…$$`, `MATH_TOKEN_RE`) –
+      ausdrücklicher Auftrag ("ein `<br>` INNERHALB eines Codespans oder
+      einer Formel bleibt Literaltext") – sowie zusätzlich (nicht
+      ausdrücklich verlangt, aber sonst käme kaputtes HTML dabei heraus)
+      `<span>…</span>`/`<mark>…</mark>`-Blöcke als Ganzes (via `findClose`,
+      derselbe Helfer wie in `renderInline`): ein `<br>` SELTEN innerhalb
+      eines hart umbrochenen Farb-/Marker-Spans würde dessen Start-/
+      Ende-Tag sonst auf zwei "Zeilen" verteilen. Ohne jedes `<br>` liefert
+      die Funktion IMMER genau EIN Element, byte-identisch zum Original –
+      bestehende Zellen ohne Umbruch rendern dadurch UNVERÄNDERT (kein
+      neuer Wrapper, keine Regression, siehe Test).
+    - **`renderCellLines` (neu, intern):** gruppiert mit `-`/`*`/`N.`/`N)`
+      beginnende, durch `<br>` getrennte Zeilen zu einer kompakten
+      `<ul>`/`<ol>` (dieselben `UL_RE`/`OL_RE` wie im Block-Renderer – KEINE
+      zweite Listensyntax), alle anderen Zeilen werden per echtem `<br/>`
+      voneinander getrennt (nicht per `<span class="block">`: ein `<br/>`
+      genügt als einzelnes Element pro Trennstelle und vermeidet unnötige
+      Wrapper-Elemente je Zeile). Ein `<ul>`/`<ol>` ist bereits selbst
+      block-level und bekommt deshalb bewusst KEIN zusätzliches `<br/>`
+      davor/danach (sonst ein optisch zu großer Doppel-Abstand) – `my-0`/
+      `space-y-0` statt der Block-Varianten `mb-3`/`space-y-1` hält die
+      Tabellenzeile kompakt, wie im Auftrag verlangt ("ohne die Zeilenhöhe
+      der Tabelle zu sprengen").
+    - **Systemprompt (`anthropic.js`, KONVENTIONEN):** "Zellen ohne
+      Zeilenumbrüche" ersetzt durch eine Regel, die `<br>` explizit als
+      erlaubte Umbruch-Syntax nennt (inkl. kurzer `-`/`1.`-Aufzählungen
+      darin) und ausdrücklich auf "kurze Ergänzungen" begrenzt (keine
+      langen Absätze in Zellen) – die bestehende Regel "jede Tabellenzeile
+      auf einer eigenen Zeile" bleibt unverändert stehen.
+    - **Roundtrip aktiv geprüft** (`tests/docEditorTableBreaks.test.jsx`,
+      echte `Editor`-Instanz mit `MdTable`/`TableRow`/`TableHeader`/
+      `TableCell`): Laden eines `<br>` erzeugt einen echten hardBreak-Knoten
+      (kein Literaltext), Speichern reproduziert byte-identisch das
+      Original, ein zweiter Lade-/Speicherzyklus bleibt stabil, `DocView`
+      zeigt denselben Text als echten Umbruch, UND eine Zelle mit
+      escaptem Pipe-Zeichen + Umbruch + zwei Aufzählungspunkten übersteht
+      die GESAMTE Kette Editor → Markdown → Renderer → Editor unbeschädigt
+      (Pipe bleibt sichtbar, Tabelle zerreißt nicht, `<ul>` mit beiden
+      Punkten erscheint).
+    - **Aktiv verifiziert, dass die Tests ohne den Fix rot sind:** die
+      `renderTable`-Zeilen auf `<Inline text={c} />` zurückgesetzt (vor
+      Einführung von `TableCell`) – alle neuen `splitCellLines`- und
+      "Tabellenzellen …"-Tests in `tests/markdown.test.jsx` sowie alle vier
+      Tests in `tests/docEditorTableBreaks.test.jsx`, die eine Umbruch-
+      Anzeige prüfen, liefen rot (Renderer zeigte weiterhin `&lt;br&gt;`
+      als Text), Fix wiederhergestellt, alle wieder grün.
+    - **Bewusste Grenzen:** Ein `<br>` mitten in einem `[Titel](url)` (z. B.
+      ein absichtlich hart umbrochener Linktitel – in der Praxis extrem
+      unüblich) wird trotzdem aufgetrennt; das Ergebnis ist dann keine
+      funktionierende Verlinkung mehr auf beiden Zeilen, aber auch kein
+      kaputtes HTML (Klammern sind kein Markup) – reines GIGO, wie an
+      anderer Stelle dieser Datei bereits toleriert (z. B. der
+      Titel-Cap in `INLINE_TOKEN_RE`). Ein `<br>` innerhalb eines
+      Farb-/Marker-Spans wird zwar korrekt GESCHÜTZT (kein kaputtes Tag),
+      erzeugt dort aber auch KEINEN sichtbaren Umbruch (bleibt Literaltext
+      innerhalb des geschützten Blocks) – akzeptiert, weil dieser Fall
+      (ein hart umbrochener Farb-/Marker-Span in einer Tabellenzelle) in
+      der Praxis noch seltener ist als der Link-Fall oben.
+
+90. **Finding B1 aus Eintrag #86 nachgebessert – Einzug unter einem
+    Listenpunkt "verhält sich komisch" (v7.44, Nutzer-Befund).** Nutzer
+    wörtlich: "Es verhält sich komisch, wenn ich das in einem Block mache,
+    der eine Checkbox oder Aufzählung hat." Finding B1 (Eintrag #86) hatte
+    dies nur DOKUMENTIERT: Ein Top-Level-Absatz/-Bild/-Formel, der/die per
+    Attribut auf Ebene 1 eingerückt wird (2 Leerzeichen) UND unmittelbar
+    (nur Leerzeile dazwischen) einer Liste mit 2-Zeichen-Marker (`-`/`* `/
+    `- [ ] `) folgt, erzeugt exakt denselben Rohtext wie eine STRUKTURELLE
+    Fortsetzung desselben Listenpunkts (CommonMark "lazy continuation"
+    entscheidet rein über die Spalten-Tiefe) – das Dateiformat ist NICHT
+    reparierbar, aber das VERHALTEN entstand nur, weil der Editor vor dem
+    Speichern etwas anderes zuließ als nach dem Neuladen: Knopf-Zustand
+    und Tab-Wirkung wechselten dadurch unbemerkt zwischen zwei Sitzungen.
+    **Diese Nachbesserung LÖST DAS AUF, Eintrag #86/Finding B1 gilt damit
+    als ÜBERHOLT** (Optionen (a)/(b) dort sind durch eine dritte, damals
+    nicht erwogene Option ersetzt, siehe unten) – Finding B2/B3/B4 aus
+    Eintrag #86 bleiben unverändert gültig.
+    - **Gewählte Lösung (Empfehlung des Reviewers, geprüft und trägt):**
+      `runIndentChange` (`DocEditor.jsx`) wählt in GENAU dieser Position
+      SOFORT die strukturelle Variante – der Block wird per Transaktion
+      als neues, letztes Kind in den letzten Listenpunkt der unmittelbar
+      vorangehenden Liste verschoben – statt ein `indent`-Attribut zu
+      setzen, das der nächste Ladevorgang ohnehin genau dazu umdeutet.
+      Damit sieht der Nutzer sofort das Endergebnis, und Knopf-Zustand wie
+      Tab-Wirkung bleiben über Speichern+Neuladen hinweg KONSTANT (keine
+      Überraschung mehr).
+    - **`chainList` (neu, in `runIndentChange`):** verfolgt beim Durchlauf
+      aller Top-Level-Blöcke, ob der ZULETZT gesehene Block eine
+      qualifizierende Liste (`bulletList`/`taskList`, NIE `orderedList` –
+      siehe unten) ist ODER selbst schon in eine solche aufgenommen wurde.
+      Jeder ANDERE Blocktyp (Überschrift, leerer Absatz, ein NICHT
+      aufgenommener Absatz/Bild z. B. weil er schon `indent>0` trägt,
+      Tabelle …) bricht die Kette für alles Nachfolgende. Das ermöglicht
+      den ursprünglichen Nutzerfall "Bild UND Bildunterschrift" (zwei
+      aufeinanderfolgende Top-Level-Blöcke) in EINEM Tab-Druck gemeinsam
+      strukturell aufzunehmen, in der richtigen Reihenfolge, als EINE
+      Transaktion (ein Undo-Schritt).
+    - **`touched`-Bremse (bewusste Scope-Grenze, siehe Finding B2 unten).**
+      `chainList` merkt sich zusätzlich, ob die qualifizierende Liste
+      SELBST Teil der aktuellen Selektion war – nur wenn NICHT, greift die
+      Struktur-Sofort-Übernahme. Grund: Eine "Excel-Style"-Mehrfachauswahl,
+      die GLEICHZEITIG einen Listenpunkt sinken lässt UND einen
+      anschließenden Absatz aufnehmen würde (Finding B2 aus Eintrag #86),
+      ist NICHT Teil dieses Auftrags. Empirisch geprüft (siehe
+      `tests/docEditorIndent.test.jsx`, Kommentar bei Finding B2): Für das
+      dortige konkrete Beispiel wäre das TEXTUELLE Endergebnis sogar
+      identisch, ob die Kette hier bricht oder nicht (beide Wege landen
+      strukturell gültig, nur über unterschiedliche interne Pfade) – die
+      Bremse ist trotzdem bewusst gesetzt, um den Diff auf den GEMELDETEN
+      Fall zu beschränken, statt stillschweigend auch Finding B2 (nicht
+      erschöpfend gegen alle denkbaren Mehrfachauswahl-Kombinationen
+      durchgetestet) mit anzufassen. Finding B2 bleibt dadurch UNVERÄNDERT
+      gültig (derselbe Test wie in v7.42, unverändert grün).
+    - **Rückweg (`trailingContinuationRun`, neu):** Liegt die Selektion
+      vollständig innerhalb des Continuation-Suffix (Absatz/Bild/Formel,
+      KEINE Unterliste) am Ende des LETZTEN Listenpunkts einer
+      bulletList/taskList, löst "Einzug verkleinern" NUR dieses Suffix aus
+      dem Listenpunkt heraus (neuer Top-Level-Nachbar direkt nach der
+      Liste) – statt wie zuvor den GANZEN Listenpunkt zu heben (das war
+      das eigentliche "komisch": der Knopf traf den falschen Umfang, ein
+      inhaltlich unbeteiligter Bullet-/Checkbox-Text ging als sichtbare
+      Formatierung verloren). Die Extraktion beginnt dabei GENAU an dem
+      Kind, das den Anfang der Selektion enthält (nicht zwingend am
+      Suffix-Anfang): ein Cursor NUR in der Bildunterschrift löst NUR sie
+      heraus, eine Auswahl, die schon beim Bild beginnt, zieht die
+      Unterschrift automatisch mit – "Bild und Bildunterschrift … müssen
+      weiterhin gemeinsam funktionieren" (Auftrag) UND das engere
+      "nur den berührten Block anfassen"-Prinzip bleiben beide erfüllt.
+    - **Marker-Breite tatsächlich geprüft, nicht geraten (Auftrag).**
+      Sowohl die Vorwärts- als auch die Rückwärts-Sonderbehandlung sind
+      strikt auf `bulletList`/`taskList` beschränkt, `orderedList` bleibt
+      in BEIDEN Richtungen unangetastet: Eine Nummerierung mit `"1. "`
+      (Content-Spalte 3) kennt die Verschluck-Ambiguität aus Finding B1
+      nicht (2 Leerzeichen reichen dort nicht, siehe Eintrag #86 für die
+      vollständige Matrix) – die neue Sonderbehandlung dort greifen zu
+      lassen hätte eine Inkonsistenz erzeugt, die es vorher nicht gab.
+      Pinnende Regressionstests für BEIDE Richtungen (Vorwärts bleibt beim
+      Attribut, Rückwärts hebt weiterhin den ganzen Punkt) belegen das.
+    - **Aktiv verifiziert, dass alle neuen Tests ohne den Fix rot sind:**
+      beide neuen `if`-Bedingungen in `runIndentChange` testweise auf
+      `if (false && …)` gesetzt – alle 5 neuen "v7.44 Finding B1
+      nachgebessert"-Tests liefen rot, die restlichen 89 Tests der Datei
+      blieben unverändert grün (kein Kollateralschaden), Fix
+      wiederhergestellt, alle 94 wieder grün.
+    - **Bewusste Grenze:** Enthält der letzte Listenpunkt bereits eine
+      verschachtelte Unterliste als letztes Kind (z. B. "Bullet unter
+      Checkbox", siehe Eintrag #86), greift die Rückwärts-Sonderbehandlung
+      NICHT (nur Absatz/Bild/Formel gelten als Continuation-Suffix) – dort
+      bleibt das bestehende, bereits als konsistent vermessene Sink-/
+      Lift-Verhalten unverändert (kein neuer Test nötig, unveränderter
+      Code-Pfad).
+    - **Bewusste Folge (Review-Fund zu v7.44, im Review gemessen):** Hatte
+      die vorangehende Liste MEHR ALS EINEN Punkt, fügt der nächste
+      Ladevorgang EINMALIG Leerzeilen zwischen ihre Punkte ein – die Liste
+      wird "lose", weil ihr letzter Punkt jetzt zwei Blöcke enthält und
+      `prosemirror-markdown` die Loose/Tight-Entscheidung für die GANZE
+      Liste einheitlich trifft (dieselbe Mechanik wie Finding B2 in
+      Eintrag #86):
+      `- Eins\n- Zwei\n\nAbsatz` → einrücken → gespeichert
+      `- Eins\n- Zwei\n\n  Absatz` → nach dem Reload
+      `- Eins\n\n- Zwei\n\n  Absatz`, danach über drei weitere Zyklen
+      stabil. Kein Inhaltsverlust; ein Öffnen+Speichern OHNE Änderung
+      löst wegen des `md === baseline`-Vergleichs auch keinen Commit aus.
+      Beim Ein-Punkt-Fall (dem gemeldeten Nutzerfall) tritt es NICHT auf.
+      Neu ist nur, dass dieser bekannte Effekt jetzt auf dem HAUPTPFAD
+      des gefixten Features liegt statt in einem Randfall – deshalb
+      ausdrücklich in `docs/TESTFAELLE.md` (D23) als "nicht als Fehler
+      melden" hinterlegt, damit der E2E-Lauf keinen Fehlalarm produziert.

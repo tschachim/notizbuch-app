@@ -970,6 +970,22 @@ describe("buildSystem", () => {
     });
   });
 
+  // v7.44: Der Renderer stellt <br> NUR in Tabellenzellen als Umbruch dar
+  // (splitCellLines/renderCellLines in markdown.jsx) – ausserhalb erscheint
+  // es als sichtbarer Literaltext. Die Zellen-Regel allein verleitet ein
+  // Modell leicht zur Verallgemeinerung "<br> ist ein erlaubtes
+  // Umbruchmittel"; die Einschraenkung muss deshalb ausdruecklich dabeistehen
+  // (Review-Fund zu v7.44).
+  describe("Tabellenzellen-Regel: <br> ist NUR in Zellen erlaubt", () => {
+    it("erlaubt <br> in Zellen und verbietet es ausserhalb ausdruecklich", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain('Innerhalb einer Zelle sind Zeilenumbrüche NUR als "<br>" erlaubt');
+      expect(sys).toContain('AUSSERHALB von Tabellenzellen niemals "<br>" verwenden');
+      // Die bestehende Zeilen-Regel darf dabei nicht verlorengehen.
+      expect(sys).toContain("jede Tabellenzeile auf einer eigenen Zeile");
+    });
+  });
+
   // v7.43 (Live-Befund, siehe DECISIONS #87): Der Nutzer bat, einen
   // eingefügten HTML-Block in eine echte Tabelle umzuwandeln – das Modell
   // schickte replace_section OHNE "heading" (verwechselte offenbar den

@@ -1703,6 +1703,49 @@ export function moveOutlineRange(editor, entries, draggedIndex, targetIndex) {
 /*  - alles andere (Tabelle/Trennlinie/Codeblock/Formel-Block) -> No-op,    */
 /*    nicht Teil dieses Auftrags (siehe DECISIONS, bewusste Grenze).        */
 /*                                                                          */
+/* NACHBESSERUNG v7.44 (Finding B1 aus v7.42, DECISIONS #86, Nutzer-        */
+/* Befund "verhält sich komisch, wenn ich das in einem Block mache, der     */
+/* eine Checkbox oder Aufzählung hat"): Ein Top-Level-Absatz/-Bild/         */
+/* -Formel, der/die per "indent"-Attribut auf Ebene 1 gebracht wird (2      */
+/* Leerzeichen) UND unmittelbar (nur Leerzeile dazwischen) einer Liste mit  */
+/* 2-Zeichen-Marker ("-"/"* "/"- [ ] ") folgt, ergab beim SPEICHERN exakt   */
+/* denselben Rohtext wie eine STRUKTURELLE Fortsetzung desselben            */
+/* Listenpunkts (CommonMark "lazy continuation" entscheidet rein über die   */
+/* Spalten-Tiefe) – der nächste Ladevorgang deutete das Attribut deshalb    */
+/* IMMER in Struktur um, und Knopf-/Tab-Verhalten wechselten dadurch        */
+/* unbemerkt zwischen zwei Sitzungen. v7.42 hat das nur DOKUMENTIERT (siehe */
+/* DECISIONS #86, Finding B1) – dieser Auftrag löst es stattdessen auf:     */
+/* runIndentChange wählt in GENAU dieser Position SOFORT die strukturelle   */
+/* Variante (Block wird realer, zusätzlicher Kind-Knoten des LETZTEN        */
+/* Listenpunkts der unmittelbar VORANGEHENDEN Top-Level-Liste), statt das   */
+/* Attribut zu setzen – der Nutzer sieht dadurch sofort das Endergebnis,    */
+/* und ein Reload ändert weder Knopf-Zustand noch Tab-Wirkung mehr. Der     */
+/* Rückweg (Einzug verkleinern auf einem SO entstandenen – oder aus einem   */
+/* alten Dokument SO geladenen – Block) löst NUR diesen Block wieder aus    */
+/* dem Listenpunkt heraus (als neuer Top-Level-Nachbar direkt NACH der      */
+/* Liste), statt wie bisher den GANZEN Listenpunkt zu heben (das war das    */
+/* eigentliche "komisch": der Knopf "Einzug verkleinern" traf den falschen  */
+/* Umfang). Beide Richtungen sind AUSSCHLIESSLICH auf bulletList/taskList   */
+/* beschränkt (siehe trailingContinuationRun/chainList unten) – eine        */
+/* nummerierte Liste mit "1. " (Content-Spalte 3) kennt diese Ambiguität    */
+/* nicht (2 Leerzeichen reichen dort nicht zum Verschlucken, siehe DECISIONS*/
+/* #86) und bleibt bewusst UNANGETASTET, sonst entstünde dort eine          */
+/* Inkonsistenz, die es vorher nicht gab. "chainList" (siehe runIndentChange*/
+/* unten) verkettet mehrere aufeinanderfolgende, gemeinsam ausgewählte      */
+/* Top-Level-Blöcke (Nutzerfall "Bild UND Bildunterschrift in einem Rutsch  */
+/* einrücken") in denselben Listenpunkt UND bricht bewusst ab, sobald die   */
+/* anfangende Liste selbst TEIL derselben Selektion ist (Finding B2, siehe  */
+/* DECISIONS #86) – eine gleichzeitig sinkende/hebende Liste UND ein        */
+/* strukturell aufzunehmender Nachbar in EINER Aktion bleibt unverändert    */
+/* beim bisherigen (bereits getesteten, nicht-destruktiven) Attribut-Weg,   */
+/* um dieses seltene, bereits als unkritisch dokumentierte Zusammenspiel    */
+/* nicht zusätzlich zu verändern (empirisch geprüft: für das konkrete       */
+/* Finding-B2-Beispiel wäre das TEXTUELLE Endergebnis sogar identisch, egal */
+/* ob die Kette hier bricht oder nicht – die Grenze ist trotzdem bewusst    */
+/* gezogen, um den Diff auf den GEMELDETEN Fall/Finding B1 zu beschränken,  */
+/* statt implizit auch Finding B2 anzufassen, das NICHT Teil dieses         */
+/* Auftrags ist).                                                          */
+/*                                                                          */
 /* EIN gemeinsames "tr" für die GESAMTE Auswahl (Auftrag: ein Undo-Schritt) */
 /* – aber sinkListItem/liftListItem (prosemirror-schema-list) sind fertige  */
 /* Commands, die IMMER an einen frischen "state.tr" gebunden sind, nicht an */
@@ -1786,6 +1829,51 @@ function extendPastSkippedLeaves(doc, from, to) {
   return { from: f, to: t };
 }
 
+// Liefert den zusammenhängenden "Suffix" an Continuation-Kindern (Absatz/
+// Bild/Formel – KEINE Unterliste) am ENDE des LETZTEN Listenpunkts von
+// "listNode" (v7.44, siehe Kopfkommentar oben) – z. B. Bild+Bildunterschrift,
+// die gemeinsam als Fortsetzung angehängt wurden. Index 0 (der PRIMÄRE
+// Inhalt des Punkts, z. B. der Bullet-/Checkbox-Text selbst) wird NIE
+// eingeschlossen (Schleife läuft nur bis Index 1). null, wenn der letzte
+// Punkt gar kein solches Suffix hat (z. B. nur ein einzelnes Kind, oder das
+// letzte Kind ist selbst eine verschachtelte Liste – siehe "Bullet unter
+// Checkbox"-Fall, DECISIONS #86, der bewusst UNVERÄNDERT bleibt).
+// "items" listet JEDES Continuation-Kind EINZELN mit seinem eigenen
+// {from,to} (Reihenfolge wie im Dokument) – runIndentChange nutzt das, um
+// GENAU ab dem Kind zu extrahieren, das die Selektion zuerst berührt
+// (Cursor NUR in der Bildunterschrift löst NUR sie heraus; eine Auswahl,
+// die schon beim Bild beginnt, zieht die Unterschrift automatisch mit,
+// weil beides bis "to" zusammenhängt – "Bild UND Bildunterschrift … müssen
+// weiterhin gemeinsam funktionieren", Auftrag).
+function trailingContinuationRun(listNode, listPos) {
+  if (listNode.childCount === 0) return null;
+  const lastItem = listNode.lastChild;
+  const isContinuation = (n) =>
+    n.type.name === "paragraph" || n.type.name === "image" || n.type.name === "mathBlock";
+  let count = 0;
+  for (let i = lastItem.childCount - 1; i >= 1; i--) {
+    if (!isContinuation(lastItem.child(i))) break;
+    count++;
+  }
+  if (count === 0) return null;
+  // itemEnd = Ende des LETZTEN Listenpunkts = Ende des Listeninhalts
+  // (listPos + nodeSize der Liste - 1, siehe Positions-Arithmetik oben bei
+  // extendPastSkippedLeaves/isLeafmostBoundary: ein Knoten mit Startposition
+  // p und Größe s belegt [p, p+s), sein Inhalt [p+1, p+s-1)).
+  const itemEnd = listPos + listNode.nodeSize - 1;
+  const itemStart = itemEnd - lastItem.nodeSize;
+  let cursor = itemStart + 1;
+  for (let i = 0; i < lastItem.childCount - count; i++) cursor += lastItem.child(i).nodeSize;
+  const runStart = cursor;
+  const items = [];
+  for (let i = lastItem.childCount - count; i < lastItem.childCount; i++) {
+    const child = lastItem.child(i);
+    items.push({ from: cursor, to: cursor + child.nodeSize });
+    cursor += child.nodeSize;
+  }
+  return { from: runStart, to: itemEnd - 1, items };
+}
+
 function runIndentChange(editor, delta, dryRun) {
   if (!editor) return false;
   const { state } = editor;
@@ -1793,6 +1881,19 @@ function runIndentChange(editor, delta, dryRun) {
   const { from, to } = extendPastSkippedLeaves(doc, state.selection.from, state.selection.to);
   const tr = state.tr;
   let applied = false;
+
+  // "chainList" (v7.44, siehe Kopfkommentar): {pos,end,touched} der
+  // ZULETZT durchlaufenen Top-Level-Liste mit 2-Zeichen-Marker, SOLANGE der
+  // seitdem durchlaufene Weg NUR aus genau dieser Liste selbst und/oder
+  // durch SIE selbst strukturell aufgenommenen Blöcken besteht – jeder
+  // ANDERE Blocktyp (Überschrift, leerer Absatz, ein nicht aufgenommener
+  // Absatz/Bild z. B. weil er schon indent>0 trägt, Tabelle, orderedList
+  // …) setzt sie unten explizit auf null zurück und bricht die Kette damit
+  // für alles Nachfolgende. "touched" hält fest, ob DIESE Liste selbst Teil
+  // der aktuellen Selektion war (Finding B2, DECISIONS #86) – nur dann,
+  // wenn sie es NICHT war, darf ein direkt folgender Block strukturell
+  // aufgenommen werden (siehe Kopfkommentar, "Nachbesserung v7.44").
+  let chainList = null;
 
   doc.forEach((node, pos) => {
     const end = pos + node.nodeSize;
@@ -1803,6 +1904,16 @@ function runIndentChange(editor, delta, dryRun) {
     // exakte Antreffen einer Blockgrenze (seltener Randfall, z. B. Cursor
     // exakt zwischen zwei Blöcken) – lieber einmal zu viel als gar nicht.
     const touches = from === to ? pos <= from && from <= end : pos < to && end > from;
+
+    // Chain-Fortschreibung PASSIERT UNABHÄNGIG von "touches"/frühen Returns
+    // unten (die strukturelle Nachbarschaft im Dokument existiert unabhängig
+    // von der aktuellen Selektion) – siehe Kommentar bei "chainList" oben.
+    const priorChain = chainList;
+    chainList =
+      node.type.name === "bulletList" || node.type.name === "taskList"
+        ? { pos, end, touched: touches }
+        : null;
+
     if (!touches) return;
 
     if (node.type.name === "heading") return; // No-op, siehe Kopfkommentar
@@ -1828,6 +1939,49 @@ function runIndentChange(editor, delta, dryRun) {
       const cur = tr.doc.nodeAt(mappedPos);
       if (!cur) return;
       const curIndent = cur.attrs.indent || 0;
+
+      // NACHBESSERUNG v7.44 (Finding B1, siehe Kopfkommentar): Ebene 0 -> 1
+      // GENAU dann NICHT über das Attribut lösen, sondern SOFORT strukturell
+      // in den letzten Punkt der unmittelbar vorangehenden Liste aufnehmen,
+      // wenn diese Liste NICHT selbst Teil der aktuellen Selektion ist
+      // (sonst bleibt es beim bisherigen Attribut-Weg, siehe "touched" oben
+      // und Finding B2/DECISIONS #86).
+      if (delta > 0 && curIndent === 0 && priorChain && !priorChain.touched) {
+        applied = true;
+        if (!dryRun) {
+          const mFrom = tr.mapping.map(pos);
+          const mTo = tr.mapping.map(end);
+          const movedNode = tr.doc.nodeAt(mFrom);
+          if (movedNode) {
+            tr.delete(mFrom, mTo);
+            // "mFrom" ist ZU DIESEM ZEITPUNKT (nach dem Löschen des
+            // aufzunehmenden Blocks, aber ohne jede weitere Änderung) exakt
+            // die Position DIREKT NACH der vorangehenden Liste – bei EINEM
+            // einzelnen aufgenommenen Block, weil er als echtes Top-Level-
+            // Geschwister direkt an deren Ende grenzte (Löschen selbst
+            // verschiebt "mFrom" nicht, es trifft nur Positionen >= mFrom).
+            // Bei einer VERKETTETEN Aufnahme (chainList bleibt bestehen,
+            // z. B. Bild GEFOLGT von Bildunterschrift in derselben Auswahl)
+            // gilt dieselbe Invariante induktiv weiter: der bereits
+            // aufgenommene Vorgänger (hier das Bild) wurde exakt an dieser
+            // Stelle in die Liste eingefügt, wodurch ihr Ende wieder GENAU
+            // an die (unveränderte) Position des NÄCHSTEN Blocks (hier die
+            // Bildunterschrift) heranrückt – Löschen und erneutes Einfügen
+            // gleicher Länge heben sich für alles DANACH liegende exakt auf.
+            // "-2" führt von dort GENAU einen Schritt VOR das schließende
+            // Tag der Liste UND das des letzten Listenpunkts hinein
+            // (Herleitung siehe trailingContinuationRun oben, hier
+            // spiegelbildlich) – der Block wird dadurch neues, LETZTES Kind
+            // des letzten Listenpunkts, kein neuer Listenpunkt.
+            const insertAt = mFrom - 2;
+            tr.insert(insertAt, movedNode);
+            tr.setSelection(TextSelection.near(tr.doc.resolve(Math.min(insertAt + 1, tr.doc.content.size))));
+          }
+        }
+        chainList = priorChain; // Kette bleibt bestehen (z. B. Bild UND Bildunterschrift in einem Rutsch).
+        return;
+      }
+
       const next = Math.max(0, Math.min(6, curIndent + delta));
       if (next === curIndent) return;
       applied = true;
@@ -1836,6 +1990,46 @@ function runIndentChange(editor, delta, dryRun) {
     }
 
     if (node.type.name === "bulletList" || node.type.name === "orderedList" || node.type.name === "taskList") {
+      // NACHBESSERUNG v7.44 (Rückweg des obigen Struktur-Wechsels, siehe
+      // Kopfkommentar): Liegt die GESAMTE Selektion innerhalb des
+      // Continuation-Suffix des LETZTEN Listenpunkts (Absatz/Bild/Formel,
+      // KEINE Unterliste – trailingContinuationRun), wird NUR dieses Suffix
+      // wieder herausgelöst, statt (wie die generische sink/lift-Logik
+      // unten es täte) den GANZEN Listenpunkt aus der Liste zu heben.
+      // orderedList bleibt bewusst ausgenommen (siehe Kopfkommentar).
+      if (delta < 0 && node.type.name !== "orderedList") {
+        const run = trailingContinuationRun(node, pos);
+        if (run && from >= run.from && to <= run.to) {
+          applied = true;
+          if (!dryRun) {
+            // Extraktion beginnt NICHT zwingend am Suffix-Anfang, sondern am
+            // Anfang des Kindes, das "from" tatsächlich enthält – ein Cursor
+            // NUR in der Bildunterschrift (dem letzten Kind) löst dadurch NUR
+            // sie heraus, während eine Selektion, die schon beim Bild
+            // beginnt, beide gemeinsam extrahiert (siehe Kommentar bei
+            // trailingContinuationRun). Fallback (letztes Element) deckt den
+            // Randfall "from === run.to" ab (Cursor exakt an der äußersten
+            // Grenze).
+            let start = run.items[run.items.length - 1].from;
+            for (const it of run.items) {
+              if (from < it.to) { start = it.from; break; }
+            }
+            const mFrom = tr.mapping.map(start);
+            const mTo = tr.mapping.map(run.to);
+            const slice = tr.doc.slice(mFrom, mTo);
+            tr.delete(mFrom, mTo);
+            // "end" (ORIGINAL-Position direkt NACH der GESAMTEN Liste) jetzt
+            // (nach dem Löschen) mappen – ergibt die aktuelle Position direkt
+            // nach der (durch das Löschen geschrumpften) Liste, exakt dort
+            // soll das Suffix als neuer Top-Level-Nachbar wieder auftauchen.
+            const insertAt = tr.mapping.map(end);
+            tr.insert(insertAt, slice.content);
+            tr.setSelection(TextSelection.near(tr.doc.resolve(Math.min(insertAt + 1, tr.doc.content.size))));
+          }
+          return;
+        }
+      }
+
       const innerFrom = tr.mapping.map(Math.max(from, pos + 1));
       const innerTo = tr.mapping.map(Math.min(to, end - 1));
       if (innerFrom > innerTo) return;

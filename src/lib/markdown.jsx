@@ -736,6 +736,154 @@ const splitRow = (line) =>
     .split(/(?<!\\)\|/)
     .map((c) => c.trim().replace(/\\\|/g, "|"));
 
+/* ---------------- Umbrüche/Aufzählungen in Tabellenzellen (v7.44) ---------------- */
+/* Nutzerwunsch ("Umbrüche und Aufzählungen in Tabellenzellen wäre aber
+   schon schön…"), Diagnose war nur zur Hälfte richtig: Der EDITOR
+   serialisiert einen harten Zeilenumbruch in einer Tabellenzelle bereits
+   als "<br>" (MdTable/DocEditor.jsx setzt dafür state.inTable=true, GFM
+   selbst kennt zwar keine echte mehrzeilige Zelle, aber "<br>" als
+   Inline-HTML ist eine verbreitete, auch von markdown-it (html:true)
+   unterstützte Konvention). Die LÜCKE war ausschließlich der Renderer
+   hier: "<br>" kam in dieser Datei nirgends vor, renderTable schob den
+   Zelltext unverändert durch <Inline>, ein "<br>" erschien deshalb als
+   Literaltext statt als Umbruch.
+
+   splitCellLines zerlegt den rohen Zelltext an "<br>"/"<br/>"/"<br />"
+   (case-insensitiv, wie im Editor-Output plus robust gegenüber von Hand
+   editiertem/eingefügtem Markdown) – ABER schützt zwei Konstrukte davor,
+   selbst aufgetrennt zu werden (Auftrag: "ein <br> INNERHALB eines
+   Codespans oder einer Formel bleibt Literaltext"):
+   - Codespans (`…`): reiner Verbatim-Text, ein "<br>" darin ist Teil des
+     Codes, kein Umbruch.
+   - Formeln ($…$/$$…$$, MATH_TOKEN_RE): TeX-Quelltext, ebenfalls Verbatim.
+   ZUSÄTZLICH (nicht im Auftrag ausdrücklich verlangt, aber ohne das würde
+   ein hart umbrochener Farb-/Marker-Span kaputtes HTML erzeugen): auch
+   ein "<span>…</span>"/"<mark>…</mark>"-Block wird als GANZES geschützt
+   (via findClose, derselbe Helfer wie in renderInline) – ein "<br>", der
+   SELTEN (z. B. bei hart umbrochenem farbigem Text) INNERHALB eines
+   solchen Spans steht, würde dessen öffnendes/schließendes Tag sonst auf
+   zwei getrennte "Zeilen" verteilen; jede Hälfte für sich wäre dann ein
+   kaputtes, unbalanciertes Tag (siehe renderInline: ein Tag ohne
+   Gegenstück bleibt dort ohnehin Literaltext – kein Absturz, aber
+   hässlich). Alles ANDERE (Links, generischer Text, `**`/`~~`/`_`) bleibt
+   UNGESCHÜTZT: ein "<br>" DAZWISCHEN ist der Normalfall (neue Zeile
+   zwischen zwei Sätzen/Listenpunkten) und MUSS einen echten Umbruch
+   erzeugen. Bewusst akzeptierte Grenze: ein "<br>" mitten IN einem
+   "[Titel](url)" (z. B. absichtlich hart umbrochener Linktitel – in der
+   Praxis extrem unüblich) wird trotzdem aufgetrennt; das Ergebnis ist
+   dann zwar keine funktionierende Verlinkung mehr auf beiden Zeilen,
+   aber auch kein kaputtes HTML (Klammern sind kein Markup) – reines
+   GIGO, wie an vielen anderen Stellen dieser Datei bereits (z. B.
+   INLINE_TOKEN_RE-Titel-Cap) toleriert.
+   Ohne jedes "<br>" liefert die Funktion IMMER genau EIN Element, dessen
+   Inhalt byte-identisch zum Original ist (jeder Zweig der Schleife hängt
+   exakt das anwendete Fragment an) – das bestehende Verhalten für
+   "normale" (bisher einzige mögliche) Zellen bleibt dadurch unverändert. */
+// Exportiert (wie indentLevel/decodeBasicEntities oben), damit Tests die
+// reine Split-Logik (inkl. Codespan-/Formel-/Span-Schutz) direkt prüfen
+// können, statt sie über gerendertes HTML zurückzurechnen.
+export const CELL_BR_RE = /^<br\s*\/?>/i;
+export function splitCellLines(text) {
+  const s = String(text ?? "");
+  const lines = [""];
+  let i = 0;
+  while (i < s.length) {
+    const rest = s.slice(i);
+    const codeM = /^`[^`\n]+`/.exec(rest);
+    if (codeM) { lines[lines.length - 1] += codeM[0]; i += codeM[0].length; continue; }
+    const mathM = MATH_TOKEN_RE.exec(rest);
+    if (mathM && mathM.index === 0) { lines[lines.length - 1] += mathM[0]; i += mathM[0].length; continue; }
+    const tagM = /^<(span|mark)\b[^>]*>/.exec(rest); // dieselbe Tag-Konvention wie renderInline (case-sensitiv, nur lowercase)
+    if (tagM) {
+      const closeAt = findClose(rest, tagM[0].length, tagM[1]);
+      if (closeAt !== -1) {
+        const whole = rest.slice(0, closeAt + tagM[1].length + 3); // "</" + tag + ">"
+        lines[lines.length - 1] += whole;
+        i += whole.length;
+        continue;
+      }
+      // Kaputtes/unbekanntes Tag ohne Gegenstück: kein Sonderfall nötig,
+      // fällt unten Zeichen für Zeichen in den Default-Zweig (renderInline
+      // zeigt es später ohnehin literal, siehe dort).
+    }
+    const brM = CELL_BR_RE.exec(rest);
+    if (brM) { lines.push(""); i += brM[0].length; continue; }
+    lines[lines.length - 1] += rest[0];
+    i += 1;
+  }
+  return lines;
+}
+
+// Eine mit "- "/"* " bzw. "N. "/"N) " beginnende Zeile INNERHALB einer
+// Zelle wird zur kompakten <ul>/<ol> gruppiert (Auftrag: "Aufzählungen …
+// kompakt, ohne die Zeilenhöhe der Tabelle zu sprengen" + "auch
+// nummerierte Zeilen sinnvoll abdecken"). UL_RE/OL_RE sind dieselben
+// Regeln wie im Block-Renderer (renderBlocks) weiter unten – KEINE eigene
+// Kopie, damit eine Zelle exakt dieselbe Listensyntax akzeptiert wie ein
+// normaler Absatz. my-0/space-y-0 statt der Block-Varianten mb-3/space-y-1
+// (renderBlocks) hält die Tabellenzeile kompakt, wie gefordert.
+function renderCellLines(lines) {
+  const nodes = [];
+  let i = 0;
+  let k = 0;
+  // Trennt zwei AUFEINANDERFOLGENDE einfache Zeilen durch einen ECHTEN
+  // <br/> (dieselbe Optik wie im Editor getippt) – ein <ul>/<ol> ist
+  // dagegen bereits selbst block-level und braucht KEINEN zusätzlichen
+  // <br/> davor/danach (siehe die beiden Zweige unten).
+  let afterPlainLine = false;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (UL_RE.test(line)) {
+      const items = [];
+      while (i < lines.length && UL_RE.test(lines[i])) {
+        items.push(<li key={k++}><Inline text={lines[i].replace(/^\s*[-*]\s+/, "")} /></li>);
+        i++;
+      }
+      nodes.push(<ul key={k++} className="list-disc pl-4 my-0 space-y-0">{items}</ul>);
+      afterPlainLine = false;
+      continue;
+    }
+    if (OL_RE.test(line)) {
+      const numM = /^\s*(\d+)[.)]\s+/.exec(line);
+      const start = numM ? parseInt(numM[1], 10) : 1;
+      const items = [];
+      while (i < lines.length && OL_RE.test(lines[i])) {
+        items.push(<li key={k++}><Inline text={lines[i].replace(/^\s*\d+[.)]\s+/, "")} /></li>);
+        i++;
+      }
+      nodes.push(
+        <ol key={k++} start={start > 1 ? start : undefined} className="list-decimal pl-4 my-0 space-y-0">
+          {items}
+        </ol>
+      );
+      afterPlainLine = false;
+      continue;
+    }
+    // Einfache Zeile (auch eine LEERE, z. B. "<br><br>" fuer eine
+    // bewusste Leerzeile in der Zelle, oder ein abschliessendes "<br>" ohne
+    // Folgetext, das der EDITOR selbst so nie erzeugt, siehe MdTable/
+    // ProseMirror-Standardverhalten - GIGO/von Hand editiertes Markdown
+    // kann das aber): <Inline> mit leerem Text rendert einfach nichts, das
+    // vorangestellte <br/> (bei zwei Leerzeilen hintereinander also ZWEI
+    // <br/> in Folge) sorgt trotzdem fuer die sichtbare Luecke.
+    if (afterPlainLine) nodes.push(<br key={k++} />);
+    nodes.push(<Inline key={k++} text={line} />);
+    afterPlainLine = true;
+    i++;
+  }
+  return nodes;
+}
+
+// Zell-Inhalt: der Normalfall (keine "<br>" in der Zelle) liefert exakt
+// dasselbe Markup wie vor v7.44 (<Inline text={text} />, KEIN zusätzlicher
+// Wrapper) – reine Fallunterscheidung, keine Verhaltensänderung für
+// bestehende Tabellen ohne Umbrüche.
+function TableCell({ text }) {
+  const lines = splitCellLines(text);
+  if (lines.length <= 1) return <Inline text={text} />;
+  return <>{renderCellLines(lines)}</>;
+}
+
 function renderTable(tlines, key, level) {
   let header = null;
   let bodyLines = tlines;
@@ -760,13 +908,13 @@ function renderTable(tlines, key, level) {
       <table className="border-collapse text-sm">
         {header && (
           <thead>
-            <tr>{header.map((c, i) => <th key={i} className={thCls}><Inline text={c} /></th>)}</tr>
+            <tr>{header.map((c, i) => <th key={i} className={thCls}><TableCell text={c} /></th>)}</tr>
           </thead>
         )}
         <tbody>
           {body.map((row, ri) => (
             <tr key={ri}>
-              {row.map((c, ci) => <td key={ci} className={tdCls}><Inline text={c} /></td>)}
+              {row.map((c, ci) => <td key={ci} className={tdCls}><TableCell text={c} /></td>)}
             </tr>
           ))}
         </tbody>

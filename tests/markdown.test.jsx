@@ -20,7 +20,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { DocView, parseTree, renumberCitations, TASK_RE, IMG_LINE_RE, indentLevel } from "../src/lib/markdown.jsx";
+import { DocView, parseTree, renumberCitations, TASK_RE, IMG_LINE_RE, indentLevel, splitCellLines } from "../src/lib/markdown.jsx";
 import { setLinkProviders } from "../src/lib/linkProviders.jsx";
 
 const render = (text, imgMap = {}) =>
@@ -1787,5 +1787,148 @@ describe("FileLink: href ist die Protokoll-URL, Klick navigiert direkt (v7.36)",
     });
 
     expect(openSpy).not.toHaveBeenCalled();
+  });
+});
+
+// v7.44, Thema 1 (Nutzerwunsch "Umbrüche und Aufzählungen in
+// Tabellenzellen wäre aber schon schön…"). Der EDITOR serialisiert einen
+// harten Zeilenumbruch in einer Tabellenzelle bereits als "<br>" (siehe
+// tests/docEditorTableBreaks.test.jsx für den Beleg über die volle Kette)
+// – die Lücke war ausschließlich dieser Renderer, der "<br>" bisher
+// nirgends kannte. splitCellLines ist die reine Split-Funktion dahinter,
+// direkt getestet (kein Umweg über gerendertes HTML).
+describe("splitCellLines (v7.44): <br>-Erkennung in Tabellenzellen", () => {
+  it("ohne jedes <br> liefert genau EIN Element, byte-identisch zum Original (Regressionsschutz für normale Zellen)", () => {
+    expect(splitCellLines("Normaler Zelltext ohne Umbruch")).toEqual(["Normaler Zelltext ohne Umbruch"]);
+    expect(splitCellLines("")).toEqual([""]);
+  });
+
+  it("trennt an <br>, <br/> und <br /> gleichermaßen", () => {
+    expect(splitCellLines("Zeile1<br>Zeile2")).toEqual(["Zeile1", "Zeile2"]);
+    expect(splitCellLines("Zeile1<br/>Zeile2")).toEqual(["Zeile1", "Zeile2"]);
+    expect(splitCellLines("Zeile1<br />Zeile2")).toEqual(["Zeile1", "Zeile2"]);
+  });
+
+  it("case-insensitiv (robust gegenüber von Hand editiertem/eingefügtem Markdown)", () => {
+    expect(splitCellLines("Zeile1<BR>Zeile2")).toEqual(["Zeile1", "Zeile2"]);
+    expect(splitCellLines("Zeile1<Br/>Zeile2")).toEqual(["Zeile1", "Zeile2"]);
+  });
+
+  it("zwei aufeinanderfolgende <br> ergeben eine leere Zwischenzeile (kein Verschlucken)", () => {
+    expect(splitCellLines("A<br><br>B")).toEqual(["A", "", "B"]);
+  });
+
+  it("mehrere Aufzählungspunkte UND ein abschließender Text werden alle als eigene Zeilen erkannt", () => {
+    expect(splitCellLines("Text<br>- eins<br>- zwei<br>Ende")).toEqual(["Text", "- eins", "- zwei", "Ende"]);
+  });
+
+  it('ein "<br>" INNERHALB eines Codespans bleibt Literaltext (kein Split)', () => {
+    expect(splitCellLines("`a<br>b`")).toEqual(["`a<br>b`"]);
+    // Codespan schützt nur seinen EIGENEN Inhalt – ein <br> DANACH splittet weiterhin.
+    expect(splitCellLines("`a<br>b`<br>Rest")).toEqual(["`a<br>b`", "Rest"]);
+  });
+
+  it('ein "<br>" INNERHALB einer Formel ($…$/$$…$$) bleibt Literaltext (kein Split)', () => {
+    expect(splitCellLines("$a<br>b$")).toEqual(["$a<br>b$"]);
+    expect(splitCellLines("$$a<br>b$$")).toEqual(["$$a<br>b$$"]);
+  });
+
+  it('ein "<br>" INNERHALB eines Farb-/Marker-Spans bleibt geschützt (kein kaputtes Tag durch Auftrennen)', () => {
+    const withSpan = '<span style="color:#dc2626">Zeile1<br>Zeile2</span>';
+    expect(splitCellLines(withSpan)).toEqual([withSpan]);
+    const withMark = '<mark data-color="#fff59d">A<br>B</mark>';
+    expect(splitCellLines(withMark)).toEqual([withMark]);
+    // Ein <br> AUSSERHALB des Spans splittet weiterhin normal.
+    expect(splitCellLines('<span style="color:#111">A</span><br>B')).toEqual([
+      '<span style="color:#111">A</span>',
+      "B",
+    ]);
+  });
+
+  it("ein unbekanntes/kaputtes Tag ohne Gegenstück blockiert das Splitten NICHT (fällt in den Default-Zweig)", () => {
+    // "<span" ohne schließendes "</span>" im Rest der Zelle: findClose
+    // liefert -1, der Text läuft normal weiter, ein nachfolgendes <br>
+    // splittet trotzdem ganz normal (renderInline zeigt das kaputte Tag
+    // später ohnehin literal, siehe dort).
+    expect(splitCellLines('<span style="color:#111">A<br>B')).toEqual([
+      '<span style="color:#111">A',
+      "B",
+    ]);
+  });
+});
+
+describe("Tabellenzellen: Umbrüche und Aufzählungen werden gerendert (v7.44)", () => {
+  it("ein einzelner Umbruch erzeugt einen echten <br/>, kein Literaltext", () => {
+    const html = render("# T\n\n## A\n\n| Spalte |\n|---|\n| Zeile1<br>Zeile2 |");
+    expect(html).toMatch(/<br\s*\/?>/);
+    expect(html).not.toContain("&lt;br&gt;");
+    expect(html).toContain("Zeile1");
+    expect(html).toContain("Zeile2");
+  });
+
+  it("eine bestehende Zelle OHNE <br> rendert weiterhin unverändert (kein Wrapper, keine Regression)", () => {
+    const html = render("# T\n\n## A\n\n| Spalte |\n|---|\n| Normaler Text |");
+    expect(html).toContain("Normaler Text");
+    expect(html).not.toMatch(/<br\s*\/?>/);
+    expect(html).not.toMatch(/<ul[^>]*>/);
+  });
+
+  it('mit "- " beginnende, durch <br> getrennte Zeilen werden zu einer kompakten <ul>', () => {
+    const html = render("# T\n\n## A\n\n| Spalte |\n|---|\n| Text<br>- eins<br>- zwei |");
+    expect(html).toMatch(/<ul[^>]*class="[^"]*list-disc[^"]*"[^>]*>/);
+    expect(html).toContain("<li");
+    expect(html).toContain("eins");
+    expect(html).toContain("zwei");
+    // Genau zwei Listenpunkte, kein dritter aus dem einleitenden "Text".
+    expect((html.match(/<li[^>]*>/g) || []).length).toBe(2);
+  });
+
+  it('"* " wird als Aufzählung genauso erkannt wie "- " (dieselbe UL_RE wie im Block-Renderer)', () => {
+    const html = render("# T\n\n## A\n\n| Spalte |\n|---|\n| Text<br>* eins<br>* zwei |");
+    expect(html).toMatch(/<ul[^>]*>/);
+    expect((html.match(/<li[^>]*>/g) || []).length).toBe(2);
+  });
+
+  it("nummerierte Zeilen (1. / 2. …) werden zu einer <ol>, Start-Nummer wird respektiert", () => {
+    const html = render("# T\n\n## A\n\n| Spalte |\n|---|\n| Text<br>5. Fuenf<br>6. Sechs |");
+    expect(html).toMatch(/<ol[^>]*start="5"[^>]*>/);
+    expect((html.match(/<li[^>]*>/g) || []).length).toBe(2);
+  });
+
+  it("eine bei 1 beginnende Nummerierung bekommt KEIN start-Attribut (Normalfall, wie im Block-Renderer)", () => {
+    const html = render("# T\n\n## A\n\n| Spalte |\n|---|\n| 1. eins<br>2. zwei |");
+    expect(html).toMatch(/<ol[^>]*>/);
+    expect(html).not.toMatch(/<ol[^>]*start=/);
+  });
+
+  it("gemischter Inhalt: Text, Umbruch, zwei Aufzählungspunkte, Codespan – alles in einer Zelle", () => {
+    const html = render("# T\n\n## A\n\n| Spalte |\n|---|\n| Einleitung<br>- Punkt mit `code`<br>- zweiter Punkt |");
+    expect(html).toContain("Einleitung");
+    expect(html).toMatch(/<ul[^>]*>/);
+    expect(html).toMatch(/<code[^>]*>code<\/code>/);
+    expect(html).toContain("zweiter Punkt");
+  });
+
+  it("eine Zelle mit escaptem Pipe-Zeichen UND Umbruch/Aufzählung: Pipe bleibt sichtbar, Tabelle zerreißt nicht", () => {
+    const html = render("# T\n\n## A\n\n| Spalte |\n|---|\n| A\\|B<br>- eins<br>- zwei |");
+    expect(html).toContain("A|B");
+    expect(html).toMatch(/<ul[^>]*>/);
+    expect(html).toContain("eins");
+    expect(html).toContain("zwei");
+    // Nur EINE Tabelle mit EINER Datenzeile – ein zerrissenes Pipe hätte
+    // eine zusätzliche Spalte/Zeile erzeugt.
+    expect((html.match(/<tbody>/g) || []).length).toBe(1);
+    expect((html.match(/<tr>/g) || []).length).toBe(2); // Header + eine Datenzeile
+  });
+
+  it('ein "<br>" INNERHALB eines Codespans bleibt in der ANSICHT Literaltext (kein Zeilenumbruch, kein Absturz)', () => {
+    const html = render("# T\n\n## A\n\n| Spalte |\n|---|\n| `a<br>b` |");
+    expect(html).toMatch(/<code[^>]*>a&lt;br&gt;b<\/code>/);
+  });
+
+  it('ein "<br>" INNERHALB einer Formel bleibt in der ANSICHT Teil des TeX-Quelltexts (kein Split, kein zweites <td>)', () => {
+    const html = render("# T\n\n## A\n\n| Spalte |\n|---|\n| $a<br>b$ |");
+    expect(html).toContain("application/x-tex");
+    expect((html.match(/<td[^>]*>/g) || []).length).toBe(1);
   });
 });
