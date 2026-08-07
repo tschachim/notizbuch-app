@@ -8444,3 +8444,174 @@ aus `referenz-app.jsx` übernommen.
       wieder grün. `tests/docEditorListToggle.test.jsx` und
       `tests/docEditorIndent.test.jsx` um `SplitMixedTaskLists`/
       `dropEmptyCheckboxLines` in ihrer Editor-Verdrahtung ergänzt.
+
+85. **Toolbar-Knopf klicken + SOFORT weitertippen landete am falschen
+    Platz – ECHTER Bug, Bestandsverhalten seit dem Editor-Grundgerüst
+    (v4.1), jetzt generalisiert behoben (v7.41.3, E2E-Finding).** Repro
+    (Tester, echte Mausklicks): Stichpunktliste anlegen, Enter → neuer
+    leerer dritter Punkt, Toolbar-Knopf „Checkliste“ anklicken (ohne
+    vorher zurück in den Text zu klicken), sofort weitertippen. Beobachtet:
+    `document.activeElement` war nach dem Klick der `<button>` selbst, der
+    getippte Text hängte sich ans Ende des VORHERIGEN (unveränderten)
+    Stichpunkts, ein zusätzliches Enter erzeugte einen weiteren falschen
+    Stichpunkt, der neue Checklisten-Eintrag blieb leer.
+    - **Analyse, Punkt 1 – Bestandsverhalten oder durch v7.41.1/.2
+      verursacht? Verifiziert: Bestandsverhalten, NICHT durch
+      `NestedListToggle`/`convertListItemTypeCommand` (Eintrag #83)
+      verursacht.** Ein Headless-Test (kein DOM, reine
+      `@tiptap/core`-`Editor`-Instanz) mit dem exakten Tester-Repro
+      (`"- eins\n- zwei\n- "`, Cursor im leeren dritten Punkt,
+      `editor.chain().focus().toggleTaskList().run()`) liefert MIT UND
+      OHNE `NestedListToggle` in der Extensions-Liste (also auch mit
+      TipTaps EINGEBAUTEM `toggleTaskList`/`wrapInList`) IDENTISCH die
+      korrekte ProseMirror-Selektion (`editor.state.selection` steht
+      danach im neuen, leeren `taskItem`) – der anschließend eingefügte
+      Text landet in BEIDEN Fällen korrekt als `"- [ ] Aufgabe A"`, siehe
+      `tests/docEditorToolbarFocus.test.jsx`. Die Dokument-
+      Umstrukturierung selbst (egal ob über `tr.replaceWith` in
+      `convertListItemTypeCommand` oder über TipTaps
+      `clearNodes()+wrapInList()`) ist damit als Ursache ausgeschlossen.
+      Derselbe Fokus-Diebstahl-Mechanismus (siehe Punkt 2) wurde bereits
+      EINMAL zuvor gefunden und behoben – allerdings nur an EINEM Knopf:
+      dem Sprung-Knopf der Editor-Gliederungsleiste (v7.15-Fix, siehe
+      Eintrag zu v7.15 oben, `jumpToHeading`). Die eigentliche
+      Format-Toolbar (fett/kursiv/Listen/Überschriften/…) wurde bei
+      diesem Fund nie mit angefasst – die Falle blieb dort seit v4.1
+      unbemerkt liegen, weil reine Marken-Umschalter (s. u.) sie fast nie
+      sichtbar auslösen.
+    - **Analyse, Punkt 2 – warum greift `.focus()` nicht rechtzeitig?
+      Belegt am tatsächlichen Quelltext von `@tiptap/core`/
+      `prosemirror-view` (node_modules, installierte Versionen 2.27.2 /
+      1.42.1):**
+      1. Ein `<button>` bekommt per Browser-Default den DOM-Fokus schon
+         beim `mousedown`, NOCH BEVOR der `click`-Handler (und damit
+         `chain().focus()`) überhaupt läuft – exakt dieselbe Ursache wie
+         beim v7.15-Fix, nur diesmal an einem Dutzend weiterer Knöpfe.
+      2. `@tiptap/core#focus` (`node_modules/@tiptap/core/src/commands/
+         focus.ts`) holt den DOM-Fokus NICHT synchron zurück: Ist die
+         Selektion bereits dieselbe (der Normalfall, wenn seit dem letzten
+         Tastendruck nichts an ihr geändert wurde), ruft die Funktion nur
+         `delayedFocus()` auf, die `view.focus()` über
+         `requestAnimationFrame` erst auf dem NÄCHSTEN Frame ausführt.
+         Bis dahin bleibt `document.activeElement` der Button.
+      3. Der eigentliche Editier-Befehl (z. B. `toggleTaskList`, aber auch
+         jeder andere Struktur-Befehl) dispatcht seine Transaktion
+         trotzdem SOFORT, innerhalb desselben Klick-Handlers – deutlich
+         bevor der RAF aus Schritt 2 feuert. `prosemirror-view`
+         aktualisiert das gerenderte DOM bei JEDEM Dispatch, zieht die
+         ECHTE Browser-`Selection` (`selectionToDOM`,
+         `node_modules/prosemirror-view/dist/index.js`) aber NUR nach,
+         wenn `editorOwnsSelection(view)` – für einen editierbaren View
+         exakt `view.hasFocus()` – in DIESEM Moment `true` liefert. Das
+         ist hier NICHT der Fall (Fokus liegt ja noch auf dem Button).
+      4. Ersetzt der Befehl dabei DOM-Knoten AN oder UM die alte
+         Cursor-Position (z. B. `toggleTaskList` beim Aufteilen der
+         Liste), verwaist die zu diesem Zeitpunkt nicht mitgezogene, ECHTE
+         Browser-Selection (ihr referenzierter DOM-Knoten existiert nach
+         dem Redraw nicht mehr) – der Browser kollabiert sie eigenständig
+         auf die nächstgelegene, noch vorhandene Position (beobachtet:
+         Ende des unveränderten Punkts davor). GENAU diese – falsche –
+         Position ist es, wohin der nächste Tastendruck geht, sobald der
+         Fokus (per RAF) zurückkehrt, NICHT die zu diesem Zeitpunkt
+         bereits korrekte interne ProseMirror-Selektion aus Punkt 1.
+         Reine Marken-Umschalter (fett/kursiv/Code/Farbe/Marker) ändern
+         dagegen keinen DOM-Knoten AN der Cursor-Position selbst (nur eine
+         Markierung auf vorhandenem Text) – der Fokus-Diebstahl (Schritt
+         1+2) betrifft sie GLEICHERMASSEN, nur ohne für den Nutzer
+         sichtbare Folgen, weshalb die Falle so lange unbemerkt blieb.
+      5. Warum der RAF aus Schritt 2 den Schaden NICHT mehr heilt
+         (Ergänzung aus dem Review – ohne sie liegt der Einwand nahe,
+         `EditorView.focus()` rufe doch selbst `selectionToDOM` mit dann
+         vorhandenem Fokus auf, was stimmt): `focus()` ruft ZUERST
+         `this.domObserver.stop()`, und `stop()` nimmt anstehende
+         Mutations-Records auf und plant `flush()` 20 ms SPÄTER ein
+         (`node_modules/prosemirror-view/dist/index.js`). Dieser
+         nachlaufende Flush liest die inzwischen vom Browser kollabierte
+         DOM-Selection zurück in den State – also NACH dem korrigierenden
+         `selectionToDOM`. Am Ende gewinnt daher die falsche Position.
+    - **Fix (wie beim v7.15-Fix, jetzt konsistent auf die GESAMTE
+      Format-Toolbar angewendet):** `onMouseDown={(e) => e.preventDefault()}`
+      auf jedem Knopf, der über `editor.chain()`/`editor.view.dispatch`
+      auf die aktuelle Selektion wirkt – verhindert den Fokus-Diebstahl
+      von vornherein, der `click`-Handler feuert unverändert weiter.
+      Betroffen: Kapitel/Abschnitt/Unterthema, Fett/Kursiv/
+      Durchgestrichen/Code/Codeblock, Stichpunktliste/Nummerierte Liste/
+      Checkliste, Einzug vergrößern/verkleinern, Trennlinie, Formel
+      einfügen (inline/abgesetzt), Tabellen-Zeilen/-Spalten-Operationen
+      (`addRowAfter`/`addColumnAfter`/`deleteRow`/`deleteColumn`/
+      `deleteTable`), sowie ZUSÄTZLICH zur Auftragsliste Rückgängig/
+      Wiederholen (Undo/Redo können ebenso Knoten an der Cursor-Position
+      ersetzen). Der vormals bei „Einzug verkleinern/vergrößern“ stehende
+      Behelf (`editor.commands.focus()` vor `changeIndent(...)`, derselbe
+      RAF-verzögerte Mechanismus, also KEIN echter Schutz) ist damit
+      überflüssig geworden und entfernt.
+    - **Bewusst ausgenommen** (Popover-Öffner + deren Inhalte brauchen den
+      echten Fokuswechsel bzw. lösen selbst keinen Struktur-Befehl auf der
+      ALTEN Selektion aus):
+      - **Schriftfarbe/Textmarker:** Öffner-Knopf UND die Farbkästchen in
+        `swatchGrid` – setzen nur eine Marke auf die beim ÖFFNEN bereits
+        feststehende Selektion, kein Node-Austausch an der
+        Cursor-Position.
+      - **Link einfügen/bearbeiten:** Öffner-Knopf UND alle Knöpfe/
+        Eingabefelder im Popover – die Eingabefelder MÜSSEN echten Fokus
+        bekommen können. Wichtig für künftige Umbauten (Präzisierung aus
+        dem Review): Diese Begründung trägt NUR für die `<input>`s.
+        „Einfügen"/„Übernehmen"/„Entfernen" lösen mit `applyLink`/
+        `removeLink` sehr wohl Inhaltsersetzungen auf der Selektion aus –
+        sie sind hier aus einem ANDEREN Grund ungefährlich: Sobald der
+        Nutzer in ein `<input>` geklickt hat, liegt die Browser-Selection
+        gar nicht mehr im contenteditable, es gibt also keine
+        verwaisende Selection mehr, die der Browser kollabieren könnte.
+        Dass der Dialog trotzdem auf der richtigen Stelle arbeitet, ist
+        gegengeprüft: `openLinkPicker`/`applyLink` lesen
+        `editor.state.selection`, und ein bloßer Blur aktualisiert den
+        State nicht (`DOMObserver.flush` verlangt `hasFocusAndSelection`).
+      - **Tabelle einfügen: KEINE Ausnahme (Korrektur aus dem Review).**
+        Hier stand zunächst „Öffner-Knopf UND Größen-Raster ausgenommen
+        (reine `<div>`s ohne `tabIndex`, bekommen nie Fokus per
+        `mousedown`)" mit einem angemerkten, nicht verifizierten
+        Restrisiko. Der Review hat es am Quellcode aufgelöst: `insertTable`
+        führt `tr.replaceSelectionWith(node)` aus
+        (`@tiptap/extension-table`), also GENAU die Knotenersetzung an der
+        Cursor-Position, die das Orphaning auslöst – und zum Klick auf
+        eine Rasterzelle ist `view.hasFocus()` längst `false`, weil der
+        Öffner-`<button>` den Fokus beim Aufklappen genommen hat. Alle
+        drei Vorbedingungen sind damit erfüllt; die alte Begründung
+        adressierte nur die dritte und ging am Mechanismus vorbei.
+        Konsequenz: `preventFocusSteal` liegt jetzt auf dem Öffner UND
+        (einmal, am Container – `mousedown` blubbert von den 36 Zellen
+        hoch) auf dem Raster. Gefahrlos, weil beide keine Eingabefelder
+        enthalten. E2E-Fall D20 deckt den Weg ausdrücklich mit ab.
+      - **„Bild einfügen“:** der sichtbare Knopf löst nur
+        `imageFileInputRef.current.click()` aus (kein Editor-Befehl); die
+        tatsächliche Einfügeposition (`editor.state.selection.to`) wird
+        ERST im `onChange` des versteckten Datei-Inputs gelesen – NACH
+        dem (fokusraubenden, aber blockierenden) nativen Dateidialog, zu
+        einem Zeitpunkt, an dem „sofort weitertippen“ ohnehin unmöglich
+        ist.
+      - **„Speichern“/„Abbrechen“:** lösen keinen Editor-Befehl auf der
+        Selektion aus, Fokusverlust ist hier folgenlos.
+    - **Tests (neue Datei `tests/docEditorToolbarFocus.test.jsx`):**
+      jsdom implementiert den Browser-Default „mousedown verschiebt den
+      DOM-Fokus“ NICHT (empirisch geprüft: ein `dispatchEvent("mousedown")`
+      auf einen `<button>` ändert `document.activeElement` in jsdom nie,
+      weder mit noch ohne `preventDefault`) – ein Test, der danach prüft,
+      WO `document.activeElement` liegt oder wohin anschließend
+      eingefügter Text landet, wäre deshalb IMMER grün, auch ganz ohne
+      Fix, und würde nur vortäuschen, das eigentliche Browser-Verhalten zu
+      belegen. Stattdessen zwei Ebenen, beide ohne den Fix nachweislich
+      rot (aktiv verifiziert: Fix testweise entfernt, `git stash`, 3 von 7
+      Tests liefen rot wie erwartet, Fix wiederhergestellt, alle 7 wieder
+      grün): (1) an einem ECHT über `react-dom/client` gerenderten
+      `DocEditor` wird per echtem, „cancelable“ `mousedown`-`dispatchEvent`
+      geprüft, ob `event.defaultPrevented` auf GENAU den betroffenen,
+      NICHT deaktivierten Knöpfen `true` und auf den ausgenommenen `false`
+      ist (React dispatcht Maus-Events an `disabled`-Elemente grundsätzlich
+      nicht – ein deaktivierter Knopf lässt sich ohnehin nicht anklicken,
+      unabhängig vom hier geprüften Fix). (2) eine quelltextbasierte
+      Vollständigkeitsprüfung ALLER betroffenen Knöpfe inkl. der
+      standardmäßig deaktivierten (Einzug, Rückgängig/Wiederholen, Zeile
+      löschen in der Kopfzeile), für die sich ohne direkten Editor-Zugriff
+      kein aktivierter Ausgangszustand herstellen lässt. Zusätzlich ein
+      Editor-Ebenen-Test (kein DOM), der Analyse-Punkt 1 belegt (siehe
+      oben, mit UND ohne `NestedListToggle`).

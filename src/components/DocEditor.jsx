@@ -2762,6 +2762,12 @@ export default function DocEditor({
       ? "bg-indigo-50 border-indigo-300 text-indigo-700"
       : "border-slate-300 bg-white text-slate-600 hover:bg-slate-50");
 
+  // Gemeinsamer onMouseDown-Handler für alle Selektions-Knöpfe der Toolbar
+  // (v7.41.3, siehe ausführliche Analyse/Ausnahmeliste weiter unten vor dem
+  // JSX-Rückgabewert): verhindert NUR den impliziten Browser-Fokuswechsel
+  // auf den Button, der click-Handler feuert unverändert weiter.
+  const preventFocusSteal = (e) => e.preventDefault();
+
   if (!editor) return null;
 
   const currentColor = editor.getAttributes("textStyle").color || null;
@@ -2952,42 +2958,114 @@ export default function DocEditor({
     </div>
   );
 
+  // onMouseDown+preventDefault auf den Selektions-Knöpfen (v7.41.3, E2E-
+  // Finding: Toolbar-Klick + SOFORT weitertippen landet am falschen Platz –
+  // Repro exakt wie beim v7.15-Fix an jumpToHeading/der Gliederungsleiste
+  // oben, hier aber generalisiert auf die GESAMTE Format-Toolbar).
+  //
+  // Analyse (belegt, siehe DECISIONS): Bestandsverhalten, NICHT durch
+  // NestedListToggle/convertListItemTypeCommand (v7.41.1/.2) verursacht –
+  // ein Headless-Test mit UND ohne NestedListToggle (also mit TipTaps
+  // eingebautem toggleTaskList) liefert nach dem Toggle IDENTISCH die
+  // richtige ProseMirror-Selektion (im neuen, leeren Checklisten-Punkt).
+  // Der eigentliche Defekt liegt eine Ebene TIEFER, in der Browser/DOM-Welt:
+  // 1. Ein `<button>` bekommt per Browser-Default den DOM-Fokus schon beim
+  //    mousedown, NOCH VOR dem click-Handler (also bevor "chain().focus()"
+  //    überhaupt läuft).
+  // 2. @tiptap/core#focus (node_modules/@tiptap/core/src/commands/focus.ts)
+  //    holt sich den DOM-Fokus NICHT synchron zurück, sondern erst per
+  //    requestAnimationFrame (delayedFocus) – bis dahin bleibt
+  //    document.activeElement der Button.
+  // 3. Der eigentliche Editier-Befehl (z. B. toggleTaskList) dispatcht seine
+  //    Transaktion trotzdem SOFORT, noch bevor dieser RAF gefeuert hat.
+  //    prosemirror-view aktualisiert das gerenderte DOM bei JEDEM Dispatch,
+  //    zieht die ECHTE Browser-Selection (selectionToDOM) aber NUR nach,
+  //    wenn "editorOwnsSelection(view)" – für einen editierbaren View exakt
+  //    "view.hasFocus()" – zu diesem Zeitpunkt true ist (siehe
+  //    node_modules/prosemirror-view/dist/index.js, editorOwnsSelection/
+  //    selectionToDOM). Das ist hier NICHT der Fall (Fokus liegt ja noch auf
+  //    dem Button) – die Browser-Selection wird also nicht mitgezogen.
+  //    Ersetzt ein Befehl dabei DOM-Knoten AN der alten Cursor-Position
+  //    (z. B. "toggleTaskList" beim Aufteilen der Liste, aber auch jeder
+  //    andere Struktur-Befehl), verwaist die alte Browser-Selection (ihr
+  //    DOM-Knoten existiert nicht mehr) – der Browser kollabiert sie
+  //    daraufhin von sich aus auf die nächstgelegene, noch vorhandene
+  //    Position (beobachtet: Ende des UNVERÄNDERTEN Punkts davor). GENAU
+  //    diese (falsche) Position ist es, wohin der nächste Tastendruck geht,
+  //    sobald der Fokus zurückkehrt – NICHT die (korrekte) interne
+  //    ProseMirror-Selektion aus Schritt "Analyse" oben. Reine Marken-
+  //    Umschalter (fett/kursiv/…) ändern dagegen keinen DOM-Knoten AN der
+  //    Cursor-Position selbst, weshalb ihnen dieselbe Falle bisher kaum
+  //    auffiel – der Fokus-Diebstahl (Schritt 1+2) betrifft sie GLEICHERMASSEN,
+  //    nur ohne sichtbare Folgen.
+  //
+  // Fix: wie beim v7.15-Fix – der Browser darf den Fokus gar nicht erst
+  // stehlen (onMouseDown+preventDefault verhindert NUR den impliziten
+  // Fokuswechsel, der click-Handler feuert unverändert). Angewendet auf
+  // ALLE Knöpfe dieser Leiste, die per editor.chain()/editor.view.dispatch
+  // auf die aktuelle Selektion wirken (Formatierung, Überschriften, Listen,
+  // Einzug, Trennlinie, Formel, Tabellen-Zeilen/Spalten, Rückgängig/
+  // Wiederholen – Letztere bewusst ZUSÄTZLICH zur Auftragsliste, weil ein
+  // Undo/Redo ebenso Knoten an der Cursor-Position ersetzen kann).
+  //
+  // BEWUSST ausgenommen (Popover-Öffner + deren Inhalte brauchen den echten
+  // Fokuswechsel bzw. lösen selbst keinen Struktur-Befehl auf der ALTEN
+  // Selektion aus):
+  // - Schriftfarbe/Textmarker: Öffner-Knopf UND die Farbkästchen in
+  //   swatchGrid (setzen nur eine Marke auf die beim ÖFFNEN bereits fest-
+  //   stehende Selektion, kein Node-Austausch an der Cursor-Position).
+  // - Link einfügen/bearbeiten: Öffner-Knopf UND alle Knöpfe/Eingabefelder
+  //   im Popover (die Eingabefelder MÜSSEN echten Fokus bekommen können).
+  // - Tabelle einfügen: Öffner-Knopf UND das Größen-Raster (reine <div>s
+  //   ohne tabIndex – bekommen ohnehin nie Fokus per mousedown).
+  // - "Bild einfügen": der sichtbare Knopf löst nur imageFileInputRef
+  //   .click() aus (kein Editor-Befehl); die tatsächliche Einfüge-Position
+  //   (editor.state.selection.to) wird ERST im onChange des versteckten
+  //   Datei-Inputs gelesen – NACH dem (fokusraubenden, aber blockierenden)
+  //   nativen Dateidialog, zu einem Zeitpunkt, an dem "sofort weitertippen"
+  //   ohnehin unmöglich ist.
+  // - "Speichern"/"Abbrechen": lösen keinen Editor-Befehl auf der Selektion
+  //   aus, Fokusverlust ist hier folgenlos.
   return (
     <div className="flex-1 min-h-0 flex flex-col px-4 pb-4 gap-2">
       <div className="flex flex-wrap items-center gap-1">
-        <button onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
+        <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
           className={btn(editor.isActive("heading", { level: 1 }))} title="Kapitel (#)">
           <Heading1 size={15} />
         </button>
-        <button onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
+        <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
           className={btn(editor.isActive("heading", { level: 2 }))} title="Abschnitt (##)">
           <Heading2 size={15} />
         </button>
-        <button onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()}
+        <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()}
           className={btn(editor.isActive("heading", { level: 3 }))} title="Unterthema (###)">
           <Heading3 size={15} />
         </button>
-        <button onClick={() => editor.chain().focus().toggleBold().run()}
+        <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().toggleBold().run()}
           className={btn(editor.isActive("bold"))} title="Fett">
           <Bold size={15} />
         </button>
-        <button onClick={() => editor.chain().focus().toggleItalic().run()}
+        <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().toggleItalic().run()}
           className={btn(editor.isActive("italic"))} title="Kursiv">
           <Italic size={15} />
         </button>
-        <button onClick={() => editor.chain().focus().toggleStrike().run()}
+        <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().toggleStrike().run()}
           className={btn(editor.isActive("strike"))} title="Durchgestrichen">
           <Strikethrough size={15} />
         </button>
-        <button onClick={() => editor.chain().focus().toggleCode().run()}
+        <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().toggleCode().run()}
           className={btn(editor.isActive("code"))} title="Code">
           <Code size={15} />
         </button>
-        <button onClick={() => editor.chain().focus().toggleCodeBlock().run()}
+        <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().toggleCodeBlock().run()}
           className={btn(editor.isActive("codeBlock"))} title="Codeblock">
           <Code2 size={15} />
         </button>
 
+        {/* Schriftfarbe/Textmarker (v7.41.3): Öffner-Knopf UND Farbkästchen
+            BEWUSST OHNE preventFocusSteal (siehe Ausnahmeliste oben) – sie
+            setzen nur eine Marke auf die beim Öffnen bereits feststehende
+            Selektion, kein Node-Austausch an der Cursor-Position. */}
         <div className="relative">
           <button onClick={() => setPicker(picker === "color" ? null : "color")}
             className={btn(!!currentColor)} title="Schriftfarbe">
@@ -3003,37 +3081,39 @@ export default function DocEditor({
           {picker === "highlight" && swatchGrid(HIGHLIGHT_COLORS, currentHighlight, applyHighlight)}
         </div>
 
-        <button onClick={() => editor.chain().focus().toggleBulletList().run()}
+        <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().toggleBulletList().run()}
           className={btn(editor.isActive("bulletList"))} title="Stichpunktliste">
           <List size={15} />
         </button>
-        <button onClick={() => editor.chain().focus().toggleOrderedList().run()}
+        <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().toggleOrderedList().run()}
           className={btn(editor.isActive("orderedList"))} title="Nummerierte Liste">
           <ListOrdered size={15} />
         </button>
-        <button onClick={() => editor.chain().focus().toggleTaskList().run()}
+        <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().toggleTaskList().run()}
           className={btn(editor.isActive("taskList"))} title="Checkliste">
           <ListChecks size={15} />
         </button>
         {/* Einzug vergrößern/verkleinern (v7.41, Nutzerwunsch "Icons wie in
             Excel"): wirkt auf den Block der Cursorposition bzw. bei einer
             Auswahl auf ALLE berührten Blöcke, siehe changeIndent/
-            canChangeIndent oben. focus() zuerst, damit ein Klick auf den
-            Knopf den Editor-Fokus nicht verliert (gleiches Muster wie bei
-            allen anderen Toolbar-Knöpfen hier). */}
-        <button onClick={() => { editor.commands.focus(); changeIndent(editor, -1); }}
+            canChangeIndent oben. Der vormals hier stehende, zusätzliche
+            "editor.commands.focus()"-Aufruf (gleiche Idee, aber weiterhin
+            per requestAnimationFrame verzögert, siehe Analyse oben) ist mit
+            preventFocusSteal überflüssig geworden: der Fokus geht jetzt gar
+            nicht erst verloren. */}
+        <button onMouseDown={preventFocusSteal} onClick={() => changeIndent(editor, -1)}
           disabled={!indentDecOk}
           className={btn(false) + (indentDecOk ? "" : " opacity-40")}
           title="Einzug verkleinern (Umschalt+Tab)">
           <IndentDecrease size={15} />
         </button>
-        <button onClick={() => { editor.commands.focus(); changeIndent(editor, 1); }}
+        <button onMouseDown={preventFocusSteal} onClick={() => changeIndent(editor, 1)}
           disabled={!indentIncOk}
           className={btn(false) + (indentIncOk ? "" : " opacity-40")}
           title="Einzug vergrößern (Tab)">
           <IndentIncrease size={15} />
         </button>
-        <button onClick={() => editor.chain().focus().setHorizontalRule().run()}
+        <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().setHorizontalRule().run()}
           className={btn(false)} title="Trennlinie">
           <Minus size={15} />
         </button>
@@ -3049,6 +3129,10 @@ export default function DocEditor({
             derselben Datei nicht). */}
         {onAddImage && (
           <>
+            {/* BEWUSST OHNE preventFocusSteal (v7.41.3, siehe Ausnahmeliste
+                oben): löst keinen Editor-Befehl aus, nur den nativen
+                Dateidialog – die tatsächliche Einfügeposition wird erst in
+                dessen onChange gelesen, lange nach jedem Fokus-Timing. */}
             <button
               onClick={() => imageFileInputRef.current && imageFileInputRef.current.click()}
               className={btn(false)}
@@ -3081,13 +3165,19 @@ export default function DocEditor({
           </>
         )}
 
-        <button onClick={() => insertMath(false)} className={btn(false)} title="Formel einfügen (inline, $…$)">
+        <button onMouseDown={preventFocusSteal} onClick={() => insertMath(false)} className={btn(false)} title="Formel einfügen (inline, $…$)">
           <Sigma size={15} />
         </button>
-        <button onClick={() => insertMath(true)} className={btn(false)} title="Formel einfügen (abgesetzt, $$…$$)">
+        <button onMouseDown={preventFocusSteal} onClick={() => insertMath(true)} className={btn(false)} title="Formel einfügen (abgesetzt, $$…$$)">
           <SquareFunction size={15} />
         </button>
 
+        {/* Link einfügen/bearbeiten (v7.41.3): Öffner-Knopf UND das gesamte
+            Popover BEWUSST OHNE preventFocusSteal (siehe Ausnahmeliste
+            oben) – die Eingabefelder brauchen echten Fokus, applyLink()
+            selbst löst keinen Struktur-Befehl auf einer FRISCH VERÄNDERTEN
+            Cursor-Position aus (die Selektion steht bereits seit
+            openLinkPicker() fest). */}
         <div className="relative">
           <button
             onClick={() => (picker === "link" ? closeLinkPicker() : openLinkPicker())}
@@ -3156,8 +3246,20 @@ export default function DocEditor({
           )}
         </div>
 
+        {/* Tabelle einfügen (v7.41.3): Öffner-Knopf UND Größen-Raster MIT
+            preventFocusSteal – zunächst als "Restrisiko, nicht verifiziert"
+            ausgenommen, im Review dann am Quellcode belegt: "insertTable"
+            führt tr.replaceSelectionWith aus (@tiptap/extension-table), also
+            GENAU die Knotenersetzung an der Cursor-Position, die das
+            Orphaning auslöst – und der Fokus ist zum Klick auf eine
+            Rasterzelle längst weg, weil der Öffner-<button> ihn beim
+            Aufklappen genommen hat. Damit sind alle drei Vorbedingungen
+            erfüllt, das Raster gehört also NICHT in die Ausnahmeliste.
+            Am Container statt an den 36 Zellen: mousedown blubbert hoch.
+            Gefahrlos, weil weder Öffner noch Raster Eingabefelder haben. */}
         <div className="relative">
           <button
+            onMouseDown={preventFocusSteal}
             onClick={() => { setPicker(picker === "table" ? null : "table"); setTableHover({ r: 0, c: 0 }); }}
             className={btn(editor.isActive("table"))}
             title="Tabelle einfügen"
@@ -3166,7 +3268,7 @@ export default function DocEditor({
           </button>
           {picker === "table" && (
             <div className="absolute z-10 top-full left-0 mt-1 p-2 bg-white border border-slate-200 rounded-lg shadow-lg">
-              <div className="grid grid-cols-6 gap-0.5">
+              <div className="grid grid-cols-6 gap-0.5" onMouseDown={preventFocusSteal}>
                 {Array.from({ length: 6 * 6 }, (_, i) => {
                   const r = Math.floor(i / 6) + 1;
                   const c = (i % 6) + 1;
@@ -3195,12 +3297,12 @@ export default function DocEditor({
         {editor.isActive("table") && (
           <>
             <span className="mx-1 w-px h-5 bg-slate-200" />
-            <button onClick={() => editor.chain().focus().addRowAfter().run()}
+            <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().addRowAfter().run()}
               className="px-2 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 text-xs"
               title="Zeile unterhalb einfügen">
               +Zeile
             </button>
-            <button onClick={() => editor.chain().focus().addColumnAfter().run()}
+            <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().addColumnAfter().run()}
               className="px-2 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 text-xs"
               title="Spalte rechts einfügen">
               +Spalte
@@ -3208,19 +3310,19 @@ export default function DocEditor({
             {/* Die Kopfzeile ist nicht löschbar: ohne sie wäre die Tabelle
                 kein GFM mehr und fiele auf HTML-Serialisierung zurück, die
                 die Leseansicht nicht darstellt. */}
-            <button onClick={() => editor.chain().focus().deleteRow().run()}
+            <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().deleteRow().run()}
               disabled={editor.isActive("tableHeader")}
               className={"px-2 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-600 text-xs " +
                 (editor.isActive("tableHeader") ? "opacity-40" : "hover:bg-slate-50")}
               title={editor.isActive("tableHeader") ? "Kopfzeile kann nicht gelöscht werden" : "Aktuelle Zeile löschen"}>
               −Zeile
             </button>
-            <button onClick={() => editor.chain().focus().deleteColumn().run()}
+            <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().deleteColumn().run()}
               className="px-2 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 text-xs"
               title="Aktuelle Spalte löschen">
               −Spalte
             </button>
-            <button onClick={() => editor.chain().focus().deleteTable().run()}
+            <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().deleteTable().run()}
               className="px-2 py-1.5 rounded-lg border border-rose-200 bg-white text-rose-700 hover:bg-rose-50 text-xs"
               title="Ganze Tabelle löschen">
               ✕Tabelle
@@ -3228,12 +3330,15 @@ export default function DocEditor({
           </>
         )}
         <div className="flex-1" />
-        <button onClick={() => editor.chain().focus().undo().run()}
+        {/* Rückgängig/Wiederholen (v7.41.3, über die Auftragsliste hinaus
+            ERGÄNZT, siehe Analyse oben): kann Knoten GENAU an der
+            Cursor-Position ersetzen wie jeder andere Struktur-Befehl. */}
+        <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().undo().run()}
           disabled={!editor.can().undo()}
           className={btn(false) + (editor.can().undo() ? "" : " opacity-40")} title="Rückgängig">
           <Undo2 size={15} />
         </button>
-        <button onClick={() => editor.chain().focus().redo().run()}
+        <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().redo().run()}
           disabled={!editor.can().redo()}
           className={btn(false) + (editor.can().redo() ? "" : " opacity-40")} title="Wiederholen">
           <Redo2 size={15} />

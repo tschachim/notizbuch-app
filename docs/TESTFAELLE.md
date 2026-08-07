@@ -1282,6 +1282,43 @@ Lockerheit“) und kein Bug. Eine reine Stichpunktliste OHNE jede Checkliste
 im selben Dokument ist davon NICHT betroffen – dort bleibt eine bewusste
 Leerzeile zwischen zwei Punkten unverändert erhalten.
 
+**D20 [VERBUNDEN] Toolbar-Knopf klicken und SOFORT weitertippen landet an
+der richtigen Stelle (v7.41.3, ECHTER Bug, Bestandsverhalten seit dem
+Editor-Grundgerüst v4.1, jetzt behoben – siehe DECISIONS #85).** Für
+JEDEN der folgenden Fälle gilt: Knopf anklicken OHNE vorher zurück in den
+Editor-Text zu klicken, dann OHNE Pause weitertippen.
+- **Liste/Checkliste (exaktes Tester-Repro):** Stichpunktliste anlegen
+  („QA-Fokus eins“, Enter, „QA-Fokus zwei“), Enter → neuer leerer dritter
+  Stichpunkt. Toolbar-Knopf „Checkliste“ anklicken, sofort
+  „QA-Fokus Aufgabe A“ tippen, Enter, „QA-Fokus Aufgabe B“ tippen.
+  Erwartet: „QA-Fokus eins“/„QA-Fokus zwei“ bleiben als Stichpunkte
+  unverändert stehen, „QA-Fokus Aufgabe A“ und „QA-Fokus Aufgabe B“
+  erscheinen darunter als ZWEI neue, LEERE Checklisten-Einträge (nicht an
+  „QA-Fokus zwei“ angehängt, keine zusätzliche falsche Aufzählungszeile).
+- **Formatierung:** Cursor ans Ende eines Absatzes setzen, „Fett“-Knopf
+  anklicken, sofort weitertippen. Erwartet: Der neu getippte Text
+  erscheint FETT direkt an der Cursorposition (nicht irgendwo anders im
+  Dokument).
+- **Überschrift:** Cursor in einen leeren Absatz am Dokumentende setzen,
+  „Kapitel (#)“-Knopf anklicken, sofort einen Kapiteltitel tippen.
+  Erwartet: Der getippte Text erscheint als NEUES Kapitel genau an dieser
+  Stelle.
+- **Einzug:** Einen zweiten, bereits eingerückten Listenpunkt anlegen,
+  Cursor am Ende dieses Punkts belassen, „Einzug verkleinern“ anklicken,
+  sofort weitertippen. Erwartet: Der getippte Text hängt an GENAU diesem
+  (jetzt weniger eingerückten) Punkt, nicht an einem anderen.
+- **Tabelle über das Größen-Raster:** Cursor in einen leeren Absatz am
+  Dokumentende setzen, „Tabelle einfügen“ anklicken, im aufklappenden
+  Raster eine 2×2-Tabelle wählen, sofort „QA-Fokus Zelle“ tippen.
+  Erwartet: Der Text landet in der ERSTEN Zelle der neuen Tabelle – nicht
+  in dem Absatz darüber und nicht an einer anderen Stelle im Dokument.
+  (Dieser Weg lief über den Öffner-Knopf UND das Raster; beide waren
+  zunächst als ungefährlich eingestuft und wurden erst im Review als
+  betroffen erkannt – deshalb hier ausdrücklich mitgeprüft.)
+
+Speichern, Editor erneut öffnen: alle oben genannten Ergänzungen
+erscheinen unverändert an der erwarteten Stelle.
+
 ## E. Schnellnotizen
 
 **E1 [OFFEN] Post-it-Lebenszyklus.** „Schnellnotiz“-Knopf (Desktop:
