@@ -1507,6 +1507,20 @@ Editor-Text zu klicken, dann OHNE Pause weitertippen.
   (Dieser Weg lief über den Öffner-Knopf UND das Raster; beide waren
   zunächst als ungefährlich eingestuft und wurden erst im Review als
   betroffen erkannt – deshalb hier ausdrücklich mitgeprüft.)
+- **Listentyp-Umwandlung eines Folgeblocks, wenn im Dokument WEITER UNTEN
+  noch etwas steht (v7.49, 🟡 E2E-Finding, DECISIONS #101 – eigener Fall,
+  UNABHÄNGIG vom Repro oben: dort steht die Liste am Dokumentende, hier
+  ausdrücklich NICHT).** Voraussetzung: Im Dokument steht (irgendwo weiter
+  unten, z. B. eine bereits vorhandene Tabelle/Überschrift/ein Absatz aus
+  einem früheren Testfall) noch mindestens ein weiterer Block. Direkt
+  DAVOR eine Stichpunktliste anlegen: „QA-Geister eins“, Enter,
+  „QA-Geister zwei“, Enter → neuer leerer dritter Stichpunkt. Toolbar-Knopf
+  „Checkliste“ anklicken, sofort weitertippen. Erwartet: Der Text erscheint
+  im neu entstandenen, LEEREN Checklisten-Eintrag – NICHT im weiter unten
+  stehenden Block (z. B. nicht in der Kopfzelle einer Tabelle). Dasselbe
+  gilt spiegelbildlich für „Stichpunktliste“/„Nummerierte Liste“ als
+  Zielknopf sowie für einen bereits TEXTHALTIGEN (nicht nur leeren)
+  Zielpunkt, sofern danach noch etwas im Dokument folgt.
 
 Speichern, Editor erneut öffnen: alle oben genannten Ergänzungen
 erscheinen unverändert an der erwarteten Stelle.
@@ -1535,17 +1549,35 @@ Dokument-Ansicht. Nur melden, falls der Abstand zwischen Aufzählungszeichen
 und Text dadurch unangenehm groß wirkt.
 
 **D22 [VERBUNDEN] Formel als Fortsetzung unter einem Listenpunkt bekommt
-keinen doppelten Einzug mehr (v7.42, ECHTER Bug, DECISIONS #86 Finding
-B4).** Editor öffnen, Stichpunkt „QA-Formel-Liste“ anlegen, Enter, direkt
+keinen doppelten Einzug mehr (v7.42, ECHTER Bug, DECISIONS #86 Finding B4;
+Reproduktionsschritte in v7.49 präzisiert, DECISIONS #102 – der zuvor hier
+verlangte „Enter“ erzeugt technisch einen ANDEREN Fall, siehe Klarstellung
+unten).** Editor öffnen, Stichpunkt „QA-Formel-Liste“ anlegen, Cursor am
+ENDE dieses Textes belassen (bewusst KEIN Enter – ein Enter würde einen
+neuen, EIGENEN Listenpunkt anlegen, siehe Klarstellung unten), direkt
 danach eine abgesetzte Formel einfügen (Sigma-Knopf, z. B. `x^2`) OHNE
 weitere manuelle Einrückung. Erwartet: Die Formel erscheint auf GLEICHER
 Einzugstiefe wie der Text von „QA-Formel-Liste“ (kein zusätzlicher Versatz
 nach rechts, obwohl sie technisch als Fortsetzung UNTER dem Listenpunkt
 steht). Cursor in die Formel setzen: „Einzug verkleinern“ ist AKTIV (die
 Formel verhält sich wie der gesamte Listenpunkt, analog zu einem Absatz an
-derselben Stelle), „Einzug vergrößern“ ist AUSGEGRAUT. Speichern, Editor
-erneut öffnen und OHNE weitere Änderung erneut speichern: KEIN Commit
-(No-op-Roundtrip).
+derselben Stelle), „Einzug vergrößern“ ist AUSGEGRAUT (die Formel ist
+strukturell Teil des EINEN, bereits vorhandenen Listenpunkts – es gibt
+keinen Vorgänger, unter den sie zusätzlich sinken könnte). Speichern,
+Editor erneut öffnen und OHNE weitere Änderung erneut speichern: KEIN
+Commit (No-op-Roundtrip).
+
+**Klarstellung (v7.49, E2E-Befund am Code nachgeprüft, KEIN Bug – dieselbe
+Regel wie D15/D16/D23):** Drückt man VOR dem Formel-Knopf zusätzlich
+Enter (wie in einer früheren Fassung dieses Testfalls beschrieben), landet
+die Formel NICHT als Fortsetzung von „QA-Formel-Liste“ selbst, sondern als
+Fortsetzung eines NEUEN, EIGENEN (zweiten) Listenpunkts direkt danach. Für
+diesen zweiten Punkt gilt dieselbe Regel wie für jeden NICHT-ersten
+Listenpunkt einer Liste (siehe D15/D16/D23): Da ein Vorgänger existiert,
+unter den er strukturell sinken könnte, bleibt „Einzug vergrößern“ hier
+AKTIV (nicht ausgegraut) – das ist KORREKT und kein Widerspruch zum Fall
+oben, nur eine andere Ausgangslage (Formel als eigener Listenpunkt statt
+als Fortsetzung des vorherigen). Bitte NICHT als Finding melden.
 
 **D23 [VERBUNDEN] Einzug unter einem Listenpunkt bleibt über Speichern+
 Neuladen KONSTANT (v7.44, Nutzer-Befund „verhält sich komisch, wenn ich

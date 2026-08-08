@@ -2827,13 +2827,65 @@ function convertListItemTypeCommand(targetListTypeName, targetItemTypeName, list
     if (!middle.length) return false; // sollte durch den Range-Finder nie vorkommen
 
     if (dispatch) {
+      // Anchor/Head VOR dem Umbau merken (siehe Selektions-Fix unten) –
+      // "state.selection" ist hier noch die ALTE, unveränderte Selektion.
+      const { anchor, head } = state.selection;
+
       const parts = [];
       if (before.length) parts.push(listNode.type.create(listNode.attrs, Fragment.fromArray(before)));
       parts.push(targetListType.create({ ...listNode.attrs, ...listAttrs }, Fragment.fromArray(middle)));
       if (after.length) parts.push(listNode.type.create(listNode.attrs, Fragment.fromArray(after)));
 
       const listPos = range.$from.before(range.depth);
-      dispatch(state.tr.replaceWith(listPos, listPos + listNode.nodeSize, Fragment.fromArray(parts)));
+      const tr = state.tr.replaceWith(listPos, listPos + listNode.nodeSize, Fragment.fromArray(parts));
+
+      // 🟡 v7.49 E2E-Finding: "Checkliste"-Knopf auf einem LEEREN Listenpunkt
+      // mit einer Tabelle direkt danach setzte die Selektion in die Kopfzelle
+      // der Tabelle statt in den neu entstandenen leeren Checklisten-Eintrag
+      // – derselben Fokus-Fehler-KLASSE wie #85 (v7.41.3), aber eine ANDERE
+      // Ursache: #85 war ein DOM-Fokus-Diebstahl durch den Button selbst
+      // (durch preventFocusSteal bereits abgedeckt), HIER ist die interne
+      // ProseMirror-Selektion selbst schon falsch, WEIT BEVOR sie je den DOM
+      // erreicht. tr.replaceWith() oben ersetzt "davor"+Zielteil+"danach" als
+      // EINEN einzigen Schritt; ProseMirrors STANDARD-Selektionsmapping
+      // (Transaction.selection-Getter, node_modules/prosemirror-state/src/
+      // transaction.ts) mapped jede Position, die STRIKT INNERHALB des
+      // ersetzten Bereichs lag (das ist die Selektion hier IMMER – siehe
+      // nearestListItemAncestor/blockRange oben, sie liegt per Konstruktion
+      // im Zielteil, nie exakt an dessen Rändern), mit assoc=1 an das ENDE
+      // DES GESAMTEN ersetzten Bereichs (node_modules/prosemirror-transform/
+      // src/map.ts, StepMap._map: "side = assoc" für jede Position, die
+      // weder exakt am Anfang noch am Ende des Bereichs liegt) – bei einem
+      // Folgeblock (Tabelle/Absatz/Überschrift) direkt danach sucht
+      // Selection.near von DORT aus zuerst VORWÄRTS und landet im
+      // Folgeblock, nicht im neuen Zielpunkt. Aktiv verifiziert (siehe
+      // tests/docEditorListToggleSelection.test.jsx, roter Lauf mit
+      // versionsweise entferntem Fix dokumentiert): derselbe Effekt tritt
+      // GENAUSO bei einem TEXTHALTIGEN Zielpunkt auf, sobald ein Folgeblock
+      // ODER ein spätes Geschwister ("danach") existiert – nur fiel er dort
+      // nie auf, weil kein bisheriger Testfall "Knopf klicken, sofort
+      // weitertippen" mit einem NICHT-leeren Punkt UND einem Folgeblock
+      // kombinierte (D20 deckte bislang nur den leeren Punkt ab).
+      //
+      // Fix: Position ANALYTISCH statt per Mapping bestimmen. "davor"/
+      // Zielteil/"danach" übernehmen ihre Kind-Knoten 1:1 (nur der
+      // Knotentyp des Zielteils ändert sich – nodeSize hängt NIE von
+      // Attributen wie "checked" ab, sondern ausschließlich vom Inhalt, der
+      // unverändert per child.content übernommen wird). Die einzige
+      // Größenänderung VOR dem Zielteil ist die Anzahl neu eingefügter
+      // Listen-Rahmen: keiner, wenn "davor" leer ist (der Zielteil beginnt
+      // dann exakt an derselben Stelle wie zuvor die Gesamtliste), sonst
+      // GENAU zwei zusätzliche Tokens (Schließen von "davor" + Öffnen des
+      // Zielteils) – unabhängig davon, wie viele Punkte "davor" enthält
+      // oder wie tief die Selektion im Zielteil verschachtelt ist (Text,
+      // leerer Absatz, verschachtelter Listenpunkt: siehe Testmatrix).
+      const shift = before.length ? 2 : 0;
+      const clampPos = (pos) => Math.max(0, Math.min(pos + shift, tr.doc.content.size));
+      const $anchor = tr.doc.resolve(clampPos(anchor));
+      const $head = tr.doc.resolve(clampPos(head));
+      tr.setSelection(TextSelection.between($anchor, $head, head >= anchor ? 1 : -1));
+
+      dispatch(tr);
     }
     return true;
   };
@@ -3775,7 +3827,18 @@ export default function DocEditor({
   // ein Headless-Test mit UND ohne NestedListToggle (also mit TipTaps
   // eingebautem toggleTaskList) liefert nach dem Toggle IDENTISCH die
   // richtige ProseMirror-Selektion (im neuen, leeren Checklisten-Punkt).
-  // Der eigentliche Defekt liegt eine Ebene TIEFER, in der Browser/DOM-Welt:
+  //
+  // PRÄZISIERUNG v7.49 (DECISIONS #101) – dieser Beleg galt nur unter einer
+  // Bedingung, die im damaligen Testdokument zufällig erfüllt war: Es ENDETE
+  // mit der Liste. Dann rettet die Rückwärtssuche von Selection.near die
+  // Position. Steht hinter der Liste noch ein Block (Tabelle, Absatz,
+  // Überschrift), war die interne ProseMirror-Selektion sehr wohl falsch –
+  // sie landete im FOLGEBLOCK. convertListItemTypeCommand setzt sie seit
+  // v7.49 deshalb explizit (siehe dort und tests/
+  // docEditorListToggleSelection.test.jsx). Der DOM-Fokus-Diebstahl unten
+  // bleibt davon unberührt: ZWEI getrennte Ursachen, beide Fixes nötig.
+  //
+  // Der HIER behandelte Defekt liegt eine Ebene TIEFER, in der Browser/DOM-Welt:
   // 1. Ein `<button>` bekommt per Browser-Default den DOM-Fokus schon beim
   //    mousedown, NOCH VOR dem click-Handler (also bevor "chain().focus()"
   //    überhaupt läuft).

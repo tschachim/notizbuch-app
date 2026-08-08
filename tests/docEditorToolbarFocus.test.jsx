@@ -50,6 +50,13 @@
 //    toggleTaskList, ohne NestedListToggle) – das belegt die Analyse aus
 //    dem Auftrag ("ist convertListItemTypeCommand die Ursache?" -> nein,
 //    siehe DECISIONS).
+//    PRÄZISIERUNG v7.49 (DECISIONS #101): Diese Aussage gilt NUR, weil das
+//    Dokument hier mit der Liste ENDET – dann rettet die Rückwärtssuche von
+//    Selection.near die Position zufällig. Steht dahinter noch ein Block,
+//    landete die Selektion sehr wohl im Folgeblock; das ist eine ZWEITE,
+//    eigenständige Ursache, die v7.49 separat behebt (siehe
+//    tests/docEditorListToggleSelection.test.jsx). Der DOM-Fokus-Diebstahl,
+//    um den es in DIESER Datei geht, bleibt davon unberührt.
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it, expect, vi } from "vitest";
@@ -260,9 +267,16 @@ describe("Toolbar-Knöpfe (Quelltext): onMouseDown={preventFocusSteal} exakt auf
 // Ursache?"): die interne ProseMirror-Selektion landet nach dem Toggle in
 // BEIDEN Fällen (mit UND ohne NestedListToggle, siehe Extensions-Liste)
 // korrekt im neuen, leeren Checklisten-Punkt – identisch zum Verhalten VOR
-// v7.41.1. Der eigentliche Defekt (siehe Kopfkommentar) liegt
-// ausschließlich in der Browser/DOM-Fokus-Ebene, nicht in dieser
-// Dokument-Umstrukturierung.
+// v7.41.1. Der HIER behandelte Defekt liegt in der Browser/DOM-Fokus-Ebene,
+// nicht in dieser Dokument-Umstrukturierung.
+//
+// PRÄZISIERUNG v7.49 (DECISIONS #101): "korrekt im neuen Punkt" gilt nur,
+// weil das Testdokument unten mit der Liste ENDET. Mit einem Folgeblock
+// dahinter schob das Standard-Selektionsmapping die Position ans Ende des
+// ersetzten Bereichs, und Selection.near sprang vorwärts IN den Folgeblock –
+// eine zweite, eigenständige Ursache, die v7.49 in
+// convertListItemTypeCommand behebt (Regressionstests in
+// tests/docEditorListToggleSelection.test.jsx). Beide Fixes sind nötig.
 function buildHeadlessEditor(md, { withNestedListToggle }) {
   return new Editor({
     extensions: [
@@ -288,7 +302,7 @@ function buildHeadlessEditor(md, { withNestedListToggle }) {
   });
 }
 
-describe("Analyse-Beleg: convertListItemTypeCommand ist NICHT die Ursache des Fokus-Bugs", () => {
+describe("Analyse-Beleg: der DOM-Fokus-Diebstahl ist eine EIGENE Ursache (der Selektions-Teil steckt in docEditorListToggleSelection.test.jsx, v7.49)", () => {
   it.each([
     ["MIT NestedListToggle (aktueller Code)", true],
     ["OHNE NestedListToggle (TipTaps eingebautes toggleTaskList)", false],

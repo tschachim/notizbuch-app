@@ -10185,3 +10185,160 @@ aus `referenz-app.jsx` übernommen.
        6×6) UND die Quelltext-Arithmetik selbst, damit ein künftiges
        Off-by-one (in `insertTable` ODER in der Rasterindex-Berechnung)
        sofort auffällt.
+
+101. **v7.49, 🟡 E2E-Finding: Toolbar-Umwandlung eines Listenpunkts setzt
+     die Selektion falsch, sobald danach noch etwas im Dokument folgt –
+     "sofort weitertippen" landet dann NICHT im umgewandelten Punkt.**
+     Tester-Repro (zweimal reproduziert, einmal ausdrücklich mit 2 s
+     Wartezeit zwischen jedem Schritt – kein Werkzeug-Timing-Artefakt):
+     Stichpunktliste anlegen, Enter → neuer LEERER dritter Punkt,
+     Toolbar-Knopf "Checkliste" anklicken, sofort weitertippen. Der leere
+     Punkt wird strukturell korrekt in `taskItem` umgewandelt, aber
+     `getSelection().anchorNode` zeigt unmittelbar danach auf die
+     Kopfzelle einer im Dokument weiter unten stehenden Tabelle – der
+     getippte Text landet dort statt im neuen Checklisten-Eintrag.
+     - **Ursache (aktiv verifiziert, siehe
+       `tests/docEditorListToggleSelection.test.jsx`): ProseMirrors
+       STANDARD-Selektionsmapping, NICHT der Fokus-Diebstahl aus #85.**
+       `convertListItemTypeCommand` (`DocEditor.jsx`, seit #83/#84) teilt
+       die umschließende Liste in bis zu drei Geschwister-Listen
+       ("davor"/Zielteil/"danach") und ersetzt die GESAMTE ursprüngliche
+       Liste per EINEM `tr.replaceWith(listPos, listPos+listNode.nodeSize,
+       …)` – ein einziger `ReplaceStep` über den kompletten alten Bereich.
+       `Transaction.selection` (`node_modules/prosemirror-state/src/
+       transaction.ts`) mapped die VOR dem Befehl gültige Selektion
+       standardmäßig per `curSelection.map(doc, mapping)`, also mit
+       `assoc=1` (vorwärts-Bias, `node_modules/prosemirror-transform/src/
+       map.ts#StepMap._map`: `side = assoc`, wenn eine Position WEDER
+       exakt am Anfang NOCH exakt am Ende des ersetzten Bereichs liegt).
+       Die Selektion liegt hier IMMER strikt innerhalb des ersetzten
+       Bereichs (`nearestListItemAncestor`/`blockRange` in
+       `convertListItemTypeCommand` stellen das sicher) – sie wird
+       dadurch IMMER an das Ende des GESAMTEN ersetzten Bereichs
+       geschoben (`start + newSize`, unabhängig davon, wo innerhalb sie
+       vorher stand). Gibt es dahinter einen Folgeblock, sucht
+       `Selection.near` von dort zuerst VORWÄRTS und landet darin. Gibt
+       es KEINEN Folgeblock (Dokumentende), schlägt die Vorwärtssuche
+       fehl und `Selection.near` sucht stattdessen RÜCKWÄRTS – und landet
+       dabei ZUFÄLLIG im neuen, korrekten Punkt. Genau dieser Zufall ist
+       es, weshalb der bereits bestehende Headless-Test aus #85
+       (`tests/docEditorToolbarFocus.test.jsx`, Dokument endet exakt mit
+       der Liste) die interne ProseMirror-Selektion fälschlich als
+       "immer schon korrekt" bestätigt hatte.
+     - **Beim Testschreiben selbst gefunden: Der Fehler betrifft NICHT nur
+       einen LEEREN Zielpunkt.** Ein aktiv per Headless-Test verifizierter
+       Vergleich (siehe Testdatei) zeigt: Ein TEXTHALTIGER Zielpunkt
+       (Cursor am Ende von "zwei" in `- eins\n- zwei` gefolgt von einer
+       Tabelle) landet nach `toggleTaskList()` GENAUSO in der
+       Tabellen-Kopfzelle wie der leere Fall – die Positions-Arithmetik
+       oben unterscheidet nicht zwischen "Zielpunkt leer oder nicht". Der
+       Tester-Befund beschränkte sich auf den leeren Fall, weil kein
+       bisheriger Test (D17/D17b/D19, D20) "Knopf klicken + sofort
+       weitertippen" mit einem NICHT-leeren Punkt UND einem Folgeblock
+       kombinierte – strukturelle Korrektheit (D17/D19, per Speichern+
+       Neuladen geprüft) verdeckt das Problem vollständig, weil beim
+       nächsten Öffnen ohnehin alles per Markdown neu geparst wird und die
+       (dann längst überschriebene) Zwischen-Selektion keine Rolle mehr
+       spielt.
+     - **Fix: Position ANALYTISCH berechnen statt dem Standard-Mapping zu
+       überlassen.** "davor"/Zielteil/"danach" übernehmen ihre Kind-Knoten
+       1:1 (nur der Knotentyp des Zielteils ändert sich – `nodeSize` hängt
+       ausschließlich vom `content` ab, das unverändert per
+       `child.content` übernommen wird, NIE von Attributen wie
+       `checked`). Die einzige Größenänderung VOR dem Zielteil ist die
+       Anzahl neu eingefügter Listen-Rahmen: keiner, wenn "davor" leer ist
+       (der Zielteil beginnt dann exakt an derselben Stelle wie zuvor die
+       Gesamtliste), sonst GENAU zwei zusätzliche Tokens (Schließen von
+       "davor" + Öffnen des Zielteils) – UNABHÄNGIG davon, wie viele Punkte
+       "davor" enthält, wie tief "danach" ist, oder wie tief die Selektion
+       selbst im Zielteil verschachtelt ist (Text, leerer Absatz,
+       verschachtelter Listenpunkt). `convertListItemTypeCommand` merkt
+       sich `anchor`/`head` VOR dem `tr.replaceWith(...)`, addiert diesen
+       konstanten Versatz (`shift = before.length ? 2 : 0`) und setzt die
+       Selektion danach explizit per
+       `tr.setSelection(TextSelection.between(...))` – GENAU der im
+       Auftrag vorgeschlagene Ansatz ("Selektion explizit setzen, statt
+       sich auf das Mapping zu verlassen"), hier als geschlossene Formel
+       statt einer Fallunterscheidung "leer/nicht leer".
+     - **Regressionstest (`tests/docEditorListToggleSelection.test.jsx`,
+       14 neue Fälle), aktiv ALS ROT VERIFIZIERT:** Fix testweise entfernt
+       (`git stash` auf `DocEditor.jsx` allein) – 13 von 14 Tests schlugen
+       fehl (nur der bereits bestehende "ohne Folgeblock"-Fall blieb
+       zufällig grün, siehe Ursachenanalyse oben), Fix wiederhergestellt,
+       alle 14 wieder grün. Deckt: leerer Punkt am Listenende mit
+       Folgeblock Tabelle/Absatz/Überschrift, leerer Punkt OHNE Folgeblock
+       (Dokumentende, Regressionsschutz), leerer Punkt in der MITTE einer
+       Liste (Geschwister davor UND danach in DERSELBEN Liste), leerer
+       VERSCHACHTELTER Punkt mit Folgeblock nach der äußeren Liste, ein
+       TEXTHALTIGER Zielpunkt mit Folgeblock, alle drei Zieltypen
+       (Aufzählung/Nummerierung/Checkliste) in BEIDEN Richtungen (6
+       Kombinationen, je mit Folgeblock), sowie eine Mehrfachauswahl über
+       zwei Geschwisterpunkte hinweg. Jeder Test prüft `editor.state.
+       selection` (Punkt-Typ UND -Inhalt) NACH dem Befehl, nicht nur die
+       Dokumentstruktur – exakt daran war der Fehler bisher vorbeigerutscht.
+       Ergänzend prüft der Kernfall (Tester-Repro) auch das tatsächliche
+       Verhalten ("sofort weitertippen": eingefügter Text landet in der
+       gespeicherten Markdown-Ausgabe im neuen Checklisten-Eintrag, nicht
+       in der Tabelle).
+     - **Tragfähigkeit der Konstante (im Review nachgeschärft – die erste
+       Fassung dieses Absatzes begründete sie falsch):** `shift = 2` ist
+       keine empirische Faustregel, sondern zwingend.
+       `NodeType.create` (prosemirror-model) ruft `new Node(this, attrs,
+       Fragment.from(content))` – **ohne** `fillBefore`, **ohne** jede
+       Inhaltsprüfung (die macht nur `createChecked`, und auch die füllt
+       nicht auf). Damit gilt `nodeSize === content.size + 2` für JEDEN
+       Item-Typ, unabhängig von Attributen, Verschachtelung, mehreren
+       Blöcken im Punkt oder Marks. Im Review über ~35 Konstellationen
+       gemessen: `$from.parentOffset` bleibt vor/nach dem Befehl exakt
+       gleich, Struktur und gespeichertes Markdown sind byte-identisch.
+       Das verbleibende Restrisiko eines künftigen Listentyps mit eigenem
+       Pflicht-Kind liegt deshalb NICHT in der Positionsrechnung, sondern
+       darin, dass `create` einen schema-UNGÜLTIGEN Knoten still
+       erzeugen würde – eine andere Fehlerklasse, die dann ohnehin eine
+       eigene Prüfung bräuchte.
+
+102. **v7.49, 🔵 E2E-Finding zu D22: "Einzug vergrößern" bleibt bei einer
+     Formel als Fortsetzung eines Listenpunkts entgegen der Doku aktiv –
+     KEIN Bug, Testfall korrigiert.** Tester-Befund: Formel liegt auf
+     exakt derselben Einzugstiefe wie der Listentext (kein doppelter
+     Einzug, Kernanforderung aus #86 Finding B4 erfüllt), "Einzug
+     verkleinern" ist wie erwartet aktiv, aber "Einzug vergrößern" bleibt
+     ENTGEGEN der D22-Doku ebenfalls aktiv statt auszugrauen.
+     - **Befund nach Prüfung (Code UND Headless-Test, siehe unten): KEIN
+       Bug – die in D22 beschriebenen REPRODUKTIONSSCHRITTE erzeugen eine
+       ANDERE Struktur als die, die D22 eigentlich meint.** Die exakt
+       befolgte D22-Anleitung ("Stichpunkt anlegen, ENTER, direkt danach
+       Formel einfügen") legt per Enter zuerst einen NEUEN, leeren
+       zweiten Listenpunkt an – `insertContent({type:"mathBlock"})` fügt
+       die Formel danach ALS ZWEITES KIND DIESES NEUEN Punkts ein
+       (`listItem(paragraph(""), mathBlock)`), NICHT als Fortsetzung des
+       ERSTEN Punkts ("QA-Formel-Liste"). Für einen NICHT-ersten
+       Listenpunkt mit einem Vorgänger gilt aber unverändert die
+       allgemeine Listen-Regel aus #83/#90 (siehe D15/D16/D23): "Einzug
+       vergrößern" bleibt aktiv, weil ein Vorgänger existiert, unter den
+       der Punkt strukturell sinken könnte – exakt das vom Tester
+       beobachtete Verhalten. Per Headless-Test bestätigt (drei
+       Konfigurationen durchgespielt): Lässt man das Enter WEG (Cursor am
+       Ende von "QA-Formel-Liste", Formel direkt einfügen), entsteht
+       stattdessen GENAU die von D22 gemeinte Struktur
+       (`listItem(paragraph("QA-Formel-Liste"), mathBlock)`, Formel als
+       ECHTE Fortsetzung DESSELBEN Punkts) – dort ist "Einzug vergrößern"
+       nachweislich ausgegraut, wie ursprünglich dokumentiert. Eine
+       freistehende Formel ohne jeden Listenkontext verhält sich weiterhin
+       wie ein Absatz (D15: "Einzug verkleinern" aus, "Einzug vergrößern"
+       an, Attribut-Einzug 0–6).
+     - **Entscheidung: `docs/TESTFAELLE.md` D22 korrigiert, kein
+       Code-Fix.** Das "Enter" in der Reproduktionsanleitung entfällt
+       (Cursor bleibt am Ende des Listentexts stehen, bevor die Formel
+       eingefügt wird) – damit reproduziert D22 wieder zuverlässig den
+       tatsächlich gemeinten Finding-B4-Fall. Ergänzend eine neue
+       "Klarstellung", die den Enter-zuerst-Fall EXPLIZIT als korrektes,
+       NICHT zu meldendes Verhalten beschreibt (dieselbe Regel wie
+       D15/D16/D23), damit ein künftiger Tester nicht erneut denselben,
+       bereits geklärten Fall meldet. Keine Code-Änderung, kein neuer
+       Unit-Test in `src/lib` (reines Editor-Verhalten, wie die übrige
+       Indent-/Listen-Logik über `docs/TESTFAELLE.md`/E2E abgedeckt) –
+       die bereits bestehenden `canChangeIndent`-Tests in
+       `tests/docEditorIndent.test.jsx` decken die zugrunde liegende Regel
+       (nicht-erster Listenpunkt sinkt/hebt unabhängig von seinem Inhalt)
+       bereits ab.
