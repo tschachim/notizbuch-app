@@ -680,6 +680,39 @@ DIREKT als normaler Text (kein Codespan) an den Zellenanfang und ans
 Zellenende einer weiteren Zelle tippen, speichern, Editor erneut öffnen:
 Erwartet, beide Pipe-Zeichen bleiben an ihrer Position lesbar erhalten.
 
+**D2d [VERBUNDEN] Bild/Formel als Zellinhalt bleibt in der ANSICHT
+sichtbar – auch wenn die Zelle bereits Text enthält (v7.48-Fix + Review-
+Nachbesserung, vorher 🔴-Finding: die GANZE Tabelle verschwand aus der
+Ansicht statt nur des Bildes, DECISIONS).** Im Editor eine Tabelle mit
+mindestens 2 Spalten und 5 Datenzeilen anlegen, Kopf füllen. In der
+ersten Datenzeile normalen Text in beide Zellen tippen. In der zweiten
+Datenzeile die ERSTE Zelle mit Text füllen, in die ZWEITE Zelle NUR ein
+Bild einfügen (Bild-Knopf) – KEIN Begleittext davor/danach in dieser
+Zelle. In der dritten Datenzeile die ERSTE Zelle mit Text füllen, in die
+ZWEITE Zelle NUR eine abgesetzte Formel (Toolbar-Knopf „Formel abgesetzt“,
+`$$…$$`) einfügen, z. B. `x^2+y^2` – ebenfalls KEIN Begleittext in dieser
+Zelle. ⚠️ **Wichtig, NICHT weglassen (genau hier lag die vom Review
+gefundene Lücke):** In der VIERTEN Datenzeile in die ZWEITE Zelle ZUERST
+„QA-Wert“ tippen, den Cursor ans ENDE des getippten Textes lassen und
+DANACH über den Formel-Knopf eine Formel einfügen (z. B. `a^2`) – die
+Zelle enthält jetzt „QA-Wert“ GEFOLGT von der Formel, beide OHNE
+Leerzeichen dazwischen einzutippen. In der FÜNFTEN Datenzeile
+entsprechend mit einem Bild statt einer Formel: „QA-Bild“ tippen, Cursor
+ans Ende, Bild-Knopf. Speichern. Erwartet: Die Tabelle bleibt in der
+ANSICHT vollständig sichtbar (verschwindet NICHT) – AUCH in den Zeilen 4
+und 5, wo die Zelle sowohl Text ALS AUCH ein Bild/eine Formel enthält.
+Bild bzw. Formel erscheinen jeweils in ihrer Zelle (Formel gerendert als
+KaTeX, nicht als Roh-`$…$`), der Text „QA-Wert“/„QA-Bild“ bleibt daneben
+lesbar (ein einzelnes Leerzeichen zwischen Text und Bild/Formel ist normal
+und kein Finding). NIRGENDS im Dokument erscheint roher HTML-Quelltext
+(kein sichtbares „&lt;table“ o. Ä., kein Base64-Wust) – falls doch, exakt
+notieren, in WELCHER Zeile/Zelle es auftritt. Editor erneut öffnen:
+Tabelle liest sich weiterhin korrekt als Tabelle ein (Bild/Formel jeweils
+in ihrer eigenen Zelle, nicht verloren, Text bleibt erhalten). Ohne etwas
+zu ändern speichern (No-op), Editor ein drittes Mal öffnen: Erwartet,
+Bild/Formel und Text bleiben über alle Zyklen stabil in ihren Zellen,
+kein Wachstum/keine Strukturänderung.
+
 **D3 [VERBUNDEN] Checkliste.** Im Editor eine Checkliste mit zwei
 Einträgen anlegen, speichern, dann in der ANSICHT ein Kästchen anklicken.
 Erwartet: Haken bleibt nach Reload erhalten (eigener Commit).
@@ -736,21 +769,31 @@ führende „#“ im Code bleiben wörtlich erhalten (keine Formel-, Tabellen-
 oder Struktur-Fehlinterpretation), alle anderen Inhalte (inkl.
 eventueller Formeln aus D5) unverändert.
 
-**D6b [VERBUNDEN] Codeblock in einem Listenpunkt über mehrere Zyklen
+**D6b [VERBUNDEN][API] Codeblock in einem Listenpunkt über mehrere Zyklen
 (v7.46-Fix, vorher 🔴-Finding: eine zusätzliche Leerzeile pro
-Speicherzyklus, DECISIONS #94).** Im Editor eine Stichpunkt-Aufzählung
-mit einem Eintrag „QA-Punkt“ anlegen, im SELBEN Listenpunkt per Enter
-eine neue Zeile öffnen und über den Toolbar-Knopf „Codeblock“ (`</>`)
-einen Codeblock EINFÜGEN, hinein „qa code zeile“ tippen. Speichern.
-Erwartet: kein Fehler, der Codeblock erscheint monospaced UNTERHALB von
-„QA-Punkt“, sichtbar eingerückt (Teil des Listenpunkts). Editor erneut
-öffnen, ohne etwas zu ändern speichern (No-op), Editor ein DRITTES Mal
-öffnen und – diesmal an einer ANDEREN Stelle im Dokument (z. B. einem
-späteren Absatz) – eine kleine, harmlose Änderung vornehmen (z. B. ein
-Wort ergänzen) und speichern. Erwartet: Nach allen drei Zyklen zeigt der
-Codeblock im Listenpunkt weiterhin GENAU „qa code zeile“ – KEINE
-zusätzliche Leerzeile zwischen dem Code und dem unteren Rand des
-Kastens, unabhängig davon, wie oft geöffnet/gespeichert wurde.
+Speicherzyklus, DECISIONS #94).** ⚠️ Bekannte Editor-Grenze (v7.48-Befund,
+DECISIONS): Ein Codeblock LÄSST SICH NICHT über den Toolbar-Knopf
+„Codeblock“ (`</>`) innerhalb eines Listenpunkts anlegen – TipTaps
+Standard-„ListItem“ verlangt zwingend einen Absatz als ERSTES Kind eines
+Listenpunkts; der Knopf hebt den Codeblock deshalb komplett aus der Liste
+heraus (`<pre>` landet als Geschwister NEBEN der Liste, keine
+Verschachtelung mehr). Das ist KEIN Fund/Finding, bitte NICHT erneut
+melden – dieser Testfall prüft deshalb bewusst den tatsächlich
+funktionierenden Weg: **per Chat/KI erzeugter, bereits verschachtelter
+Codeblock**. Im QA-Notizbuch per Chat: „Lege einen Stichpunkt ‚QA-Punkt‘
+an und darunter, als Teil desselben Punkts, einen Codeblock mit exakt der
+Zeile ‚qa code zeile‘.“ (genau 1 API-Aufruf). Erwartet: Im Dokument
+erscheint „QA-Punkt“ als Stichpunkt, direkt darunter EIN monospaced
+Codeblock, sichtbar eingerückt (Teil des Listenpunkts, nicht bündig mit
+dem linken Rand). Editor öffnen (Roundtrip-Probe), ohne etwas zu ändern
+speichern (No-op), Editor ein DRITTES Mal öffnen und – diesmal an einer
+ANDEREN Stelle im Dokument (z. B. einem späteren Absatz) – eine kleine,
+harmlose Änderung vornehmen (z. B. ein Wort ergänzen) und speichern.
+Erwartet: Nach allen drei Zyklen zeigt der Codeblock im Listenpunkt
+weiterhin GENAU „qa code zeile“ – KEINE zusätzliche Leerzeile zwischen
+dem Code und dem unteren Rand des Kastens, unabhängig davon, wie oft
+geöffnet/gespeichert wurde, UND weiterhin sichtbar eingerückt als Teil
+von „QA-Punkt“.
 
 **D7 [VERBUNDEN] Link-Dialog im Editor.** Editor öffnen, etwas Text
 markieren, Link-Knopf (Kettensymbol) in der Toolbar anklicken. Erwartet:

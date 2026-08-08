@@ -599,14 +599,23 @@ export const BlockImage = Image.extend({
 // gleich mit abgesichert (vorher ebenfalls unmaskiert, aber außerhalb des
 // hier verlangten Testumfangs).
 const cellHasSpan = (cell) => cell.attrs.colspan > 1 || cell.attrs.rowspan > 1;
-// Eine Zelle, deren einziger Inhalt ein oder mehrere harte Zeilenumbrüche
-// sind (Umschalt+Enter in einer sonst leeren Zelle), muss für die
-// Pipe-Zeilen-Serialisierung ebenfalls als "leer" gelten: state.renderInline
-// würde sonst einen echten Zeilenumbruch mitten in die Pipe-Zeile schreiben
-// und die Tabelle beim nächsten Öffnen zerreißen (Review-Vorschlag 7,
-// gefunden beim MdTable-Bugfix für Formel-Zellen).
-function cellHasRenderableContent(cell) {
-  const p = cell.firstChild;
+// Ein Absatz OHNE jeden sichtbaren Inhalt (auch ein reiner harter
+// Zeilenumbruch zählt NICHT als Inhalt, siehe unten) ist beim Aufspalten
+// eines Absatzes rund um ein eingefügtes Block-Atom (Bild/Formel, siehe
+// INLINE_ATOM_TYPES) ein reines EINFÜGE-ARTEFAKT – ProseMirror lässt links
+// bzw. rechts vom neu eingefügten Atom einen leeren Rest-Absatz stehen,
+// wenn dort vorher kein bzw. kein weiterer Text stand. Für die
+// Pipe-Zeilen-Serialisierung MUSS ein solcher Absatz wie "nicht vorhanden"
+// behandelt werden – sonst würde state.renderInline() bei einem reinen
+// Zeilenumbruch (Umschalt+Enter in einer sonst leeren Zelle) einen echten
+// Zeilenumbruch MITTEN in die Pipe-Zeile schreiben und die Tabelle beim
+// nächsten Öffnen zerreißen (Review-Vorschlag 7, gefunden beim
+// MdTable-Bugfix für Formel-Zellen). Ehemals "cellHasRenderableContent"
+// (prüfte nur "cell.firstChild") – v7.48-Nachbesserung verallgemeinert auf
+// EINEN BELIEBIGEN Absatz-Node, weil eine Zelle jetzt MEHRERE Absätze rund
+// um ein Atom haben kann (siehe cellChildrenInlineable/gfmSerializable
+// unten), nicht mehr nur "cell.firstChild".
+function paragraphHasRenderableContent(p) {
   if (!p || p.childCount === 0) return false;
   let has = false;
   p.forEach((child) => {
@@ -622,25 +631,61 @@ function cellHasRenderableContent(cell) {
 // Zelleninhalt ohnehin nie in ein <p> wrapt (Bild direkt beim Laden aus
 // rohem "| ![…](img:x) |") oder weil tiptap-markdowns normalizeBlocks
 // (MarkdownParser.js#extractElement) den nach dem Herausheben leeren <p>
-// komplett entfernt (Text+Bild-Fall, siehe Kopfkommentar bei
-// cellHasRenderableContent). "cell.childCount > 1" (Fall: Bild MIT Text
-// davor/danach) griff bereits vorher richtig – die Lücke war GENAU der
-// Fall "childCount === 1, aber dieses eine Kind ist kein Absatz, sondern
-// das Bild-/Formel-Atom selbst": cellHasRenderableContent prüft
-// "p.childCount === 0" auf cell.firstChild und hält ein Atom (childCount
-// immer 0, es hat ja keine eigenen Kinder) fälschlich für eine LEERE
-// Zelle – der Inhalt fiel beim Speichern lautlos weg (siehe
-// tests/docEditorTableBlockCells.test.jsx, aktiv als rot verifiziert).
-// Fix (Empfehlung Code-Reviewer, geprüft): eine solche Zelle zusätzlich
-// als NICHT GFM-darstellbar werten, GENAU wie eine Zelle mit mehreren
-// Absätzen – der bereits vorhandene HTML-Fallback (getHTMLFromFragment)
-// rendert das Atom über dessen eigene renderHTML()-Regel (funktioniert
-// nachweislich schon für den Text+Bild-Fall) und rettet den Inhalt. Trifft
-// NUR die drei tatsächlich problematischen Fälle (Bild/Formel ALLEIN,
-// ohne jeden Begleittext) – eine normale Textzelle (ein einzelner Absatz,
-// ggf. mit hartem Umbruch/Aufzählung, v7.44) bleibt unverändert im
-// schlankeren GFM-Pipe-Format, weil ihr einziges Kind weiterhin ein
-// "paragraph" ist.
+// komplett entfernt (Text+Bild-Fall, siehe unten). "cell.childCount > 1"
+// (Fall: Bild MIT Text davor/danach) griff bereits vorher richtig – die
+// Lücke war GENAU der Fall "childCount === 1, aber dieses eine Kind ist
+// kein Absatz, sondern das Bild-/Formel-Atom selbst" – der Inhalt fiel beim
+// Speichern lautlos weg (siehe tests/docEditorTableBlockCells.test.jsx,
+// aktiv als rot verifiziert).
+// v7.47 hat das über den HTML-Fallback (getHTMLFromFragment) gelöst – DAS
+// war zwar am SPEICHER-Pfad korrekt (kein Datenverlust mehr), aber eine
+// SACKGASSE für die Dokument-ANSICHT: renderTable/renderBlocks (markdown.jsx)
+// verstehen ausschließlich das GFM-Pipe-Format, rohes Block-HTML fällt dort
+// in den normalen Absatz-Zweig und erscheint als sichtbarer HTML-Text –
+// STATT eines verlorenen Bildes verschwand plötzlich die GANZE TABELLE aus
+// der Ansicht (E2E-Finding 🔴, v7.48-Auftrag). Geprüft: die Ansicht konnte
+// diesen HTML-Fallback zu KEINEM Zeitpunkt rendern (auch nicht vor v7.47) –
+// er kam vor v7.47 nur extrem selten zum Zug (Merge-Zellen/mehrere Absätze,
+// praktisch nur per Copy&Paste erreichbar), v7.47 hat ihn für den ALLTÄGLICHEN
+// Fall "Bild/Formel per Toolbar-Knopf in eine Zelle" erreichbar gemacht und
+// damit den Sichtbarkeitsbruch zum ersten Mal in der Praxis ausgelöst (siehe
+// DECISIONS für den vollständigen Vergleich, dieser Eintrag ersetzt den
+// v7.47-Eintrag).
+//
+// v7.48-Fix, Review-Nachbesserung: Der ERSTE v7.48-Fix deckte NUR eine
+// Zelle ab, deren EINZIGER Inhalt ein Bild-/Formel-Atom war
+// (childCount === 1) – fügt der Nutzer ein Bild/eine Formel dagegen in eine
+// Zelle ein, die BEREITS Text enthält (z. B. Cursor hinter "b", dann
+// Formel-Knopf), spaltet ProseMirror den umschließenden Absatz auf (das
+// Atom ist group:"block") – die Zelle hat danach MEHRERE Kinder (ein oder
+// zwei Absatz-FRAGMENTE plus das Atom, je nach Cursor-Position auch mit
+// leeren Fragmenten als Einfüge-Artefakt, siehe paragraphHasRenderableContent
+// oben). "cell.childCount > 1" schickte JEDE dieser Varianten unverändert in
+// den HTML-Fallback – für den Nutzer optisch derselbe Effekt wie der
+// ursprünglich gemeldete Blocker (Tabelle zeigt weder Bild noch Formel).
+//
+// Fix: eine Zelle bleibt GFM-Pipe-darstellbar, wenn (a) JEDES Kind entweder
+// ein Absatz ODER ein unterstütztes Atom ist (cellChildrenInlineable) UND
+// (b) entweder MINDESTENS EIN Atom enthalten ist (dann dürfen beliebig viele
+// Absatz-FRAGMENTE drumherum stehen – sie sind Bruchstücke EINER
+// ursprünglich zusammenhängenden Zeile, die durchs Einfügen des Block-Atoms
+// auseinandergerissen wurde) ODER (c) es höchstens einen EINZIGEN
+// nicht-leeren Absatz gibt (der unveränderte Normalfall bzw. die triviale
+// leere Zelle). Diese Unterscheidung bleibt bewusst SCHARF gegen "echte"
+// mehrere Absätze OHNE jedes Atom (nur per Paste erreichbar, siehe Test
+// "zwei Absätze in derselben Zelle") – dort bleibt der HTML-Fallback
+// bestehen: zwei komplett eigenständige Absätze (kein Atom hat sie je
+// auseinandergerissen) sind keine Bruchstücke EINER Zeile, sondern echte,
+// eigene Zeilen – eine GFM-Pipe-Zelle ist aber strukturell IMMER genau eine
+// Zeile.
+const INLINE_ATOM_TYPES = new Set(["image", "mathBlock"]);
+function cellChildrenInlineable(cell) {
+  let ok = true;
+  cell.forEach((child) => {
+    if (child.type.name !== "paragraph" && !INLINE_ATOM_TYPES.has(child.type.name)) ok = false;
+  });
+  return ok;
+}
 function gfmSerializable(table) {
   let ok = true;
   table.forEach((row, _o, i) => {
@@ -648,14 +693,134 @@ function gfmSerializable(table) {
       const headerOk = i === 0
         ? cell.type.name === "tableHeader"
         : cell.type.name !== "tableHeader";
-      const bareBlockAtom = cell.childCount === 1 && cell.firstChild.type.name !== "paragraph";
-      if (!headerOk || cellHasSpan(cell) || cell.childCount > 1 || bareBlockAtom) ok = false;
+      let hasAtom = false;
+      let nonEmptyParagraphs = 0;
+      cell.forEach((child) => {
+        if (INLINE_ATOM_TYPES.has(child.type.name)) hasAtom = true;
+        else if (child.type.name === "paragraph" && paragraphHasRenderableContent(child)) nonEmptyParagraphs++;
+      });
+      const cellOk = cellChildrenInlineable(cell) && (hasAtom || nonEmptyParagraphs <= 1);
+      if (!headerOk || cellHasSpan(cell) || !cellOk) ok = false;
     });
   });
   return ok;
 }
+// v7.48 (Review-Nachbesserung): Ein rohes "|" IM TeX einer Formel würde die
+// Pipe-Tabellenzeile in eine zusätzliche Spalte auftrennen. Ein generisches
+// "\|"-Escaping (wie bei normalem Zelltext) ist HIER aber NICHT sicher: "\|"
+// ist in LaTeX selbst ein bedeutungstragender Befehl (Parallelstriche-
+// Notation "‖") – ein automatisches Escaping würde eine informell getippte
+// Betrags-Formel wie "|x|" beim nächsten Laden STILL in eine andere Formel
+// verwandeln (schlimmer als das seltene, bereits dokumentierte Rand-Risiko).
+// Stattdessen "\vert" – mit KaTeX empirisch geprüft (siehe DECISIONS):
+// "\vert" rendert VISUELL IDENTISCH zu "|", auch bei mehreren/
+// verschachtelten Vorkommen ("||x||" → "\vert\vert x\vert\vert"), enthält
+// aber kein rohes Pipe-Zeichen mehr. Nur INNERHALB einer Tabellenzelle
+// angewendet (state.inTable) – außerhalb bleibt "|" im TeX unangetastet
+// (kein Grund, dort von der 1:1-Formel-Notation abzuweichen).
+//
+// Trennzeichen NUR vor einem direkt folgenden BUCHSTABEN (TeX-Control-Words
+// wie "\vert" verschlucken jeden unmittelbar folgenden Buchstaben als Teil
+// DESSELBEN Befehlsnamens – "\vertx" würde als (undefiniertes) Makro
+// "\vertx" interpretiert, siehe TeX-Tokenisierung). Vor allem anderen
+// (Ziffer, Symbol, Backslash, Zeilenende) KEIN Trennzeichen – wichtig am
+// ZEILENENDE: Der eigene Formel-Viewer (MATH_TOKEN_RE, math.jsx) erkennt
+// "$…$" nur, wenn das Zeichen UNMITTELBAR vor dem schließenden "$" KEIN
+// Leerzeichen ist – ein "\vert " (mit Leerzeichen) direkt vor dem
+// schließenden "$" hätte die Formel für die eigene Ansicht unsichtbar
+// gemacht (Review-Nachbesserung: aktiv als rot verifiziert, siehe Bericht).
+function texSafeForTableCell(tex) {
+  return String(tex ?? "").replace(/\|/g, (m, offset, str) =>
+    /[a-zA-Z]/.test(str[offset + 1] || "") ? "\\vert " : "\\vert"
+  );
+}
+// Schreibt ein Bild-/Formel-Atom als eigenständiges Kind einer Zelle inline
+// in die laufende Pipe-Zeile (siehe Kopfkommentar oben). Wird NUR für die
+// beiden in INLINE_ATOM_TYPES gelisteten Typen aufgerufen – gfmSerializable
+// hat jeden anderen Atomtyp bereits vorher in den HTML-Fallback geschickt,
+// ein "sonst"-Zweig ist hier deshalb nicht erreichbar.
+// "state.esc" ist zum Aufrufzeitpunkt bereits die pipe-maskierende Variante
+// (siehe MdTable-Serializer, try-Block) – ein "|" im Alt-Text ODER im
+// "|wNNN"-Breitensuffix wird dadurch GENAUSO maskiert wie ein "|" in
+// normalem Zelltext (splitRow, markdown.jsx, löst "\|" beim Lesen wieder
+// korrekt auf).
+function writeInlineAtom(state, atom) {
+  if (atom.type.name === "image") {
+    const suffix = atom.attrs.width ? "|w" + atom.attrs.width : "";
+    state.write("![" + state.esc((atom.attrs.alt || "") + suffix) + "](" + atom.attrs.src + ")");
+  } else {
+    // mathBlock: siehe Kopfkommentar - bewusst als INLINE-Formel ($…$),
+    // NICHT als abgesetzter Block ($$…$$). texSafeForTableCell schützt vor
+    // einem rohen "|" im TeX (siehe dort).
+    state.write("$" + texSafeForTableCell(atom.attrs.tex) + "$");
+  }
+}
+// Rendert EIN Kind der Zelle (Absatz oder Atom) in einen ISOLIERTEN Puffer
+// und liefert dessen Text zurück, statt ihn direkt in state.out zu
+// schreiben. Nötig, weil renderCellChildrenInline (unten) mehrere Kinder zu
+// EINER Pipe-Zeile zusammenfügen und dabei selbst über Trennzeichen
+// entscheiden muss – state.out/state.delim werden dafür temporär
+// getauscht: OHNE das Leeren von state.delim würde state.write() bei einer
+// Zelle INNERHALB eines eingerückten Listenpunkts (state.delim ist dort der
+// Einzug-Präfix) den Einzug-Präfix fälschlich in die Mitte der Pipe-Zeile
+// schreiben, weil ein frisch geleerter Puffer für state.atBlank() wie ein
+// echter Zeilenanfang aussieht.
+function captureCellFragment(state, fn) {
+  const prevOut = state.out;
+  const prevDelim = state.delim;
+  state.out = "";
+  state.delim = "";
+  fn();
+  const result = state.out;
+  state.out = prevOut;
+  state.delim = prevDelim;
+  return result;
+}
+// Baut den GFM-Pipe-Text einer als inline-darstellbar erkannten Zelle
+// (siehe gfmSerializable) aus IHREN EINZELNEN Kindern zusammen: jeder
+// nicht-leere Absatz liefert seinen renderInline-Text, jedes Bild-/
+// Formel-Atom seine writeInlineAtom-Form – komplett LEERE Absätze (reine
+// Einfüge-Artefakte, siehe paragraphHasRenderableContent) tragen NICHTS
+// bei, auch keinen Trenner. BUGFIX (v7.3, beim Einbau der Formel-Nodes
+// gefunden, unverändert relevant): Die ursprüngliche Prüfung
+// "cell.firstChild.textContent.trim()" ist für ein Inline-ATOM ohne Text
+// (textContent liefert bei Atomen immer "") fälschlich falsy –
+// paragraphHasRenderableContent/INLINE_ATOM_TYPES erkennen "hat überhaupt
+// sichtbaren Inhalt" korrekt für Text UND Atome.
+//
+// Zwischen zwei entstandenen Fragmenten wird GENAU DANN ein zusätzliches
+// Leerzeichen eingefügt, wenn WEDER das Ende des vorigen NOCH der Anfang
+// des nächsten Fragments bereits Whitespace ist – ohne das würde ein direkt
+// hinter den Cursor eingefügtes Bild/eine Formel ohne jeden Trenner am Text
+// kleben (z. B. "b![…]" statt "b ![…]"), WEIL ProseMirror beim Aufspalten
+// des Absatzes von sich aus KEIN Leerzeichen einfügt (empirisch verifiziert:
+// Cursor direkt hinter "b", Formel eingefügt → Absatz-Rest bleibt
+// wortwörtlich "b", ohne Leerzeichen). Bereits vorhandener Whitespace (der
+// Nutzer hat z. B. "vor " mit Leerzeichen getippt, bevor das Bild
+// eingefügt wurde) bleibt dagegen unangetastet – kein unnötiges
+// Doppel-Leerzeichen im Normalfall.
+function renderCellChildrenInline(state, cell) {
+  const fragments = [];
+  cell.forEach((child) => {
+    let text = null;
+    if (child.type.name === "paragraph") {
+      if (paragraphHasRenderableContent(child)) {
+        text = captureCellFragment(state, () => state.renderInline(child));
+      }
+    } else if (INLINE_ATOM_TYPES.has(child.type.name)) {
+      text = captureCellFragment(state, () => writeInlineAtom(state, child));
+    }
+    if (text !== null) fragments.push(text);
+  });
+  let joined = "";
+  for (const frag of fragments) {
+    if (joined && !/\s$/.test(joined) && !/^\s/.test(frag)) joined += " ";
+    joined += frag;
+  }
+  state.write(joined);
+}
 // Exportiert (Re-Review-Finding R3), damit der Roundtrip-Test die ECHTE
-// Erweiterung importiert statt cellHasRenderableContent/gfmSerializable im
+// Erweiterung importiert statt gfmSerializable/renderCellChildrenInline im
 // Test nachzubauen.
 export const MdTable = Table.extend({
   addStorage() {
@@ -682,19 +847,12 @@ export const MdTable = Table.extend({
               state.write("| ");
               row.forEach((cell, _o2, j) => {
                 if (j) state.write(" | ");
-                // BUGFIX (v7.3, beim Einbau der Formel-Nodes gefunden): Die
-                // ursprüngliche Prüfung "cell.firstChild.textContent.trim()"
-                // ist für eine Zelle, deren einziger Inhalt ein Inline-ATOM
-                // ohne Text ist (z. B. eine Formel – textContent liefert bei
-                // Atomen immer ""), fälschlich falsy: state.renderInline
-                // wurde nie aufgerufen und der Inhalt der Zelle fiel beim
-                // Speichern stillschweigend weg. cellHasRenderableContent
-                // erkennt "hat überhaupt sichtbaren Kind-Inhalt" korrekt für
-                // Text UND Atome, eine wirklich leere ODER nur aus harten
-                // Zeilenumbrüchen bestehende Zelle bleibt weiterhin leer.
-                if (cellHasRenderableContent(cell)) {
-                  state.renderInline(cell.firstChild);
-                }
+                // v7.48: JEDES Kind der Zelle einzeln behandeln (Absatz-
+                // Fragmente UND Bild-/Formel-Atome in beliebiger Mischung,
+                // siehe gfmSerializable/renderCellChildrenInline oben) statt
+                // nur "cell.firstChild" – ersetzt sowohl den einfachen
+                // Ein-Absatz-Fall als auch den bare-Atom-Fall einheitlich.
+                renderCellChildrenInline(state, cell);
               });
               state.write(" |");
               state.ensureNewLine();
@@ -1065,7 +1223,14 @@ export const MathInline = Node.create({
     return {
       markdown: {
         serialize(state, node) {
-          state.write("$" + node.attrs.tex + "$");
+          // v7.48 (Review-Nachbesserung, siehe texSafeForTableCell/MdTable
+          // oben): INNERHALB einer Tabellenzelle (state.inTable) würde ein
+          // rohes "|" im TeX die Pipe-Zeile auftrennen – "\vert " ersetzt es
+          // dort visuell IDENTISCH, ohne ein neues Pipe-Zeichen zu erzeugen.
+          // Außerhalb einer Tabelle bleibt "|" unangetastet (unverändertes
+          // Verhalten).
+          const tex = state.inTable ? texSafeForTableCell(node.attrs.tex) : node.attrs.tex;
+          state.write("$" + tex + "$");
         },
         parse: {},
       },

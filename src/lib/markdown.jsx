@@ -18,6 +18,26 @@ import { FILE_URL_RE, fileUrlToWinPath, buildProtocolUrl } from "./filelinks.js"
 
 export const IMG_LINE_RE = /^!\[([^\]]*)\]\(img:([a-zA-Z0-9]+)\)$/;
 export const IMG_REF_RE = /!\[[^\]]*\]\(img:([a-zA-Z0-9]+)\)/g;
+// v7.48: dieselbe Bild-Grammatik wie IMG_LINE_RE, aber OHNE Zeilenanker –
+// für eine Bildreferenz, die NICHT allein auf ihrer Zeile steht (Konvention
+// seit v7.2), sondern INLINE eingebettet ist (Auftrag: "Bild als einziger
+// Inhalt einer Tabellenzelle bleibt GFM-Pipe-Format, kein HTML-Fallback
+// mehr" – die Zelle ist Teil einer "| … | … |"-Zeile, "^…$" würde dort nie
+// matchen). renderInline() nutzt sie NUR, wenn der Aufrufer explizit ein
+// imgMap übergibt (siehe dort) – für alle bestehenden Call-Sites OHNE
+// imgMap (normale Absätze/Listen/Checklisten) bleibt "![…](img:…)" MITTEN
+// im Text unverändert Literaltext, exakt wie vor diesem Fix (bewusst kein
+// dokumentweiter Verhaltenswechsel, nur die Tabellenzelle bekommt die neue
+// Fähigkeit, siehe DECISIONS).
+export const IMG_INLINE_RE = /!\[([^\]]*)\]\(img:([a-zA-Z0-9]+)\)/;
+// Gemeinsamer Helfer für den optionalen Größen-Suffix aus dem Editor
+// ("Titel|w320" → 320 px breit, siehe BlockImage/DocEditor.jsx) – vom
+// block-level Bild-Zweig (renderBlocks) UND vom neuen inline Bild-Zweig
+// (renderInline) genutzt, statt die Regex zweimal zu pflegen.
+export function parseImgAlt(altRaw) {
+  const wM = /^(.*?)\|w(\d+)$/.exec(altRaw);
+  return wM ? { alt: wM[1], width: parseInt(wM[2], 10) } : { alt: altRaw, width: null };
+}
 
 // v7.45-Fix (Datenkorruption, E2E-Finding 🔴): Das ursprüngliche "\]\s+"
 // verlangte nach "]" MINDESTENS ein Leerzeichen – ein bewusst LEER
@@ -51,6 +71,33 @@ const OL_RE = /^\s*\d+[.)]\s+(.*)$/;
 const UL_RE = /^\s*[-*]\s+(.*)$/;
 const TABLE_LINE_RE = /^\s*\|.*\|\s*$/;
 const TABLE_SEP_RE = /^\s*\|(\s*:?-+:?\s*\|)+\s*$/;
+// v7.48: Erkennt den ROH-HTML-Fallback, den MdTable (DocEditor.jsx,
+// getHTMLFromFragment) für eine im GFM-Pipe-Format strukturell NICHT
+// darstellbare Tabelle schreibt (verbundene Zellen/"echte" mehrere Absätze
+// OHNE jedes Bild-/Formel-Atom in einer Zelle – im Editor über die Toolbar
+// nicht erzeugbar, nur per Copy&Paste erreichbar, siehe DECISIONS). Diese
+// Zeile matcht NIE TABLE_LINE_RE (beginnt mit "<table", nicht mit "|") und
+// fiel deshalb bisher in den normalen Absatz-Zweig – dort erschien der
+// komplette rohe HTML-Quelltext als sichtbarer Klartext ("HTML-Wüste",
+// E2E-Finding 🔴). Rendert hier bewusst NUR einen kurzen Hinweis statt das
+// HTML tatsächlich zu interpretieren (kein dangerouslySetInnerHTML für
+// nutzergenerierten/eingefügten Inhalt) – die Daten selbst bleiben
+// unangetastet im Markdown-Dokument erhalten, der Editor liest sie weiterhin
+// korrekt als Tabelle ein (nur die Dokument-ANSICHT kann sie nicht
+// darstellen).
+//
+// Review-Nachbesserung: Die ursprüngliche Fassung ("/^<table[\s>]/i", NUR
+// den Zeilenanfang geprüft) verschluckte fälschlich auch ganz normale Prosa,
+// die zufällig mit "<table" beginnt (Fund: "<table> ist ein HTML-Element."
+// zeigte den Hinweiskasten STATT des Nutzertexts – Daten blieben zwar im
+// Markdown erhalten, aber die Ansicht "aß" den Satz). Der Fallback schreibt
+// die komplette Tabelle IMMER als eine einzige, in sich geschlossene Zeile,
+// die mit "</table>" endet (state.write(getHTMLFromFragment(...)) gefolgt
+// von state.closeBlock, siehe MdTable) – die Signatur wird deshalb auf GENAU
+// dieses Muster verschärft: Anfang UND Ende derselben Zeile. Eine Zeile wie
+// "<table> ist ein HTML-Element." endet nicht auf "</table>" und fällt jetzt
+// korrekt in den normalen Absatz-Zweig (Prosa bleibt sichtbar).
+const RAW_TABLE_HTML_RE = /^<table[\s>][\s\S]*<\/table>$/i;
 
 // Display-Math-Block-Erkennung: DISPLAY_MATH_START_RE/matchDisplayBlock
 // leben zentral in math.jsx (EINE Regel für Dokument-Ansicht UND den
@@ -556,7 +603,7 @@ const GENERIC_LINK_TOKEN_RE = new RegExp("^\\[([^\\]\\n]{1,300})\\]\\((" + LINK_
 // mehr kopiert wird. Ersatzlos entfernt – kein anderer Code-Pfad in der App
 // braucht den bisher aus winPath abgeleiteten Zwischenablage-Wert (winPath
 // wird unten NUR NOCH für den Tooltip/title gebraucht, siehe dort).
-function FileLink({ url, title }) {
+function FileLink({ url, title, media }) {
   const winPath = fileUrlToWinPath(url);
   // protocolUrl ist null für ein UNC-Ziel (buildProtocolUrl lehnt UNC-Pfade
   // bewusst ab, siehe SICHERHEIT-Kommentar in filelinks.js/SMB-Credential-
@@ -605,23 +652,71 @@ function FileLink({ url, title }) {
   return (
     <>
       <a href={href} title={winPath} className={DOC_LINK_CLASS} onClick={handleClick}>
-        {renderInline(title)}
+        {renderInline(title, media)}
       </a>
       {opening && <span className="ml-1 text-xs text-emerald-600 align-middle">wird geöffnet …</span>}
     </>
   );
 }
 
-function renderInline(text) {
+// v7.48: Bild INNERHALB von Fließtext (Auftrag "Bild als einziger Inhalt
+// einer Tabellenzelle bleibt GFM-Pipe-Format, keine HTML-Wüste mehr") – nur
+// erreichbar, wenn der Aufrufer von renderInline ein "media.imgMap" übergibt
+// (siehe dort), aktuell ausschließlich aus TableCell/renderTable heraus.
+// Kompakter als das block-level Bild (figure/max-h-64, renderBlocks): eine
+// Tabellenzeile soll durch ein eingebettetes Bild nicht unverhältnismäßig
+// hoch werden – ein explizites "|wNNN"-Größensuffix (Anfasser im Editor)
+// hat trotzdem immer Vorrang vor der Standardhöhe. onClick nutzt denselben
+// Lightbox-Callback wie das Block-Bild (media.onImgClick).
+function InlineImg({ altRaw, id, media }) {
+  const { alt, width } = parseImgAlt(altRaw);
+  const src = media.imgMap[id];
+  if (!src) {
+    return (
+      <span
+        className="inline-block h-5 min-w-[2.5rem] align-middle rounded border border-slate-200 bg-slate-50"
+        title="Bild wird geladen …"
+      />
+    );
+  }
+  return (
+    <img
+      src={src}
+      alt={alt}
+      title={alt || undefined}
+      onClick={() => media.onImgClick && media.onImgClick(src)}
+      style={width ? { width: width + "px", maxWidth: "100%" } : undefined}
+      className={(width ? "" : "max-h-24 ") + "inline-block align-middle rounded border border-slate-200 cursor-pointer"}
+    />
+  );
+}
+
+// "media" (optional): { imgMap, onImgClick } – NUR gesetzt, wenn der
+// Aufrufer Inline-Bilder erlauben will (siehe InlineImg oben). Ohne "media"
+// (der weit überwiegende Regelfall: Absätze, Listen, Checklisten, …) bleibt
+// "![…](img:…)" MITTEN im Text unverändert Literaltext wie vor v7.48 – kein
+// dokumentweiter Verhaltenswechsel, siehe DECISIONS. Rekursive Aufrufe
+// (Fett/Kursiv/Durchgestrichen/Link-Titel/<span>-Inhalt) reichen "media"
+// unverändert weiter, damit z. B. "**Text ![x](img:…)**" auch INNERHALB
+// einer Zelle funktioniert.
+function renderInline(text, media) {
   const parts = [];
   let k = 0;
   let s = text;
   while (s.length) {
     const otherM = INLINE_TOKEN_RE.exec(s);
     const mathM = MATH_TOKEN_RE.exec(s);
-    // Bei Gleichstand gewinnt die Formel (siehe Kommentar bei INLINE_TOKEN_RE).
-    const isMath = mathM && (!otherM || mathM.index <= otherM.index);
-    const m = isMath ? mathM : otherM;
+    const imgM = media && media.imgMap ? IMG_INLINE_RE.exec(s) : null;
+    // Prioritätsreihenfolge bei Gleichstand (mehrere Regeln matchen an
+    // derselben Startposition): Bild vor Formel vor allem anderen – "!["
+    // und "$" können nie an derselben Position beginnen, ein echter
+    // Gleichstand bleibt wie bisher praktisch nur zwischen Formel und
+    // INLINE_TOKEN_RE möglich (siehe Kommentar bei INLINE_TOKEN_RE), die
+    // zusätzliche Bild-Priorität ändert daran nichts.
+    let m = otherM;
+    let kind = "other";
+    if (mathM && (!m || mathM.index <= m.index)) { m = mathM; kind = "math"; }
+    if (imgM && (!m || imgM.index <= m.index)) { m = imgM; kind = "img"; }
     // decodeBasicEntities NUR auf bereits als "kein Token" feststehenden
     // Text (v7.24 Bugfix, siehe Kommentar dort): INLINE_TOKEN_RE/MATH_TOKEN_RE
     // laufen HIER VORHER auf dem NOCH UNDEKODIERTEN "s" – ein escapetes
@@ -634,7 +729,14 @@ function renderInline(text) {
     const tok = m[0];
     const after = m.index + tok.length;
 
-    if (isMath) {
+    if (kind === "img") {
+      const [, altRaw, id] = m;
+      parts.push(<InlineImg key={k++} altRaw={altRaw} id={id} media={media} />);
+      s = s.slice(after);
+      continue;
+    }
+
+    if (kind === "math") {
       parts.push(renderMathToken(tok, k++));
       s = s.slice(after);
       continue;
@@ -671,7 +773,7 @@ function renderInline(text) {
         s = s.slice(after);
         continue;
       }
-      const inner = renderInline(s.slice(after, closeAt));
+      const inner = renderInline(s.slice(after, closeAt), media);
       const style = extractStyles(tok, tag);
       parts.push(
         tag === "span"
@@ -728,31 +830,36 @@ function renderInline(text) {
           </sup>
         );
       } else if (isFileLink) {
-        parts.push(<FileLink key={k++} url={url} title={title} />);
+        parts.push(<FileLink key={k++} url={url} title={title} media={media} />);
       } else {
         parts.push(<ProviderLinkIcon key={k++} url={url} />);
         parts.push(
           <a key={k++} href={url} target="_blank" rel="noopener noreferrer" title={url} className={DOC_LINK_CLASS}>
-            {renderInline(title)}
+            {renderInline(title, media)}
           </a>
         );
       }
     } else if (tok.startsWith("**")) {
-      parts.push(<strong key={k++} className="font-semibold text-slate-900">{renderInline(tok.slice(2, -2))}</strong>);
+      parts.push(<strong key={k++} className="font-semibold text-slate-900">{renderInline(tok.slice(2, -2), media)}</strong>);
     } else if (tok.startsWith("~~")) {
-      parts.push(<s key={k++} className="text-slate-400">{renderInline(tok.slice(2, -2))}</s>);
+      parts.push(<s key={k++} className="text-slate-400">{renderInline(tok.slice(2, -2), media)}</s>);
     } else if (tok.startsWith("`")) {
       parts.push(<code key={k++} className="font-mono text-sm bg-slate-100 border border-slate-200 rounded px-1">{tok.slice(1, -1)}</code>);
     } else {
-      parts.push(<em key={k++}>{renderInline(tok.slice(1, -1))}</em>);
+      parts.push(<em key={k++}>{renderInline(tok.slice(1, -1), media)}</em>);
     }
     s = s.slice(after);
   }
   return parts;
 }
 
-function Inline({ text }) {
-  return <>{renderInline(text)}</>;
+// "imgMap"/"onImgClick" sind OPTIONAL (siehe renderInline-Kopfkommentar) –
+// nur TableCell (siehe unten) übergibt sie, jeder andere bestehende
+// Aufrufer (Absätze/Listen/Checklisten in renderBlocks) lässt sie bewusst
+// weg und verhält sich dadurch exakt wie vor v7.48.
+function Inline({ text, imgMap, onImgClick }) {
+  const media = imgMap ? { imgMap, onImgClick } : undefined;
+  return <>{renderInline(text, media)}</>;
 }
 
 /* ---------------- Tabellen (GFM-Pipe-Format) ---------------- */
@@ -849,7 +956,7 @@ export function splitCellLines(text) {
 // Kopie, damit eine Zelle exakt dieselbe Listensyntax akzeptiert wie ein
 // normaler Absatz. my-0/space-y-0 statt der Block-Varianten mb-3/space-y-1
 // (renderBlocks) hält die Tabellenzeile kompakt, wie gefordert.
-function renderCellLines(lines) {
+function renderCellLines(lines, imgMap, onImgClick) {
   const nodes = [];
   let i = 0;
   let k = 0;
@@ -863,7 +970,7 @@ function renderCellLines(lines) {
     if (UL_RE.test(line)) {
       const items = [];
       while (i < lines.length && UL_RE.test(lines[i])) {
-        items.push(<li key={k++}><Inline text={lines[i].replace(/^\s*[-*]\s+/, "")} /></li>);
+        items.push(<li key={k++}><Inline text={lines[i].replace(/^\s*[-*]\s+/, "")} imgMap={imgMap} onImgClick={onImgClick} /></li>);
         i++;
       }
       nodes.push(<ul key={k++} className="list-disc pl-4 my-0 space-y-0">{items}</ul>);
@@ -875,7 +982,7 @@ function renderCellLines(lines) {
       const start = numM ? parseInt(numM[1], 10) : 1;
       const items = [];
       while (i < lines.length && OL_RE.test(lines[i])) {
-        items.push(<li key={k++}><Inline text={lines[i].replace(/^\s*\d+[.)]\s+/, "")} /></li>);
+        items.push(<li key={k++}><Inline text={lines[i].replace(/^\s*\d+[.)]\s+/, "")} imgMap={imgMap} onImgClick={onImgClick} /></li>);
         i++;
       }
       nodes.push(
@@ -894,7 +1001,7 @@ function renderCellLines(lines) {
     // vorangestellte <br/> (bei zwei Leerzeilen hintereinander also ZWEI
     // <br/> in Folge) sorgt trotzdem fuer die sichtbare Luecke.
     if (afterPlainLine) nodes.push(<br key={k++} />);
-    nodes.push(<Inline key={k++} text={line} />);
+    nodes.push(<Inline key={k++} text={line} imgMap={imgMap} onImgClick={onImgClick} />);
     afterPlainLine = true;
     i++;
   }
@@ -904,14 +1011,16 @@ function renderCellLines(lines) {
 // Zell-Inhalt: der Normalfall (keine "<br>" in der Zelle) liefert exakt
 // dasselbe Markup wie vor v7.44 (<Inline text={text} />, KEIN zusätzlicher
 // Wrapper) – reine Fallunterscheidung, keine Verhaltensänderung für
-// bestehende Tabellen ohne Umbrüche.
-function TableCell({ text }) {
+// bestehende Tabellen ohne Umbrüche. "imgMap"/"onImgClick" (v7.48) werden
+// nur durchgereicht, damit ein Bild als (einziger ODER Teil-)Zellinhalt in
+// der Ansicht ein echtes <img> statt Literaltext wird (siehe InlineImg).
+function TableCell({ text, imgMap, onImgClick }) {
   const lines = splitCellLines(text);
-  if (lines.length <= 1) return <Inline text={text} />;
-  return <>{renderCellLines(lines)}</>;
+  if (lines.length <= 1) return <Inline text={text} imgMap={imgMap} onImgClick={onImgClick} />;
+  return <>{renderCellLines(lines, imgMap, onImgClick)}</>;
 }
 
-function renderTable(tlines, key, level) {
+function renderTable(tlines, key, level, imgMap, onImgClick) {
   let header = null;
   let bodyLines = tlines;
   if (tlines.length >= 2 && TABLE_SEP_RE.test(tlines[1])) {
@@ -935,13 +1044,13 @@ function renderTable(tlines, key, level) {
       <table className="border-collapse text-sm">
         {header && (
           <thead>
-            <tr>{header.map((c, i) => <th key={i} className={thCls}><TableCell text={c} /></th>)}</tr>
+            <tr>{header.map((c, i) => <th key={i} className={thCls}><TableCell text={c} imgMap={imgMap} onImgClick={onImgClick} /></th>)}</tr>
           </thead>
         )}
         <tbody>
           {body.map((row, ri) => (
             <tr key={ri}>
-              {row.map((c, ci) => <td key={ci} className={tdCls}><TableCell text={c} /></td>)}
+              {row.map((c, ci) => <td key={ci} className={tdCls}><TableCell text={c} imgMap={imgMap} onImgClick={onImgClick} /></td>)}
             </tr>
           ))}
         </tbody>
@@ -1074,7 +1183,7 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
         li++;
         tlines.push(lines[li].text);
       }
-      blocks.push(renderTable(tlines, kp + key++, indentLevel(line)));
+      blocks.push(renderTable(tlines, kp + key++, indentLevel(line), imgMap, onImgClick));
     } else if (mathBlock) {
       flush();
       blocks.push(
@@ -1090,9 +1199,7 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
       flush();
       const [, altRaw, id] = imgM;
       // Optionaler Größen-Suffix aus dem Editor: "Titel|w320" → 320 px breit.
-      const wM = /^(.*?)\|w(\d+)$/.exec(altRaw);
-      const alt = wM ? wM[1] : altRaw;
-      const width = wM ? parseInt(wM[2], 10) : null;
+      const { alt, width } = parseImgAlt(altRaw);
       const src = imgMap[id];
       // Der Titel (alt) bleibt bewusst nur als alt/title am <img> – keine
       // sichtbare figcaption mehr (v7.2, Nutzerwunsch): direkt darunter
@@ -1176,6 +1283,25 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
     } else if (/^-{3,}$/.test(line.trim())) {
       flush();
       blocks.push(<hr key={kp + key++} style={indentStyle(indentLevel(line))} className="my-4 border-slate-200" />);
+    } else if (RAW_TABLE_HTML_RE.test(line.trim())) {
+      // v7.48: siehe RAW_TABLE_HTML_RE-Kommentar oben – kurzer, sichtbarer
+      // Hinweis statt der rohen HTML-Wüste. Absichtlich EIN Block für die
+      // GANZE Zeile (der HTML-Fallback schreibt die komplette Tabelle als
+      // eine einzige Zeile, siehe MdTable/DocEditor.jsx).
+      flush();
+      blocks.push(
+        <div
+          key={kp + key++}
+          style={indentStyle(indentLevel(line))}
+          className="my-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"
+        >
+          ⚠️ Diese Tabelle enthält Inhalt aus einer komplexeren, meist per
+          Copy &amp; Paste eingefügten Struktur (z. B. verbundene Zellen
+          oder mehrere Absätze in einer Zelle), der in dieser Ansicht nicht
+          dargestellt werden kann. Bitte im Editor öffnen – dort bleibt der
+          Inhalt vollständig erhalten.
+        </div>
+      );
     } else if (line.trim() === "") {
       flush();
     } else {

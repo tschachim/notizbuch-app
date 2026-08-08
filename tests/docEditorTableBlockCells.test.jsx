@@ -1,41 +1,26 @@
 // @vitest-environment jsdom
 //
-// v7.47, Fehler 1 ("Bild als EINZIGER Inhalt einer Tabellenzelle geht beim
-// Speichern verloren"). Vom Code-Reviewer ohne jedes Pipe im Spiel gemessen:
-//   "| x | ![alt](img:x) |"              -> nach Laden+Speichern -> "| x |  |"
-//   "| x | Text ![alt](img:x) Text |"    -> HTML-Fallback greift, Bild bleibt
-// Ursache (siehe ausführlicher Kopfkommentar bei "gfmSerializable" in
-// DocEditor.jsx): BlockImage UND MathBlock sind beide group:"block" – eine
-// Zelle, deren KOMPLETTER Inhalt nur aus einem solchen Block-Atom besteht,
-// hat GAR KEINEN umschließenden Absatz mehr (markdown-it wrapt Zellinhalt
-// grundsätzlich nicht in ein <p>, und tiptap-markdowns normalizeBlocks
-// entfernt ein nach dem Herausheben leer gewordenes <p> zusätzlich ganz).
-// "cellHasRenderableContent" hielt "cell.firstChild" dadurch für einen
-// LEEREN Absatz (ein Atom hat immer childCount===0), obwohl es das Bild/
-// die Formel SELBST war - der Inhalt fiel beim Speichern lautlos weg.
+// v7.47 hatte den v7.47-eigenen Bug ("Bild als EINZIGER Inhalt einer
+// Tabellenzelle geht beim Speichern verloren") über den bereits vorhandenen
+// HTML-Fallback (getHTMLFromFragment) behoben: Inhalt blieb erhalten, ABER
+// die Dokument-ANSICHT (markdown.jsx) kann rohes Block-HTML gar nicht
+// rendern – die ganze Tabelle verschwand aus der Ansicht und ein roher
+// HTML-Text erschien stattdessen (E2E-Finding 🔴, v7.48-Auftrag). Siehe
+// DECISIONS für den vollständigen Befund ("HTML-Fallback war eine
+// Sackgasse für die Ansicht").
 //
-// Aktiv als ROT verifiziert (Auftrag: "aktiv verifizieren"): mit dem Stand
-// VOR dem v7.47-Fix (gfmSerializable kannte nur "cellHasSpan"/
-// "childCount > 1") lieferten die beiden ersten Tests unten exakt
-// "| x |  |" bzw. "|  | 4 |" (Bild/Formel weg) statt des jetzt erwarteten
-// HTML-Fallbacks - reproduziert per `git stash` gegen den unveränderten
-// Stand, siehe Bericht.
-//
-// Fix: "gfmSerializable" wertet eine Zelle mit genau einem, NICHT-Absatz-
-// Kind zusätzlich als nicht GFM-darstellbar (wie eine Zelle mit mehreren
-// Absätzen) - der bereits vorhandene HTML-Fallback (getHTMLFromFragment)
-// rendert das Atom über dessen eigene renderHTML()-Regel und rettet den
-// Inhalt (Mechanismus bereits für "Bild mit Text" belegt, siehe unten).
-//
-// Ein Formelblock ($$…$$) lässt sich NICHT über eine rohe Markdown-Zeile
-// als einziger Zellinhalt erzeugen (mathToPlaceholders/DISPLAY_MATH_START_RE
-// verlangt "$$" am Zeilenanfang - innerhalb einer Pipe-Zeile bleibt "$$…$$"
-// bewusst literal, siehe math.jsx). Ein MathBlock-Node kann trotzdem in
-// einer Zelle landen (Formel-Knopf/Paste, während der Cursor in einer
-// Zelle steht - ProseMirror darf jeden "block"-Node in eine Zelle mit
-// content:"block+" einfügen) - die Tests unten bauen diesen Fall deshalb
-// direkt über ProseMirror-JSON auf (kein Umweg über die Markdown-Ladephase
-// nötig, der Serializer-Bug sitzt ohnehin NACH dem Laden).
+// v7.48-Fix: Ein Bild oder ein Formelblock als EINZIGER Inhalt einer Zelle
+// bleibt jetzt im schlanken GFM-Pipe-Format ("| x | ![alt](img:id) |" bzw.
+// "| x | $tex$ |" – ein Formel-BLOCK wird dabei bewusst als INLINE-Formel
+// serialisiert, ein abgesetzter Block ergibt in einer Tabellenzelle ohnehin
+// keinen Sinn). Die Dokument-Ansicht (renderTable -> TableCell -> Inline)
+// kann das GENAUSO rendern wie jede andere Zelle mit Text (siehe
+// tests/markdownTableInlineMedia.test.jsx für den Ansichts-Nachweis) – der
+// HTML-Fallback bleibt NUR noch für strukturell wirklich nicht darstellbare
+// Fälle bestehen (verbundene Zellen/mehrere Absätze in einer Zelle – im
+// Editor über die Toolbar nicht erzeugbar, nur per Copy&Paste erreichbar,
+// siehe die Tests weiter unten, die das UNVERÄNDERT als
+// Nicht-Regressions-Nachweis pinnen).
 import { describe, it, expect } from "vitest";
 import { Editor } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
@@ -43,7 +28,8 @@ import TableRow from "@tiptap/extension-table-row";
 import TableHeader from "@tiptap/extension-table-header";
 import TableCell from "@tiptap/extension-table-cell";
 import { Markdown } from "tiptap-markdown";
-import { unescapeMd, MdTable, BlockImage, MathBlock } from "../src/components/DocEditor.jsx";
+import { unescapeMd, MdTable, BlockImage, MathBlock, MathInline } from "../src/components/DocEditor.jsx";
+import { mathToPlaceholders } from "../src/lib/math.jsx";
 
 const TABLE_EXT = [MdTable, TableRow, TableHeader, TableCell];
 
@@ -100,41 +86,44 @@ function mathTableDoc(firstCellContent) {
   };
 }
 
-describe("MdTable: Bild als einziger Zellinhalt geht NICHT mehr verloren (v7.47-Regression)", () => {
-  it("ein Bild OHNE jeden Begleittext in der Zelle bleibt beim Speichern erhalten (statt zu '| x |  |' zu werden)", () => {
+describe("MdTable: Bild als einziger Zellinhalt bleibt GFM-Pipe-Format (v7.48-Fix)", () => {
+  it("ein Bild OHNE jeden Begleittext bleibt eine gewöhnliche Pipe-Zeile (kein HTML-Fallback mehr)", () => {
     const md = "# T\n\n| A | B |\n| --- | --- |\n| x | ![alt](img:xyz) |\n\nEnde.";
     const out = cycle(md, [...TABLE_EXT, BlockImage]);
-    expect(out).not.toBe("# T\n\n| A | B |\n| --- | --- |\n| x |  |\n\nEnde."); // der alte, kaputte Zustand
-    expect(out).toContain("img:xyz");
-    expect(out).toContain('alt="alt"');
+    // Byte-identisch zum Original - GFM-Pipe-Format bleibt GFM-Pipe-Format,
+    // kein unnötiger HTML-Umweg mehr für genau diesen Fall.
+    expect(out).toBe(md);
+    expect(out).not.toContain("<table");
   });
 
-  it("Idempotenz: ein zweiter Lade-/Speicherzyklus des HTML-Fallbacks verändert nichts mehr", () => {
+  it("Idempotenz: mehrere Lade-/Speicherzyklen verändern nichts mehr", () => {
     const md = "# T\n\n| A | B |\n| --- | --- |\n| x | ![alt](img:xyz) |\n\nEnde.";
     const out1 = cycle(md, [...TABLE_EXT, BlockImage]);
     const out2 = cycle(out1, [...TABLE_EXT, BlockImage]);
     const out3 = cycle(out2, [...TABLE_EXT, BlockImage]);
-    expect(out2).toBe(out1);
-    expect(out3).toBe(out1);
-    expect(out1).toContain("img:xyz");
+    expect(out1).toBe(md);
+    expect(out2).toBe(md);
+    expect(out3).toBe(md);
   });
 
-  it("das Bild bleibt auch nach dem Fallback ein ECHTER BlockImage-Node (kein Literaltext), Breite/Alt bleiben erhalten", () => {
+  it("das Bild bleibt beim Wiedereinlesen ein ECHTER BlockImage-Node (kein Literaltext), Breite/Alt bleiben erhalten", () => {
     // Direkt als ProseMirror-JSON aufgebaut (statt über eine rohe Markdown-
-    // Zeile "![Titel|w320](img:xyz)"): das "|w320"-Suffix landet NUR in der
-    // eigenen, hier bewusst umgangenen state.esc-Serialisierung von
-    // BlockImage - als ROHER Alt-Text getippt/geladen wäre das unescapte
-    // "|" ohnehin ein KOMPLETT ANDERES, vorbestehendes Problem (markdown-its
-    // GFM-Tabellenregel trennt Zeilen bereits VOR jeder Inline-Erkennung an
-    // jedem rohen "|" auf - außerhalb des Umfangs dieses Fixes). Node-Attribute
-    // (src/alt/width) sind hier deshalb wie im echten Editor-Zustand gesetzt.
+    // Zeile): Node-Attribute (src/alt/width) sind so wie im echten
+    // Editor-Zustand gesetzt, unabhängig vom Serializer-Weg.
     const doc = mathTableDoc([{ type: "image", attrs: { src: "img:xyz", alt: "Titel", width: 320 } }]);
     const editor = buildEditor(doc, [...TABLE_EXT, BlockImage]);
     const out = unescapeMd(editor.storage.markdown.getMarkdown());
     editor.destroy();
-    // Erneut laden: das gerettete Bild muss als echter Node zurückkommen,
-    // Breite (aus dem "width"-HTML-Attribut des Fallbacks) und Alt-Text
-    // bleiben dabei erhalten.
+    // Jetzt GFM-Pipe-Format mit dem "|wNNN"-Größensuffix, kein HTML mehr.
+    // Das "|" DES SUFFIXES wird dabei wie jedes andere Pipe in einer
+    // Tabellenzeile maskiert ("\|") - splitRow (markdown.jsx) löst das beim
+    // Lesen wieder korrekt zu einem echten "|" auf (siehe BlockImage-Attribut-
+    // Parser, der die "|wNNN"-Konvention danach wieder herausliest).
+    expect(out).not.toContain("<table");
+    expect(out).toContain("![Titel\\|w320](img:xyz)");
+
+    // Erneut laden: das Bild muss als echter Node zurückkommen, Breite/Alt
+    // bleiben dabei erhalten (Roundtrip über das Pipe-Format).
     const editor2 = buildEditor(out, [...TABLE_EXT, BlockImage]);
     let found = null;
     editor2.state.doc.descendants((n) => { if (n.type.name === "image") found = n; });
@@ -145,7 +134,67 @@ describe("MdTable: Bild als einziger Zellinhalt geht NICHT mehr verloren (v7.47-
     expect(found.attrs.width).toBe(320);
   });
 
+  it("ein Pipe-Zeichen IM Alt-Text wird maskiert und bleibt über den Roundtrip lesbar (Escaping-Test)", () => {
+    // Ohne Maskierung würde "a|b" im Alt-Text die Pipe-Tabellenzeile in eine
+    // zusätzliche Spalte auftrennen (dieselbe Gefahr wie bei normalem
+    // Zelltext, siehe v7.46) - state.esc (in writeInlineAtom gebunden) muss
+    // das "|" hier GENAUSO maskieren.
+    const doc = mathTableDoc([{ type: "image", attrs: { src: "img:xyz", alt: "a|b", width: null } }]);
+    const editor = buildEditor(doc, [...TABLE_EXT, BlockImage]);
+    const out = unescapeMd(editor.storage.markdown.getMarkdown());
+    editor.destroy();
+    expect(out).toContain("![a\\|b](img:xyz)");
+    // Zwei Spalten in der Datenzeile bleiben zwei Spalten (keine
+    // Fehl-Auftrennung durch das ungemaskierte Pipe im Alt-Text).
+    const dataLine = out.split("\n").find((l) => l.includes("img:xyz"));
+    expect(dataLine.trim().split(/(?<!\\)\|/).length).toBe(4); // "", A, B, ""
+
+    // Erneut laden: Alt-Text kommt unverändert (mit echtem "|", ohne
+    // Backslash) zurück.
+    const editor2 = buildEditor(out, [...TABLE_EXT, BlockImage]);
+    let found = null;
+    editor2.state.doc.descendants((n) => { if (n.type.name === "image") found = n; });
+    editor2.destroy();
+    expect(found.attrs.alt).toBe("a|b");
+  });
+
+  it("ein Bild als einziger Inhalt EINER KOPFZELLE bleibt ebenfalls GFM-Pipe-Format", () => {
+    const doc = {
+      type: "doc",
+      content: [
+        { type: "heading", attrs: { level: 1 }, content: [{ type: "text", text: "T" }] },
+        {
+          type: "table",
+          content: [
+            {
+              type: "tableRow",
+              content: [
+                { type: "tableHeader", content: [{ type: "image", attrs: { src: "img:xyz", alt: "Kopf" } }] },
+                { type: "tableHeader", content: [{ type: "paragraph", content: [{ type: "text", text: "V" }] }] },
+              ],
+            },
+            {
+              type: "tableRow",
+              content: [
+                { type: "tableCell", content: [{ type: "paragraph", content: [{ type: "text", text: "x" }] }] },
+                { type: "tableCell", content: [{ type: "paragraph", content: [{ type: "text", text: "4" }] }] },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const out = cycle(doc, [...TABLE_EXT, BlockImage]);
+    expect(out).not.toContain("<table");
+    expect(out).toContain("![Kopf](img:xyz)");
+  });
+
   it("Bild MIT Text davor UND danach: HTML-Fallback greift weiterhin unverändert (Nicht-Regressions-Nachweis)", () => {
+    // Text+Bild in derselben Zelle sind ZWEI/DREI getrennte Block-Kinder
+    // (BlockImage ist group:"block", siehe Kopfkommentar bei
+    // gfmSerializable/DocEditor.jsx) - strukturell etwas ANDERES als der
+    // hier gefixte bare-Atom-Fall (genau EIN Kind). Bleibt bewusst
+    // unverändert im HTML-Fallback (kein Auftrag, das zu ändern).
     const md = "# T\n\n| A | B |\n| --- | --- |\n| x | Text ![alt](img:xyz) Text |\n\nEnde.";
     const out = cycle(md, [...TABLE_EXT, BlockImage]);
     expect(out).toContain("img:xyz");
@@ -176,25 +225,48 @@ describe("MdTable: Bild als einziger Zellinhalt geht NICHT mehr verloren (v7.47-
   });
 });
 
-describe("MdTable: Formelblock ($$…$$) als einziger Zellinhalt geht NICHT mehr verloren (v7.47-Regression)", () => {
-  it("eine MathBlock-Node allein in der Zelle bleibt beim Speichern erhalten (statt zu '|  | 4 |' zu werden)", () => {
+describe("MdTable: Formelblock ($$…$$) als einziger Zellinhalt bleibt GFM-Pipe-Format (v7.48-Fix)", () => {
+  it("eine MathBlock-Node allein in der Zelle wird als INLINE-Formel ($…$) serialisiert (kein HTML-Fallback mehr)", () => {
     const doc = mathTableDoc([{ type: "mathBlock", attrs: { tex: "x^2" } }]);
     const out = cycle(doc, [...TABLE_EXT, MathBlock]);
-    expect(out).not.toContain("|  | 4 |"); // der alte, kaputte Zustand
-    expect(out).toContain('data-tex="x^2"');
+    expect(out).not.toContain("<table");
+    // Ein abgesetzter Block ($$…$$) ergibt in einer Zeile keinen Sinn -
+    // bewusst als Inline-Formel serialisiert (siehe DECISIONS).
+    expect(out).toContain("| $x^2$ | 4 |");
+    expect(out).not.toContain("$$x^2$$");
   });
 
-  it("Idempotenz: ein zweiter Lade-/Speicherzyklus verändert nichts mehr, die Formel bleibt eine ECHTE Node", () => {
+  it("Idempotenz über den ECHTEN Lade-Pfad (mathToPlaceholders): die Formel bleibt stabil - liest beim Wiedereinlesen bewusst als INLINE-Formel (mathInline), nicht mehr als mathBlock", () => {
     const doc = mathTableDoc([{ type: "mathBlock", attrs: { tex: "x^2" } }]);
     const out1 = cycle(doc, [...TABLE_EXT, MathBlock]);
-    const out2 = cycle(out1, [...TABLE_EXT, MathBlock]);
-    expect(out2).toBe(out1);
 
-    const editor = buildEditor(out1, [...TABLE_EXT, MathBlock]);
-    let hasFormula = false;
-    editor.state.doc.descendants((n) => { if (n.type.name === "mathBlock" && n.attrs.tex === "x^2") hasFormula = true; });
-    editor.destroy();
-    expect(hasFormula).toBe(true);
+    // Ab hier über den ECHTEN App-Ladepfad weiter (mathToPlaceholders VOR
+    // dem Parsen, wie DocEditor.jsx#content das immer tut, siehe dort) -
+    // "out1" enthält jetzt rohes "$x^2$" in einer Pipe-Zeile, das OHNE diese
+    // Vorverarbeitung (wie im Rest dieser Testdatei bewusst ausgespart, das
+    // JSON-Fixture existiert ja GENAU deshalb) nur Literaltext bliebe.
+    const editor2 = buildEditor(mathToPlaceholders(out1), [...TABLE_EXT, MathBlock, MathInline]);
+    const out2 = unescapeMd(editor2.storage.markdown.getMarkdown());
+    // Ein abgesetzter Formel-BLOCK in einer Tabellenzelle ist konzeptionell
+    // eine Inline-Formel (siehe Auftrag/DECISIONS) - der Node-Typ wechselt
+    // beim ersten Roundtrip deshalb bewusst von "mathBlock" zu "mathInline",
+    // der TeX-Inhalt bleibt dabei unverändert erhalten.
+    let hasInlineFormula = false;
+    let hasMathBlock = false;
+    editor2.state.doc.descendants((n) => {
+      if (n.type.name === "mathInline" && n.attrs.tex === "x^2") hasInlineFormula = true;
+      if (n.type.name === "mathBlock") hasMathBlock = true;
+    });
+    editor2.destroy();
+    expect(hasInlineFormula).toBe(true);
+    expect(hasMathBlock).toBe(false);
+    expect(out2).toBe(out1); // stabil - ab hier keine weitere Änderung mehr
+
+    // Ein dritter Zyklus über denselben echten Pfad bleibt ebenfalls stabil.
+    const editor3 = buildEditor(mathToPlaceholders(out2), [...TABLE_EXT, MathBlock, MathInline]);
+    const out3 = unescapeMd(editor3.storage.markdown.getMarkdown());
+    editor3.destroy();
+    expect(out3).toBe(out1);
   });
 });
 
@@ -250,5 +322,20 @@ describe("MdTable: unveränderte Fälle bleiben im schlanken GFM-Pipe-Format (ke
     expect(out).toContain("Eins");
     expect(out).toContain("Zwei");
     expect(cycle(out, TABLE_EXT)).toBe(out); // stabil
+  });
+
+  it("eine eigenständige Liste als einziger Zellinhalt (per Paste, im Editor nicht erzeugbar) bleibt weiterhin im HTML-Fallback abgesichert", () => {
+    // Kein Regressionsfall des v7.48-Fixes: INLINE_ATOM_TYPES kennt
+    // ausschließlich "image"/"mathBlock" - jeder andere bare Block-Atomtyp
+    // (hier: eine komplette bulletList als einziges Zellkind) bleibt bewusst
+    // über den HTML-Fallback abgesichert (kein Datenverlust), GENAU wie vor
+    // v7.47/v7.48.
+    const doc = mathTableDoc([{
+      type: "bulletList",
+      content: [{ type: "listItem", content: [{ type: "paragraph", content: [{ type: "text", text: "Punkt" }] }] }],
+    }]);
+    const out = cycle(doc, [...TABLE_EXT, BlockImage]);
+    expect(out).toContain("<table");
+    expect(out).toContain("Punkt");
   });
 });

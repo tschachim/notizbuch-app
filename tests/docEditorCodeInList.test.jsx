@@ -257,3 +257,120 @@ describe("Editor-Roundtrip: Codeblock in einem Listenpunkt (v7.46)", () => {
     expect(out2).toBe(md);
   });
 });
+
+// v7.48-Auftrag, Fehler 2 ("Codeblock lässt sich nicht in einem
+// Listenpunkt anlegen"): GENAU eingegrenzt, WARUM der Toolbar-Knopf
+// „Codeblock“ (toggleCodeBlock) den Codeblock aus der Liste heraushebt,
+// statt ihn verschachtelt einzufügen. @tiptap/extension-list-item nutzt
+// standardmäßig "content: 'paragraph block*'" – der ERSTE Kindknoten eines
+// Listenpunkts MUSS exakt vom Typ "paragraph" sein (nicht nur irgendein
+// "block"). toggleCodeBlock (genauer: @tiptap/core#setNode) versucht
+// zuerst "setBlockType" (ersetzt GENAU den textblock mit dem Cursor durch
+// einen Codeblock, IN PLACE, an derselben Position) – das verletzt bei
+// einem Listenpunkt mit NUR einem Absatz das Content-Modell (Position 0
+// verlangt "paragraph", niemals "codeBlock"), "setBlockType" schlägt fehl.
+// setNode() fällt dann auf "commands.clearNodes()" zurück – das entfernt
+// ALLE umschließenden Listen-/Absatz-Wrapper (glättet die komplette
+// Struktur zu einer flachen Absatzfolge), BEVOR "setBlockType" erneut
+// versucht wird (diesmal erfolgreich, weil kein ListItem mehr im Weg
+// steht). Ergebnis: der Codeblock landet als Geschwister NEBEN der Liste,
+// nicht mehr darin.
+//
+// Bewusste Entscheidung (siehe DECISIONS): NICHT die Editor-Schema-Grenze
+// aufweichen (z. B. eine eigene ListItem-Erweiterung mit
+// "content: 'block+'") – das ist ein tief in ProseMirrors Listen-Kernel
+// verankertes Verhalten mit hohem Blast-Radius (sinkListItem/liftListItem,
+// Tab/Shift-Tab-Einrückung, "kein doppelter Einzug"-Logik,
+// convertListItemTypeCommand – siehe die zahlreichen bestehenden
+// List-Spezialfälle in DocEditor.jsx – bauen alle stillschweigend auf
+// "erstes Kind ist ein Absatz"). Stattdessen: die reale, funktionierende
+// Erzeugung eines Codeblocks INNERHALB eines Listenpunkts bleibt der
+// Lade-Pfad (Chat/KI-Ops oder von Hand vorbereitetes Markdown, siehe
+// D6b in TESTFAELLE.md und die restlichen Tests dieser Datei) – GENAU
+// DAFÜR ist der v7.46-Fix oben gedacht und bleibt unverändert gültig.
+//
+// Dieser Test PINNT die aktuell bekannte Editor-Grenze bewusst (kein
+// Pro-forma-Test: schlägt fehl, sobald sich das zugrunde liegende
+// TipTap/ProseMirror-Verhalten oder das Content-Modell ändert – dann muss
+// diese Analyse UND die D6b-Beschreibung in TESTFAELLE.md neu geprüft
+// werden), damit die Doku nicht unbemerkt von der Realität abweicht.
+describe("Editor-Grenze (v7.48, Fehler 2): Toolbar-Knopf 'Codeblock' auf dem ERSTEN Absatz eines Listenpunkts hebt ihn aus der Liste heraus", () => {
+  function buildListEditor(md) {
+    return new Editor({
+      extensions: [
+        IndentKeymap,
+        StarterKit.configure({ heading: { levels: [1, 2, 3] }, codeBlock: false, blockquote: false, paragraph: false }),
+        IndentParagraph,
+        FencedCodeBlock,
+        IndentMarkdownIt,
+        Markdown.configure({ html: true, bulletListMarker: "-", tightLists: true }),
+      ],
+      content: md,
+    });
+  }
+
+  it("toggleCodeBlock auf dem einzigen Absatz eines Listenpunkts entfernt die Listen-Verschachtelung (dokumentierte Grenze, kein neuer Bug)", () => {
+    const editor = buildListEditor("- QA-Punkt");
+    // Cursor ans Dokumentende (= Ende von "QA-Punkt", der einzige Inhalt).
+    editor.commands.focus("end");
+    editor.chain().focus().toggleCodeBlock().run();
+
+    let hasBulletList = false;
+    let codeBlockIsTopLevel = false;
+    editor.state.doc.forEach((node) => {
+      if (node.type.name === "bulletList") hasBulletList = true;
+      if (node.type.name === "codeBlock") codeBlockIsTopLevel = true;
+    });
+    editor.destroy();
+
+    // Die Liste ist komplett verschwunden (clearNodes glättet die Struktur),
+    // der Codeblock steht jetzt auf oberster Ebene, NICHT mehr verschachtelt.
+    expect(hasBulletList).toBe(false);
+    expect(codeBlockIsTopLevel).toBe(true);
+  });
+
+  it("zur Kontrolle: ein zweiter Absatz IM SELBEN Listenpunkt (nicht die erste Position) lässt sich sehr wohl in einen Codeblock verwandeln, OHNE die Liste zu verlassen", () => {
+    // Bestätigt die Diagnose oben: "paragraph block*" verlangt NUR beim
+    // ERSTEN Kind exakt "paragraph" - ein bereits vorhandener ZWEITER
+    // Absatz desselben Listenpunkts darf sehr wohl zu "block" (u. a.
+    // codeBlock) werden. Kein über die Toolbar normal erreichbarer Weg (siehe
+    // Auftrag), aber wichtig für die Diagnose: das Problem ist WIRKLICH nur
+    // die erste Position, nicht "Codeblock in Liste" generell.
+    // Über ProseMirror-JSON aufgebaut (statt insertContentAt am
+    // Dokumentende - das würde NICHT in den Listenpunkt einfügen, sondern
+    // eine neue TOP-LEVEL-Zeile NACH der ganzen Liste erzeugen, siehe
+    // "auf einer VERSCHACHTELTEN Listenebene"-Test oben für dasselbe Muster):
+    // ZWEI Absätze als Kinder DESSELBEN Listenpunkts von Anfang an.
+    const editor = buildListEditor("- Platzhalter");
+    editor.commands.setContent({
+      type: "doc",
+      content: [
+        {
+          type: "bulletList",
+          attrs: { tight: false },
+          content: [
+            {
+              type: "listItem",
+              content: [
+                { type: "paragraph", attrs: { indent: 0 }, content: [{ type: "text", text: "QA-Punkt" }] },
+                { type: "paragraph", attrs: { indent: 0 }, content: [{ type: "text", text: "Zweite Zeile" }] },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    editor.commands.focus("end");
+    editor.chain().focus().toggleCodeBlock().run();
+
+    let hasBulletList = false;
+    let codeBlockIsTopLevel = false;
+    editor.state.doc.forEach((node) => {
+      if (node.type.name === "bulletList") hasBulletList = true;
+      if (node.type.name === "codeBlock") codeBlockIsTopLevel = true;
+    });
+    editor.destroy();
+    expect(hasBulletList).toBe(true);
+    expect(codeBlockIsTopLevel).toBe(false);
+  });
+});

@@ -9706,7 +9706,16 @@ aus `referenz-app.jsx` übernommen.
       der im Auftrag gemessene und primär geforderte Fall (keine
       Leerzeile im Original) bleibt vollständig byte-identisch.
 
-95. **v7.47, Fehler 1 (Datenkorruption, ECHTER Bug): Ein Bild oder eine
+95. **⚠️ ÜBERHOLT durch Eintrag #98 (v7.48).** Der hier gewählte Fix (HTML-
+    Fallback für Bild/Formel allein in einer Zelle) hat den v7.47-eigenen
+    Datenverlust zwar beseitigt, aber eine NEUE, schlimmere Regression
+    eingeführt: die Dokument-ANSICHT kann rohes Block-HTML gar nicht
+    rendern, die betroffene Tabelle verschwand deshalb KOMPLETT aus der
+    Ansicht (E2E-Finding 🔴, v7.48-Auftrag). Eintrag #98 ersetzt den Fix
+    durch eine GFM-Pipe-taugliche Inline-Serialisierung – dieser Eintrag
+    bleibt unten als historische Herleitung stehen, gilt aber NICHT mehr
+    als aktueller Stand.
+    **v7.47, Fehler 1 (Datenkorruption, ECHTER Bug): Ein Bild oder eine
     Formel als EINZIGER Inhalt einer Tabellenzelle ging beim Speichern
     verloren.** Vom Code-Reviewer ohne jedes Pipe im Spiel gemessen:
     `"| x | ![alt](img:x) |"` wurde nach Laden+Speichern zu `"| x |  |"`
@@ -9873,3 +9882,306 @@ aus `referenz-app.jsx` übernommen.
     - **Test:** `tests/anthropic.test.js`, neuer Vertragstest im Stil der
       bestehenden FORMELN-/Codeblock-Tests (`toContain`/`toMatch` auf den
       gebauten System-Prompt).
+
+98. **v7.48, Fehler 1 (E2E-Blocker, von v7.47 selbst eingeführt): Der
+    HTML-Fallback für Bild/Formel allein in einer Tabellenzelle war eine
+    Sackgasse für die Dokument-Ansicht – die GANZE Tabelle verschwand aus
+    der Ansicht statt nur des Bildes.** Minimalster Repro (ganz OHNE Bild):
+    Tabelle mit Kopf- und Textzelle anlegen, in eine zweite Datenzelle NUR
+    eine abgesetzte Formel (`$$…$$`-Knopf) einfügen, speichern, neu laden –
+    die Tabelle verschwindet komplett, stattdessen erscheint der rohe
+    HTML-Quelltext (`<table style="…"><colgroup>…` usw.) als sichtbarer
+    Klartext. Der Editor liest dasselbe Dokument beim erneuten Öffnen
+    weiterhin korrekt als Tabelle ein – die Daten waren also nicht
+    verloren, aber für den Nutzer war die Tabelle weg.
+    - **Zuerst geklärt (Auftrag: "prüfe, ob die Leseansicht den Fallback
+      jemals rendern konnte"): NEIN, zu KEINEM Zeitpunkt.** `renderTable`/
+      `renderBlocks` (`markdown.jsx`) kennen ausschließlich das GFM-Pipe-
+      Format (`TABLE_LINE_RE` verlangt Zeilen, die mit `|` beginnen/enden);
+      rohes Block-HTML (`getHTMLFromFragment`-Ausgabe, IMMER eine einzige
+      lange Zeile beginnend mit `<table`) matcht das nie und fällt in den
+      normalen Absatz-Zweig, wo `Inline`/`renderInline` es (mangels
+      passender Regel) unverändert als Text zeigen – exakt das beobachtete
+      Bild. Der HTML-Fallback existiert für verbundene Zellen/mehrere
+      Absätze bereits seit den ALLERERSTEN Tabellen-Formel-Nodes (v7.3) und
+      war seither ausschließlich per Copy&Paste erreichbar (der Editor
+      bietet über die Toolbar KEINE Merge-Zellen-Funktion an, siehe
+      `DocEditor.jsx` – keine `mergeCells`/`splitCell`-Kommandos verdrahtet)
+      – ein seltener, in der Praxis kaum je gehittener Randfall. v7.47 hat
+      diese Sackgasse für den ALLTÄGLICHEN Fall "Bild/Formel per
+      Toolbar-Knopf in eine sonst leere Zelle" erreichbar gemacht und damit
+      zum ersten Mal in der Praxis ausgelöst – DAS macht Fehler 1 schlimmer
+      als der ursprüngliche v7.47-Ausgangsfehler (verlorenes Bild).
+    - **Gewählte Lösung (Empfehlung aus dem Auftrag geprüft und
+      übernommen): Zellen im GFM-Pipe-Format halten, INLINE serialisiert,
+      statt in HTML auszuweichen.** `writeInlineAtom` (`DocEditor.jsx`,
+      `MdTable`) schreibt ein Bild-/Formel-Atom, das der EINZIGE Inhalt
+      einer Zelle ist, direkt in die laufende Pipe-Zeile:
+      `![Alt|wNNN](img:id)` fürs Bild (identisch zur bestehenden
+      Block-Bild-Syntax, nur ohne `closeBlock`), `$tex$` für einen
+      Formel-BLOCK – bewusst als INLINE-Formel, weil ein ABGESETZTER Block
+      (`$$tex$$`) in einer einzeiligen Tabellenzelle ohnehin keinen Sinn
+      ergibt (Auftrag-Vorgabe, geprüft: eine Zelle ist strukturell IMMER
+      eine einzelne Zeile, ein Display-Block würde dort ohnehin nur wie
+      eine Inline-Formel aussehen). `gfmSerializable` erkennt NUR die zwei
+      wirklich handhabbaren Atomtypen (`INLINE_ATOM_TYPES = new
+      Set(["image","mathBlock"])`) als GFM-darstellbar – jeder ANDERE bare
+      Block-Atomtyp (z. B. eine eigenständige Liste/ein Codeblock als
+      einziger Zellinhalt – über die Toolbar nicht erzeugbar, nur per Paste
+      denkbar) bleibt bewusst über den HTML-Fallback abgesichert (siehe
+      Test "eine eigenständige Liste … bleibt weiterhin im HTML-Fallback
+      abgesichert", `tests/docEditorTableBlockCells.test.jsx`).
+    - **Ansicht befähigt, ein Bild INNERHALB einer Zelle zu rendern** (der
+      im Auftrag benannte Verdacht "IMG_LINE_RE ist zeilenverankert, das
+      reicht nicht" hat sich bestätigt): Neue `IMG_INLINE_RE` (`markdown.jsx`,
+      dieselbe Grammatik wie `IMG_LINE_RE`, aber ohne `^…$`-Anker) plus
+      `InlineImg`-Komponente, in `renderInline` als dritte, zur Formel
+      GLEICHRANGIGE Token-Alternative eingebaut (Priorität bei Gleichstand:
+      Bild > Formel > Rest – überschneidungsfrei, da `![` und `$` nie an
+      derselben Position beginnen können). Bewusst NUR aktiv, wenn der
+      Aufrufer ein `media.imgMap` übergibt (`Inline`/`renderInline`
+      bekommen dafür einen neuen, optionalen dritten Parameter) – NUR
+      `TableCell`/`renderCellLines`/`renderTable` reichen das durch, jeder
+      andere bestehende Aufrufer (Absätze/Listen/Checklisten in
+      `renderBlocks`) lässt es weg und verhält sich exakt wie vor v7.48
+      (ein Bild MITTEN in normalem Fließtext bleibt weiterhin Literaltext –
+      bewusst kein dokumentweiter Verhaltenswechsel, siehe Test
+      "bewusst NICHT geändert" in `tests/markdownTableInlineMedia.test.jsx`).
+      Eine Formel INNERHALB einer Zelle brauchte KEINE Änderung: `MATH_TOKEN_RE`
+      läuft in `renderInline` bereits kontextfrei über jeden Text, egal ob
+      Absatz oder Tabellenzelle.
+    - **Pipe-Escaping des Bild-Alt-Texts/Breitensuffixes:** `state.esc`
+      ist zum Aufrufzeitpunkt in `writeInlineAtom` bereits die
+      pipe-maskierende Variante (siehe `MdTable`-Serializer) – Alt-Text
+      UND das `"|wNNN"`-Größensuffix laufen GEMEINSAM durch einen einzigen
+      `state.esc(...)`-Aufruf, damit auch das strukturelle `"|"` im Suffix
+      maskiert wird (sonst würde `![Titel|w320](img:id)` die Pipe-Zeile in
+      eine zusätzliche Spalte auftrennen). Test mit `alt:"a|b"` pinnt das
+      (`tests/docEditorTableBlockCells.test.jsx`).
+    - **Bewusst NICHT symmetrisch für Formel-TeX:** Der TeX-Inhalt bleibt
+      UNESCAPED (`state.write`, kein `state.esc`) – exakt wie
+      `MathInline`/`MathBlock` das immer schon tun (ein LaTeX-Backslash
+      wie `\frac` darf nicht escaped werden). Ein `"|"` IM TeX (z. B.
+      Betragsstriche `|x|`) bleibt eine vorbestehende, bereits an anderer
+      Stelle dokumentierte GIGO-Grenze (`math.jsx#escapeHtmlAttr`-Kommentar:
+      "eine Formel mit Pipe in einer Tabellenzelle bleibt … verwundbar") –
+      KEINE neue, nur für den bare-Atom-Fall zusätzlich eingeführte
+      Asymmetrie: Eine inline getippte Formel `$|x|$` NEBEN normalem
+      Zelltext hatte exakt dasselbe Risiko schon VOR diesem Fix (derselbe
+      `MathInline`-Serializer, unverändert). Ein generischer Escape-Versuch
+      (z. B. `\|`) wurde geprüft und VERWORFEN: `\|` ist in LaTeX selbst
+      ein bedeutungstragender Befehl (Parallelstriche-Notation `‖`) – ein
+      automatisches Escaping hätte eine informell getippte Betrags-Formel
+      beim nächsten Laden STILL in eine andere Formel verwandelt, das wäre
+      schlimmer als das bereits bekannte, seltene Rand-Risiko.
+    - **Formelblock wird beim Roundtrip bewusst zu einer Inline-Formel
+      (Node-Typ-Wechsel mathBlock → mathInline):** Nach dem ersten
+      Speichern+Laden liest die Zelle `$tex$` als `mathInline`-Node
+      zurück, nicht mehr als `mathBlock` – gewollt (siehe oben, ein
+      abgesetzter Block ergibt in einer Zelle keinen Sinn), TeX-Inhalt
+      bleibt dabei exakt erhalten, weitere Zyklen sind idempotent (Test
+      "Idempotenz über den ECHTEN Lade-Pfad").
+    - **Residuale HTML-Fallback-Fälle (Merge-Zellen/mehrere Absätze, NUR
+      per Paste erreichbar) rendert die Ansicht jetzt mit einem kurzen,
+      sichtbaren Hinweis statt der HTML-Wüste** – Auftrag ausdrücklich:
+      "still verloren" UND "HTML-Wüste" sind beide schlechter als ein
+      kurzer Hinweis. `RAW_TABLE_HTML_RE` (`markdown.jsx`) erkennt eine
+      Zeile, die mit `<table` beginnt (GENAU die Form, die
+      `getHTMLFromFragment` erzeugt), und rendert einen kompakten,
+      bernsteinfarbenen Hinweiskasten ("… kann nicht dargestellt werden …
+      bitte im Editor öffnen") – BEWUSST KEIN `dangerouslySetInnerHTML` des
+      rohen HTML (das wäre der im Auftrag benannte "größere Eingriff" mit
+      eigener Sicherheitsabwägung für nutzergenerierten/eingefügten
+      Inhalt) und keine Interpretation des HTML-Inhalts. Die Daten selbst
+      bleiben unangetastet im Markdown-Dokument, der Editor liest sie
+      weiterhin korrekt als Tabelle ein.
+    - **Aktiv verifiziert (Auftrag: Regressionstest muss ohne Fix rot
+      sein):** `tests/markdownTableInlineMedia.test.jsx`, erster Test –
+      mit `imgM` testweise auf `null` gezwungen (`IMG_INLINE_RE` nie
+      geprüft, exakt der Vor-Fix-Zustand) lieferten 3 der 7 Tests
+      `![QA-Bild](img:xyz)` als sichtbaren Literaltext statt eines echten
+      `<img>` – Fix wiederhergestellt, alle grün.
+    - **Review-Nachbesserung (v7.48, noch vor dem Commit): Der erste Fix
+      deckte NUR die Zelle mit `childCount === 1` ab – ein Bild/eine Formel
+      in eine Zelle mit BEREITS VORHANDENEM Text eingefügt (Cursor hinter
+      "b", Formel-Knopf) blieb weiterhin im HTML-Fallback.** Der Reviewer
+      hat die realistischen Toolbar-Pfade durchgemessen: `BlockImage`/
+      `MathBlock` sind `group:"block"`, ProseMirror spaltet den
+      umschließenden Absatz beim Einfügen auf – die Zelle hat danach
+      MEHRERE Kinder (Absatz-Fragmente PLUS Atom, teils leer als
+      Einfüge-Artefakt). `cell.childCount > 1` schickte JEDE dieser
+      Varianten unverändert in den HTML-Fallback → für den Nutzer optisch
+      derselbe Effekt wie der ursprünglich gemeldete Blocker (Hinweiskasten
+      statt Bild/Formel). Empirisch nachgebaut (Skript-Probe mit
+      `insertContent`/`focus("end")`): Cursor am Ende von "b" + Formel
+      erzeugt `[paragraph("b"), mathBlock]` (KEIN Absatz-Rest danach);
+      Cursor MITTEN im Text erzeugt `[paragraph("vor"), mathBlock,
+      paragraph(" nach")]` (die vorhandene Leerstelle landet zufällig auf
+      EINER Seite, je nach exakter Cursor-Position) – ProseMirror fügt beim
+      Aufspalten selbst NIE ein Leerzeichen ein.
+      - **Fix:** `cellChildrenInlineable`/`gfmSerializable` (DocEditor.jsx)
+        akzeptieren jetzt eine Zelle, deren Kinder AUSSCHLIESSLICH aus
+        Absätzen und den beiden `INLINE_ATOM_TYPES` bestehen, UND
+        (mindestens ein Atom vorhanden ist ODER höchstens ein einziger
+        nicht-leerer Absatz existiert). Die zweite Bedingung hält die
+        Grenze bewusst SCHARF gegen "echte" mehrere Absätze OHNE jedes Atom
+        (nur per Paste erreichbar, Test "zwei Absätze in derselben Zelle"
+        bleibt unverändert im HTML-Fallback) – zwei komplett eigenständige
+        Absätze sind keine Bruchstücke EINER Zeile, sondern echte, eigene
+        Zeilen; eine GFM-Pipe-Zelle ist aber strukturell IMMER genau eine
+        Zeile. `renderCellChildrenInline` baut die Pipe-Zeile jetzt aus
+        JEDEM Kind einzeln zusammen (leere Absätze tragen nichts bei, jedes
+        Atom über `writeInlineAtom`) und fügt zwischen zwei Fragmenten GENAU
+        DANN ein Leerzeichen ein, wenn WEDER das Ende des einen NOCH der
+        Anfang des anderen bereits Whitespace ist – verhindert das vom
+        Reviewer benannte Kleben ("b![…]" statt "b ![…]"), ohne bei
+        bereits vorhandenem Leerzeichen ein zweites zu erzwingen (per Test
+        abgesichert). Jedes Fragment wird dafür zuerst in einen isolierten
+        Puffer geschrieben (`state.out`/`state.delim` temporär getauscht) –
+        sonst hätte eine Tabelle INNERHALB eines eingerückten Listenpunkts
+        den Einzug-Präfix mitten in die Zeile geschrieben (frisch geleerter
+        Puffer sieht für `state.atBlank()` wie ein Zeilenanfang aus).
+      - **Tests:** `tests/docEditorTableMixedCells.test.jsx` (neu, 11
+        Fälle) – Text davor/danach/davor+danach, bereits vorhandenes
+        Leerzeichen (kein Doppel-Leerzeichen), Bild mit Text davor, mehrere
+        Atome gemischt (Bild+Formel ohne Text), Kopfzelle mit Text+Bild,
+        `<br>`-Umbruch mit zusätzlichem Bild – jeweils Roundtrip,
+        Idempotenz UND Ansichts-Nachweis (`DocView` zeigt eine ECHTE Tabelle
+        mit Bild/Formel in der Zelle, kein Hinweiskasten). Aktiv rot
+        verifiziert: mit der alten `childCount === 1`-Regel scheiterten 8
+        von 11 Tests exakt an den neuen Mehrkind-Fällen.
+      - **Zusätzlich gefunden UND behoben (Formel-Escaping):** Ein rohes
+        `"|"` im TeX (z. B. Betragsstriche `|x|`) würde die Pipe-Zeile in
+        eine zusätzliche Spalte auftrennen. Generisches `"\|"`-Escaping
+        (wie bei normalem Zelltext) ist hier NICHT sicher – `\|` ist in
+        LaTeX selbst ein bedeutungstragender Befehl (Parallelstriche `‖`).
+        Stattdessen `\vert` (`texSafeForTableCell`, DocEditor.jsx) – mit
+        KaTeX empirisch geprüft (gerenderte MathML/HTML-Ausgabe abzüglich
+        der reinen TeX-Annotation ist BYTE-IDENTISCH zu `|`, auch bei
+        `||x||` → `\vert\vert x\vert\vert`). Trennzeichen NUR vor einem
+        UNMITTELBAR folgenden Buchstaben (TeX-Control-Words verschlucken
+        jeden folgenden Buchstaben als Teil des Befehlsnamens, `\vertx`
+        wäre ein undefiniertes Makro) – NICHT vor Ziffern/Symbolen/
+        Zeilenende. Der Zeilenende-Fall ist besonders wichtig: Ein erster
+        Entwurf hängte IMMER ein Leerzeichen an – "$\vert x\vert $" hat
+        dann ABER ein Leerzeichen UNMITTELBAR vor dem schließenden `$`, und
+        `MATH_TOKEN_RE` (math.jsx) verlangt für die schließende Formel-
+        Grenze zwingend `(?<!\s)` – die Formel wurde dadurch für die eigene
+        Ansicht UNSICHTBAR (blieb als rohes `$…$`-Literal stehen). Aktiv
+        rot verifiziert, dann auf die schlankere "nur vor Buchstaben"-Regel
+        korrigiert. Angewendet in `writeInlineAtom` (bare mathBlock-Atom)
+        UND in `MathInline`s eigenem Serializer (`state.inTable`-Zweig) –
+        dieselbe Formel-als-Text-neben-Text-Situation hatte über
+        `state.renderInline` schon vorher exakt dasselbe Pipe-Risiko.
+        Außerhalb einer Tabelle bleibt `"|"` im TeX unverändert (kein Grund,
+        dort von der 1:1-Notation abzuweichen).
+    - **`RAW_TABLE_HTML_RE` verschärft (Review-Fund 🔵): Ein normaler Satz,
+      der zufällig mit `"<table"` beginnt, verschwand fälschlich hinter dem
+      Hinweiskasten** (`"<table> ist ein HTML-Element."` → Nutzertext weg,
+      obwohl im Markdown erhalten). Der echte HTML-Fallback schreibt die
+      komplette Tabelle IMMER als eine einzige, in sich geschlossene Zeile,
+      die mit `</table>` ENDET – die Signatur prüft jetzt Anfang UND Ende
+      derselben Zeile (`/^<table[\s>][\s\S]*<\/table>$/i` statt nur den
+      Zeilenanfang). Bewusste Restgrenze (wie bei `<span>`/`<mark>` seit
+      v7.15 etabliert): ein Nutzer, der einen Absatz wörtlich mit `"<table"`
+      beginnt UND ihn zufällig mit `"</table>"` beenden lässt (praktisch nie
+      absichtlich getippt), sieht den Hinweiskasten statt seines Texts –
+      extrem unwahrscheinlich, gleiche Kategorie wie die bestehenden
+      reservierten Tag-Präfixe.
+    - **Hinweistext angepasst:** Nach der Review-Nachbesserung oben ist der
+      HTML-Fallback praktisch nur noch per Copy&Paste erreichbar (verbundene
+      Zellen oder "echte" mehrere Absätze ohne jedes Atom) – der Text nennt
+      das jetzt explizit ("Inhalt aus einer komplexeren, meist per Copy &
+      Paste eingefügten Struktur") statt pauschal nur "verbundene Zellen" zu
+      nennen, was nach der Erweiterung nicht mehr der repräsentative Regelfall
+      gewesen wäre.
+    - **Verbleibendes, bewusst akzeptiertes Restrisiko:** Eine Zelle mit
+      MEHREREN echten (nicht-leeren) Absätzen OHNE jedes Bild-/Formel-Atom
+      (z. B. zwei per Copy&Paste eingefügte Absätze) bleibt weiterhin im
+      HTML-Fallback – strukturell nicht von "zwei Absätzen, die ein Atom
+      auseinandergerissen hat" unterscheidbar wäre nur über eine (hier
+      bewusst nicht eingeführte) Heuristik zur Adjazenz möglich; siehe
+      Nicht-Regressions-Test "zwei Absätze in derselben Zelle".
+
+99. **v7.48, Fehler 2 (🟡, E2E-Befund): Ein Codeblock lässt sich über den
+    Toolbar-Knopf NICHT innerhalb eines Listenpunkts anlegen – er wird
+    komplett aus der Liste herausgehoben.** Repro: Stichpunkt anlegen,
+    Enter, Tab (Unterpunkt entsteht korrekt), dann „Codeblock“-Knopf – der
+    Kasten landet als Geschwister NEBEN der Liste, bündig links, keine
+    Verschachtelung mehr. Der v7.46-Fix selbst (kein Wachstum, Leerzeile
+    bleibt erhalten, Eintrag #94) ist davon NICHT betroffen – er greift für
+    einen BEREITS verschachtelten Codeblock (z. B. per Chat/KI im Dokument
+    gelandet), nicht für dessen ERZEUGUNG über den Toolbar-Knopf.
+    - **Ursache, genau eingegrenzt (aktiv per Unit-Test verifiziert, siehe
+      `tests/docEditorCodeInList.test.jsx`):** `@tiptap/extension-list-item`
+      nutzt standardmäßig `content: "paragraph block*"` – der ERSTE
+      Kindknoten eines Listenpunkts MUSS exakt vom Typ `paragraph` sein
+      (nicht nur irgendein `"block"`). `toggleCodeBlock` (genauer:
+      `@tiptap/core#setNode`) versucht zuerst `setBlockType` – ersetzt GENAU
+      den Textblock mit dem Cursor IN PLACE durch einen Codeblock. Bei
+      einem Listenpunkt mit nur einem Absatz (der Normalfall direkt nach
+      Enter/Tab) verletzt das Content-Modell (Position 0 verlangt
+      `paragraph`), `setBlockType` schlägt fehl. `setNode` fällt darauf auf
+      `commands.clearNodes()` zurück – das glättet ALLE umschließenden
+      Listen-/Absatz-Wrapper zu einer flachen Absatzfolge, BEVOR
+      `setBlockType` erneut (diesmal erfolgreich, weil kein `ListItem` mehr
+      im Weg steht) versucht wird. Ergebnis: der Codeblock landet als
+      Geschwister NEBEN der (jetzt komplett aufgelösten) Liste. Per
+      Kontroll-Test bestätigt: ein bereits vorhandener ZWEITER Absatz
+      DESSELBEN Listenpunkts lässt sich sehr wohl verwandeln, OHNE die
+      Liste zu verlassen (die Content-Regel betrifft NUR Position 0) – das
+      Problem ist also wirklich nur "Codeblock als ERSTER Inhalt eines
+      Listenpunkts", nicht "Codeblock in einer Liste" allgemein.
+    - **Entscheidung (Auftrag: begründet zwischen "Editor befähigen" und
+      "Testfall umschreiben" wählen): Testfall umschreiben, Editor NICHT
+      ändern.** Eine eigene `ListItem`-Erweiterung mit z. B.
+      `content: "block+"` hätte einen unverhältnismäßig hohen Blast-Radius
+      für einen 🟡-Befund: `sinkListItem`/`liftListItem`
+      (Einrückung/Tab-Shift-Tab, Eintrag #81), `convertListItemTypeCommand`
+      (Listentyp-Wechsel, Einträge #83/#84) und die "kein doppelter
+      Einzug"-Logik bauen an mehreren Stellen STILLSCHWEIGEND auf "erstes
+      Kind eines Listenpunkts ist ein Absatz" auf (siehe die zahlreichen
+      Listen-Spezialfälle in `DocEditor.jsx`) – eine Schema-Änderung hier
+      bräuchte eine eigene, breit angelegte Testrunde gegen ALLE diese
+      Interaktionen, unverhältnismäßig zum Nutzen (ein seltener,
+      umgehbarer Toolbar-Randfall).
+    - **D6b (`docs/TESTFAELLE.md`) umgeschrieben** auf den tatsächlich
+      funktionierenden Weg: ein per Chat/KI bereits verschachtelt erzeugter
+      Codeblock unter einem Stichpunkt (GENAU der Weg, den Eintrag #94/der
+      v7.46-Fix absichert) – mit explizitem Hinweis, dass der Toolbar-Weg
+      eine bekannte, NICHT zu meldende Editor-Grenze ist. Der
+      v7.46-Regressionsschutz bleibt dadurch UNVERÄNDERT gültig (die
+      bestehenden Unit-Tests in `tests/docEditorCodeInList.test.jsx`
+      decken genau diesen Lade-Pfad bereits lückenlos ab).
+    - **Neuer Unit-Test pinnt die Editor-Grenze bewusst** (kein
+      Pro-forma-Test: schlägt fehl, sobald sich das zugrunde liegende
+      TipTap/ProseMirror-Verhalten ändert – dann müssen diese Analyse UND
+      D6b neu geprüft werden), damit Doku und Realität nicht unbemerkt
+      auseinanderlaufen.
+
+100. **v7.48, Fehler 3 (🔵, Verdacht auf Off-by-one): Das Tabellen-
+     Größen-Raster sollte angeblich keine einspaltige Tabelle erlauben.**
+     Verdacht: Zelle (1,1) im Raster erzeuge eine 2×2- statt einer
+     2×1-Tabelle, Zeilen UND Spalten würden je um 1 erhöht.
+     - **Befund nach Prüfung (Quellcode UND empirischer Test, siehe
+       `tests/docEditorTableGrid.test.jsx`): KEIN Bug.** Der Aufruf
+       `insertTable({ rows: r + 1, cols: c, withHeaderRow: true })`
+       übernimmt die Spaltenzahl `c` UNVERÄNDERT 1:1 aus der Rasterauswahl
+       – NUR die Zeilenzahl bekommt bewusst `+1` (für die verpflichtende
+       Kopfzeile, `withHeaderRow: true`). Ein Test mit der KLEINSTMÖGLICHEN
+       Rasterauswahl (oben links, `r=1, c=1`) liefert nachweislich
+       `rows: 2, cols: 1` – eine 1-spaltige, 2-zeilige Tabelle (Kopf + 1
+       Datenzeile), GENAU die "2×1-Tabelle", die laut Verdacht nur über
+       „−Spalte" nachträglich erreichbar sein sollte. `docs/TESTFAELLE.md`
+       (D2b/D2c, seit v7.44/v7.46) verlangt bereits unabhängig davon "Im
+       Editor eine 2×1-Tabelle anlegen" OHNE einen anderen Weg als das
+       Raster zu erwähnen – ein zweites, unabhängiges Indiz, dass das schon
+       immer funktioniert hat.
+     - **Keine Code-Änderung, keine Testfall-Anpassung nötig** (der
+       Auftrag verlangte eine Anpassung NUR "falls es ein Fehler ist") –
+       D2b/D2c bleiben unverändert korrekt. Ein neuer Regressionstest
+       (`tests/docEditorTableGrid.test.jsx`) pinnt die Zeilen-/
+       Spaltenzahl für mehrere Rasterauswahlen (inkl. der Randfälle 1×1 und
+       6×6) UND die Quelltext-Arithmetik selbst, damit ein künftiges
+       Off-by-one (in `insertTable` ODER in der Rasterindex-Berechnung)
+       sofort auffällt.
