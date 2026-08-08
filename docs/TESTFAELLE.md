@@ -1444,9 +1444,15 @@ als Literaltext zu werden.
 **D19-Nachtrag 2 [VERBUNDEN] Ein leerer ERSTER Punkt einer Checkliste
 bleibt ebenfalls erhalten (v7.45.1, Review-Nachbesserung zu D19-Nachtrag –
 siehe DECISIONS #92).** Editor öffnen, per Toolbar-Knopf „Checkliste“ eine
-neue Checkliste beginnen, den ALLERERSTEN Punkt bewusst LEER lassen (Enter
-drücken, ohne Text einzutippen), direkt danach einen zweiten Punkt mit
-Text füllen („QA-LeerErst zwei“). Speichern, Seite neu laden. Erwartet:
+neue Checkliste beginnen. Den ALLERERSTEN Punkt bewusst LEER lassen –
+**aber nicht per Enter auf dem leeren Punkt** (E2E-Befund 2026-08-08:
+`Enter` auf einem leeren Listenpunkt hebt ihn aus der Liste heraus, es
+bleibt ein normaler Absatz und die Checkliste verschwindet ganz. Das ist
+dasselbe gewollte Word-Verhalten wie in D15c, KEIN Fehler – auf diesem
+Weg entsteht der Testzustand aber nie). Stattdessen: ersten Punkt mit
+irgendeinem Text füllen, Enter, zweiten Punkt „QA-LeerErst zwei“ tippen,
+dann in den ersten Punkt zurückklicken und dessen Text löschen. Speichern,
+Seite neu laden. Erwartet:
 Der erste Punkt bleibt eine leere Checkbox (nicht verschwunden, nicht
 Literaltext). Editor erneut öffnen und OHNE Änderung schließen: kein
 Commit (No-op-Roundtrip). Wiederholen für:
