@@ -32,9 +32,55 @@
 /* dieselbe Titelzeilen-/Adressierungs-Logik wie delete_chapter - der     */
 /* bisherige Helfer findDeletableChapter() dient jetzt BEIDEN Op-Typen    */
 /* und heißt deshalb neutraler findAddressableChapter().                 */
+/* v7.50 (delete_entry/move_entry-Ops, Live-Vorfall bison.box – siehe     */
+/* DECISIONS #103): zwei neue, ZEILEN-genaue Op-Typen für EINZELNE        */
+/* Einträge (eine Zeile, ggf. mit stärker eingerückten Kinderzeilen) -    */
+/* bisher gab es dafür NUR die abschnitts-/kapitel-granularen Ops         */
+/* (delete_section/delete_chapter hätten den GANZEN Abschnitt/das GANZE   */
+/* Kapitel gelöscht). Live-Vorfall: ein Versuch, EINEN Inbox-Eintrag      */
+/* unter ein anderes Kapitel zu verschieben, zerstörte per rewrite die    */
+/* komplette Inbox; ein zweiter Versuch nutzte delete_section auf         */
+/* "Inbox" als Lösch-Schritt - hätte ebenfalls den GANZEN Abschnitt        */
+/* gelöscht (schlug nur zufällig fehl) und hinterließ den Eintrag          */
+/* dupliziert. delete_entry entfernt GENAU EINEN, per exaktem oder         */
+/* (nur wenn kein exakter Treffer existiert) eindeutigem Substring-Match   */
+/* gefundenen Eintrag samt seiner Kinderzeilen; move_entry verschiebt ihn  */
+/* ATOMAR (Quelle+Ziel in EINEM Op, ALLE Prüfungen laufen VOLLSTÄNDIG vor  */
+/* jeder Änderung am Zeilen-Array) innerhalb EINES Notizbuchs - die        */
+/* Ziel-Einfügung nutzt dieselben Such-Helfer (findChapter/findSection/    */
+/* firstSectionInChapter/findAddressableChapter/padEnd) wie               */
+/* append_to_section/append_to_chapter, um NICHT von deren geprüftem       */
+/* Anlage-Verhalten abzuweichen. Sicherheitsgarantie: eine #/##-           */
+/* Strukturzeile wird NIE als Eintrag gematcht (BOUNDARY_RE-Filter, wie    */
+/* überall in dieser Datei) - bei Mehrdeutigkeit (>1 Treffer) wird NICHTS  */
+/* angefasst, nie geraten (siehe applyOne/explainSkip unten).             */
+/* v7.50.1 (Review-Fix, kritischer Fund, siehe DECISIONS #104):            */
+/* entryBlockRange() (Ermittlung des Eintragsblocks für delete_entry/       */
+/* move_entry) war ENTGEGEN dem eigenen Fence-Awareness-Grundsatz dieser    */
+/* Datei NICHT fence-aware - ein eingerücktes ```-Kind mit einer Leerzeile  */
+/* oder einer Spalte-0-Codezeile DARIN riss den Block MITTEN im Codeblock   */
+/* auseinander (delete_entry: Datenverlust an Codeinhalt; move_entry: nur   */
+/* der öffnende Zaun wanderte mit, Rest blieb als Waise in der Quelle).     */
+/* entryBlockRange() bezieht einen an der Trefferzeile/ihren Kindern         */
+/* anschließenden GESCHLOSSENEN Fence-Block jetzt IMMER GANZ oder GAR NICHT  */
+/* ein (matchFenceBlock aus code.jsx); dedentBlock() klammert die Einrück-   */
+/* ungs-Reduktion zusätzlich PRO ZEILE auf deren eigene Einrückung, damit    */
+/* Fence-Innenzeilen mit geringerer Einrückung als die Trefferzeile beim     */
+/* Ziel-Insert von move_entry nicht am Anfang beschnitten werden.           */
+/* v7.50.2 (Nachbesserungs-Finding, Struktur-Injektion, siehe DECISIONS      */
+/* #103/#104): dedentBlock() konnte eine eingerückte Zeile, die WEGEN ihrer  */
+/* Einrückung bisher NICHT als "#"/"##"-Strukturzeile galt (z. B. ein als    */
+/* Kind eingerücktes "# Kommentar mit Raute" unter einem Listenpunkt), durch */
+/* die volle Dedentierung auf Spalte 0 ERST zu einer ECHTEN Kapitelzeile     */
+/* machen - aus Inhalt wurde Struktur, der Zielabschnitt endete am Ziel      */
+/* vorzeitig (tidy() fügte sogar eine Leerzeile davor ein). Matcht die       */
+/* volle Dedentierung einer Zeile BOUNDARY_RE, die Originalzeile aber nicht, */
+/* bleibt jetzt PRO ZEILE (nicht nur bei der Trefferzeile) ein führendes     */
+/* Whitespace-Zeichen stehen - Fence-Innenzeilen bleiben davon unberührt     */
+/* (dort schützt bereits der mitwandernde Zaun selbst, siehe v7.50.1).       */
 /* ------------------------------------------------------------------ */
 
-import { computeFenceLineMask } from "./code.jsx";
+import { computeFenceLineMask, matchFenceBlock } from "./code.jsx";
 
 const HEAD_RE = /^##\s+/;
 // EIN "#" gefolgt von Whitespace – matcht bewusst NICHT "## "/"### " (nach
@@ -262,6 +308,225 @@ function padEnd(lines) {
   lines.push("");
 }
 
+// v7.50 (delete_entry/move_entry, DECISIONS #103): Whitespace-normalisierter
+// Vergleichstext für das Eintrags-Matching – trimmt UND kollabiert innere
+// Whitespace-Läufe (Mehrfach-Leerzeichen, Tabs, Zeilenumbrüche im entry-Feld)
+// zu je einem Leerzeichen, damit z. B. ein vom Modell leicht anders
+// eingerücktes/umgebrochenes "entry" trotzdem den exakten Zeileninhalt trifft.
+const norm = (s) => String(s || "").trim().replace(/\s+/g, " ");
+
+// Bestimmt den Such-BEREICH [s, e) für delete_entry/move_entry (Quelle bzw.
+// alleiniger Scope) – DIESELBE Adressierungs-Logik wie bei den ##-Abschnitts-
+// Ops, aber rein LESEND (legt NIE etwas an, anders als append_to_section/
+// append_to_chapter mit fehlendem chapter): "heading" gesetzt -> exakt dieser
+// Abschnitt (optional zusätzlich per "chapter" auf EIN Kapitel eingegrenzt,
+// wie findSection(..., range) es auch bei den bestehenden Ops tut); NUR
+// "chapter" gesetzt -> das GESAMTE Kapitel (Kopfzeile-Bereich inkl. Präambel
+// und aller ##-Abschnitte, wie findChapter es liefert); beides leer -> das
+// gesamte Dokument. "notFound" unterscheidet "chapter" (die Kapitel-
+// Eingrenzung existiert nicht – Suche kann gar nicht erst laufen) von
+// "heading" (der Abschnitt selbst wurde im an sich vorhandenen Scope nicht
+// gefunden) – explainSkip() unten braucht das für zwei unterschiedliche
+// Meldungen. Von applyOne UND explainSkip genutzt (kein zweiter
+// Entscheidungspfad, Grundprinzip dieser Datei).
+function entryScope(lines, headingField, chapterField) {
+  const headingDisp = dispHead(headingField);
+  const chapterDisp = dispHead(chapterField);
+  if (headingDisp) {
+    let chRange = null;
+    if (chapterDisp) {
+      chRange = findChapter(lines, chapterField);
+      if (!chRange) return { range: null, notFound: "chapter" };
+    }
+    const sec = findSection(lines, headingDisp, chRange);
+    if (!sec) return { range: null, notFound: "heading" };
+    return { range: sec, notFound: null };
+  }
+  if (chapterDisp) {
+    const chRange = findChapter(lines, chapterField);
+    if (!chRange) return { range: null, notFound: "chapter" };
+    return { range: chRange, notFound: null };
+  }
+  return { range: [0, lines.length], notFound: null };
+}
+
+// Findet die Zeilen INNERHALB von range, die als "entry" gelten könnten
+// (v7.50, delete_entry/move_entry) – Kandidaten sind alle NICHT fence-
+// maskierten (computeFenceLineMask, wie überall in dieser Datei) UND KEINE
+// Struktur-Zeilen (BOUNDARY_RE: "#"/"##" – NIE ein Kapitel/Abschnitt als
+// "Eintrag" behandeln, die zentrale Sicherheitsgarantie dieser beiden
+// Op-Typen). Zweistufiges Matching: Stufe 1 EXAKT (norm()-Vergleich,
+// Groß-/Kleinschreibung UND Whitespace-Läufe sensitiv reduziert) – liefert
+// Stufe 1 mindestens einen Treffer, gewinnt sie AUSSCHLIESSLICH (Stufe 2 läuft
+// dann gar nicht). NUR wenn Stufe 1 leer bleibt, Stufe 2: case-insensitiver
+// Substring-Match. Rückgabe: alle Treffer-Zeilenindizes (0, 1 oder mehr) –
+// der Aufrufer entscheidet über Skip (0)/Ambiguität (>1)/Erfolg (genau 1).
+function findEntryLines(lines, range, entryText) {
+  const needle = norm(entryText);
+  if (!needle) return [];
+  const mask = computeFenceLineMask(lines);
+  const candidates = [];
+  for (let i = range[0]; i < range[1]; i++) {
+    if (mask[i]) continue;
+    if (BOUNDARY_RE.test(lines[i])) continue;
+    candidates.push(i);
+  }
+  const exact = candidates.filter((i) => norm(lines[i]) === needle);
+  if (exact.length) return exact;
+  const needleLower = needle.toLowerCase();
+  return candidates.filter((i) => norm(lines[i]).toLowerCase().includes(needleLower));
+}
+
+// Liefert den vollständigen EINTRAGSBLOCK [s, e) ab einer bereits gefundenen
+// Trefferzeile (v7.50): die Trefferzeile selbst PLUS alle direkt folgenden
+// Zeilen mit GRÖSSERER Einrückung (mehr führende Leerzeichen als die
+// Trefferzeile – verschachtelte Kinder wandern mit). Eine Leerzeile ODER eine
+// nicht stärker eingerückte Zeile beendet den Block sofort.
+// v7.50.1 (Review-Fix, kritischer Fund, siehe DECISIONS #104): FENCE-AWARE
+// gemacht – vorher wurde ein eingerücktes ```-Kind rein über Leerzeile/
+// Einrückung abgetastet, GENAU wie normaler Text. Ein Codeblock DARF aber
+// Leerzeilen und (bei Spalte-0-Code) schwächer eingerückte Zeilen ENTHALTEN,
+// ohne dass der Eintrag dort "endet" – der alte Scan riss den Block an der
+// erstbesten solchen Zeile MITTEN im Fence auseinander (Datenverlust bzw.
+// halber Zaun bei move_entry, siehe Review-Befund). "end" trifft beim
+// sequenziellen Vorrücken (Einzelschritt ODER Sprung direkt hinter einen
+// bereits eingeschlossenen Block) IMMER zuerst die ÖFFNENDE Zaunzeile eines
+// GESCHLOSSENEN Blocks (computeFenceLineMask markiert pro Block einen
+// zusammenhängenden Bereich – der erste maskierte Index kann daher nie ein
+// Zauninneres sein). Unterschreitet/erreicht die ÖFFNENDE Zaunzeile selbst
+// die Einrückungsgrenze (wie jede andere zu schwach eingerückte Zeile), endet
+// der Block VOR dem Fence ("break"); sonst gehört der GESAMTE Fence-Block
+// (inkl. aller Leerzeilen/Spalte-0-Zeilen DARIN) atomar zum Eintrag –
+// matchFenceBlock() liefert hier GARANTIERT ein Ergebnis (dieselbe Erkennung,
+// die computeFenceLineMask bereits benutzt hat, um mask[end] auf true zu
+// setzen).
+function entryBlockRange(lines, hitIdx) {
+  const indentOf = (l) => l.length - l.trimStart().length;
+  const baseIndent = indentOf(lines[hitIdx]);
+  const mask = computeFenceLineMask(lines);
+  let end = hitIdx + 1;
+  while (end < lines.length) {
+    if (mask[end]) {
+      if (indentOf(lines[end]) <= baseIndent) break;
+      const block = matchFenceBlock(lines, end);
+      end = block.endIdx + 1;
+      continue;
+    }
+    const l = lines[end];
+    if (l.trim() === "" || indentOf(l) <= baseIndent) break;
+    end++;
+  }
+  return [hitIdx, end];
+}
+
+// Hebt die führende Einrückung eines per entryBlockRange() ermittelten Blocks
+// auf 0 an (v7.50, NUR für move_entry-Zielinserts relevant – delete_entry
+// löscht den Block unverändert, ohne ihn neu einzufügen): Kinderzeilen werden
+// um DASSELBE Delta reduziert, die relative Struktur zueinander bleibt also
+// erhalten. War die Trefferzeile bereits nicht eingerückt (delta 0), liefert
+// die Funktion den Block unverändert zurück (kein unnötiger Array-Kopieren).
+// v7.50.1 (Review-Fix, siehe DECISIONS #104): PRO ZEILE auf die tatsächliche
+// EIGENE Einrückung geklammert (Math.min(delta, indentOf(l))) statt pauschal
+// delta abzuschneiden – seit der Fence-Awareness oben können Fence-
+// INNENZEILEN (echter Code-Inhalt) im Block stecken, deren Einrückung
+// GERINGER als delta ist (z. B. Spalte-0-Code in einem eingerückten
+// Codeblock-Kind, oder eine Leerzeile). Ein pauschales l.slice(delta) hätte
+// dort führende CODE-ZEICHEN statt nur Whitespace abgeschnitten
+// (Byte-Verstümmelung des Codeinhalts). Für alle "normalen" Kinderzeilen
+// (deren Einrückung laut entryBlockRange-Kontrakt IMMER > baseIndent === delta
+// ist) bleibt das Verhalten zur alten, gepinnten Logik identisch.
+// v7.50.2 (Nachbesserungs-Finding, Struktur-Injektion, siehe DECISIONS #103/
+// #104): eine Zeile, die WEGEN ihrer Einrückung bisher NICHT als "#"/"##"-
+// Strukturzeile galt (BOUNDARY_RE griff nicht, weil sie nicht bei Spalte 0
+// beginnt – z. B. ein als Kind eingerücktes "# Kommentar mit Raute" unter
+// einem Listenpunkt), darf durchs volle Dedent NICHT ERST zu einer ECHTEN
+// Kapitel-/Abschnittszeile werden: am Ziel würde tidy() davor sogar eine
+// Leerzeile einfügen und der Zielabschnitt für jede spätere findSection/
+// findChapter-Suche vorzeitig "enden" – aus Inhalt würde Struktur. Prüfung
+// PRO ZEILE (nicht nur die erste), weil grundsätzlich jede Zeile des Blocks
+// betroffen sein könnte: matcht die volle Dedentierung BOUNDARY_RE, obwohl
+// die ORIGINALZEILE es nicht tat, bleibt EIN führendes Leerzeichen stehen
+// (l.slice(cut - 1) statt l.slice(cut) – nimmt das ORIGINALE Whitespace-
+// Zeichen an dieser Position, kein hartcodiertes " ", funktioniert daher
+// auch bei Tabs). Fence-INNENZEILEN (mask[i], siehe computeFenceLineMask)
+// sind davon ausdrücklich AUSGENOMMEN: sie bleiben unverändert Sache des
+// bestehenden Math.min-Clamps oben – ein Fence-Zaun schützt seinen Inhalt
+// bereits strukturell (wandert komplett mit, siehe entryBlockRange), eine
+// zusätzliche Leerzeichen-Injektion dort wäre reine, unnötige Byte-
+// Verfälschung von echtem Code-Inhalt (z. B. ein Shell-Kommentar "# …" bei
+// Spalte 0 IM Codeblock ist gültiger, unveränderlicher Inhalt).
+function dedentBlock(blockLines) {
+  if (!blockLines.length) return blockLines;
+  const indentOf = (l) => l.length - l.trimStart().length;
+  const delta = indentOf(blockLines[0]);
+  if (!delta) return blockLines;
+  const mask = computeFenceLineMask(blockLines);
+  return blockLines.map((l, i) => {
+    const cut = Math.min(delta, indentOf(l));
+    const out = l.slice(cut);
+    if (!mask[i] && cut > 0 && !BOUNDARY_RE.test(l) && BOUNDARY_RE.test(out)) {
+      return l.slice(cut - 1); // EIN Whitespace-Zeichen der Originalzeile bleibt stehen
+    }
+    return out;
+  });
+}
+
+// Ziel-Einfügung für move_entry MIT gesetztem "to_heading" (v7.50) –
+// append_to_section-Semantik (v7.23-konsistent): der Ziel-Abschnitt wird
+// angelegt, falls er fehlt, ein zusätzlich gesetztes Ziel-Kapitel ebenso;
+// Einfüge-Position ist wie bei append_to_section das Abschnittsende
+// (Leerzeilen davor werden übersprungen). Eigenständige, kleine Funktion
+// statt eines dritten Aufrufs des applyOne-internen op.chapter/op.heading-
+// Blocks weiter unten, weil move_entry KEIN "op.content" hat, sondern einen
+// bereits fertigen Zeilen-Block (den bewegten Eintrag) einfügt – nutzt aber
+// dieselben Such-Helfer (findChapter/findSection/padEnd) wie jener Block, um
+// NICHT vom geprüften Anlage-Verhalten abzuweichen. Mutiert "lines" direkt
+// (push/splice), wie die übrigen Op-Zweige dieser Datei.
+function insertEntryIntoSection(lines, headingDisp, chapterField, blockLines) {
+  let range = null;
+  if (chapterField) {
+    range = findChapter(lines, chapterField);
+    if (!range) {
+      padEnd(lines);
+      const chapterLineIdx = lines.length;
+      lines.push("# " + dispHead(chapterField), "");
+      range = [chapterLineIdx, lines.length];
+    }
+  }
+  const b = findSection(lines, headingDisp, range);
+  if (!b) {
+    if (range) {
+      lines.splice(range[1], 0, "## " + headingDisp, "", ...blockLines, "");
+    } else {
+      padEnd(lines);
+      lines.push("## " + headingDisp, "", ...blockLines, "");
+    }
+    return;
+  }
+  let at = b[1];
+  while (at > b[0] + 1 && lines[at - 1].trim() === "") at--;
+  lines.splice(at, 0, ...blockLines);
+}
+
+// Ziel-Einfügung für move_entry mit NUR gesetztem "to_chapter" (v7.50) –
+// append_to_chapter-Semantik: identisch zum bestehenden append_to_chapter-
+// Zweig in applyOne (Präambel-Einfügung VOR dem ersten ##-Abschnitt, fehlendes
+// Kapitel wird am Dokumentende angelegt) – nutzt denselben
+// findAddressableChapter()/firstSectionInChapter()-Unterbau, damit beide
+// Op-Typen GARANTIERT dasselbe Anlage-/Einfüge-Verhalten zeigen.
+function insertEntryIntoChapterPreamble(lines, chapterField, blockLines) {
+  const chapterDisp = dispHead(chapterField);
+  const { range } = findAddressableChapter(lines, chapterField);
+  if (!range) {
+    padEnd(lines);
+    lines.push("# " + chapterDisp, "", ...blockLines);
+    return;
+  }
+  let at = firstSectionInChapter(lines, range);
+  while (at > range[0] + 1 && lines[at - 1].trim() === "") at--;
+  lines.splice(at, 0, ...blockLines);
+}
+
 function applyOne(text, op) {
   if (!op || typeof op !== "object") return text;
 
@@ -346,6 +611,63 @@ function applyOne(text, op) {
     while (at > range[0] + 1 && chLines[at - 1].trim() === "") at--;
     chLines.splice(at, 0, ...content.split("\n"));
     return tidy(chLines);
+  }
+
+  // v7.50 (delete_entry-Op, Live-Vorfall bison.box – siehe DECISIONS #103):
+  // eigener Zweig, VOR der "heading"-Adressierung unten platziert – "heading"
+  // ist bei delete_entry OPTIONAL (nur eine von drei möglichen Scope-
+  // Eingrenzungen, siehe entryScope), ein Zweig NACH der "const disp ="-Zeile
+  // würde eine Op OHNE heading (z. B. nur mit "chapter" oder ganz ohne
+  // Eingrenzung) sofort fälschlich als No-op abfangen. Löscht GENAU EINE
+  // Zeile (plus deren stärker eingerückte Kinderzeilen) – NIEMALS einen
+  // ganzen Abschnitt/Kapitel wie delete_section/delete_chapter.
+  if (op.type === "delete_entry") {
+    const entryText = typeof op.entry === "string" ? op.entry : "";
+    if (!norm(entryText)) return text; // leerer/fehlender entry -> Skip
+    const deLines = text.split("\n");
+    const { range, notFound } = entryScope(deLines, op.heading, op.chapter);
+    if (notFound) return text; // Abschnitt/Kapitel nicht gefunden -> Skip
+    const hits = findEntryLines(deLines, range, entryText);
+    // 0 ODER ≥2 Treffer -> Skip (Sicherheitsgarantie: NIE mehr als einen
+    // Eintrag anfassen, siehe Kopfkommentar der Datei).
+    if (hits.length !== 1) return text;
+    const [s, e] = entryBlockRange(deLines, hits[0]);
+    deLines.splice(s, e - s);
+    return tidy(deLines);
+  }
+
+  // v7.50 (move_entry-Op, Live-Vorfall bison.box – siehe DECISIONS #103):
+  // ATOMARER Umzug EINES Eintrags innerhalb EINES Notizbuchs. Alle Prüfungen
+  // (Quelle gefunden, Eintrag eindeutig gefunden, mindestens ein Ziel-Feld
+  // gesetzt) laufen auf der LOKALEN Kopie "meLines" VOR jeder Änderung daran
+  // – jeder vorzeitige "return text" liefert dadurch GARANTIERT den
+  // byte-identischen Ausgangstext zurück (Atomaritäts-Garantie: es entsteht
+  // NIE ein Zwischenzustand "Eintrag ist aus der Quelle weg, aber im Ziel
+  // nicht angekommen", der genau der Live-Vorfall war, siehe DECISIONS #103).
+  if (op.type === "move_entry") {
+    const entryText = typeof op.entry === "string" ? op.entry : "";
+    if (!norm(entryText)) return text;
+    const toHeadingDisp = dispHead(op.to_heading);
+    const toChapterDisp = dispHead(op.to_chapter);
+    if (!toHeadingDisp && !toChapterDisp) return text; // mind. EIN Ziel-Feld ist Pflicht
+    const meLines = text.split("\n");
+    const { range, notFound } = entryScope(meLines, op.from_heading, op.from_chapter);
+    if (notFound) return text;
+    const hits = findEntryLines(meLines, range, entryText);
+    if (hits.length !== 1) return text;
+    // ALLE Prüfungen bestanden – ab hier wird "meLines" tatsächlich mutiert.
+    const [s, e] = entryBlockRange(meLines, hits[0]);
+    const block = dedentBlock(meLines.slice(s, e));
+    meLines.splice(s, e - s);
+    // Ziel-Einfügung IMMER auf dem bereits um die Quelle bereinigten Array
+    // (Quelle==Ziel verschiebt den Eintrag dadurch korrekt ans Zielende,
+    // statt ihn zu duplizieren).
+    if (toHeadingDisp) {
+      insertEntryIntoSection(meLines, toHeadingDisp, toChapterDisp ? op.to_chapter : null, block);
+    } else {
+      insertEntryIntoChapterPreamble(meLines, op.to_chapter, block);
+    }
+    return tidy(meLines);
   }
 
   const disp = dispHead(op.heading);
@@ -437,7 +759,11 @@ function applyOne(text, op) {
 // App.jsx#splitOps herausgefiltert und laufen nie hier durch, siehe dort).
 // v7.32: delete_chapter ergänzt (siehe applyOne/explainSkip, DECISIONS #74).
 // v7.40: append_to_chapter ergänzt (siehe applyOne/explainSkip, DECISIONS #80).
-const OP_TYPES = ["append_to_section", "replace_section", "delete_section", "delete_chapter", "append_to_chapter", "rewrite"];
+// v7.50: delete_entry/move_entry ergänzt (siehe applyOne/explainSkip, DECISIONS #103).
+const OP_TYPES = [
+  "append_to_section", "replace_section", "delete_section", "delete_chapter", "append_to_chapter",
+  "delete_entry", "move_entry", "rewrite",
+];
 
 // Rahmen-Integrität des SYSTEM-HINWEIS (Review-Fix 🟡, Defense-in-Depth
 // Schicht 1/"Quelle"): heading/chapter/type in einer Op stammen vom MODELL
@@ -519,6 +845,58 @@ function explainSkip(text, op) {
     if (!content) return "leerer content";
     return "keine inhaltliche Änderung";
   }
+  // v7.50 (delete_entry-Op, DECISIONS #103): eigener Zweig, spiegelt applyOne
+  // exakt (NUR lesende Prüfungen, dieselbe entryScope()/findEntryLines()-
+  // Logik) – Prüfreihenfolge: leerer entry -> Scope (Abschnitt/Kapitel) nicht
+  // gefunden -> Eintrag nicht gefunden/mehrdeutig -> (sonst: applied wäre
+  // true, landet praktisch nie hier).
+  if (op.type === "delete_entry") {
+    const entryText = typeof op.entry === "string" ? op.entry : "";
+    const entryDisp = norm(entryText);
+    if (!entryDisp) return "leerer entry";
+    const lines = text.split("\n");
+    const { range, notFound } = entryScope(lines, op.heading, op.chapter);
+    if (notFound === "chapter") {
+      return "Kapitel „" + sanitizeForWarning(dispHead(op.chapter)) + "“ nicht gefunden – Op übersprungen";
+    }
+    if (notFound === "heading") {
+      return "Abschnitt „" + sanitizeForWarning(dispHead(op.heading)) + "“ nicht gefunden";
+    }
+    const hits = findEntryLines(lines, range, entryText);
+    if (hits.length === 0) return "Eintrag „" + sanitizeForWarning(entryDisp) + "“ nicht gefunden";
+    if (hits.length > 1) {
+      return "Eintrag „" + sanitizeForWarning(entryDisp) + "“ mehrdeutig (" + hits.length +
+        " Treffer) – exakteren Wortlaut oder heading/chapter angeben";
+    }
+    return "keine inhaltliche Änderung";
+  }
+  // v7.50 (move_entry-Op, DECISIONS #103): eigener Zweig, spiegelt applyOne
+  // exakt – Prüfreihenfolge: leerer entry -> fehlendes Ziel (weder to_heading
+  // noch to_chapter) -> Quell-Scope nicht gefunden -> Eintrag nicht
+  // gefunden/mehrdeutig -> (sonst: applied wäre true).
+  if (op.type === "move_entry") {
+    const entryText = typeof op.entry === "string" ? op.entry : "";
+    const entryDisp = norm(entryText);
+    if (!entryDisp) return "leerer entry";
+    const toHeadingDisp = dispHead(op.to_heading);
+    const toChapterDisp = dispHead(op.to_chapter);
+    if (!toHeadingDisp && !toChapterDisp) return "fehlendes Ziel – to_heading oder to_chapter angeben";
+    const lines = text.split("\n");
+    const { range, notFound } = entryScope(lines, op.from_heading, op.from_chapter);
+    if (notFound === "chapter") {
+      return "Kapitel „" + sanitizeForWarning(dispHead(op.from_chapter)) + "“ nicht gefunden – Op übersprungen";
+    }
+    if (notFound === "heading") {
+      return "Abschnitt „" + sanitizeForWarning(dispHead(op.from_heading)) + "“ nicht gefunden";
+    }
+    const hits = findEntryLines(lines, range, entryText);
+    if (hits.length === 0) return "Eintrag „" + sanitizeForWarning(entryDisp) + "“ nicht gefunden";
+    if (hits.length > 1) {
+      return "Eintrag „" + sanitizeForWarning(entryDisp) + "“ mehrdeutig (" + hits.length +
+        " Treffer) – exakteren Wortlaut oder heading/chapter angeben";
+    }
+    return "keine inhaltliche Änderung";
+  }
   // v7.43 (Live-Befund, siehe DECISIONS #87): Meldung um eine konkrete
   // Handlungsanweisung ergänzt (statt nur "fehlende Abschnitts-
   // Überschrift") – landet über buildOpsWarning (App.jsx) im nächsten Turn
@@ -591,13 +969,21 @@ export function applyOpsDetailed(docText, ops) {
     // sonst z. B. bei "42" statt beim vorherigen/erwarteten undefined,
     // chapterFieldFor prüft diesen typeof zwar bereits FÜR delete_chapter/
     // append_to_chapter selbst, aber eben nicht für die drei ##-Abschnitts-
-    // Ops).
+    // Ops). v7.50: delete_entry/move_entry adressieren WEDER über "heading"
+    // NOCH über "chapter", sondern über "entry" (die zu löschende/zu
+    // verschiebende Zeile selbst) – dieselbe Sonderbehandlung zeigt hier den
+    // entry-Text an (getrimmt, KEIN dispHead()/chapterFieldFor(), da "entry"
+    // kein Kapitel-/Abschnittstitel ist und ein führendes "#" in einem
+    // Eintragstext – z. B. eine Markdown-Überschrift als Zitat – nicht als
+    // Kapitel-Raute weginterpretiert werden soll).
     const heading = op && typeof op === "object"
-      ? dispHead(
-          op.type === "delete_chapter" || op.type === "append_to_chapter"
-            ? chapterFieldFor(op)
-            : (typeof op.heading === "string" ? op.heading : "")
-        ) || undefined
+      ? (op.type === "delete_entry" || op.type === "move_entry"
+          ? (typeof op.entry === "string" && op.entry.trim() ? op.entry.trim() : undefined)
+          : dispHead(
+              op.type === "delete_chapter" || op.type === "append_to_chapter"
+                ? chapterFieldFor(op)
+                : (typeof op.heading === "string" ? op.heading : "")
+            ) || undefined)
       : undefined;
     const before = text;
     let applied = false;

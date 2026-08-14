@@ -614,6 +614,61 @@ Abschnitt „Offene Handovers“ bleibt inhaltlich unverändert. Ein
 in einem bestehenden `##`-Abschnitt landen. Danach aufräumen: „Lösche
 das Kapitel QA-Test Codex.“ (1 API-Aufruf).
 
+**C23 [VERBUNDEN][API] Einzelnen Eintrag per Chat aus einem Abschnitt in
+ein Kapitel verschieben (move_entry, v7.50, Live-Vorfall bison.box).**
+Voraussetzung: Ein `##`-Abschnitt „QA-Test Inbox“ mit MINDESTENS ZWEI
+Stichpunkten, einer davon eindeutig benennbar (z. B. „KPI-Check
+weitermachen“) – bei Bedarf per Chat anlegen: „Lege den Abschnitt
+‚QA-Test Inbox‘ an mit den Stichpunkten ‚KPI-Check weitermachen‘ und
+‚Sonstige Notiz‘.“ (1 API-Aufruf). Danach im Chat: „Verschiebe den
+Eintrag ‚KPI-Check weitermachen‘ aus QA-Test Inbox in ein neues Kapitel
+‚QA-Test KPIs‘.“ (1 API-Aufruf). Erwartet: Der Eintrag „KPI-Check
+weitermachen“ steht danach GENAU EINMAL im gesamten Dokument, jetzt im
+neuen Kapitel „# QA-Test KPIs“ (als Kapitel-Freitext oder in einem
+sinnvoll benannten `##`-Abschnitt) – „QA-Test Inbox“ enthält ihn NICHT
+mehr, „Sonstige Notiz“ bleibt dort unverändert stehen. KEINE ⚠️-Warn-Pille
+(korrekt eindeutig adressierter, einzelner Eintrag), ein 💾-Commit-Badge
+erscheint. Ein 🔴-Finding liegt vor, wenn der Eintrag DOPPELT im Dokument
+steht (in Inbox UND im Kapitel) ODER wenn „Sonstige Notiz“ bzw. weitere
+Inbox-Einträge mitgelöscht wurden – genau der Live-Vorfall, den
+move_entry beheben soll. Danach aufräumen: „Lösche das Kapitel QA-Test
+KPIs und den Abschnitt QA-Test Inbox.“ (1 API-Aufruf).
+
+**C24 [VERBUNDEN][API] Einzelnen Eintrag per Chat löschen (delete_entry,
+v7.50).** Voraussetzung: Ein `##`-Abschnitt „QA-Test Löschliste“ mit
+GENAU ZWEI unterscheidbaren Stichpunkten – bei Bedarf per Chat anlegen:
+„Lege den Abschnitt ‚QA-Test Löschliste‘ an mit den Stichpunkten ‚Alter
+Punkt A‘ und ‚Bleibt stehen B‘.“ (1 API-Aufruf). Danach im Chat: „Lösche
+aus QA-Test Löschliste nur den Eintrag ‚Alter Punkt A‘.“ (1 API-Aufruf).
+Erwartet: NUR diese eine Zeile verschwindet, „Bleibt stehen B“ UND die
+`##`-Abschnittsüberschrift „QA-Test Löschliste“ selbst bleiben
+vollständig erhalten (anders als delete_section, das den GANZEN Abschnitt
+entfernt hätte). KEINE ⚠️-Warn-Pille, ein 💾-Commit-Badge erscheint. Ein
+🔴-Finding liegt vor, wenn der gesamte Abschnitt oder der zweite
+Stichpunkt mitgelöscht wurde. Danach aufräumen: „Lösche den Abschnitt
+QA-Test Löschliste.“ (1 API-Aufruf).
+
+**C25 [VERBUNDEN][API] Mehrdeutigen Eintrag verschieben löst eine
+Warn-Pille aus, Dokument bleibt unverändert (delete_entry/move_entry-
+Ambiguität, v7.50).** Voraussetzung: Ein `##`-Abschnitt „QA-Test
+Duplikate“ mit ZWEI Stichpunkten, die denselben charakteristischen
+Wortlaut teilen (z. B. „Rechnung prüfen Januar“ und „Rechnung prüfen
+Februar“) – bei Bedarf per Chat anlegen: „Lege den Abschnitt ‚QA-Test
+Duplikate‘ an mit den Stichpunkten ‚Rechnung prüfen Januar‘ und
+‚Rechnung prüfen Februar‘.“ (1 API-Aufruf). Danach im Chat: „Verschiebe
+aus QA-Test Duplikate den Eintrag ‚Rechnung prüfen‘ in ein neues Kapitel
+‚QA-Test Archiv‘.“ (1 API-Aufruf, absichtlich uneindeutiger Wortlaut, der
+BEIDE Stichpunkte trifft). Erwartet: Eine ⚠️-Warn-Pille erscheint (Text
+verweist sinngemäß auf Mehrdeutigkeit/mehrere Treffer), KEIN 💾-Commit-
+Badge, „QA-Test Duplikate“ bleibt mit BEIDEN Stichpunkten vollständig
+unverändert – kein neues Kapitel „QA-Test Archiv“ entsteht. Alternativ
+gilt auch bestanden, wenn das Modell die Mehrdeutigkeit selbst erkennt
+und in reply nachfragt statt eine Op zu schicken (dann ebenfalls KEINE
+Änderung am Dokument, KEIN 💾-Badge). Ein 🔴-Finding liegt vor, wenn
+trotzdem einer der beiden Stichpunkte verschoben/gelöscht wurde. Danach
+aufräumen (nur falls nötig): „Lösche den Abschnitt QA-Test Duplikate.“
+(1 API-Aufruf).
+
 ## D. Manuelles Bearbeiten (WYSIWYG)
 
 **D1 [VERBUNDEN] Editor-Roundtrip.** Stift-Knopf → im QA-Notizbuch einen

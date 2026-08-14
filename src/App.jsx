@@ -1584,9 +1584,19 @@ export default function NotizbuchApp() {
             ? msg
             : changed.map((c) => c.name).join(", ") + " · " + msg;
 
-          // Betroffene Abschnitte je Notizbuch automatisch aufklappen
+          // Betroffene Abschnitte je Notizbuch automatisch aufklappen. v7.50.2
+          // (Nachbesserungs-Finding): move_entry trägt Ziel/Quelle NICHT in
+          // "heading" (das Feld existiert bei move_entry gar nicht), sondern in
+          // "to_heading"/"from_heading" – ein reines o.heading-Mapping lieferte
+          // dafür also IMMER undefined, der Zielabschnitt blieb nach einem
+          // erfolgreichen move_entry eingeklappt. Alle drei Felder einsammeln
+          // (bei den anderen Op-Typen sind to_heading/from_heading schlicht
+          // undefined und fallen über filter(Boolean) heraus, wie bisher).
           for (const ch of changed) {
-            const touched = ch.ops.map((o) => dispHead(o.heading)).filter(Boolean);
+            const touched = ch.ops
+              .flatMap((o) => [o.heading, o.to_heading, o.from_heading])
+              .map((h) => dispHead(h))
+              .filter(Boolean);
             if (!touched.length) continue;
             setCollapsedAll((prev) => {
               const cur = prev[ch.id];
@@ -2881,7 +2891,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.49</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.50</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"

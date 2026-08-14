@@ -229,6 +229,40 @@ describe("buildOpsWarning: Warn-Pillen-Text aus NICHT angewendeten Ops bauen", (
     );
   });
 
+  // v7.50 (delete_entry/move_entry-Ops, Live-Vorfall bison.box – siehe
+  // DECISIONS #103): delete_entry/move_entry adressieren über "entry" (der
+  // zu löschende/zu verschiebende Zeilentext), NICHT über "heading"/"chapter"
+  // – die Warn-Pille muss trotzdem einen erkennbaren Bezug zeigen (analog zur
+  // delete_chapter/append_to_chapter-Sonderbehandlung oben). End-zu-Ende über
+  // applyOpsDetailed, wie die Tests darüber.
+  it("delete_entry-Skip (Eintrag nicht gefunden) zeigt den entry-Text in der Warn-Pille (End-zu-Ende über applyOpsDetailed)", () => {
+    const doc = "# QA-Test\n\n## Inbox\n\n- [ ] vorhandener Eintrag\n";
+    const { results } = applyOpsDetailed(doc, [
+      { type: "delete_entry", entry: "nicht vorhandener Eintrag" },
+    ]);
+    const out = buildOpsWarning(
+      results.filter((r) => !r.applied).map((r) => ({ ...r, notebook: "QA-Test" }))
+    );
+    expect(out).toBe(
+      '⚠️ Nicht angewendet: delete_entry „nicht vorhandener Eintrag“ in „QA-Test“ ' +
+      '(Eintrag „nicht vorhandener Eintrag“ nicht gefunden)'
+    );
+  });
+
+  it("move_entry-Skip (mehrdeutiger Eintrag) zeigt den entry-Text in der Warn-Pille (End-zu-Ende über applyOpsDetailed)", () => {
+    const doc = "# QA-Test\n\n## Inbox\n\n- [ ] Text A\n- [ ] Text B\n";
+    const { results } = applyOpsDetailed(doc, [
+      { type: "move_entry", entry: "Text", from_heading: "## Inbox", to_heading: "## Archiv" },
+    ]);
+    const out = buildOpsWarning(
+      results.filter((r) => !r.applied).map((r) => ({ ...r, notebook: "QA-Test" }))
+    );
+    expect(out).toBe(
+      '⚠️ Nicht angewendet: move_entry „Text“ in „QA-Test“ ' +
+      '(Eintrag „Text“ mehrdeutig (2 Treffer) – exakteren Wortlaut oder heading/chapter angeben)'
+    );
+  });
+
   it("MEHRERE nicht angewendete Ops werden in EINER Pille gebündelt (mehrzeilig, ein Eintrag pro Zeile)", () => {
     const out = buildOpsWarning([
       { type: "delete_section", heading: "Warenkunde", notebook: "QA-Test", reason: 'Abschnitt „Warenkunde“ nicht gefunden' },

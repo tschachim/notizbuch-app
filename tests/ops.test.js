@@ -1524,3 +1524,621 @@ describe("stripInboxPlaceholder: Randfall 'Inbox enthält NUR den Platzhalter' k
     expect(out).toBe("# NB\n\n## Inbox\n");
   });
 });
+
+// v7.50 (delete_entry/move_entry-Ops, Live-Vorfall bison.box – siehe
+// DECISIONS #103): Der Nutzer bat, EINEN einzelnen Inbox-Eintrag unter das
+// Kapitel "# KPIs" zu verschieben. Ohne zeilengenauen Op-Typ zerstörte ein
+// erster Versuch (rewrite) die komplette Inbox, ein zweiter Versuch
+// (append_to_section im Ziel + delete_section "Inbox" in der Quelle) hätte
+// bei Erfolg die GESAMTE Inbox gelöscht und produzierte wegen eines
+// zufälligen Fehlschlags stattdessen ein DUPLIKAT (Eintrag in Inbox UND in
+// KPIs). Dieser Block ist der 1:1-Regressionstest für genau diesen Vorfall.
+describe("applyOps: delete_entry/move_entry (v7.50, Live-Vorfall bison.box, DECISIONS #103)", () => {
+  const DOC_BISONBOX = [
+    "# bison.box",
+    "",
+    "## Inbox",
+    "",
+    "- [ ] Rechnung Nr. 4711 prüfen",
+    "- [ ] KPI-Formatierung in der RP prüfen – weitermachen: [Wrike-Link](https://wrike.example.com/task/123)",
+    "- [ ] Onboarding-Dokument fertigstellen",
+    "",
+    "## KAGB",
+    "",
+    "- [ ] Meldung Q3 einreichen",
+    "",
+    "# Codex",
+    "",
+    "## Konventionen",
+    "",
+    "- deutsche Kommentare, die das WARUM erklären",
+    "",
+    "## Tests",
+    "",
+    "- Vitest, Coverage-Gate 60 %",
+    "",
+    "# KPIs",
+    "",
+    "Umsatz +5 % im Q2.",
+    "Kosten -3 % im Q2.",
+    "",
+  ].join("\n");
+
+  it("REGRESSIONSTEST bison.box: move_entry verschiebt GENAU DIESEN Inbox-Eintrag (Substring-Match, Markdown-Link) ans Ende des Kapitel-Freitexts von '# KPIs', der Rest des Dokuments bleibt unangetastet", () => {
+    const out = applyOps(DOC_BISONBOX, [
+      {
+        type: "move_entry", entry: "KPI-Formatierung in der RP prüfen",
+        from_heading: "## Inbox", to_chapter: "# KPIs",
+      },
+    ]);
+    // GENAU EIN Vorkommen im gesamten Dokument – kein Duplikat (der zentrale
+    // Live-Befund).
+    expect(out.match(/KPI-Formatierung in der RP prüfen/g)).toHaveLength(1);
+    const inboxPart = out.split("## KAGB")[0];
+    expect(inboxPart).not.toContain("KPI-Formatierung");
+    // Die übrige Inbox bleibt bis auf die entfernte Zeile inhaltlich gleich.
+    expect(inboxPart).toContain("- [ ] Rechnung Nr. 4711 prüfen");
+    expect(inboxPart).toContain("- [ ] Onboarding-Dokument fertigstellen");
+    // Steht jetzt GENAU am Ende des KPIs-Kapitel-Freitexts, samt Link.
+    const kpisPart = out.split("# KPIs")[1];
+    expect(kpisPart.trim().endsWith(
+      "KPI-Formatierung in der RP prüfen – weitermachen: [Wrike-Link](https://wrike.example.com/task/123)"
+    )).toBe(true);
+    expect(kpisPart).toContain("Umsatz +5 % im Q2.");
+    expect(kpisPart).toContain("Kosten -3 % im Q2.");
+    // "## KAGB" bis "# Codex" bleibt BYTE-IDENTISCH zum Original.
+    const originalMiddle = DOC_BISONBOX.slice(DOC_BISONBOX.indexOf("## KAGB"), DOC_BISONBOX.indexOf("# KPIs"));
+    const outMiddle = out.slice(out.indexOf("## KAGB"), out.indexOf("# KPIs"));
+    expect(outMiddle).toBe(originalMiddle);
+  });
+
+  const DOC_ENTRIES = [
+    "# NB", "",
+    "## Inbox", "",
+    "- [ ] Erster Eintrag",
+    "- [ ] Zweiter Eintrag mit Text",
+    "- [ ] Dritter ähnlicher Eintrag mit Text",
+    "",
+    "## Aufgaben", "",
+    "- [ ] Andere Aufgabe",
+    "",
+  ].join("\n");
+
+  describe("delete_entry: Matching-Stufen und Skip-Gründe", () => {
+    it("exakter Match löscht genau die eine Zeile", () => {
+      const out = applyOps(DOC_ENTRIES, [{ type: "delete_entry", entry: "- [ ] Erster Eintrag" }]);
+      expect(out).not.toContain("Erster Eintrag");
+      expect(out).toContain("- [ ] Zweiter Eintrag mit Text");
+      expect(out).toContain("- [ ] Andere Aufgabe");
+    });
+
+    it("eindeutiger Substring-Match (ohne '- [ ] '-Präfix) trifft trotzdem genau die eine Zeile", () => {
+      const out = applyOps(DOC_ENTRIES, [{ type: "delete_entry", entry: "Erster Eintrag" }]);
+      expect(out).not.toContain("Erster Eintrag");
+      expect(out).toContain("- [ ] Zweiter Eintrag mit Text");
+    });
+
+    it("Ambiguität (2 ähnliche Zeilen per Substring): Skip mit Treffer-Anzahl im reason, Dokument unverändert", () => {
+      const { text, results } = applyOpsDetailed(DOC_ENTRIES, [
+        { type: "delete_entry", entry: "Eintrag mit Text" },
+      ]);
+      expect(text).toBe(DOC_ENTRIES);
+      expect(results[0].applied).toBe(false);
+      expect(results[0].reason).toContain("mehrdeutig");
+      expect(results[0].reason).toContain("2 Treffer");
+    });
+
+    it("nicht gefunden: Skip mit reason 'nicht gefunden'", () => {
+      const { text, results } = applyOpsDetailed(DOC_ENTRIES, [
+        { type: "delete_entry", entry: "Gibt es nicht im Dokument" },
+      ]);
+      expect(text).toBe(DOC_ENTRIES);
+      expect(results[0].applied).toBe(false);
+      expect(results[0].reason).toContain("nicht gefunden");
+    });
+
+    it("leerer/fehlender entry: Skip mit reason 'leerer entry'", () => {
+      expect(applyOps(DOC_ENTRIES, [{ type: "delete_entry", entry: "" }])).toBe(DOC_ENTRIES);
+      const { results } = applyOpsDetailed(DOC_ENTRIES, [{ type: "delete_entry" }]);
+      expect(results[0].applied).toBe(false);
+      expect(results[0].reason).toBe("leerer entry");
+    });
+
+    it("applied-Flag: true bei eindeutigem Treffer, false bei Skip – ohne reason im Erfolgsfall", () => {
+      const ok = applyOpsDetailed(DOC_ENTRIES, [{ type: "delete_entry", entry: "- [ ] Erster Eintrag" }]);
+      expect(ok.results[0]).toMatchObject({ applied: true, reason: undefined });
+      const skip = applyOpsDetailed(DOC_ENTRIES, [{ type: "delete_entry", entry: "nicht da" }]);
+      expect(skip.results[0].applied).toBe(false);
+    });
+  });
+
+  describe("Kinderzeilen wandern mit dem Treffer, Einrückungs-Normalisierung bei move_entry", () => {
+    const DOC_NESTED = [
+      "# NB", "",
+      "## Inbox", "",
+      "- [ ] Hauptpunkt",
+      "  - Unterpunkt A",
+      "    - Unterpunkt A1",
+      "- [ ] Anderer Punkt",
+      "",
+    ].join("\n");
+
+    it("delete_entry löscht einen Eintrag MIT allen stärker eingerückten Kinderzeilen (2 Ebenen), Geschwister bleiben", () => {
+      const out = applyOps(DOC_NESTED, [{ type: "delete_entry", entry: "Hauptpunkt" }]);
+      expect(out).not.toContain("Hauptpunkt");
+      expect(out).not.toContain("Unterpunkt A");
+      expect(out).not.toContain("Unterpunkt A1");
+      expect(out).toContain("- [ ] Anderer Punkt");
+    });
+
+    const DOC_NESTED_SRC_INDENT = [
+      "# NB", "",
+      "## Eins", "",
+      "- [ ] Top",
+      "  - [ ] Kind eins",
+      "    - Detailinfo zum ersten Kind",
+      "  - [ ] Kind zwei",
+      "",
+      "## Zwei", "",
+      "- bestehend",
+      "",
+    ].join("\n");
+
+    it("move_entry verschiebt einen SELBST eingerückten Eintrag samt Kind – Einrückung wird am Ziel auf 0 normalisiert, relative Struktur bleibt", () => {
+      const out = applyOps(DOC_NESTED_SRC_INDENT, [
+        { type: "move_entry", entry: "Kind eins", from_heading: "## Eins", to_heading: "## Zwei" },
+      ]);
+      const einsPart = out.split("## Zwei")[0];
+      expect(einsPart).not.toContain("Kind eins");
+      expect(einsPart).not.toContain("Detailinfo zum ersten Kind");
+      expect(einsPart).toContain("- [ ] Kind zwei"); // Geschwister bleibt in Kapitel "Eins"
+      const zweiPart = out.split("## Zwei")[1];
+      expect(zweiPart).toContain("- bestehend");
+      // Trefferzeile jetzt bei Einrückung 0, Kind um denselben Delta (2) reduziert -> Einrückung 2.
+      expect(zweiPart).toContain("- [ ] Kind eins\n  - Detailinfo zum ersten Kind");
+    });
+  });
+
+  // Review-Fix (kritischer Fund, siehe DECISIONS #104): entryBlockRange() war
+  // NICHT fence-aware - ein eingerücktes ```-Kind mit einer Leerzeile ODER
+  // einer Spalte-0-Codezeile DARIN riss den Eintragsblock mitten im Codeblock
+  // auseinander (Datenverlust bei delete_entry, halber Zaun bei move_entry).
+  describe("Eintragsblock mit eingerücktem, GESCHLOSSENEM Fence-Kind (Review-Fix v7.50.1, DECISIONS #104)", () => {
+    it("delete_entry: Fence-Kind MIT Leerzeile darin wandert als GANZES weg - kein halber Zaun, kein Datenverlust am Rest", () => {
+      const doc = [
+        "# NB", "",
+        "## Eins", "",
+        "- [ ] Task A",
+        "  ```js",
+        "  const x = 1;",
+        "",
+        "  const y = 2;",
+        "  ```",
+        "- [ ] Task B",
+        "",
+      ].join("\n");
+      const out = applyOps(doc, [{ type: "delete_entry", entry: "Task A" }]);
+      expect(out).not.toContain("Task A");
+      expect(out).not.toContain("const x = 1;");
+      expect(out).not.toContain("const y = 2;");
+      expect(out).not.toContain("```"); // KEIN halber Zaun übrig
+      expect(out).toContain("- [ ] Task B");
+    });
+
+    it("delete_entry: Fence-Kind MIT Spalte-0-Codezeile darin wandert als GANZES weg (alte Logik brach schon an dieser Zeile ab)", () => {
+      const doc = [
+        "# NB", "",
+        "## Eins", "",
+        "- [ ] Task A",
+        "  ```js",
+        "return 1;",
+        "  ```",
+        "- [ ] Task B",
+        "",
+      ].join("\n");
+      const out = applyOps(doc, [{ type: "delete_entry", entry: "Task A" }]);
+      expect(out).not.toContain("Task A");
+      expect(out).not.toContain("return 1;");
+      expect(out).not.toContain("```");
+      expect(out).toContain("- [ ] Task B");
+    });
+
+    it("move_entry: Fence-Kind MIT Leerzeile darin wandert komplett ans Ziel, Quelle hat KEINE Waisen-Zaunreste", () => {
+      const doc = [
+        "# NB", "",
+        "## Eins", "",
+        "- [ ] Task A",
+        "  ```js",
+        "  const x = 1;",
+        "",
+        "  const y = 2;",
+        "  ```",
+        "- [ ] Task B",
+        "",
+        "## Zwei", "",
+        "- bestehend",
+        "",
+      ].join("\n");
+      const out = applyOps(doc, [
+        { type: "move_entry", entry: "Task A", from_heading: "## Eins", to_heading: "## Zwei" },
+      ]);
+      const einsPart = out.split("## Zwei")[0];
+      expect(einsPart).not.toContain("Task A");
+      expect(einsPart).not.toContain("const x = 1;");
+      expect(einsPart).not.toContain("const y = 2;");
+      expect(einsPart).not.toContain("```"); // keine Zaun-Waise in der Quelle
+      expect(einsPart).toContain("- [ ] Task B");
+      const zweiPart = out.split("## Zwei")[1];
+      expect(zweiPart).toContain("- bestehend");
+      // Fence komplett am Ziel, inkl. Leerzeile DARIN.
+      expect(zweiPart).toContain("- [ ] Task A\n  ```js\n  const x = 1;\n\n  const y = 2;\n  ```");
+    });
+
+    it("move_entry: Fence mit Spalte-0-Code UND eigener Einrückung der Trefferzeile - dedentBlock() darf Code-Zeichen NICHT abschneiden", () => {
+      // Trefferzeile "- [ ] Kind mit Code" ist selbst um 2 eingerückt (delta=2
+      // für dedentBlock); die öffnende Zaunzeile darf laut FENCE_OPEN_RE
+      // HÖCHSTENS 3 führende Leerzeichen haben (CommonMark-Grenze, siehe
+      // code.jsx) - hier bewusst 3, also NOCH als Fence erkannt, aber bereits
+      // stärker eingerückt als die Trefferzeile. Die Codezeile "return 1;" im
+      // Fence-Inneren hat Einrückung 0 (< delta=2, Fence-Innenzeilen sind von
+      // JEDER Einrückungsregel ausgenommen). Ein pauschales l.slice(delta)
+      // würde hier "re" von "return 1;" abschneiden (Byte-Verstümmelung) - der
+      // Fix klammert pro Zeile auf die eigene Einrückung (Math.min).
+      const doc = [
+        "# NB", "",
+        "## Eins", "",
+        "- [ ] Top",
+        "  - [ ] Kind mit Code",
+        "   ```js",
+        "return 1;",
+        "   ```",
+        "",
+        "## Zwei", "",
+        "- bestehend",
+        "",
+      ].join("\n");
+      const out = applyOps(doc, [
+        { type: "move_entry", entry: "Kind mit Code", from_heading: "## Eins", to_heading: "## Zwei" },
+      ]);
+      const einsPart = out.split("## Zwei")[0];
+      expect(einsPart).not.toContain("Kind mit Code");
+      expect(einsPart).not.toContain("return 1;");
+      expect(einsPart).not.toContain("```"); // keine Zaun-Waise in der Quelle
+      expect(einsPart).toContain("- [ ] Top"); // Elternzeile bleibt (nicht Teil des Eintragsblocks)
+      const zweiPart = out.split("## Zwei")[1];
+      expect(zweiPart).toContain("- bestehend");
+      // "return 1;" bleibt BYTE-GENAU erhalten (keine abgeschnittenen Zeichen),
+      // die Trefferzeile ist auf 0 dedentet, das Fence relativ dazu um denselben
+      // Delta (2) reduziert (3 - 2 = 1 verbleibendes Leerzeichen vor den Zäunen).
+      expect(zweiPart).toContain("- [ ] Kind mit Code\n ```js\nreturn 1;\n ```");
+    });
+  });
+
+  // Nachbesserungs-Finding (v7.50.2, Struktur-Injektion): Ein als Kind unter
+  // einem Listenpunkt eingerücktes "# Kommentar mit Raute" wird von
+  // BOUNDARY_RE NICHT als Strukturzeile erkannt (die Einrückung verhindert
+  // den Match) und darf per move_entry direkt als "entry" adressiert werden
+  // (findEntryLines schließt nur Zeilen aus, die BEREITS bei Spalte 0 mit
+  // "#"/"##" beginnen). Ohne den Fix in dedentBlock() würde die volle
+  // Dedentierung auf Spalte 0 aus dieser Inhalts-Zeile am Ziel eine ECHTE
+  // "# "-Kapitelzeile machen (tidy() hätte sogar eine Leerzeile davor
+  // eingefügt) - aus Inhalt würde Struktur, der Zielabschnitt "endete" dort
+  // für jede künftige findChapter/findSection-Suche vorzeitig.
+  describe("dedentBlock: Struktur-Injektion verhindern (Review-Fix v7.50.2)", () => {
+    it("move_entry mit eingerücktem '# …'-Kind: am Ziel entsteht KEINE neue Kapitelzeile, ein Leerzeichen Einzug bleibt erhalten", () => {
+      const doc = [
+        "# NB", "",
+        "## Eins", "",
+        "- [ ] Container",
+        "  # Kommentar mit Raute",
+        "- [ ] Anderer Punkt",
+        "",
+        "## Zwei", "",
+        "- bestehend",
+        "",
+      ].join("\n");
+      const out = applyOps(doc, [
+        { type: "move_entry", entry: "Kommentar mit Raute", from_heading: "## Eins", to_heading: "## Zwei" },
+      ]);
+      const einsPart = out.split("## Zwei")[0];
+      expect(einsPart).not.toContain("Kommentar mit Raute");
+      expect(einsPart).toContain("- [ ] Container"); // Elternzeile bleibt (nicht Teil des Eintragsblocks)
+      expect(einsPart).toContain("- [ ] Anderer Punkt"); // Geschwister bleibt unangetastet
+      const zweiPart = out.split("## Zwei")[1];
+      expect(zweiPart).toContain("- bestehend");
+      // GENAU EIN führendes Leerzeichen am Ziel - NICHT auf Spalte 0 dedentet.
+      expect(out).toContain("\n # Kommentar mit Raute");
+      // Die zentrale Sicherheitsgarantie: KEINE neue "#"-Kapitelzeile auf
+      // Spalte 0 im gesamten Dokument außer der echten Titelzeile "# NB".
+      const chapterLines = out.split("\n").filter((l) => /^#\s/.test(l));
+      expect(chapterLines).toEqual(["# NB"]);
+    });
+  });
+
+  describe("Fence-Awareness und Strukturzeilen-Schutz", () => {
+    const DOC_FENCE_ENTRY = [
+      "# NB", "",
+      "## Eins", "",
+      "- [ ] Echter Eintrag",
+      "```",
+      "- [ ] Echter Eintrag",
+      "```",
+      "",
+      "## Zwei", "",
+      "- x",
+      "",
+    ].join("\n");
+
+    it("identischer Text INNERHALB eines ```-Codeblocks wird NICHT als Treffer gezählt (weder gematcht noch für Ambiguität mitgezählt)", () => {
+      const out = applyOps(DOC_FENCE_ENTRY, [{ type: "delete_entry", entry: "Echter Eintrag" }]);
+      // Die echte Zeile ist weg, der Codeblock (inkl. der Text-Kopie darin)
+      // bleibt byte-genau erhalten – GENAU EIN Treffer außerhalb des Fences,
+      // keine Ambiguität trotz identischem Text im Codeblock.
+      expect(out).toContain("```\n- [ ] Echter Eintrag\n```");
+      expect(out.match(/Echter Eintrag/g)).toHaveLength(1);
+    });
+
+    it("eine '##'-Strukturzeile wird NIE gelöscht, selbst wenn 'entry' sie exakt matcht (Sicherheitsgarantie)", () => {
+      const { text, results } = applyOpsDetailed(DOC_FENCE_ENTRY, [
+        { type: "delete_entry", entry: "## Eins" },
+      ]);
+      expect(text).toBe(DOC_FENCE_ENTRY); // No-op: kein Kandidat, "## Eins" ist BOUNDARY_RE
+      expect(results[0].applied).toBe(false);
+      expect(results[0].reason).toContain("nicht gefunden");
+      expect(text).toContain("## Eins");
+    });
+  });
+
+  describe("Scoping über heading/chapter", () => {
+    const DOC_SCOPE = [
+      "# NB", "",
+      "# Kapitel A", "",
+      "## Notizen", "",
+      "- [ ] Gleicher Eintrag Text",
+      "",
+      "# Kapitel B", "",
+      "## Notizen", "",
+      "- [ ] Gleicher Eintrag Text",
+      "",
+    ].join("\n");
+
+    it("ohne Eingrenzung: derselbe Text in zwei Kapiteln ist global mehrdeutig -> Skip", () => {
+      const { text, results } = applyOpsDetailed(DOC_SCOPE, [
+        { type: "delete_entry", entry: "Gleicher Eintrag Text" },
+      ]);
+      expect(text).toBe(DOC_SCOPE);
+      expect(results[0].reason).toContain("mehrdeutig");
+    });
+
+    it("mit heading+chapter eindeutig eingegrenzt: löscht NUR den Eintrag im richtigen Kapitel", () => {
+      const out = applyOps(DOC_SCOPE, [
+        { type: "delete_entry", entry: "Gleicher Eintrag Text", heading: "## Notizen", chapter: "Kapitel B" },
+      ]);
+      expect(out.split("# Kapitel B")[0]).toContain("- [ ] Gleicher Eintrag Text"); // Kapitel A unangetastet
+      expect(out.split("# Kapitel B")[1]).not.toContain("Gleicher Eintrag Text");
+    });
+
+    it("heading grenzt korrekt auf den Abschnitt ein, chapter grenzt korrekt auf das Kapitel ein (Gegenprobe Kapitel A)", () => {
+      const out = applyOps(DOC_SCOPE, [
+        { type: "delete_entry", entry: "Gleicher Eintrag Text", heading: "## Notizen", chapter: "Kapitel A" },
+      ]);
+      expect(out.split("# Kapitel B")[0]).not.toContain("Gleicher Eintrag Text");
+      expect(out.split("# Kapitel B")[1]).toContain("- [ ] Gleicher Eintrag Text");
+    });
+
+    it("heading nicht gefunden -> Skip mit reason 'nicht gefunden'", () => {
+      const { text, results } = applyOpsDetailed(DOC_SCOPE, [
+        { type: "delete_entry", entry: "Gleicher Eintrag Text", heading: "## Gibtsnicht" },
+      ]);
+      expect(text).toBe(DOC_SCOPE);
+      expect(results[0].reason).toContain("nicht gefunden");
+    });
+
+    it("chapter nicht gefunden (mit heading) -> eigener Skip-Grund 'Kapitel ... nicht gefunden'", () => {
+      const { text, results } = applyOpsDetailed(DOC_SCOPE, [
+        { type: "delete_entry", entry: "Gleicher Eintrag Text", heading: "## Notizen", chapter: "Kapitel X" },
+      ]);
+      expect(text).toBe(DOC_SCOPE);
+      expect(results[0].reason).toBe('Kapitel „Kapitel X“ nicht gefunden – Op übersprungen');
+    });
+
+    it("NUR chapter gesetzt (kein heading) und Kapitel nicht gefunden -> derselbe Kapitel-Skip-Grund, byte-identisch", () => {
+      const { text, results } = applyOpsDetailed(DOC_SCOPE, [
+        { type: "delete_entry", entry: "Gleicher Eintrag Text", chapter: "Kapitel X" },
+      ]);
+      expect(text).toBe(DOC_SCOPE);
+      expect(results[0].reason).toBe('Kapitel „Kapitel X“ nicht gefunden – Op übersprungen');
+    });
+
+    it("NUR chapter gesetzt (kein heading), Kapitel existiert: grenzt die Suche auf das GESAMTE Kapitel ein (alle Abschnitte darin)", () => {
+      const out = applyOps(DOC_SCOPE, [
+        { type: "delete_entry", entry: "Gleicher Eintrag Text", chapter: "Kapitel B" },
+      ]);
+      expect(out.split("# Kapitel B")[0]).toContain("- [ ] Gleicher Eintrag Text"); // Kapitel A unangetastet
+      expect(out.split("# Kapitel B")[1]).not.toContain("Gleicher Eintrag Text");
+    });
+  });
+
+  describe("move_entry: Atomaritäts-Garantie (Skip -> Dokument byte-identisch)", () => {
+    it("fehlende to_-Felder (weder to_heading noch to_chapter): Skip, Dokument byte-identisch", () => {
+      const { text, results } = applyOpsDetailed(DOC_ENTRIES, [
+        { type: "move_entry", entry: "Erster Eintrag", from_heading: "## Inbox" },
+      ]);
+      expect(text).toBe(DOC_ENTRIES);
+      expect(results[0].applied).toBe(false);
+      expect(results[0].reason).toContain("to_heading oder to_chapter");
+    });
+
+    it("Eintrag mehrdeutig: Skip, Dokument byte-identisch (nichts wird aus der Quelle entfernt)", () => {
+      const { text, results } = applyOpsDetailed(DOC_ENTRIES, [
+        { type: "move_entry", entry: "Eintrag mit Text", from_heading: "## Inbox", to_heading: "## Aufgaben" },
+      ]);
+      expect(text).toBe(DOC_ENTRIES);
+      expect(results[0].applied).toBe(false);
+      expect(results[0].reason).toContain("mehrdeutig");
+    });
+
+    it("Quelle (from_heading) nicht gefunden: Skip, Dokument byte-identisch", () => {
+      const { text, results } = applyOpsDetailed(DOC_ENTRIES, [
+        { type: "move_entry", entry: "Erster Eintrag", from_heading: "## Gibtsnicht", to_heading: "## Aufgaben" },
+      ]);
+      expect(text).toBe(DOC_ENTRIES);
+      expect(results[0].applied).toBe(false);
+    });
+
+    it("Quelle (from_chapter, ohne from_heading) nicht gefunden: eigener Skip-Grund 'Kapitel ... nicht gefunden', Dokument byte-identisch", () => {
+      const { text, results } = applyOpsDetailed(DOC_ENTRIES, [
+        { type: "move_entry", entry: "Erster Eintrag", from_chapter: "Kapitel Gibtsnicht", to_heading: "## Aufgaben" },
+      ]);
+      expect(text).toBe(DOC_ENTRIES);
+      expect(results[0].applied).toBe(false);
+      expect(results[0].reason).toBe('Kapitel „Kapitel Gibtsnicht“ nicht gefunden – Op übersprungen');
+    });
+
+    it("leerer entry: Skip, Dokument byte-identisch", () => {
+      expect(applyOps(DOC_ENTRIES, [
+        { type: "move_entry", entry: "", from_heading: "## Inbox", to_heading: "## Aufgaben" },
+      ])).toBe(DOC_ENTRIES);
+    });
+
+    // Nachbesserungs-Finding (v7.50.2, Zeile ~811 in explainSkip war bisher
+    // NUR theoretisch erreichbar dokumentiert): Quelle === Ziel UND der
+    // Eintrag steht bereits am ENDE des Abschnitts -> nach Entfernen +
+    // Wieder-Einfügen ans Abschnittsende landet er exakt an derselben Stelle,
+    // der Text ist byte-identisch zum Ausgangsdokument. Dieser Test pinnt den
+    // "keine inhaltliche Änderung"-Zweig für move_entry als ECHT erreichbar.
+    it("Quelle == Ziel UND Eintrag bereits am Abschnittsende: KEINE Änderung, applied:false, reason 'keine inhaltliche Änderung'", () => {
+      const doc = ["# NB", "", "## Inbox", "", "- [ ] A", "- [ ] B", ""].join("\n");
+      const { text, results } = applyOpsDetailed(doc, [
+        { type: "move_entry", entry: "- [ ] B", from_heading: "## Inbox", to_heading: "## Inbox" },
+      ]);
+      expect(text).toBe(doc);
+      expect(results[0].applied).toBe(false);
+      expect(results[0].reason).toBe("keine inhaltliche Änderung");
+    });
+  });
+
+  describe("move_entry: Ziel-Varianten", () => {
+    it("Ziel = bestehender Abschnitt (to_heading): Eintrag landet an dessen Ende", () => {
+      const out = applyOps(DOC_ENTRIES, [
+        { type: "move_entry", entry: "- [ ] Erster Eintrag", from_heading: "## Inbox", to_heading: "## Aufgaben" },
+      ]);
+      expect(out.split("## Aufgaben")[0]).not.toContain("Erster Eintrag");
+      const aufgaben = out.split("## Aufgaben")[1];
+      expect(aufgaben).toContain("- [ ] Andere Aufgabe");
+      expect(aufgaben).toContain("- [ ] Erster Eintrag");
+      expect(aufgaben.indexOf("Andere Aufgabe")).toBeLessThan(aufgaben.indexOf("Erster Eintrag"));
+    });
+
+    it("Ziel = neuer Abschnitt in bestehendem Kapitel (to_heading + to_chapter): Abschnitt wird im richtigen Kapitel angelegt", () => {
+      const doc = [
+        "# NB", "",
+        "## Inbox", "",
+        "- [ ] Zu verschieben",
+        "",
+        "# Projekte", "",
+        "## Übersicht", "",
+        "- bestehend",
+        "",
+      ].join("\n");
+      const out = applyOps(doc, [
+        {
+          type: "move_entry", entry: "Zu verschieben", from_heading: "## Inbox",
+          to_heading: "## Neu", to_chapter: "# Projekte",
+        },
+      ]);
+      expect(out.split("# Projekte")[0]).not.toContain("Zu verschieben"); // aus der Inbox entfernt
+      const projekte = out.split("# Projekte")[1];
+      expect(projekte).toContain("## Übersicht");
+      expect(projekte).toContain("- bestehend");
+      expect(projekte).toContain("## Neu");
+      expect(projekte).toContain("- [ ] Zu verschieben");
+    });
+
+    it("Ziel = to_heading OHNE to_chapter, Abschnitt existiert NICHT: wird global am Dokumentende neu angelegt (kein Kapitel-Scope)", () => {
+      const out = applyOps(DOC_ENTRIES, [
+        { type: "move_entry", entry: "Erster Eintrag", from_heading: "## Inbox", to_heading: "## Ganz Neu" },
+      ]);
+      expect(out.split("## Ganz Neu")[0]).not.toContain("Erster Eintrag");
+      expect(out).toContain("## Ganz Neu\n\n- [ ] Erster Eintrag");
+    });
+
+    it("Ziel = to_heading + to_chapter, BEIDES existiert noch nicht: neues Kapitel UND neuer Abschnitt werden gemeinsam angelegt", () => {
+      const out = applyOps(DOC_ENTRIES, [
+        {
+          type: "move_entry", entry: "Erster Eintrag", from_heading: "## Inbox",
+          to_heading: "## Frischer Abschnitt", to_chapter: "Frisches Kapitel",
+        },
+      ]);
+      expect(out.split("# Frisches Kapitel")[0]).not.toContain("Erster Eintrag");
+      const kapitel = out.split("# Frisches Kapitel")[1];
+      expect(kapitel).toContain("## Frischer Abschnitt");
+      expect(kapitel).toContain("- [ ] Erster Eintrag");
+    });
+
+    it("Ziel = nur to_chapter (Kapitel-Freitext, kein neuer ##-Abschnitt)", () => {
+      const doc = [
+        "# NB", "",
+        "## Inbox", "",
+        "- [ ] Zu verschieben",
+        "",
+        "# KPIs", "",
+        "Bestehender Freitext.",
+        "",
+      ].join("\n");
+      const out = applyOps(doc, [
+        { type: "move_entry", entry: "Zu verschieben", from_heading: "## Inbox", to_chapter: "# KPIs" },
+      ]);
+      expect(out.split("# KPIs")[0]).not.toContain("Zu verschieben");
+      const kpis = out.split("# KPIs")[1];
+      expect(kpis).toContain("Bestehender Freitext.\n- [ ] Zu verschieben");
+      expect(kpis).not.toMatch(/^## /m); // KEIN neuer ##-Abschnitt entstanden
+    });
+
+    it("Ziel-Kapitel fehlt: wird am Dokumentende neu angelegt (v7.23-konsistent)", () => {
+      const out = applyOps(DOC_ENTRIES, [
+        { type: "move_entry", entry: "Erster Eintrag", from_heading: "## Inbox", to_chapter: "Neues Kapitel" },
+      ]);
+      expect(out.split("## Aufgaben")[0]).not.toContain("Erster Eintrag");
+      expect(out).toContain("# Neues Kapitel\n\n- [ ] Erster Eintrag");
+    });
+  });
+
+  it("Quelle == Ziel (gleicher Abschnitt): Eintrag wandert ans Ende, kein Duplikat, kein Verlust", () => {
+    const out = applyOps(DOC_ENTRIES, [
+      { type: "move_entry", entry: "Erster Eintrag", from_heading: "## Inbox", to_heading: "## Inbox" },
+    ]);
+    expect(out.match(/Erster Eintrag/g)).toHaveLength(1);
+    const inbox = out.split("## Aufgaben")[0];
+    expect(inbox).toContain("- [ ] Zweiter Eintrag mit Text");
+    expect(inbox).toContain("- [ ] Dritter ähnlicher Eintrag mit Text");
+    expect(inbox).toContain("- [ ] Erster Eintrag");
+    // Jetzt am ENDE des Abschnitts (nach den beiden anderen Einträgen).
+    expect(inbox.indexOf("Zweiter Eintrag")).toBeLessThan(inbox.indexOf("- [ ] Erster Eintrag"));
+    expect(inbox.indexOf("Dritter ähnlicher")).toBeLessThan(inbox.indexOf("- [ ] Erster Eintrag"));
+  });
+
+  // Analog zum bestehenden Wrapper-Äquivalenz-Pin weiter oben (applyOps ===
+  // applyOpsDetailed(...).text) – hier gezielt für die beiden neuen Op-Typen,
+  // je einen applied- UND einen skip-Fall.
+  describe("applyOps === applyOpsDetailed(...).text (Wrapper-Äquivalenz, v7.50)", () => {
+    const cases = [
+      [DOC_ENTRIES, [{ type: "delete_entry", entry: "- [ ] Erster Eintrag" }]],
+      [DOC_ENTRIES, [{ type: "delete_entry", entry: "nicht vorhanden" }]],
+      [DOC_ENTRIES, [{ type: "delete_entry", entry: "Eintrag mit Text" }]], // mehrdeutig
+      [DOC_ENTRIES, [{ type: "delete_entry" }]],
+      [DOC_ENTRIES, [
+        { type: "move_entry", entry: "- [ ] Erster Eintrag", from_heading: "## Inbox", to_heading: "## Aufgaben" },
+      ]],
+      [DOC_ENTRIES, [{ type: "move_entry", entry: "Erster Eintrag", from_heading: "## Inbox" }]], // kein Ziel
+      [DOC_ENTRIES, [
+        { type: "move_entry", entry: "Erster Eintrag", from_heading: "## Inbox", to_chapter: "Frisches Kapitel" },
+      ]],
+    ];
+    for (const [doc, ops] of cases) {
+      it("Fall: " + JSON.stringify(ops).slice(0, 70), () => {
+        expect(applyOps(doc, ops)).toBe(applyOpsDetailed(doc, ops).text);
+      });
+    }
+  });
+});

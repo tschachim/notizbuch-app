@@ -563,7 +563,7 @@ describe("buildSystem", () => {
     it("nennt delete_chapter in der abschließenden op-Typen-Liste (OPS-ZUVERLÄSSIGKEIT)", () => {
       const sys = buildSystem(nbs, "Wissensbasis", null);
       expect(sys).toContain(
-        "Es gibt NUR diese op-Typen: append_to_section, replace_section, delete_section, delete_chapter, append_to_chapter, rewrite, memory_append, memory_replace."
+        "Es gibt NUR diese op-Typen: append_to_section, replace_section, delete_section, delete_chapter, append_to_chapter, delete_entry, move_entry, rewrite, memory_append, memory_replace."
       );
     });
 
@@ -710,6 +710,111 @@ describe("buildSystem", () => {
     });
   });
 
+  // v7.50 (delete_entry/move_entry-Ops, Live-Vorfall bison.box – siehe
+  // DECISIONS #103): Prompt-Vertragstests für die zwei neuen, zeilengenauen
+  // Op-Typen, analog zu den bestehenden delete_chapter/append_to_chapter-
+  // Blöcken oben.
+  describe("delete_entry/move_entry-Ops (v7.50, Live-Vorfall bison.box)", () => {
+    it("dokumentiert delete_entry und move_entry in der Ops-Liste inkl. Beispiel-JSON", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain('{"type":"delete_entry","entry":"- [ ] Text der Zeile"}');
+      expect(sys).toContain(
+        '{"type":"move_entry","entry":"- [ ] Text der Zeile","from_heading":"## Inbox","to_chapter":"# Kapitel"}'
+      );
+      expect(sys).toContain("löscht GENAU EINEN einzelnen Eintrag");
+      expect(sys).toContain("verschiebt GENAU EINEN einzelnen Eintrag INNERHALB EINES Notizbuchs, ATOMAR");
+    });
+
+    it("Ops-Listen-Intro nennt delete_entry/move_entry als dritte Adressierungs-Ebene (einzelner Eintrag statt Abschnitt/Kapitel)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain(
+        "delete_entry und move_entry dagegen auf EINEN einzelnen Eintrag (eine Zeile, ggf. mit eingerückten Unterpunkten)"
+      );
+    });
+
+    it("nennt delete_entry/move_entry in der abschließenden op-Typen-Liste (OPS-ZUVERLÄSSIGKEIT)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain(
+        "Es gibt NUR diese op-Typen: append_to_section, replace_section, delete_section, delete_chapter, " +
+        "append_to_chapter, delete_entry, move_entry, rewrite, memory_append, memory_replace."
+      );
+    });
+
+    it("neue OPS-ZUVERLÄSSIGKEIT-Regel: delete_entry/move_entry statt delete_section/replace_section für einzelne Einträge, mit Notizbuch-übergreifendem Ausweg", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain(
+        "EINZELNE Einträge (eine Zeile/ein Stichpunkt, ggf. mit eingerückten Unterpunkten) löschst du " +
+        "AUSSCHLIESSLICH mit delete_entry und verschiebst sie innerhalb eines Notizbuchs AUSSCHLIESSLICH mit move_entry"
+      );
+      expect(sys).toContain("NIEMALS mit delete_section (löscht IMMER den GANZEN Abschnitt!)");
+      expect(sys).toContain("NIEMALS durch replace_section-Neuschreiben des Abschnitts");
+      expect(sys).toContain(
+        "Zwischen ZWEI Notizbüchern: ZUERST append_to_section/append_to_chapter im Ziel, DANN delete_entry in der Quelle"
+      );
+      // Steht im OPS-ZUVERLÄSSIGKEIT-Block, NACH der bestehenden Verschiebe-Regel
+      // (referenziert sie als "siehe Verschiebe-Regel oben").
+      const block = sys.slice(sys.indexOf("OPS-ZUVERLÄSSIGKEIT"), sys.indexOf("REINE FRAGEN"));
+      expect(block.indexOf("Verschiebe-Regel:")).toBeLessThan(block.indexOf("siehe Verschiebe-Regel oben"));
+    });
+
+    it("Verschiebe-Regel wurde um den Einzeleintrag-Fall (move_entry vs. append+delete_entry) ergänzt", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("Für einen EINZELNEN Eintrag gilt dieselbe Reihenfolge-Regel, aber ein ANDERER Op-Weg");
+      expect(sys).toContain("move_entry verschiebt NUR INNERHALB EINES Notizbuchs");
+      expect(sys).toContain("ZUERST append_to_section/append_to_chapter im Ziel-Notizbuch, DANN delete_entry (NICHT delete_section!) in der Quelle");
+    });
+
+    it("GLIEDERUNGS-VORSCHLAG und REINE-FRAGEN-Aufzählungen der Notizbuch-Ops enthalten delete_entry/move_entry", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain(
+        'Mit "ops":[] sind hier NOTIZBUCH-Ops gemeint (append_to_section/replace_section/delete_section/' +
+        "delete_chapter/append_to_chapter/delete_entry/move_entry/rewrite)"
+      );
+      expect(sys).toContain(
+        "ALLE Notizbuch-Ops (append_to_section/replace_section/delete_section/delete_chapter/append_to_chapter/" +
+        "delete_entry/move_entry/rewrite) bleiben bei reinen Fragen dagegen unverändert verboten"
+      );
+    });
+
+    it("NOTEBOOK_TOOL-Schema: type-enum enthält delete_entry/move_entry mit erklärender Beschreibung", () => {
+      const typeProp = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties.type;
+      expect(typeProp.enum).toContain("delete_entry");
+      expect(typeProp.enum).toContain("move_entry");
+      expect(typeProp.description).toMatch(/delete_entry löscht GENAU EINEN einzelnen Eintrag/);
+      expect(typeProp.description).toMatch(/move_entry verschiebt GENAU EINEN einzelnen Eintrag ATOMAR INNERHALB EINES Notizbuchs/);
+      expect(typeProp.description).toMatch(/NIEMALS für einen kompletten Abschnitt oder ein komplettes Kapitel/);
+    });
+
+    it("NOTEBOOK_TOOL-Schema: heading/chapter/content-Beschreibungen nennen delete_entry/move_entry korrekt (heading/chapter optional bei delete_entry, entfällt bei move_entry; content entfällt bei beiden)", () => {
+      const props = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties;
+      expect(props.heading.description).toMatch(/Bei delete_entry OPTIONAL/);
+      expect(props.heading.description).toMatch(/move_entry nutzt statt 'heading' die eigenen Felder 'from_heading'\/'to_heading'/);
+      expect(props.chapter.description).toMatch(/Bei delete_entry OPTIONAL/);
+      expect(props.chapter.description).toMatch(/move_entry nutzt statt 'chapter' die eigenen Felder 'from_chapter'.*'to_chapter'/);
+      expect(props.content.description).toMatch(/Entfällt AUCH bei delete_entry und move_entry/);
+    });
+
+    it("NOTEBOOK_TOOL-Schema: neue Felder entry/from_heading/from_chapter/to_heading/to_chapter sind definiert, mit korrekter Pflicht/Optional-Kennzeichnung", () => {
+      const props = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties;
+      expect(props.entry).toBeDefined();
+      expect(props.entry.type).toBe("string");
+      expect(props.entry.description).toMatch(/PFLICHT \(nicht leer\) bei delete_entry und move_entry/);
+
+      expect(props.from_heading).toBeDefined();
+      expect(props.from_heading.description).toMatch(/move_entry/);
+      expect(props.from_heading.description).toMatch(/Entfällt bei allen anderen Op-Typen/);
+
+      expect(props.from_chapter).toBeDefined();
+      expect(props.from_chapter.description).toMatch(/move_entry/);
+
+      expect(props.to_heading).toBeDefined();
+      expect(props.to_heading.description).toMatch(/Mindestens eines von to_heading\/to_chapter ist PFLICHT bei move_entry/);
+
+      expect(props.to_chapter).toBeDefined();
+      expect(props.to_chapter.description).toMatch(/Mindestens eines von to_heading\/to_chapter ist PFLICHT bei move_entry/);
+    });
+  });
+
   // v7.23 (Verschiebe-Auftrag, Live-Befund des Nutzers): "Verschiebe X ins
   // Notizbuch Y als neues Kapitel Z" führte bisher dazu, dass die Lösch-Op
   // im Quell-Notizbuch griff, während die Ziel-Op (mangels Kapitel)
@@ -794,7 +899,7 @@ describe("buildSystem", () => {
       // Ausnahme prüfen, nicht den Vertrag duplizieren.
       expect(sys).toMatch(/GEDÄCHTNIS-Ops \("memory_append"\/"memory_replace"\) sind davon EBENFALLS ausgenommen/);
       expect(sys).toContain("Gedächtnispflege ist KEIN Notizbuch-Aufräumen");
-      expect(sys).toContain("ALLE Notizbuch-Ops (append_to_section/replace_section/delete_section/delete_chapter/append_to_chapter/rewrite) bleiben bei reinen Fragen dagegen unverändert verboten");
+      expect(sys).toContain("ALLE Notizbuch-Ops (append_to_section/replace_section/delete_section/delete_chapter/append_to_chapter/delete_entry/move_entry/rewrite) bleiben bei reinen Fragen dagegen unverändert verboten");
     });
 
     it("NOTEBOOK_TOOL-Schema: type-enum enthält memory_append/memory_replace mit erklärender Beschreibung", () => {
@@ -929,7 +1034,7 @@ describe("buildSystem", () => {
   it("GLIEDERUNGS-VORSCHLAG: 'ops':[] meint NOTIZBUCH-Ops, memory_append/memory_replace bleiben davon unberührt (Review-Fix)", () => {
     const sys = buildSystem(nbs, "Wissensbasis", null);
     expect(sys).toContain('"ops":[] bleibt dabei leer'); // bestehender Vertrag bleibt als Substring erhalten
-    expect(sys).toContain('Mit "ops":[] sind hier NOTIZBUCH-Ops gemeint (append_to_section/replace_section/delete_section/delete_chapter/append_to_chapter/rewrite)');
+    expect(sys).toContain('Mit "ops":[] sind hier NOTIZBUCH-Ops gemeint (append_to_section/replace_section/delete_section/delete_chapter/append_to_chapter/delete_entry/move_entry/rewrite)');
     expect(sys).toContain("memory_append/memory_replace bleiben davon unberührt und auch beim reinen Struktur-Vorschlag erlaubt");
   });
 
@@ -951,7 +1056,7 @@ describe("buildSystem", () => {
     it("nennt die exakte, abschließende Liste der op-Typen und verbietet erfundene Varianten", () => {
       const sys = buildSystem(nbs, "Wissensbasis", null);
       expect(sys).toContain(
-        "Es gibt NUR diese op-Typen: append_to_section, replace_section, delete_section, delete_chapter, append_to_chapter, rewrite, memory_append, memory_replace."
+        "Es gibt NUR diese op-Typen: append_to_section, replace_section, delete_section, delete_chapter, append_to_chapter, delete_entry, move_entry, rewrite, memory_append, memory_replace."
       );
       expect(sys).toContain("Erfinde keine Varianten (z. B. memory_add)");
       expect(sys).toContain("unbekannte Typen werden verworfen und dir als ⚠️ gemeldet");
@@ -961,6 +1066,18 @@ describe("buildSystem", () => {
       const sys = buildSystem(nbs, "Wissensbasis", null);
       expect(sys).toContain("delete_section/replace_section adressieren nur ##-Hauptabschnitte");
       expect(sys).toContain("replace_section des gesamten ##-Abschnitts mit dem bereinigten Inhalt");
+    });
+
+    // Nachbesserungs-Finding (v7.50.2): delete_entry löscht bei einer
+    // "### Unterthema"-Zeile NUR diese eine Zeile – BOUNDARY_RE schützt nur
+    // "#"/"##" vor dem Eintrags-Matching, ihr nicht eingerückter Inhalt
+    // bliebe als Waise im Elternabschnitt zurück. Die ###-Regel muss das
+    // Modell deshalb explizit auch von delete_entry als Ausweg abhalten.
+    it("weist explizit darauf hin, dass auch delete_entry KEIN Ausweg für ein ###-Unterthema ist", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain(
+        "auch NICHT per delete_entry (das löscht nur die ###-Zeile selbst, ihr Inhalt bliebe zurück)"
+      );
     });
 
     // v7.32 (delete_chapter-Op, Live-Befund – siehe DECISIONS #74): das

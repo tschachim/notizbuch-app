@@ -10342,3 +10342,270 @@ aus `referenz-app.jsx` übernommen.
        `tests/docEditorIndent.test.jsx` decken die zugrunde liegende Regel
        (nicht-erster Listenpunkt sinkt/hebt unabhängig von seinem Inhalt)
        bereits ab.
+
+103. **`delete_entry`/`move_entry`-Ops für EINZELNE Einträge (v7.50,
+     Live-Vorfall bison.box, 2026-08-13/14).** Der Nutzer bat im Notizbuch
+     bison.box, einen einzelnen Inbox-Eintrag ("KPI-Formatierung in der RP
+     prüfen – weitermachen: [Wrike-Link]") unter das Kapitel „# KPIs“ zu
+     verschieben.
+     - **Versuch 1 (ohne zeilengenauen Op-Typ): komplette Inbox zerstört.**
+       Das Modell hatte keinen Op, der EINE Zeile adressiert – der Versuch,
+       den Umzug irgendwie über die vorhandenen Ops nachzubilden, zerstörte
+       die GESAMTE Inbox. Der Nutzer musste die Dokument-Version im
+       Editor-Verlauf zurücksetzen.
+     - **Versuch 2 ("minimal-invasiv"): Duplikat statt Umzug.** Der
+       Ziel-Schritt (`append_to_section` im KPIs-Bereich) klappte, der
+       Lösch-Schritt lief aber als `delete_section` auf „Inbox“ – das hätte
+       bei Erfolg WIEDER den GANZEN Abschnitt gelöscht (alle übrigen
+       Inbox-Einträge mit) und schlug nur ZUFÄLLIG fehl (Warn-Pille:
+       Abschnitt „Inbox“ nicht gefunden, vermutlich wegen einer
+       `chapter`-Eingrenzung, die „Inbox“ dort nicht traf). Ergebnis: der
+       Eintrag stand danach DOPPELT im Dokument (weiterhin in „## Inbox“
+       UND neu unter „# KPIs“).
+     - **Wurzelursache:** `src/lib/ops.js` kannte bis dahin AUSSCHLIESSLICH
+       abschnitts-/kapitel-granulare Ops (`append_to_section`/
+       `replace_section`/`delete_section` für `##`-Abschnitte,
+       `append_to_chapter`/`delete_chapter` für `#`-Kapitel). Für „lösche/
+       verschiebe GENAU DIESE EINE Zeile“ musste das Modell zwangsläufig
+       zu grobkörnig greifen – strukturell dieselbe Fehlerklasse wie
+       DECISIONS #74/#80 (fehlender Op-Typ zwingt zu unsicheren
+       Behelfslösungen), hier aber mit tatsächlichem Datenverlust bzw.
+       Duplikat als Konsequenz.
+     - **Entscheidung: zwei neue, ZEILEN-genaue Op-Typen.**
+       `delete_entry` (`{"type":"delete_entry","entry":"…","heading":"…"?,
+       "chapter":"…"?}`) löscht GENAU EINEN Eintrag; `move_entry`
+       (`{"type":"move_entry","entry":"…","from_heading":"…"?,
+       "from_chapter":"…"?,"to_heading":"…"?,"to_chapter":"…"?}`)
+       verschiebt ihn ATOMAR innerhalb EINES Notizbuchs. Design-
+       Entscheidungen:
+       - **Scope-Logik identisch zu den bestehenden Abschnitts-Ops**
+         (neuer Helfer `entryScope()`, rein lesend, von `applyOne` UND
+         `explainSkip` gemeinsam genutzt – Grundprinzip der Datei, siehe
+         deren Kopfkommentar): `heading` gesetzt → genau dieser Abschnitt
+         (optional zusätzlich per `chapter` eingegrenzt); NUR `chapter`
+         gesetzt → das ganze Kapitel; beides leer → das gesamte Notizbuch.
+         Bewusst KEINE automatische Anlage (anders als
+         `append_to_section`/`append_to_chapter` bei fehlendem `chapter`)
+         – ein Such-Scope, der nicht existiert, kann nichts „finden“,
+         Anlegen wäre hier sinnlos.
+       - **Warum GENAU-1-Treffer-Regel (kein „nimm den ersten Treffer“):**
+         Der Live-Vorfall zeigt genau die Gefahr eines zu laxen Matchings
+         – bei mehreren ähnlichen Zeilen (z. B. wiederkehrende
+         Formulierungen in einer Checkliste) hätte „erster Treffer
+         gewinnt“ STILLSCHWEIGEND die FALSCHE Zeile treffen können, ohne
+         dass Modell oder Nutzer es bemerken. Beide Ops brechen bei 0 ODER
+         ≥2 Treffern KOMPLETT ab (kein Teil-Erfolg) und melden die
+         Treffer-Anzahl in der Warn-Pille (`explainSkip`) – das Modell
+         bekommt dadurch eine klare Handlungsanweisung („exakteren
+         Wortlaut oder heading/chapter angeben“) statt eines stillen
+         Fehlgriffs.
+       - **Zweistufiges Matching (exakt vor Substring):** `norm()`
+         (Whitespace kollabiert) für exakte Vergleiche zuerst – nur wenn
+         das GAR NICHTS liefert, ein case-insensitiver Substring-Fallback.
+         Ein Modell zitiert eine Zeile selten byte-genau (Formulierung,
+         Emoji, Link-Klammerung); die zweistufige Suche deckt den
+         Normalfall exakt ab und bleibt für den Rest tolerant, OHNE bei
+         einem bereits eindeutigen exakten Treffer unnötig einen
+         Substring-Treffer in einer GANZ ANDEREN Zeile als zusätzliche
+         (scheinbare) Ambiguität mitzuzählen.
+       - **Warum Strukturzeilen-Schutz (BOUNDARY_RE-Filter, `#`/`##` NIE
+         als Kandidat):** Die zentrale Sicherheitsgarantie dieser beiden
+         Op-Typen – ein `entry`-Text, der zufällig (oder durch
+         Prompt-Injection aus Notizbuch-Inhalten) eine Kapitel-/
+         Abschnittszeile trifft, darf NIEMALS zum Löschen/Verschieben
+         eines ganzen Abschnitts/Kapitels eskalieren. `delete_section`/
+         `delete_chapter` bleiben die EINZIGEN Wege, echte Struktur zu
+         entfernen.
+       - **Eintragsblock inkl. Kinderzeilen:** Die Trefferzeile PLUS alle
+         direkt folgenden, STÄRKER eingerückten Zeilen wandern mit
+         (`entryBlockRange()`) – ein Stichpunkt mit Unterpunkten ist aus
+         Nutzersicht EIN Eintrag, nicht mehrere unabhängige Zeilen.
+       - **Warum `move_entry` ATOMAR statt zweier Ops (`delete_entry` +
+         `append_to_section`):** Genau die Lehre aus Versuch 2 des
+         Live-Vorfalls – zwei separate Ops könnten (Modellfehler, falsche
+         Reihenfolge, eine der beiden Ops greift aus irgendeinem Grund
+         nicht) zu Duplikat ODER Datenverlust führen. `move_entry` prüft
+         Quelle, Eintrag-Eindeutigkeit UND mindestens ein Ziel-Feld
+         VOLLSTÄNDIG, BEVOR es das lokale Zeilen-Array überhaupt anfasst
+         – jeder Skip liefert dadurch GARANTIERT den byte-identischen
+         Ausgangstext (siehe eigener Kommentar in `applyOne`). Für
+         Verschiebungen ZWISCHEN zwei Notizbüchern bleibt `move_entry`
+         bewusst NICHT zuständig (Notizbuch-Grenzen bestehen nur in
+         App.jsx, nicht in `ops.js`, das pro Aufruf ausschließlich EINEN
+         Dokumenttext kennt) – dafür gilt weiterhin die bestehende
+         Verschiebe-Regel (zuerst Ziel-Op im Zielbuch, dann `delete_entry`
+         in der Quelle), jetzt EXPLIZIT im Prompt um den
+         Einzeleintrag-Fall ergänzt.
+       - **Ziel-Einfügung nutzt bestehende Helfer statt eigener Logik:**
+         `insertEntryIntoSection()`/`insertEntryIntoChapterPreamble()`
+         rufen `findChapter`/`findSection`/`firstSectionInChapter`/
+         `findAddressableChapter`/`padEnd` – dieselben Bausteine wie
+         `append_to_section`/`append_to_chapter` – statt eine dritte,
+         eigenständige Anlage-Logik zu erfinden (v7.23/v7.40-konsistentes
+         Verhalten: fehlender Abschnitt/fehlendes Kapitel wird automatisch
+         angelegt). Die BESTEHENDEN `append_to_section`/`append_to_chapter`-
+         Codepfade selbst bleiben dabei UNANGETASTET (kein Umbau auf eine
+         gemeinsame Funktion) – das Risiko, deren gepinntes,
+         byte-identisches Verhalten versehentlich zu verändern, wog
+         schwerer als die zusätzliche Code-Ersparnis.
+       - **Einrückungs-Normalisierung am Ziel:** War die Trefferzeile
+         selbst eingerückt (z. B. ein verschobenes Unterpunkt-Kind), wird
+         die führende Einrückung am neuen Ort auf 0 gehoben, Kinderzeilen
+         um denselben Delta reduziert (`dedentBlock()`) – die relative
+         Struktur bleibt erhalten, aber der Eintrag hängt am Zielort nicht
+         mehr an einer (dort bedeutungslosen) alten Einrückungstiefe.
+     - **Prompt (`src/lib/anthropic.js`):** neue Ops-Zeilen in der
+       „Erlaubte ops“-Liste, `delete_entry`/`move_entry` in ALLEN
+       bestehenden Op-Typ-Aufzählungen ergänzt (op-Typen-Liste,
+       GLIEDERUNGS-VORSCHLAG, REINE-FRAGEN-Ausnahme, Tool-Schema-Enum),
+       neue OPS-ZUVERLÄSSIGKEIT-Regel „delete_entry/move_entry statt
+       delete_section/replace_section für einzelne Einträge“ sowie eine
+       Ergänzung der bestehenden Verschiebe-Regel um den
+       Einzeleintrag-Fall. Tool-Schema um die Felder `entry`/
+       `from_heading`/`from_chapter`/`to_heading`/`to_chapter` erweitert.
+     - **Bewusste Restrisiken:** (1) Der Substring-Fallback kann bei SEHR
+       kurzen/generischen `entry`-Texten (z. B. nur "x") in der Praxis
+       breit matchen und dadurch häufiger in die Ambiguitäts-Meldung statt
+       in einen Treffer laufen – akzeptiert, weil „nichts tun statt raten“
+       hier ausdrücklich gewünscht ist. (2) `move_entry` erkennt
+       „Quelle==Ziel“ nicht als Sonderfall, sondern führt Entfernen+
+       Wiedereinfügen ganz normal aus (Eintrag wandert ans Abschnittsende)
+       – bewusst KEIN Kurzschluss-Pfad, weil das Verhalten dadurch
+       vorhersagbar bleibt (immer „ans Ende“) statt zwei unterschiedliche
+       Ergebnisse je nachdem, ob Quelle und Ziel zufällig gleich sind.
+       (3) Wie bei den bestehenden Ops bleibt `ops.js` GIGO-tolerant
+       gegenüber offensichtlich unsinnigem `entry` (z. B. reiner
+       Whitespace-Text nach `norm()`) – das wird als „leerer entry“
+       abgefangen, alles andere wird beim Wort genommen. (4) **`move_entry`-
+       Asymmetrie beim Notizbuch-Titelnamen (Nachbesserungs-Finding
+       v7.50.2):** `from_chapter` erreicht über `findChapter()` auch die
+       Titel-Präambel (erster Treffer im Dokument ist per Konvention immer
+       die Titelzeile, siehe `titleLineIdx`), `to_chapter` dagegen NICHT
+       (`insertEntryIntoChapterPreamble()` nutzt `findAddressableChapter()`,
+       das die Titelzeile bewusst ausschließt, siehe deren Kopfkommentar
+       oben). Ein `move_entry` AUS der Titel-Präambel HERAUS in ein
+       gleichnamiges `to_chapter` legt dadurch ein ZWEITES, gleichnamiges
+       Kapitel am Dokumentende an, statt den Eintrag in die (aus
+       `to_chapter`-Sicht unsichtbare) Titelzeile zurückzuschreiben – KEIN
+       Datenverlust (der Eintrag bleibt exakt einmal im Dokument), aber ein
+       inkonsistentes Ergebnis für diesen exotischen Randfall. Bewusst KEIN
+       Code-Umbau: `from_chapter`/`to_chapter` spiegeln damit je für sich
+       GENAU das etablierte Verhalten ihrer jeweiligen Analog-Ops
+       (`delete_chapter`/`findAddressableChapter` für die Quelle,
+       `append_to_chapter` für das Ziel) – ein Guard würde `explainSkip()`
+       eine dritte, nur für `move_entry` geltende Titelzeilen-Fallunter-
+       scheidung aufzwingen, für einen Fall, der voraussetzt, dass der
+       Nutzer explizit Inhalt AUS der Titel-Präambel eines Notizbuchs
+       verschieben lässt (in der Praxis extrem selten, da die Präambel
+       normalerweise nur den Notizbuchnamen selbst trägt).
+     - **Tests:** `tests/ops.test.js` (1:1-Regressionstest des
+       bison.box-Vorfalls, Matching-Stufen, Ambiguität, Fence-Awareness,
+       Strukturzeilen-Schutz, Scoping, Atomaritäts-Garantie, Ziel-Varianten,
+       Quelle==Ziel, Wrapper-Äquivalenz), `tests/anthropic.test.js`
+       (Prompt-/Schema-Vertrag), `tests/appOps.test.js` (Warn-Pillen-Fälle).
+     - **Nachbesserung (v7.50.2, Review vor dem Commit – fünf MINOR-
+       Findings behoben, v7.50 bleibt v7.50):** (1) Prompt-Halbsatz ergänzt
+       (`src/lib/anthropic.js`, OPS-ZUVERLÄSSIGKEIT): die bestehende
+       ###-Unterthema-Regel weist jetzt explizit darauf hin, dass auch
+       `delete_entry` KEIN Ausweg ist (löscht nur die `###`-Zeile selbst,
+       ihr nicht eingerückter Inhalt bliebe als Waise im Elternabschnitt
+       zurück – `BOUNDARY_RE` schützt nur `#`/`##` vor dem Eintrags-
+       Matching, keine `###`-Zeilen). (2) `App.jsx#send()`: die Auto-
+       Aufklapp-Logik für betroffene Abschnitte las bisher NUR `o.heading`
+       – bei `move_entry` (Ziel/Quelle stehen in `to_heading`/
+       `from_heading`, es gibt gar kein `o.heading`-Feld) blieb der
+       Zielabschnitt nach einem erfolgreichen Umzug fälschlich eingeklappt.
+       Fix: alle drei Felder einsammeln (`[o.heading, o.to_heading,
+       o.from_heading]`), die übrigen Op-Typen bleiben unverändert (deren
+       `to_heading`/`from_heading` sind schlicht `undefined` und fallen
+       über `filter(Boolean)` heraus). (3) `tests/ops.test.js`: der
+       „keine inhaltliche Änderung“-Zweig in `explainSkip()` für
+       `move_entry` (Quelle==Ziel, Eintrag bereits am Abschnittsende) war
+       bisher nur als theoretisch erreichbar dokumentiert, aber ungetestet
+       – Pin-Test ergänzt, der ihn ECHT auslöst (byte-identisches Dokument,
+       `applied:false`). (4) `dedentBlock()`-Struktur-Injektion (siehe
+       Nachbesserung zu #104 unten). (5) diese Restrisiko-Ergänzung selbst.
+
+104. **v7.50.1, 🔴 Code-Review-Fund zu #103: `entryBlockRange()` war NICHT
+     fence-aware – `delete_entry`/`move_entry` konnten einen geschlossenen
+     ```-Codeblock als Eintrags-Kind mitten auseinanderreißen (Datenverlust
+     bzw. Zaun-Waisen).** Der Review zu #103 fand vor dem Commit zwei
+     empirisch reproduzierte Fälle: `entryBlockRange()` (ermittelt den
+     Eintragsblock aus Trefferzeile + stärker eingerückten Kinderzeilen)
+     tastete Kinderzeilen NUR über Leerzeile/Einrückung ab, OHNE die
+     Fence-Maske (`computeFenceLineMask`) zu prüfen – im Widerspruch zum
+     eigenen Kopfkommentar der Datei ("Fence-Awareness überall") und zum
+     Matching in `findEntryLines()`, das Fence-Zeilen als Kandidaten bereits
+     korrekt ausschließt. (1) Ein eingerücktes ```-Kind MIT einer Leerzeile
+     darin ließ `delete_entry` an dieser Leerzeile abbrechen – Eintrag +
+     öffnender Zaun + erste Codezeile wurden gelöscht, die restlichen
+     Codezeilen + Schlusszaun blieben als Waise stehen (Codeinhalt
+     unwiederbringlich verstümmelt, Fence-Struktur zerstört). (2) Ein
+     ```-Kind mit einer Spalte-0-Codezeile ließ `move_entry` NUR den
+     öffnenden Zaun mitverschieben, der restliche Code + Schlusszaun blieben
+     in der Quelle zurück.
+     - **Fix:** `entryBlockRange()` erkennt jetzt, wenn der Scan auf die
+       ÖFFNENDE Zaunzeile eines GESCHLOSSENEN Fence-Blocks trifft
+       (`computeFenceLineMask`/`matchFenceBlock`, beide aus `code.jsx`,
+       bereits von `findChapter`/`findSection`/`tidy` genutzt): Unterschreitet
+       die Zaunzeile selbst die Einrückungsgrenze, endet der Block VOR dem
+       Fence (wie bei jeder anderen zu schwach eingerückten Zeile); sonst
+       wird der GESAMTE Fence-Block (inkl. Leerzeilen/Spalte-0-Zeilen DARIN)
+       ATOMAR eingeschlossen – Inhalt des Codeblocks kann den Eintragsblock
+       nicht mehr vorzeitig beenden.
+     - **Begleitfund `dedentBlock()`:** Mit einbezogenen Fence-Innenzeilen
+       kann eine Zeile eine GERINGERE Einrückung als die Trefferzeile haben
+       (z. B. Spalte-0-Code in einem eingerückten Codeblock-Kind) – ein
+       pauschales `l.slice(delta)` hätte dort führende CODE-ZEICHEN statt nur
+       Whitespace abgeschnitten. Fix: pro Zeile auf die eigene Einrückung
+       geklammert (`l.slice(Math.min(delta, indentOf(l)))`) – für alle
+       "normalen" Kinderzeilen (deren Einrückung laut `entryBlockRange`-
+       Kontrakt immer über der Trefferzeile liegt) bleibt das Verhalten zum
+       vorherigen, bereits gepinnten Stand byte-identisch.
+     - **Restrisiko:** Ein UNTERMINIERTER Zaun (fehlender Schlusszaun) bleibt
+       bewusst unmaskiert (dieselbe GIGO-Philosophie wie überall in dieser
+       Datei, siehe `computeFenceLineMask`-Kommentar in `code.jsx`) – ein
+       Eintrag mit einem offenen, nie geschlossenen Codeblock als Kind wird
+       weiterhin über die normale Leerzeilen-/Einrückungsregel abgeschnitten,
+       nicht über die Fence-Erkennung.
+     - **Tests:** `tests/ops.test.js`, neue `describe`-Gruppe "Eintragsblock
+       mit eingerücktem, GESCHLOSSENEM Fence-Kind" – je ein `delete_entry`-
+       und zwei `move_entry`-Fälle mit Leerzeile bzw. Spalte-0-Zeile im
+       Fence-Kind, plus ein Fall mit eigener Einrückung der Trefferzeile
+       (prüft gezielt den `dedentBlock()`-Clamp, sonst würde `return 1;` zu
+       `turn 1;` verstümmelt).
+     - **Nachbesserung (v7.50.2, Review vor dem Commit): `dedentBlock()`
+       konnte Inhalt durchs Dedent selbst zu Struktur machen (Struktur-
+       Injektion).** Eine per Einrückung bisher UNSCHÄDLICHE Zeile wie ein
+       als Kind unter einem Listenpunkt eingerücktes `"  # Kommentar mit
+       Raute"` matcht `BOUNDARY_RE` nicht (das `#` steht nicht bei Spalte 0)
+       – `findEntryLines()` lässt sie deshalb bewusst als `entry`-Kandidat
+       zu (dieselbe Logik, die auch ein zitiertes `"# "` in normalem
+       Fließtext toleriert). Wurde GENAU diese Zeile per `move_entry`
+       adressiert (sie selbst also die Trefferzeile mit eigener
+       Einrückung, `delta > 0`), hob die volle Dedentierung sie auf Spalte 0
+       – aus Inhalt wurde dadurch eine ECHTE `#`-Kapitelzeile, `tidy()`
+       hätte am Ziel sogar noch eine Leerzeile davor erzwungen, und jede
+       künftige `findChapter`/`findSection`-Suche hätte den Zielabschnitt
+       dort fälschlich enden lassen. **Fix:** `dedentBlock()` prüft jetzt
+       PRO ZEILE (nicht nur die Trefferzeile – Robustheit gegen künftige
+       Änderungen an `entryBlockRange`, auch wenn nach aktuellem Kontrakt
+       nur die Trefferzeile selbst betroffen sein kann, da normale
+       Kinderzeilen laut `entryBlockRange` immer STRIKT stärker eingerückt
+       sind als `delta` und nach dem Clamp mindestens ein Leerzeichen
+       behalten): Matcht die volle Dedentierung `BOUNDARY_RE`, die
+       Originalzeile aber nicht, bleibt EIN führendes Whitespace-Zeichen
+       DER ORIGINALZEILE stehen (`l.slice(cut - 1)` statt `l.slice(cut)` –
+       funktioniert dadurch auch bei Tabs, kein hartcodiertes Leerzeichen).
+       Fence-Innenzeilen (`computeFenceLineMask(blockLines)`) sind davon
+       ausdrücklich AUSGENOMMEN – ein `#`-Shell-Kommentar bei Spalte 0
+       IM Codeblock ist gültiger, unveränderlicher Inhalt (der mitwandernde
+       Zaun schützt ihn bereits strukturell, siehe Fix oben) und darf nicht
+       zusätzlich mit einem Leerzeichen verfälscht werden.
+       - **Test:** `tests/ops.test.js`, neue `describe`-Gruppe
+         "dedentBlock: Struktur-Injektion verhindern" – `move_entry` mit
+         einem als Kind eingerückten `"# Kommentar mit Raute"` als `entry`;
+         prüft sowohl das erhaltene EINE Leerzeichen am Ziel als auch (als
+         stärkste Garantie) dass im GESAMTEN Ergebnisdokument außer der
+         echten Titelzeile keine weitere Zeile `BOUNDARY_RE`-artig
+         (`/^#\s/`) auf Spalte 0 auftaucht.
