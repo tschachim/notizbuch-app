@@ -183,6 +183,19 @@ describe("buildSystem", () => {
       .toContain("<cite index=");
   });
 
+  // v7.51 (E2E-Befund): eine Live-Antwort lieferte eine gemischtsprachige
+  // Commit-Botschaft ("Add section QA-Test Duplikate mit zwei
+  // Stichpunkten") – der Prompt verlangte für "commit" bisher keine
+  // explizite Sprache. Ergänzt statt umformuliert (bestehende Prompt-Pin-
+  // Tests bleiben unberührt).
+  it("verlangt die commit-Botschaft ausdrücklich auf Deutsch (v7.51, gemischtsprachiger Live-Befund)", () => {
+    const sys = buildSystem(nbs, "Wissensbasis", null);
+    expect(sys).toContain(
+      "commit: sehr kurze Änderungsbeschreibung im Stil einer Git-Commit-Message, auf Deutsch; " +
+      "leer lassen, wenn keine Änderung."
+    );
+  });
+
   it("weist an, absolute Windows-Pfade als file:-Link mit Dateiname-ohne-Endung einzutragen (v7.31)", () => {
     const sys = buildSystem(nbs, "Wissensbasis", null);
     expect(sys).toContain("Absolute Windows-Pfade");

@@ -226,24 +226,93 @@ export async function ghListCommits(cfg, path, perPage = 30) {
   }));
 }
 
+// v7.51-Fix (E2E-Befund 🟡): GitHubs /commits?path=… liefert ALLE Commits,
+// die einen Dateipfad je berührt haben – auch die eines FRÜHER GELÖSCHTEN,
+// gleichnamigen Notizbuchs (der Pfad wird aus dem Namen abgeleitet, ein
+// erneut angelegtes Notizbuch mit demselben Namen landet also wieder auf
+// demselben Pfad und "erbt" dessen komplette Vorgänger-Historie). Statt das
+// über den Dateiinhalt zu erraten, kontrolliert die App die relevanten
+// Commit-Botschaften selbst und markiert damit ihre eigenen Grenzen:
+// "Notizbuch „X“ angelegt" (App.jsx#createNotebook) beginnt eine neue
+// Inkarnation INKLUSIVE dieses Commits (die Anlage gehört noch dazu, alles
+// Ältere ist Vorgänger); "Notizbuch „X“ gelöscht" (App.jsx#deleteNotebook)
+// beendet die VORHERIGE Inkarnation EXKLUSIVE dieses Commits (der
+// Lösch-Commit selbst gehört noch zum Vorgänger, nicht zur neuen). Von
+// NEU nach ALT gelesen gewinnt der ERSTE Treffer eines der beiden Muster.
+// "Notizbuch umbenannt: „A“ → „B“" (renameNotebook) committet auf DENSELBEN
+// Pfad und ist bewusst KEINE Grenze, sondern eine normale Version – die
+// Anlage-Grenze bleibt dahinter (älter) weiterhin sichtbar, auch wenn der
+// Name beim Anlegen ein anderer war (deshalb .* statt eines konkreten
+// Namens im Muster – und bewusst NICHT [^“]*: der Notizbuchname selbst darf
+// typografische Anführungszeichen enthalten, z. B. „Zitate „Goethe““; ein
+// nicht-gieriges [^“]* könnte einen solchen Namen nicht überspannen und die
+// Grenze bliebe für genau diese Notizbücher dauerhaft unerkannt, Review-Fix
+// 🔵 v7.51). Die Lösch-Suffixe ("… gelöscht: Wissensdatei entfernt"
+// / "… gelöscht: Icon entfernt", App.jsx#deleteNotebook) committen auf
+// ANDEREN Pfaden (bilder/wissen-Dateien), tauchen hier also ohnehin nicht
+// auf – die Muster sind trotzdem mit ^…$ verankert, damit sie niemals als
+// Teilstring-Treffer durchrutschen könnten. Kein Treffer: Liste unverändert
+// (z. B. die Root-Wissensbasis, die nie über diese Botschaften angelegt/
+// gelöscht wird, oder eine Grenze, die jenseits der abgefragten Seite liegt
+// – siehe ghCommitMeta-Fallback unten).
+const RE_NB_CREATED = /^Notizbuch „.*“ angelegt$/;
+const RE_NB_DELETED = /^Notizbuch „.*“ gelöscht$/;
+
+export function truncateToCurrentIncarnation(commits) {
+  for (let i = 0; i < commits.length; i++) {
+    const msg = commits[i].msg || "";
+    if (RE_NB_CREATED.test(msg)) return commits.slice(0, i + 1); // inklusive
+    if (RE_NB_DELETED.test(msg)) return commits.slice(0, i); // exklusive
+  }
+  return commits.slice();
+}
+
 // Anzahl der Commits einer Datei + Zeitstempel des jüngsten.
-// Der Trick: per_page=1 und die letzte Seitennummer aus dem Link-Header lesen.
+// v7.51: EIN Request mit per_page=100, durch truncateToCurrentIncarnation
+// geschnitten (siehe dort). Wurde eine Grenze gefunden ODER kamen weniger
+// als 100 Einträge (die Rohliste ist dann ohnehin vollständig): count/lastTs
+// stehen direkt fest. "Grenze gefunden" heißt dabei: die geschnittene Liste
+// ist KÜRZER als die Rohliste ODER ihr ältester Eintrag ist selbst der
+// Anlage-Commit (inklusiver Schnitt EXAKT an Position 100 kürzt nichts,
+// die Grenze war aber sichtbar – ohne diese Zusatzprüfung fiele genau
+// dieser Randfall fälschlich in den Fallback und zeigte wieder die
+// Gesamtzahl inkl. Vorgänger, Review-Fix 🔵 v7.51). Der seltene Rest –
+// exakt 100 Treffer UND KEINE erkennbare Grenze (>100 Versionen der
+// aktuellen Inkarnation, oder eine sehr alte Datei von vor diesem Fix
+// ohne Grenz-Commit) – fällt zurück auf
+// den bisherigen Link-Header-Trick (separater per_page=1-Request), damit
+// dieser Fall wenigstens die korrekte GESAMT-Anzahl zeigt statt fälschlich
+// "100".
 export async function ghCommitMeta(cfg, path) {
   const url =
     `${GH_API}/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}` +
-    `/commits?path=${encodeURIComponent(path)}&per_page=1`;
+    `/commits?path=${encodeURIComponent(path)}&per_page=100`;
   const res = await ghFetch(url, { headers: baseHeaders(cfg) });
   if (!res.ok) throw errorFor(res);
   const data = await res.json();
   if (!Array.isArray(data) || !data.length) return { count: 0, lastTs: null };
-  let count = 1;
-  const link = res.headers.get("Link") || "";
+  const list = data.map((c) => ({
+    msg: ((c.commit && c.commit.message) || "").split("\n")[0],
+    ts: new Date((c.commit && c.commit.committer && c.commit.committer.date) || 0).getTime(),
+  }));
+  const truncated = truncateToCurrentIncarnation(list);
+  if (truncated.length < list.length || list.length < 100
+      || RE_NB_CREATED.test(truncated[truncated.length - 1].msg)) {
+    return { count: truncated.length, lastTs: truncated[0] ? truncated[0].ts : null };
+  }
+  // Fallback: exakt 100 Einträge, keine Grenze gefunden – lastTs steht
+  // trotzdem bereits fest (jüngster Commit, unabhängig vom Grenzfund), nur
+  // die genaue Gesamtzahl braucht den zweiten Request.
+  const legacyUrl =
+    `${GH_API}/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}` +
+    `/commits?path=${encodeURIComponent(path)}&per_page=1`;
+  const legacyRes = await ghFetch(legacyUrl, { headers: baseHeaders(cfg) });
+  if (!legacyRes.ok) throw errorFor(legacyRes);
+  let count = 100;
+  const link = legacyRes.headers.get("Link") || "";
   const m = /[?&]page=(\d+)>;\s*rel="last"/.exec(link);
   if (m) count = parseInt(m[1], 10);
-  const lastTs = new Date(
-    (data[0].commit && data[0].commit.committer && data[0].commit.committer.date) || 0
-  ).getTime();
-  return { count, lastTs };
+  return { count, lastTs: list[0].ts };
 }
 
 /* --- Verbindungscheck für den Settings-Dialog --- */

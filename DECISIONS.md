@@ -10609,3 +10609,86 @@ aus `referenz-app.jsx` übernommen.
          stärkste Garantie) dass im GESAMTEN Ergebnisdokument außer der
          echten Titelzeile keine weitere Zeile `BOUNDARY_RE`-artig
          (`/^#\s/`) auf Spalte 0 auftaucht.
+
+105. **v7.51, 🟡 E2E-Finding aus dem v7.50-Testerlauf: Versionszähler und
+     Historie-Liste eines frisch angelegten Notizbuchs zählten/zeigten die
+     Historie eines früher GELÖSCHTEN, gleichnamigen Vorgängers mit.**
+     Beobachtet: „QA-Test Automatisch“ (QA legt es per Konvention immer
+     wieder unter demselben Namen an) zeigte im Aktenkopf direkt nach der
+     Anlage korrekt „1 Versionen“, nach einem bloßen Notizbuch-Wechsel dann
+     „96 Versionen“ (später „114 Versionen“). Ursache: Der Dateipfad wird
+     aus dem Notizbuchnamen abgeleitet (`slugify`) und bei erneuter Anlage
+     desselben Namens wiederverwendet; GitHubs `/commits?path=…` liefert
+     aber ALLE Commits, die diesen Pfad je berührt haben – auch die eines
+     längst gelöschten Vorgängers. Betroffen waren sowohl `ghCommitMeta()`
+     (`meta.count` im Aktenkopf/Historie-Dialog) als auch `ghListCommits()`
+     (die Historie-LISTE selbst zeigte und hätte Versionen des gelöschten
+     Vorgängers restaurieren können).
+     - **Fix – Grenz-Commit-Abgrenzung:** Die App kontrolliert die
+       relevanten Commit-Botschaften auf dem Notizbuch-Pfad selbst und
+       nutzt sie als Grenzen. Neuer, rein funktionaler, exportierter Helfer
+       `truncateToCurrentIncarnation(commits)` in `src/lib/github.js`
+       (Eingabe: die `ghListCommits`-Form `[{sha,msg,ts,parent}]`, neueste
+       zuerst): von NEU nach ALT gelesen beendet der ERSTE Treffer eines
+       von zwei Mustern die aktuelle Inkarnation – `/^Notizbuch „[^“]*“
+       angelegt$/` (App.jsx#createNotebook) schneidet INKLUSIVE (die
+       Anlage gehört noch zur aktuellen Inkarnation), `/^Notizbuch „[^“]*“
+       gelöscht$/` (App.jsx#deleteNotebook) schneidet EXKLUSIVE (der
+       Lösch-Commit gehört noch zum Vorgänger). Kein Treffer: Liste
+       unverändert. „Notizbuch umbenannt: „A“ → „B““ (renameNotebook)
+       committet auf DENSELBEN Pfad und ist bewusst KEINE Grenze, sondern
+       eine normale Version – der Name im Muster ist deshalb generisch
+       (`[^“]*`), damit eine Umbenennung zwischen Anlage und heute die
+       Anlage-Grenze nicht unsichtbar macht. Die Lösch-Suffix-Varianten
+       („… gelöscht: Wissensdatei entfernt“ / „… gelöscht: Icon entfernt“)
+       committen ohnehin auf ANDEREN Pfaden, matchen wegen der `^…$`-
+       Verankerung aber auch als reiner Text nie.
+     - **`ghCommitMeta()` umgebaut:** EIN Request mit `per_page=100`
+       (statt bisher `per_page=1`), Ergebnis durch den Helfer geschnitten.
+       Grenze gefunden ODER weniger als 100 Einträge (Rohliste dann
+       ohnehin vollständig): `count` = Länge der geschnittenen Liste,
+       `lastTs` = jüngster Eintrag – beides ohne zweiten Request. Kein
+       Grenzfund UND exakt 100 Einträge (theoretisch >100 Versionen der
+       aktuellen Inkarnation, oder eine sehr alte Datei von vor diesem
+       Fix ohne Grenz-Commit): Fallback auf den bisherigen Link-Header-
+       Trick (separater `per_page=1`-Request) – dieser seltene Fall
+       verhält sich wie vor v7.51. Rückgabeform `{ count, lastTs }` bleibt
+       identisch, kein Aufrufer musste angepasst werden.
+     - **Historie-Dialog (App.jsx#openHistory):** Das Ergebnis von
+       `ghListCommits(..., 30)` läuft jetzt ebenfalls durch
+       `truncateToCurrentIncarnation`, bevor es in `history` landet –
+       Zähler und Liste sind dadurch konsistent, die Liste zeigt/restauriert
+       keine Vorgänger-Versionen mehr.
+     - **Bewusste Restrisiken:** (1) Gelöschte Vorgänger-Historie wird
+       damit bewusst NICHT mehr als „Wiederherstellungs-Feature“ angeboten
+       – wer ein Notizbuch löscht und den Namen später wiederverwendet,
+       sieht dessen alte Versionen nicht mehr in der App (im Git-Repo
+       bleiben sie über GitHub selbst trotzdem erreichbar, siehe
+       Entscheidung 10). (2) Theoretisches Restrisiko: Ein MODELL-
+       generierter Chat-Commit-Text könnte rein zufällig exakt eines der
+       beiden Grenzmuster imitieren (z. B. eine Dokumentänderung, deren
+       `commit`-Feld wortgleich „Notizbuch „X“ angelegt“ lautet) – Folge
+       wäre dann eine zu kurz abgeschnittene Historie/Zählung, aber KEIN
+       Datenverlust (die Commits bleiben im Git-Repo unangetastet). (3)
+       Der `>100`-Fallback deckt zwar den Zähler ab, die Historie-LISTE
+       bleibt bei `perPage=30` weiterhin auf die Referenz-Grenze von
+       Entscheidung 10 begrenzt – bei mehr als 30 Versionen OHNE erkennbare
+       Grenze innerhalb dieser 30 zeigt der Dialog wie bisher nur die
+       neuesten 30 (unverändert seit Entscheidung 10, kein neues Risiko).
+     - **Nebenpunkte (🔵, im selben Auftrag miterledigt):** (a)
+       `src/lib/anthropic.js`, ANTWORTFORMAT-Zeile für `commit`: um „auf
+       Deutsch“ ergänzt (Live-Befund einer gemischtsprachigen
+       Commit-Botschaft „Add section QA-Test Duplikate mit zwei
+       Stichpunkten“). (b) `docs/TESTFAELLE.md`, Fall C19-Negativprobe: Die
+       Erwartung akzeptiert jetzt BEIDE Ausgänge – ⚠️-Warn-Pille (Op ohne
+       Wirkung) ODER Fließtext-Absage ohne Op –, analog zur bereits
+       akzeptierten Alternativ-Formulierung bei C25 (beide informieren
+       korrekt, ohne das Dokument zu verändern).
+     - **Tests:** `tests/github.test.js`, neue `describe`-Gruppe
+       „truncateToCurrentIncarnation“ (kein Treffer, Anlage-Grenze
+       inklusive, Lösch-Grenze exklusive, beide Grenzen gleichzeitig,
+       Umbenennen ist keine Grenze, Lösch-Suffix-Varianten sind keine
+       Grenze, Anlage mit anderem Namen vor Umbenennung bleibt Grenze) plus
+       erweiterte `ghCommitMeta`-Tests für die drei Netz-Zweige
+       (Grenzfund/<100/100-Fallback) und `tests/anthropic.test.js` für den
+       „auf Deutsch“-Zusatz.

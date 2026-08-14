@@ -541,13 +541,20 @@ Gedächtnis entfernen.
 Negativ-Probe (bewusst provozierter Fehlschlag, zeigt die neue
 Fehlerbehandlung): Im Chat einen Löschauftrag auf einen NICHT
 existierenden Abschnittsnamen geben, z. B. „Lösche den Abschnitt ‚QA-Test
-Nichtvorhanden‘.“ (1 API-Aufruf). Erwartet: Eine ⚠️-Warn-Pille (amber,
-Warndreieck-Icon) erscheint unter der Chat-Antwort mit einem Text wie
-„⚠️ Nicht angewendet: delete_section „QA-Test Nichtvorhanden“ (Abschnitt
-„QA-Test Nichtvorhanden“ nicht gefunden)“ – KEIN 💾-Badge, das Notizbuch
-bleibt unverändert. Danach im Chat nachfragen: „Was ist mit dem
-Löschauftrag von eben?“ (1 API-Aufruf). Erwartet: Das Modell erkennt aus
-der ⚠️-Warnung in der Historie, dass die vorige Änderung wirkungslos war
+Nichtvorhanden‘.“ (1 API-Aufruf). Erwartet (Präzisierung nach v7.50-Lauf:
+BEIDE Ausgänge gelten als bestanden, analog zur Alternativ-Formulierung
+bei C25): entweder (a) eine ⚠️-Warn-Pille (amber, Warndreieck-Icon)
+erscheint unter der Chat-Antwort mit einem Text wie „⚠️ Nicht angewendet:
+delete_section „QA-Test Nichtvorhanden“ (Abschnitt „QA-Test Nichtvorhanden“
+nicht gefunden)“ – KEIN 💾-Badge, das Notizbuch bleibt unverändert – ODER
+(b) das Modell erkennt die Nichtexistenz bereits selbst und sagt das im
+Fließtext klar und korrekt ab, OHNE überhaupt eine Op zu senden (ebenfalls
+KEIN 💾-Badge, Dokument unverändert) – beide Pfade informieren den Nutzer
+korrekt und verändern nichts, ein 🔴-Finding liegt nur vor, wenn trotzdem
+etwas gelöscht wurde oder der Fehlschlag GAR NICHT kommuniziert wird.
+Danach im Chat nachfragen: „Was ist mit dem Löschauftrag von eben?“ (1
+API-Aufruf). Erwartet: Das Modell erkennt aus der Historie (⚠️-Warnung
+oder eigener Fließtext von eben), dass die vorige Änderung wirkungslos war
 (keine Behauptung, es sei „bereits erledigt“).
 
 **C20 [VERBUNDEN][API] Kapitel per Chat löschen (delete_chapter, v7.32,

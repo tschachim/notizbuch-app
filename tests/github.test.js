@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   utf8ToB64, b64ToUtf8, ghGetFile, ghGetBlob, ghListDir, ghPutFile, ghDeleteFile,
   ghListCommits, ghCommitMeta, ghCheckRepo, ShaConflictError, reconcileNotebooksWithRemote,
+  truncateToCurrentIncarnation,
 } from "../src/lib/github.js";
 
 const CFG = { owner: "o", repo: "r", pat: "PAT" };
@@ -162,30 +163,107 @@ describe("Historie & Verbindungscheck", () => {
     ]);
   });
 
-  it("ghCommitMeta liest die Commit-Anzahl aus dem Link-Header (rel=last)", async () => {
-    fetch.mockResolvedValueOnce({
-      ok: true, status: 200,
-      headers: { get: (h) => (h === "Link"
-        ? '<https://api.github.com/repos/o/r/commits?path=x&per_page=1&page=2>; rel="next", ' +
-          '<https://api.github.com/repos/o/r/commits?path=x&per_page=1&page=42>; rel="last"'
-        : null) },
-      json: async () => [commit("c9", "m", "2026-03-03T12:00:00Z")],
-    });
-    const meta = await ghCommitMeta(CFG, "wissensbasis.md");
-    expect(meta.count).toBe(42);
-    expect(meta.lastTs).toBe(Date.parse("2026-03-03T12:00:00Z"));
-  });
-
-  it("ghCommitMeta: ohne Link-Header count=1, ohne Commits count=0", async () => {
+  // v7.51: ghCommitMeta fragt jetzt per_page=100 in EINEM Request ab und
+  // schneidet über truncateToCurrentIncarnation (siehe eigene describe-Gruppe
+  // unten für die reine Schnittlogik). Diese Tests decken die drei Zweige
+  // des Umbaus ab: Grenzfund, <100 Einträge ohne Grenze, 100-Fallback.
+  it("ghCommitMeta ohne Grenz-Commit und <100 Einträgen: EIN Request genügt, count = Rohlisten-Länge", async () => {
     fetch.mockResolvedValueOnce({
       ok: true, status: 200, headers: { get: () => null },
-      json: async () => [commit("c1", "m", "2026-01-01T00:00:00Z")],
+      json: async () => [
+        commit("c3", "dritte Version", "2026-03-03T12:00:00Z"),
+        commit("c2", "zweite Version", "2026-02-02T00:00:00Z"),
+        commit("c1", "erste Version", "2026-01-01T00:00:00Z"),
+      ],
     });
-    expect((await ghCommitMeta(CFG, "x.md")).count).toBe(1);
+    const meta = await ghCommitMeta(CFG, "wissensbasis.md");
+    expect(meta).toEqual({ count: 3, lastTs: Date.parse("2026-03-03T12:00:00Z") });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0][0]).toContain("per_page=100");
+  });
+
+  it("ghCommitMeta: ohne Commits count=0/lastTs=null, kein zweiter Request", async () => {
     fetch.mockResolvedValueOnce({
       ok: true, status: 200, headers: { get: () => null }, json: async () => [],
     });
     expect(await ghCommitMeta(CFG, "leer.md")).toEqual({ count: 0, lastTs: null });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  // Exakt das E2E-Finding (v7.50-Testerlauf, 🟡): "QA-Test Automatisch" zeigte
+  // nach einem Notizbuch-Wechsel "96 Versionen" statt "1 Versionen", weil
+  // /commits?path=... die Historie eines früher gelöschten, gleichnamigen
+  // Notizbuchs mitliefert. Mit der Anlage-Grenze INKLUSIVE geschnitten zeigt
+  // der Zähler wieder nur die aktuelle Inkarnation.
+  it("ghCommitMeta: Anlage-Grenze gefunden – zeigt NUR die aktuelle Inkarnation, nicht die Historie eines gelöschten, gleichnamigen Vorgängers (E2E-Finding v7.51)", async () => {
+    const vorgaenger = Array.from({ length: 20 }, (_, i) =>
+      commit("v" + i, "Vorgänger-Version " + i, "2025-01-01T00:00:00Z"));
+    fetch.mockResolvedValueOnce({
+      ok: true, status: 200, headers: { get: () => null },
+      json: async () => [
+        commit("cNeu", "Notizbuch „QA-Test Automatisch“ angelegt", "2026-08-14T09:00:00Z"),
+        ...vorgaenger,
+      ],
+    });
+    const meta = await ghCommitMeta(CFG, "notizbuecher/qa-test-automatisch.md");
+    expect(meta).toEqual({ count: 1, lastTs: Date.parse("2026-08-14T09:00:00Z") });
+    expect(fetch).toHaveBeenCalledTimes(1); // Grenze gefunden - kein Fallback-Request nötig
+  });
+
+  it("ghCommitMeta: Lösch-Grenze eines Vorgängers EXKLUSIVE geschnitten (der Lösch-Commit gehört noch zum Vorgänger)", async () => {
+    fetch.mockResolvedValueOnce({
+      ok: true, status: 200, headers: { get: () => null },
+      json: async () => [
+        commit("c4", "vierte Version", "2026-04-04T00:00:00Z"),
+        commit("c3", "dritte Version", "2026-03-03T00:00:00Z"),
+        commit("c2", "Notizbuch „Vorgänger Name“ gelöscht", "2026-02-02T00:00:00Z"),
+        commit("c1", "uralte Vorgänger-Version", "2025-01-01T00:00:00Z"),
+      ],
+    });
+    const meta = await ghCommitMeta(CFG, "notizbuecher/wiederverwendet.md");
+    expect(meta).toEqual({ count: 2, lastTs: Date.parse("2026-04-04T00:00:00Z") });
+  });
+
+  // Review-Fix 🔵 (v7.51): Liegt der Anlage-Commit EXAKT an Position 100
+  // (Index 99), kürzt der inklusive Schnitt nichts (truncated.length ===
+  // list.length) – ohne die Zusatzprüfung auf den ältesten Eintrag fiele
+  // genau dieser Randfall fälschlich in den Link-Header-Fallback und zeigte
+  // wieder die Gesamtzahl inkl. Vorgänger statt der korrekten 100.
+  it("ghCommitMeta: Anlage-Grenze EXAKT an Position 100 – KEIN Fallback, count = 100", async () => {
+    const aktuelle = Array.from({ length: 99 }, (_, i) =>
+      commit("a" + i, "aktuelle Version " + i, "2026-06-06T00:00:00Z"));
+    fetch.mockResolvedValueOnce({
+      ok: true, status: 200, headers: { get: () => null },
+      json: async () => [
+        ...aktuelle,
+        commit("a99", "Notizbuch „Randfall“ angelegt", "2026-01-01T00:00:00Z"),
+      ],
+    });
+    const meta = await ghCommitMeta(CFG, "notizbuecher/randfall.md");
+    expect(meta).toEqual({ count: 100, lastTs: Date.parse("2026-06-06T00:00:00Z") });
+    expect(fetch).toHaveBeenCalledTimes(1); // Grenze sichtbar - kein zweiter Request
+  });
+
+  it("ghCommitMeta: exakt 100 Einträge ohne erkennbare Grenze – Fallback auf den Link-Header-Trick (zweiter Request)", async () => {
+    const hundert = Array.from({ length: 100 }, (_, i) =>
+      commit("h" + i, "normale Version " + i, "2026-05-05T00:00:00Z"));
+    fetch.mockResolvedValueOnce({
+      ok: true, status: 200, headers: { get: () => null },
+      json: async () => hundert,
+    });
+    fetch.mockResolvedValueOnce({
+      ok: true, status: 200,
+      headers: { get: (h) => (h === "Link"
+        ? '<https://api.github.com/repos/o/r/commits?path=x&per_page=1&page=2>; rel="next", ' +
+          '<https://api.github.com/repos/o/r/commits?path=x&per_page=1&page=142>; rel="last"'
+        : null) },
+      json: async () => [commit("h0", "normale Version 0", "2026-05-05T00:00:00Z")],
+    });
+    const meta = await ghCommitMeta(CFG, "sehr-alte-datei.md");
+    expect(meta).toEqual({ count: 142, lastTs: Date.parse("2026-05-05T00:00:00Z") });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch.mock.calls[0][0]).toContain("per_page=100");
+    expect(fetch.mock.calls[1][0]).toContain("per_page=1");
   });
 
   it("ghCheckRepo: true bei Erfolg, 403-Meldung nennt die PAT-Berechtigung", async () => {
@@ -193,6 +271,104 @@ describe("Historie & Verbindungscheck", () => {
     expect(await ghCheckRepo(CFG)).toBe(true);
     fetch.mockResolvedValueOnce({ ok: false, status: 403 });
     await expect(ghCheckRepo(CFG)).rejects.toThrow(/Contents: Read and write/);
+  });
+});
+
+// v7.51-Fix (E2E-Finding 🟡, siehe DECISIONS #105): GitHubs
+// /commits?path=... liefert auch Commits eines früher gelöschten,
+// gleichnamigen Notizbuchs mit (der Dateipfad wird aus dem Namen
+// abgeleitet und bei erneuter Anlage desselben Namens wiederverwendet).
+// truncateToCurrentIncarnation() ist die reine, netzlose Schnittlogik, die
+// ghCommitMeta UND der Historie-Dialog in App.jsx gemeinsam nutzen, damit
+// Zähler und Liste konsistent bleiben (siehe eigene Tests für ghCommitMeta
+// oben für den Netz-Umbau).
+describe("truncateToCurrentIncarnation (v7.51, Grenz-Commit-Abgrenzung gegen Pfad-Wiederverwendung)", () => {
+  const c = (sha, msg, ts = 0) => ({ sha, msg, ts, parent: null });
+
+  it("kein Grenz-Commit: Liste bleibt inhaltlich unverändert (aber als frische Kopie)", () => {
+    const list = [c("c3", "dritte Änderung"), c("c2", "zweite Änderung"), c("c1", "Initial")];
+    const res = truncateToCurrentIncarnation(list);
+    expect(res).toEqual(list);
+    expect(res).not.toBe(list); // eigene Kopie, kein Alias auf die Eingabe
+  });
+
+  it("leere Liste bleibt leer", () => {
+    expect(truncateToCurrentIncarnation([])).toEqual([]);
+  });
+
+  it("Anlage-Grenze mittendrin: INKLUSIVE Schnitt (die Anlage-Version gehört noch zur aktuellen Inkarnation)", () => {
+    const list = [
+      c("c4", "vierte Änderung"),
+      c("c3", "Notizbuch „QA-Test Automatisch“ angelegt"),
+      c("c2", "Notizbuch „QA-Test Automatisch“ gelöscht"), // gehört zum Vorgänger, muss weg
+      c("c1", "Initial des Vorgängers"),
+    ];
+    expect(truncateToCurrentIncarnation(list)).toEqual([list[0], list[1]]);
+  });
+
+  it("Lösch-Grenze mittendrin: EXKLUSIVE Schnitt (der Lösch-Commit selbst gehört noch zum Vorgänger)", () => {
+    const list = [
+      c("c3", "dritte Version der aktuellen Inkarnation"),
+      c("c2", "zweite Version der aktuellen Inkarnation"),
+      c("c1", "Notizbuch „X“ gelöscht"), // Vorgänger-Grenze, exklusive raus
+      c("c0", "uralte Vorgänger-Version"),
+    ];
+    expect(truncateToCurrentIncarnation(list)).toEqual([list[0], list[1]]);
+  });
+
+  it("beide Grenzmuster in derselben Liste: der ERSTE (neueste) Treffer gewinnt", () => {
+    const list = [
+      c("c5", "Notizbuch „X“ angelegt"), // näher an "neu" - gewinnt
+      c("c4", "Notizbuch „Y“ gelöscht"),
+      c("c3", "Vorgänger-Version"),
+    ];
+    expect(truncateToCurrentIncarnation(list)).toEqual([list[0]]);
+  });
+
+  it("Umbenennen-Commit ist KEINE Grenze (committet auf denselben Pfad, normale Version innerhalb der Inkarnation)", () => {
+    const list = [
+      c("c3", "Notizbuch umbenannt: „A“ → „B“"),
+      c("c2", "Notizbuch „A“ angelegt"),
+      c("c1", "Vorgänger-Rest, darf nicht mehr auftauchen"),
+    ];
+    expect(truncateToCurrentIncarnation(list)).toEqual([list[0], list[1]]);
+  });
+
+  it("Lösch-Suffix-Varianten ('… gelöscht: Wissensdatei entfernt' / '… gelöscht: Icon entfernt') matchen NICHT (Muster exakt mit $ verankert)", () => {
+    const list = [
+      c("c3", "Notizbuch „X“ gelöscht: Wissensdatei entfernt"),
+      c("c2", "Notizbuch „X“ gelöscht: Icon entfernt"),
+      c("c1", "normale Version"),
+    ];
+    expect(truncateToCurrentIncarnation(list)).toEqual(list);
+  });
+
+  it("Anlage-Commit mit ANDEREM Namen (vor einer späteren Umbenennung) ist trotzdem eine gültige Grenze", () => {
+    const list = [
+      c("c3", "Notizbuch umbenannt: „Alter Name“ → „Neuer Name“"),
+      c("c2", "Notizbuch „Alter Name“ angelegt"),
+      c("c1", "Vorgänger-Rest, muss weg"),
+    ];
+    expect(truncateToCurrentIncarnation(list)).toEqual([list[0], list[1]]);
+  });
+
+  // Review-Fix 🔵 (v7.51): Der Notizbuchname darf SELBST typografische
+  // Anführungszeichen enthalten – ein nicht-gieriges [^“]* im Muster könnte
+  // „Zitate „Goethe““ nicht überspannen, die Grenze bliebe für genau diese
+  // Notizbücher dauerhaft unerkannt (Vor-Fix-Zustand: Vorgänger zählt mit).
+  it("Notizbuchname mit typografischen Anführungszeichen im Namen ist trotzdem eine gültige Grenze (.* statt [^“]*)", () => {
+    const list = [
+      c("c3", "neue Version"),
+      c("c2", "Notizbuch „Zitate „Goethe““ angelegt"),
+      c("c1", "Vorgänger-Rest, muss weg"),
+    ];
+    expect(truncateToCurrentIncarnation(list)).toEqual([list[0], list[1]]);
+    const delList = [
+      c("d2", "aktuelle Version"),
+      c("d1", "Notizbuch „Zitate „Goethe““ gelöscht"),
+      c("d0", "Vorgänger-Rest, muss weg"),
+    ];
+    expect(truncateToCurrentIncarnation(delList)).toEqual([delList[0]]);
   });
 });
 
