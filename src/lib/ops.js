@@ -643,16 +643,45 @@ function insertIntoChapterPreamble(lines, range, contentLines) {
 // dieselben Such-Helfer (findChapter/findSection/padEnd) wie jener Block, um
 // NICHT vom geprüften Anlage-Verhalten abzuweichen. Mutiert "lines" direkt
 // (push/splice), wie die übrigen Op-Zweige dieser Datei.
-// v7.52 (Live-Vorfall "KPIs"-Duplikat, DECISIONS #106): VOR der bisherigen
-// Logik entscheidet resolveSectionTarget() rein lesend, ob "headingDisp"
-// (ggf. mit "chapterField") ein GLEICHNAMIGES #-Kapitel OHNE eigenen
-// ##-Abschnitt trifft – dann wandert der Eintrag in dessen Kapitel-
-// Freitext (insertEntryIntoChapterPreamble) statt einen redundanten
+// v7.52 (Live-Vorfall "KPIs"-Duplikat, DECISIONS #106): der Aufrufer (siehe
+// applyOne, move_entry-Zweig) entscheidet VORAB rein lesend per
+// resolveSectionTarget(), ob "headingDisp" (ggf. mit "chapterField") ein
+// GLEICHNAMIGES #-Kapitel OHNE eigenen ##-Abschnitt trifft, und reicht das
+// Ergebnis als "collision" durch – dann wandert der Eintrag in dessen
+// Kapitel-Freitext (insertEntryIntoChapterPreamble) statt einen redundanten
 // "## X"-Abschnitt INNERHALB von "# X" anzulegen.
-function insertEntryIntoSection(lines, headingDisp, chapterField, blockLines) {
-  const resolved = resolveSectionTarget(lines, { heading: headingDisp, chapter: chapterField });
-  if (resolved.collision) {
-    insertEntryIntoChapterPreamble(lines, chapterField || headingDisp, blockLines);
+// v7.52.1 (Review-Finding 1, Spiegelprinzip-Drift, DECISIONS #109): "collision"
+// wird bewusst NICHT mehr HIER per eigenem resolveSectionTarget-Aufruf
+// ermittelt (wie bis v7.52) – "lines" ist an dieser Stelle bereits das um die
+// Quellzeile BEREINIGTE Array (applyOne führt meLines.splice() VOR diesem
+// Aufruf aus), während explainNote() dieselbe Kollisions-Frage auf dem
+// UNMUTIERTEN "before"-Text beantwortet. Beide konnten dadurch bei einem
+// Dokument OHNE Titelzeile, dessen verschobene Zeile die erste nicht-leere
+// Zeile war, zu UNTERSCHIEDLICHEN Ergebnissen kommen: das Entfernen der
+// Quellzeile ließ die folgende "# X"-Zeile per Konvention (siehe
+// titleLineIdx) zur neuen Titelzeile werden, findAddressableChapter() hielt
+// sie deshalb für unadressierbar und lieferte KEINE Kollision – "## X"
+// landete klaglos UNTER "# X", während die note weiterhin "Kapitel-Freitext"
+// behauptete. Der Aufrufer berechnet "collision" jetzt GARANTIERT auf
+// demselben Zeilenstand wie explainNote (siehe dort).
+// "collisionRange" (nur bei collision:true relevant, sonst ignoriert) ist AUS
+// DEMSELBEN GRUND ebenfalls vom Aufrufer VORAB (auf dem unmutierten Stand)
+// ermittelt und um die anschließende Quell-Entfernung index-verschoben
+// durchgereicht – ein zweiter, HIER laufender findAddressableChapter()-Aufruf
+// (wie ursprünglich in insertEntryIntoChapterPreamble) hätte auf dem bereits
+// bereinigten "lines" DENSELBEN Titelzeilen-Fehlschluss gezogen (empirisch
+// bei der Fix-Verifikation aufgefallen: eine testbare Datenlage erzeugte
+// dadurch ein zweites "# X" STATT der erwarteten Präambel-Einfügung in das
+// BESTEHENDE Kapitel – kein bloßes "per Name neu suchen" reicht hier, weil
+// die Titelzeilen-Eigenschaft selbst vom (nicht mehr vorhandenen) Kontext
+// abhängt). "collisionRange" ist null, wenn das Kollisions-Kapitel selbst
+// erst neu angelegt werden muss (siehe resolveSectionTarget) – dann bleibt
+// die Namens-basierte Neuanlage in insertEntryIntoChapterPreamble() unten
+// unverändert richtig (ein NOCH NICHT existierendes Kapitel kann durch die
+// Quell-Mutation nicht fälschlich zur Titelzeile werden).
+function insertEntryIntoSection(lines, headingDisp, chapterField, blockLines, collision, collisionRange) {
+  if (collision) {
+    insertEntryIntoChapterPreamble(lines, chapterField || headingDisp, blockLines, collisionRange);
     return;
   }
   let range = null;
@@ -686,9 +715,19 @@ function insertEntryIntoSection(lines, headingDisp, chapterField, blockLines) {
 // Kapitel wird am Dokumentende angelegt) – nutzt denselben
 // findAddressableChapter()/insertIntoChapterPreamble()-Unterbau, damit beide
 // Op-Typen GARANTIERT dasselbe Anlage-/Einfüge-Verhalten zeigen.
-function insertEntryIntoChapterPreamble(lines, chapterField, blockLines) {
+// v7.52.1 (Review-Finding 1, Spiegelprinzip-Drift, DECISIONS #109): vierter
+// Parameter "range" ist PFLICHT (kein optionaler Fallback mehr, Review-
+// Nachbesserung 🔵 2) – Range kommt IMMER vom Aufrufer, VOR der Quell-Mutation
+// ermittelt (siehe collision-Aufruf in insertEntryIntoSection oben sowie der
+// reine to_chapter-Zweig in applyOne). Ein hier NEU laufender, positions-
+// abhängiger findAddressableChapter()-Aufruf auf dem bereits um die Quellzeile
+// bereinigten Array wäre GEFÄHRLICH (Titelzeilen-Ausschluss per titleLineIdx,
+// siehe dort, könnte je nach entfernter Quellzeile zu einem ANDEREN Ergebnis
+// kommen als der Aufrufer VOR der Quell-Entfernung ermittelt hat – dieselbe
+// Fehlerfamilie wie beim collisionRange-Fix oben) – deshalb bewusst KEIN
+// Fallback mehr, beide bestehenden Aufrufer übergeben "range" ausnahmslos.
+function insertEntryIntoChapterPreamble(lines, chapterField, blockLines, range) {
   const chapterDisp = dispHead(chapterField);
-  const { range } = findAddressableChapter(lines, chapterField);
   if (!range) {
     padEnd(lines);
     lines.push("# " + chapterDisp, "", ...blockLines);
@@ -823,17 +862,55 @@ function applyOne(text, op) {
     if (notFound) return text;
     const hits = findEntryLines(meLines, range, entryText);
     if (hits.length !== 1) return text;
+    // v7.52.1 (Review-Finding 1, Spiegelprinzip-Drift, DECISIONS #109): die
+    // Ziel-ADRESSIERUNG (Kollisions-Entscheidung für to_heading BZW. die
+    // Kapitel-Range für ein reines to_chapter-Ziel) wird HIER, VOR dem
+    // meLines.splice() der Quelle weiter unten, auf demselben Zeilenstand
+    // ermittelt wie explainNote() (dort: "before", der komplett UNMUTIERTE
+    // Ausgangstext) – sonst könnte das Entfernen der Quellzeile (z. B. wenn
+    // sie die einzige nicht-leere Zeile VOR dem Ziel-Kapitel war) dessen
+    // Titelzeilen-Position verschieben (siehe titleLineIdx) und ein ZWEITER,
+    // ERST NACH der Mutation laufender Aufruf zu einem ANDEREN Ergebnis
+    // kommen als beim explainNote-Aufruf auf "before" – Grundprinzip dieser
+    // Datei (EIN Entscheidungspfad für Anwendung UND Erklärung) verletzt,
+    // siehe insertEntryIntoSection-Kommentar oben für das konkrete Beispiel.
+    const targetResolved = toHeadingDisp
+      ? resolveSectionTarget(meLines, { heading: op.to_heading, chapter: toChapterDisp ? op.to_chapter : null })
+      : null;
+    const toChapterOnlyRange = (!toHeadingDisp && toChapterDisp)
+      ? findAddressableChapter(meLines, op.to_chapter).range
+      : null;
     // ALLE Prüfungen bestanden – ab hier wird "meLines" tatsächlich mutiert.
     const [s, e] = entryBlockRange(meLines, hits[0]);
     const block = dedentBlock(meLines.slice(s, e));
     meLines.splice(s, e - s);
+    // Die oben (VOR der Mutation) ermittelten Ziel-Ranges verweisen noch auf
+    // Indizes des UNMUTIERTEN Arrays – für die tatsächliche Einfügung unten
+    // (die auf "meLines" NACH der Quell-Entfernung arbeitet) müssen sie um
+    // die Länge des entfernten Quell-Blocks nachgeführt werden. Eine echte
+    // Struktur-/Kapitelzeile kann NIE innerhalb von [s, e) liegen – eine
+    // #/##-Zeile steht immer in Spalte 0 und beendet den Block über die
+    // Einrückungsregel in entryBlockRange (indentOf ≤ baseIndent), siehe
+    // dort (Review-Nachbesserung 🔵 3, DECISIONS #109: der Abbruch kommt NICHT
+    // von BOUNDARY_RE, entryBlockRange nutzt es gar nicht) – die beiden
+    // Bereiche überlappen also nie, ein Range liegt IMMER GANZ vor ODER GANZ
+    // ab dem entfernten Block.
+    const shiftIdx = (i) => (i >= e ? i - (e - s) : i);
+    const shiftRange = (r) => (r ? [shiftIdx(r[0]), shiftIdx(r[1])] : r);
     // Ziel-Einfügung IMMER auf dem bereits um die Quelle bereinigten Array
     // (Quelle==Ziel verschiebt den Eintrag dadurch korrekt ans Zielende,
-    // statt ihn zu duplizieren).
+    // statt ihn zu duplizieren) – die Ziel-ADRESSIERUNG selbst kommt dabei
+    // GARANTIERT aus den oben (VOR der Mutation) berechneten, jetzt nur noch
+    // index-verschobenen Ranges, NIE aus einer zweiten Suche auf dem bereits
+    // mutierten Array (siehe Kommentare oben).
     if (toHeadingDisp) {
-      insertEntryIntoSection(meLines, toHeadingDisp, toChapterDisp ? op.to_chapter : null, block);
+      const collision = !!(targetResolved && targetResolved.collision);
+      insertEntryIntoSection(
+        meLines, toHeadingDisp, toChapterDisp ? op.to_chapter : null, block,
+        collision, collision ? shiftRange(targetResolved.collisionRange) : undefined
+      );
     } else {
-      insertEntryIntoChapterPreamble(meLines, op.to_chapter, block);
+      insertEntryIntoChapterPreamble(meLines, op.to_chapter, block, shiftRange(toChapterOnlyRange));
     }
     return tidy(meLines);
   }
@@ -1308,7 +1385,17 @@ function explainNote(before, op) {
     const toHeadingDisp = dispHead(op.to_heading);
     const toChapterDisp = dispHead(op.to_chapter);
     if (toHeadingDisp) {
-      const resolved = resolveSectionTarget(lines, { heading: op.to_heading, chapter: op.to_chapter });
+      // v7.52.1 (Review-Nachbesserung 🔵 4, DECISIONS #109): "chapter" wie in
+      // applyOne (dort ca. Z. 878) NUR durchreichen, wenn toChapterDisp
+      // NICHT-LEER ist – ein op.to_chapter, das nach dispHead() leer wird
+      // (z. B. nur "#" ohne Namen), darf resolveSectionTarget NICHT als
+      // gesetztes chapterField erreichen (chapterField dort prüft nur
+      // trim(), nicht dispHead() – "#" gilt dort fälschlich als "gesetzt",
+      // aber ungefunden -> chapterMissing:true -> irreführende "Kapitel
+      // neu angelegt"-Note). Vorher wich diese Zeile von applyOne ab (dort
+      // bereits korrekt "toChapterDisp ? op.to_chapter : null") - beide
+      // MÜSSEN denselben Resolver-Input sehen (Grundprinzip dieser Datei).
+      const resolved = resolveSectionTarget(lines, { heading: op.to_heading, chapter: toChapterDisp ? op.to_chapter : null });
       if (resolved.collision) {
         // Review-Fix 🔵 (Runde 2): analog zu append_to_section/replace_section
         // (siehe oben) den Sonderfall "Kapitel existierte noch gar nicht"

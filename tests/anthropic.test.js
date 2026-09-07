@@ -1259,11 +1259,19 @@ describe("buildSystem", () => {
         "Kapitel-Freitext in diesem Kapitel (ℹ️-Hinweis), ein Kapitelnamen-Duplikat entsteht nie"
       );
       expect(sys).toContain(
-        "nur für EXISTIERENDE ##-Abschnitte; ist der Name ein #-Kapitel mit Freitext, wird die Op ABGELEHNT " +
+        "gedacht für EXISTIERENDE ##-Abschnitte (ein fehlender Abschnitt wird zwar angelegt, siehe chapter-Zeile – " +
+        "aber NIE als Kapitelnamen-Duplikat); ist der Name ein #-Kapitel mit Freitext, wird die Op ABGELEHNT " +
         "(⚠️, Freitext wird nie blind ersetzt) – eine Zeile ändern: replace_entry"
       );
       expect(sys).toContain(
         "Ein append_to_section, dessen heading nur als #-Kapitel existiert, wird automatisch hierher umgeleitet (ℹ️-Hinweis)"
+      );
+      // v7.52.1 (Review-Finding 3, DECISIONS #109): derselbe Kollisions-
+      // Nebensatz aus der chapter-Beispielzeile (Kapitel-Anlage-Regel) ist
+      // bisher NUR für die NOTEBOOK_TOOL-chapter-description gepinnt (siehe
+      // Schema-Test weiter unten), nicht für den System-Prompt selbst.
+      expect(sys).toContain(
+        "ist heading dabei namensgleich zum Kapitel, wird KEIN ##-Abschnitt angelegt, sondern content als Kapitel-Freitext"
       );
     });
 
@@ -1330,10 +1338,14 @@ describe("buildSystem", () => {
       );
     });
 
-    it("NOTEBOOK_TOOL-Schema: to_heading-Beschreibung nennt die Kollisions-Ausnahme, bestehender PFLICHT-Substring bleibt erhalten", () => {
+    it("NOTEBOOK_TOOL-Schema: to_heading/to_chapter-Beschreibung nennt die Kollisions-Ausnahme, bestehender PFLICHT-Substring bleibt erhalten", () => {
       const props = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties;
       expect(props.to_heading.description).toMatch(/namensgleich zu einem bereits\s+existierenden #-Kapitel ohne eigenen ##-Abschnitt/);
       expect(props.to_heading.description).toMatch(/Mindestens eines von to_heading\/to_chapter ist PFLICHT bei move_entry/);
+      // v7.52.1 (Review-Finding 3, DECISIONS #109): der to_chapter-Nebensatz,
+      // der auf die to_heading-Kollisionsregel verweist, war bisher gar
+      // nicht gepinnt.
+      expect(props.to_chapter.description).toMatch(/siehe\s+Kollisions-Nebensatz bei 'to_heading' oben/);
     });
   });
 });

@@ -10996,3 +10996,156 @@ aus `referenz-app.jsx` übernommen.
        ##-Abschnitt“-Test (`replace_entry`/`delete_entry`), Fall 6d um
        `note`-Prüfung „neu angelegt“ erweitert. Version weiterhin v7.52
        (`src/App.jsx`-Header, siehe #107).
+
+109. **v7.52.1, drei 🔵-Review-Punkte aus #106–#108 nachgezogen.** Die
+     beim v7.52-Review zurückgestellten 🔵-Findings (siehe „Bewusst NICHT
+     umgesetzt“ in #108) wurden umgesetzt.
+     - **Finding 1 – Spiegelprinzip-Drift bei der move_entry-Ziel-
+       Kollision.** `insertEntryIntoSection()` entschied die
+       Ziel-Kollision bis v7.52 per eigenem `resolveSectionTarget()`-
+       Aufruf auf dem bereits UM DIE QUELLE BEREINIGTEN Array (`applyOne`
+       führt `meLines.splice()` VOR der Ziel-Einfügung aus), während
+       `explainNote()` dieselbe Frage auf dem UNMUTIERTEN `before`-Text
+       beantwortet – bei einem Dokument OHNE Titelzeile, dessen
+       verschobene Zeile die erste nicht-leere Zeile ist, ließ das
+       Entfernen die folgende „# X“-Zeile per Konvention (`titleLineIdx`)
+       zur NEUEN Titelzeile werden, `findAddressableChapter()` hielt sie
+       deshalb für unadressierbar → keine Kollision erkannt → „## X“
+       landete klaglos UNTER „# X“, während die `note` weiterhin
+       „Kapitel-Freitext“ behauptete. Fix: `applyOne` ermittelt die
+       Ziel-Adressierung (Kollision für `to_heading`, Range für ein reines
+       `to_chapter`) jetzt VOR dem Quell-`splice()`, exakt auf demselben
+       Zeilenstand wie `explainNote()`, und reicht das Ergebnis
+       (Kollisions-Flag + Range) als Parameter durch;
+       `insertEntryIntoSection()`/`insertEntryIntoChapterPreamble()` führen
+       dadurch KEINE eigene, positionsabhängige Suche mehr auf dem bereits
+       mutierten Array aus. Die vorab ermittelten Ranges werden anschließend
+       um die Länge des entfernten Quell-Blocks index-verschoben (Quelle
+       und eine echte Struktur-/Kapitelzeile können sich nachweislich nie
+       überlappen – jede Spalte-0-Struktur-/Leerzeile bricht
+       `entryBlockRange()` sofort ab, egal wie tief der Treffer selbst
+       eingerückt war).
+       - **Über den Auftrag hinaus gefundener, ECHTER Zweit-Fehler:** der
+         im Auftrag vorgeschlagene, minimalere Patch (nur ein Boolean
+         „collision“ durchreichen, `insertEntryIntoChapterPreamble()` sucht
+         „per Name neu“) wurde zunächst 1:1 umgesetzt und gegen die exakte
+         Repro-Datenlage aus dem Finding getestet – er behob zwar die
+         „## X unter # X“-Anlage, erzeugte aber STATTDESSEN ein zweites,
+         redundantes „# X“ (derselbe Titelzeilen-Fehlschluss traf jetzt den
+         weiterhin auf dem mutierten Array laufenden
+         `findAddressableChapter()`-Aufruf INNERHALB von
+         `insertEntryIntoChapterPreamble()`). Erst die Index-Verschiebungs-
+         Lösung oben (Adressierung komplett VOR der Mutation, keine zweite
+         Suche danach) erfüllt die im Finding geforderten Testerwartungen.
+         Derselbe Fehlerpfad betraf – unangefragt, aber vom selben Muster –
+         AUCH den reinen `to_chapter`-Zweig von `move_entry` (ohne
+         `to_heading`), der `insertEntryIntoChapterPreamble()` bisher IMMER
+         mit einer eigenen, nachgelagerten Suche aufrief; mit ausgebessert
+         (Test „Fall 16b“).
+     - **Finding 2 – Prompt-Selbstwiderspruch bei `replace_section`.** Die
+       „Erlaubte ops“-Zeile für `replace_section` behauptete „nur für
+       EXISTIERENDE ##-Abschnitte“, während die `chapter`-Beispielzeile
+       davor und die `rewrite`-Zeile weiterhin sagen, ein fehlendes
+       Kapitel/ein fehlender Abschnitt werde angelegt (was die Engine ohne
+       Kollision auch tut). Wortlaut präzisiert: „gedacht für EXISTIERENDE
+       ##-Abschnitte (ein fehlender Abschnitt wird zwar angelegt, siehe
+       chapter-Zeile – aber NIE als Kapitelnamen-Duplikat)“.
+     - **Finding 3 – fehlende Vertrags-Pins in `tests/anthropic.test.js`.**
+       Der System-Prompt-Nebensatz „ist heading dabei namensgleich zum
+       Kapitel, wird KEIN ##-Abschnitt angelegt, sondern content als
+       Kapitel-Freitext“ war bisher nur für die NOTEBOOK_TOOL-`chapter`-
+       Beschreibung gepinnt, nicht für `buildSystem()` selbst; der
+       `to_chapter`-Nebensatz „(siehe Kollisions-Nebensatz bei
+       'to_heading' oben)“ war GAR NICHT gepinnt. Beide Pins ergänzt (Text
+       1:1 aus dem unveränderten Bestandscode übernommen).
+     - **Tests:** `tests/ops.test.js` (Fall 16 – exakte Repro-Datenlage aus
+       Finding 1 mit den im Auftrag vorgegebenen Erwartungen; Fall 16b –
+       dieselbe Drift für den reinen `to_chapter`-Zweig, siehe Zweit-Fehler
+       oben; alle 243 Bestands-Tests inkl. der Atomaritäts-/
+       Ziel-Varianten-/Wrapper-Äquivalenz-Pins für `move_entry` bleiben
+       unverändert grün), `tests/anthropic.test.js` (Pin-Anpassung für die
+       neue `replace_section`-Formulierung, zwei neue Pins für Finding 3).
+     - **Bewusst weiterhin offen (Restrisiko, unverändert seit #106):** die
+       `chapterIsTitle`-Konsistenzlücke bei einem `#`-Kapitel, das
+       zufällig denselben Namen wie die Notizbuch-Titelzeile trägt UND
+       zusätzlich ein ECHTES, gleichnamiges Kapitel weiter unten im
+       Dokument existiert (`append_to_section`/`replace_section` landen
+       dabei weiter im Titel-Vorspann, `replace_entry`/`delete_entry`/
+       `append_to_chapter` dagegen im echten Kapitel) – seltene
+       Namenskombination, kein Datenverlust, nur ein potenziell
+       unerwarteter Ablageort, weiterhin bewusst nicht behoben (siehe
+       #106, „Bewusst NICHT in v7.52“).
+     - Version: Header `src/App.jsx` auf `v7.52.1` (Patch-Version, reine
+       Nachbesserung ohne neue Op-Semantik).
+     - **Review-Nachbesserung (dasselbe Paket, Version bleibt `v7.52.1`):**
+       der Code-Reviewer bewertete den obigen Diff mit NACHARBEIT (ein 🟡,
+       drei 🔵), alle vier Punkte wurden umgesetzt:
+       - **🟡 Fehlender Branch-Pin für `shiftIdx()`.** Alle bisherigen
+         `move_entry`-Tests verschieben das Ziel ausschließlich HINTER die
+         Quelle (`i >= e`-Zweig von `shiftIdx`) – der `i < e`-Zweig (Ziel-
+         Range liegt bereits VOR der Quelle, keine Verschiebung nötig) war
+         ungepinnt. Neuer Test „Fall 16c“ deckt fünf Datenlagen ab (Ziel
+         VOR der Quelle, Quelle in der Ziel-Kapitel-Präambel, Quelle im
+         Ziel-##-Abschnitt selbst, ein Block, der EXAKT am Range-Ende
+         endet, sowie ein Kontrollfall mit Ziel HINTER der Quelle), jeweils
+         über alle drei Zieladressierungen (`to_chapter`, `to_heading`,
+         beides) geschleift – alle Erwartungswerte wurden vom Reviewer
+         empirisch gegen die echte Engine verifiziert. Zusätzlich „Fall 16“
+         auf beide Zielvarianten erweitert (`{to_heading}` UND
+         `{to_heading, to_chapter}`) mit einer expliziten
+         Einfach-„# Kap“-Zählung: in v7.52 (vor dem Finding-1-Fix) zeigte
+         auch `{to_heading:"## Kap", to_chapter:"# Kap"}` (Pfad (ii) von
+         `resolveSectionTarget`, chapter===heading) auf derselben
+         Titelzeilen-Drift-Datenlage „## Kap“ unter „# Kap“; das redundante
+         ZWEITE „# Kap“ war das Symptom des verworfenen Minimal-Patches und
+         des reinen `to_chapter`-Pfads (Fall 16b) – die Zählung pinnt den
+         Rückfall auf eine nachgelagerte Namenssuche, bei der „# Kap“ nach
+         dem Entfernen der Quelle als Titelzeile gilt (Re-Review 🔵 2).
+         Ergänzt aus dem Re-Review (🟡): eine sechste 16c-Datenzeile (Ziel
+         VOR der Quelle, Kapitel ohne `##`, Block-Länge 2), die als einzige
+         eine „immer verschieben“-Mutante von `shiftIdx` entlarvt – die
+         übrigen Zeilen decken einen zu kleinen Range-Start über die
+         `# Kap`/`## S`-Rückwärts-Stopper ab.
+       - **🔵 Toter, laut eigenem Kommentar gefährlicher Fallback in
+         `insertEntryIntoChapterPreamble()`.** Der optionale vierte
+         Parameter (`preResolvedRange !== undefined ? … : findAddressable-
+         Chapter(…).range`) hatte KEINEN Aufrufer, der ihn wegließ – beide
+         Aufrufer (Kollisions-Umleitung in `insertEntryIntoSection()` und
+         der reine `to_chapter`-Zweig in `applyOne`) übergeben ihn
+         ausnahmslos. Parameter jetzt verpflichtend (`range`, kein
+         Default), Fallback entfernt, Kommentar auf „Range kommt IMMER vom
+         Aufrufer, VOR der Quell-Mutation ermittelt“ verkürzt.
+       - **🔵 Falsch begründeter Kommentar zu `entryBlockRange()`.** Der
+         Kommentar bei der Index-Verschiebung in `applyOne` behauptete,
+         `BOUNDARY_RE` breche `entryBlockRange()` bei jeder Spalte-0-
+         Struktur-/Leerzeile ab – `entryBlockRange()` nutzt `BOUNDARY_RE`
+         gar nicht, der tatsächliche Abbruch kommt aus der Einrückungsregel
+         `l.trim() === "" || indentOf(l) <= baseIndent`. Kommentar
+         korrigiert, verweist jetzt auf die tatsächliche Regel in
+         `entryBlockRange()`.
+       - **🔵 Abweichender Resolver-Input zwischen `applyOne` und
+         `explainNote()` bei `move_entry`.** `applyOne` übergibt
+         `resolveSectionTarget()` seit Finding 1 bewusst
+         `chapter: toChapterDisp ? op.to_chapter : null` (siehe oben) –
+         `explainNote()` reichte an derselben Stelle weiterhin das rohe
+         `op.to_chapter` durch. Bei `to_chapter === "#"` (nicht leer, aber
+         `dispHead()`-leer) hielt `resolveSectionTarget()` das Kapitelfeld
+         dadurch fälschlich für „referenziert, aber nicht gefunden“
+         (`chapterMissing`), obwohl `applyOne` (mit dem korrekten Input)
+         längst die bestehende Kapitel-Präambel traf – die `note` lautete
+         dadurch irreführend „Kapitel „“ und Abschnitt „Kap“ neu angelegt“
+         (leerer Kapitelname) statt einer Beschreibung der tatsächlich
+         erfolgten Präambel-Einfügung. `explainNote()` berechnet
+         `toChapterDisp` jetzt ebenfalls und nutzt dieselbe Zeile wie
+         `applyOne` – EIN Entscheidungspfad für Anwendung UND Erklärung,
+         Grundprinzip dieser Datei. Neuer Test „Fall 19“ pinnt sowohl die
+         alte Fehl-Note (per Vergleich mit dem unrevertierten Bestandscode
+         empirisch verifiziert) als auch die korrigierte.
+       - **Tests:** `tests/ops.test.js` – „Fall 16c“ (neu), „Fall 16“
+         (erweitert um die zweite Zielvariante samt Einfach-„# Kap“-
+         Zählung), „Fall 19“ (neu, `explainNote`-Resolver-Input). Alle
+         2021 Bestands- und neuen Tests grün, Coverage weiterhin deutlich
+         über dem 60 %-Gate.
+       - **Restrisiko (unverändert):** siehe „Bewusst weiterhin offen“ oben
+         (`chapterIsTitle`-Konsistenzlücke) – von dieser Nachbesserung
+         nicht berührt.

@@ -2465,6 +2465,113 @@ describe("Kapitelnamen-Kollision (v7.52, Live-Vorfall KPIs-Duplikat, DECISIONS #
     expect(text).toContain("- y\n- [ ] Offener Punkt");
     expect(text.split("## Erledigt")[0]).not.toContain("Offener Punkt");
   });
+
+  // v7.52.1 (Review-Finding 1, Spiegelprinzip-Drift, DECISIONS #109):
+  // insertEntryIntoSection() entschied die Ziel-Kollision bis v7.52 auf dem
+  // bereits um die Quelle BEREINIGTEN Array, explainNote() dagegen auf dem
+  // UNMUTIERTEN "before"-Text – bei einem Dokument OHNE Titelzeile, dessen
+  // verschobene Zeile die erste nicht-leere Zeile ist, ließ das Entfernen
+  // die folgende "# Kap"-Zeile zur (neuen) Titelzeile werden (titleLineIdx
+  // sprang), findAddressableChapter() hielt sie deshalb für unadressierbar
+  // -> KEINE Kollision erkannt -> "## Kap" wurde klaglos UNTER "# Kap"
+  // angelegt, während die note weiterhin "Kapitel-Freitext" behauptete.
+  it("Fall 16 – move_entry-Ziel, Spiegelprinzip-Drift: Titelzeilen-Sprung durch Entfernen der (titellosen) Quelle darf die Kollisions-Umleitung NICHT unterlaufen", () => {
+    const doc = "- lose Zeile\n\n# Kap\n\n- k\n";
+    // v7.52.1 (Review-Nachbesserung 🟡 1, DECISIONS #109): beide Zielvarianten
+    // durchlaufen – in v7.52 war NEBEN Pfad (i) (nur to_heading) auch Pfad
+    // (ii) (chapter===heading, siehe resolveSectionTarget) kaputt: dort ergab
+    // dieselbe Datenlage ebenfalls "## Kap" unter "# Kap" ("# Kap\n\n- k\n\n##
+    // Kap\n\n- lose Zeile\n"). Die zusätzliche "# Kap"-Zählung unten pinnt
+    // den Rückfall auf eine NACHGELAGERTE Namenssuche (verworfener Minimal-
+    // Patch bzw. v7.52-Verhalten des reinen to_chapter-Pfads, siehe 16b): dort
+    // gilt "# Kap" nach dem Entfernen der Quelle als Titelzeile und würde als
+    // ZWEITES "# Kap" neu angelegt.
+    for (const target of [{ to_heading: "## Kap" }, { to_heading: "## Kap", to_chapter: "# Kap" }]) {
+      const { text, results } = applyOpsDetailed(doc, [
+        { type: "move_entry", entry: "lose Zeile", ...target },
+      ]);
+      expect(text, JSON.stringify(target)).not.toMatch(/^## Kap$/m);
+      expect(text).toContain("- k\n- lose Zeile");
+      expect(results[0].applied).toBe(true);
+      expect(results[0].note).toContain("Kapitel-Freitext");
+      expect(text.match(/^# Kap$/gm)).toHaveLength(1);
+    }
+  });
+
+  // v7.52.1 (Nachbesserung zu Finding 1, DECISIONS #109): dieselbe
+  // Spiegelprinzip-Drift betraf, unangefragt vom Review-Finding aber vom
+  // selben Muster, auch insertEntryIntoChapterPreamble() bei einem REINEN
+  // to_chapter-Ziel (KEIN to_heading, adressiert also nicht über die
+  // Kollisions-Erkennung von resolveSectionTarget, sondern direkt über
+  // findAddressableChapter) – auch dieser Aufruf lief bis zur Nachbesserung
+  // auf dem bereits um die Quelle bereinigten Array.
+  it("Fall 16b – move_entry-Ziel NUR mit to_chapter, dieselbe Titelzeilen-Drift-Datenlage: Eintrag landet in der BESTEHENDEN Kapitel-Präambel, KEIN zweites '# Kap'", () => {
+    const doc = "- lose Zeile\n\n# Kap\n\n- k\n";
+    const { text, results } = applyOpsDetailed(doc, [
+      { type: "move_entry", entry: "lose Zeile", to_chapter: "# Kap" },
+    ]);
+    expect(results[0].applied).toBe(true);
+    expect(text.match(/^# Kap$/gm)).toHaveLength(1);
+    expect(text).toContain("- k\n- lose Zeile");
+  });
+
+  // v7.52.1 (Review-Nachbesserung 🟡 1, DECISIONS #109): shiftIdx() in
+  // applyOne (const shiftIdx = (i) => (i >= e ? i - (e - s) : i)) hatte bis
+  // hierhin KEINEN Pin für den Zweig "Ziel-Range liegt VOR der Quelle" (i < e,
+  // KEINE Verschiebung nötig) – alle bisherigen move_entry-Pins verschieben
+  // das Ziel HINTER die Quelle. Deckt zusätzlich ab: Quelle in der
+  // Ziel-KAPITEL-Präambel, Quelle im Ziel-##-Abschnitt selbst, ein Block, der
+  // EXAKT am Range-Ende endet (Off-by-one bei "i >= e"), und ein Ziel, das
+  // (nach Shift) tatsächlich HINTER der Quelle liegt (Kontrollfall, damit der
+  // Verschiebe-Zweig nicht durch reines Weglassen "grün" wird).
+  it("Fall 16c – index-verschobene Ziel-Range: Ziel VOR / UM / NACH der Quelle trifft das richtige Kapitel", () => {
+    const cases = [
+      ["# NB\n\n# Kap\n\n- k\n\n## S\n\n- x\n\n# Later\n\n- src\n", "# NB\n\n# Kap\n\n- k\n- src\n\n## S\n\n- x\n\n# Later\n"], // Ziel VOR Quelle
+      ["# NB\n\n# Kap\n\n- src\n- k\n\n## S\n\n- x\n",             "# NB\n\n# Kap\n\n- k\n- src\n\n## S\n\n- x\n"],            // Quelle in Ziel-Präambel
+      ["# NB\n\n# Kap\n\n- k\n\n## S\n\n- src\n- x\n",             "# NB\n\n# Kap\n\n- k\n- src\n\n## S\n\n- x\n"],            // Quelle im ##-Abschnitt des Ziels
+      ["# NB\n\n# Kap\n\n- k\n- src\n# Z\n",                       "# NB\n\n# Kap\n\n- k\n- src\n\n# Z\n"],                    // Block endet exakt am Range-Ende
+      ["# NB\n\n## Inbox\n\n- src\n  - child\n- y\n\n# Kap\n\n- k\n\n## S\n\n- x\n", "# NB\n\n## Inbox\n\n- y\n\n# Kap\n\n- k\n- src\n  - child\n\n## S\n\n- x\n"], // Ziel NACH Quelle, Shift 2
+      // Re-Review v7.52.1 (🟡, Mutationsprüfung): Ziel VOR der Quelle, Kapitel
+      // OHNE ##-Abschnitt, Block-Länge 2 – nur diese Datenlage entlarvt eine
+      // "immer verschieben"-Mutante (Range-Start würde um 2 zu klein, der
+      // Eintrag landete VOR "- k" statt danach); bei den Zeilen oben deckt
+      // "# Kap"/"## S" als Rückwärts-Stopper einen zu kleinen Range-Start ab.
+      ["# NB\n\n# Kap\n\n- k\n\n# Later\n\n- src\n  - child\n", "# NB\n\n# Kap\n\n- k\n- src\n  - child\n\n# Later\n"], // Ziel VOR Quelle, kein ##, Block-Länge 2 – pinnt den i<e-Zweig
+    ];
+    for (const [doc, expected] of cases) {
+      for (const target of [{ to_chapter: "# Kap" }, { to_heading: "## Kap" }, { to_heading: "## Kap", to_chapter: "# Kap" }]) {
+        const { text, results } = applyOpsDetailed(doc, [{ type: "move_entry", entry: "src", ...target }]);
+        expect(text, JSON.stringify(target) + "\n" + doc).toBe(expected);
+        expect(results[0].applied).toBe(true);
+        expect(text.match(/^# Kap$/gm)).toHaveLength(1);
+        expect(text).not.toMatch(/^## Kap$/m);
+      }
+    }
+  });
+
+  // v7.52.1 (Review-Nachbesserung 🔵 4, DECISIONS #109): explainNote() wich
+  // bei move_entry vom Resolver-Input in applyOne ab (dort bereits
+  // "toChapterDisp ? op.to_chapter : null", hier bislang roh "op.to_chapter").
+  // to_chapter:"#" ist NICHT leer (trim() truthy), aber dispHead()-leer – die
+  // alte explainNote-Zeile reichte es trotzdem als "gesetztes" chapterField an
+  // resolveSectionTarget durch, das Kapitel-Feld galt dadurch fälschlich als
+  // "referenziert, aber nicht gefunden" (chapterMissing), OBWOHL applyOne
+  // (mit dem korrekten Input) längst die BESTEHENDE Kapitel-Präambel von
+  // "# Kap" traf. Ergebnis: note lautete "Kapitel „“ und Abschnitt „Kap“ neu
+  // angelegt" (leerer Kapitelname in Anführungszeichen) statt einer
+  // Beschreibung der tatsächlich erfolgten Präambel-Einfügung.
+  it("Fall 19 – move_entry to_heading '## Kap' + to_chapter '#' (dispHead-leer) auf bestehendem '# Kap'-Freitext: note ohne 'Kapitel „'", () => {
+    const doc = "# NB\n\n## Inbox\n\n- x\n\n# Kap\n\nFreitext.\n";
+    const { text, results } = applyOpsDetailed(doc, [
+      { type: "move_entry", entry: "x", from_heading: "## Inbox", to_heading: "## Kap", to_chapter: "#" },
+    ]);
+    expect(results[0].applied).toBe(true);
+    expect(text).toContain("Freitext.\n- x");
+    expect(text.match(/^# Kap$/gm)).toHaveLength(1); // KEIN zweites, leer benanntes Kapitel angelegt
+    expect(results[0].note).not.toContain("Kapitel „“"); // die frühere Leer-Namen-Note
+    expect(results[0].note).not.toContain("neu angelegt"); // Kapitel existierte bereits, wurde NICHT neu angelegt
+    expect(results[0].note).toContain("Kapitel-Freitext „Kap“");
+  });
 });
 
 // v7.52 (replace_entry-Op, Live-Vorfall "KPIs"-Duplikat Turn 2 – siehe
