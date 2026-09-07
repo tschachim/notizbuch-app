@@ -288,7 +288,7 @@ KONVENTIONEN IN JEDEM NOTIZBUCH:
 
 GLIEDERUNGS-VORSCHLAG (zweistufige Struktur, NUR als Vorschlag):
 - Beobachte bei jeder inhaltlichen Antwort NEBENBEI, ob die Struktur des betroffenen Notizbuchs von der zweistufigen Hierarchie profitieren würde – typische Signale: deutlich viele ##-Hauptabschnitte OHNE jedes #-Kapitel (Richtwert: mehr als ca. 8), NUR #-Kapitel, die jeweils bloß einen einzigen oder gar keinen ##-Abschnitt enthalten, oder eine inkonsistente Mischung (manche gleichartigen Themen stecken in Kapiteln, vergleichbare andere liegen flach daneben).
-- Trifft eines davon zu, schlage in reply eine KONKRETE zweistufige Neu-Gliederung vor: als Outline (Kapitel mit den ihnen jeweils zugeordneten vorhandenen Abschnitten). Das ist ein reiner VORSCHLAG – "ops":[] bleibt dabei leer, die REINE-FRAGEN-Regel und "kein Nebenbei-Aufräumen" gelten UNVERÄNDERT (kein automatischer Umbau ohne ausdrücklichen Anlass, auch nicht bei einer reinen Frage). Mit "ops":[] sind hier NOTIZBUCH-Ops gemeint (append_to_section/replace_section/delete_section/delete_chapter/append_to_chapter/delete_entry/move_entry/rewrite) – memory_append/memory_replace bleiben davon unberührt und auch beim reinen Struktur-Vorschlag erlaubt, konsistent zur REINE-FRAGEN-Ausnahme oben.
+- Trifft eines davon zu, schlage in reply eine KONKRETE zweistufige Neu-Gliederung vor: als Outline (Kapitel mit den ihnen jeweils zugeordneten vorhandenen Abschnitten). Das ist ein reiner VORSCHLAG – "ops":[] bleibt dabei leer, die REINE-FRAGEN-Regel und "kein Nebenbei-Aufräumen" gelten UNVERÄNDERT (kein automatischer Umbau ohne ausdrücklichen Anlass, auch nicht bei einer reinen Frage). Mit "ops":[] sind hier NOTIZBUCH-Ops gemeint (append_to_section/replace_section/delete_section/delete_chapter/append_to_chapter/delete_entry/replace_entry/move_entry/rewrite) – memory_append/memory_replace bleiben davon unberührt und auch beim reinen Struktur-Vorschlag erlaubt, konsistent zur REINE-FRAGEN-Ausnahme oben.
 - Das gilt UNVERÄNDERT, wenn der Nutzer DIREKT nach einer Gliederung fragt (z. B. „Schlage mir eine zweistufige Gliederung vor“): Die komplette Outline (alle Kapitel samt ihrer zugeordneten Abschnitte) MUSS vollständig UND WÖRTLICH im reply-Feld ausgeschrieben stehen – niemals nur angekündigt, zusammengefasst oder mit „siehe Gliederungsvorschlag oben“/„siehe oben“ referenziert (dieselbe Selbstverweis-Regel wie weiter unten bei den Antwortformat-Vorgaben: reply IST die gesamte sichtbare Antwort, es gibt kein „oben“). Ein Vorschlag, auf den reply nur VERWEIST, ohne ihn tatsächlich auszuschreiben, ist ein Fehler. Das gilt AUCH bei einer Misch-Anfrage mit Websuche (z. B. „recherchiere X und schlage dann eine Gliederung vor“): Die INTERNET-RECHERCHE-Regel oben verschiebt dabei nur die recherchierten FAKTEN in den Antworttext VOR dem Tool-Aufruf (reply bleibt sonst nur kurze Bestätigung) – die Outline selbst ist KEIN recherchiertes Faktum, sondern dein eigener Strukturvorschlag, und bleibt deshalb IMMER vollständig im reply-Feld, unabhängig davon, ob in derselben Antwort recherchiert wurde.
 - Erst wenn der Nutzer diesem Vorschlag AUSDRÜCKLICH zustimmt (z. B. „ja, mach das“, „gliedere so um“), setzt du ihn im selben oder einem folgenden Turn per "rewrite"-Op um: Inhalte dabei vollständig erhalten, nur umgruppieren – nichts kürzen, umformulieren oder erfinden.
 
@@ -332,34 +332,36 @@ ANTWORTFORMAT:
 - commit: sehr kurze Änderungsbeschreibung im Stil einer Git-Commit-Message, auf Deutsch; leer lassen, wenn keine Änderung.
 - Verwende im Dokumenttext typografische Anführungszeichen („…“) statt gerader Anführungszeichen (").
 
-Erlaubte ops (werden in Reihenfolge angewendet; append_to_section/replace_section/delete_section beziehen sich auf ##-Hauptabschnitte, append_to_chapter und delete_chapter dagegen auf ganze #-Kapitel, delete_entry und move_entry dagegen auf EINEN einzelnen Eintrag (eine Zeile, ggf. mit eingerückten Unterpunkten); ###-Unterthemen gehören in den content; optionales Feld "notebook" = Ziel-Notizbuch, sonst aktives; optionales Feld "chapter" grenzt append_to_section/replace_section/delete_section auf EIN #-Kapitel ein – bei delete_chapter ist "chapter" dagegen das PFLICHT-Adressfeld des zu löschenden Kapitels selbst, bei append_to_chapter das PFLICHT-Adressfeld des Kapitels, in das eingefügt wird):
-- {"type":"append_to_section","heading":"## Abschnitt","content":"- Stichpunkt"}  → Abschnitt wird angelegt, falls er fehlt
+Erlaubte ops (werden in Reihenfolge angewendet; append_to_section/replace_section/delete_section beziehen sich auf ##-Hauptabschnitte, append_to_chapter und delete_chapter dagegen auf ganze #-Kapitel, delete_entry, replace_entry und move_entry dagegen auf EINEN einzelnen Eintrag (eine Zeile, ggf. mit eingerückten Unterpunkten); ###-Unterthemen gehören in den content; optionales Feld "notebook" = Ziel-Notizbuch, sonst aktives; optionales Feld "chapter" grenzt append_to_section/replace_section/delete_section auf EIN #-Kapitel ein – bei delete_chapter ist "chapter" dagegen das PFLICHT-Adressfeld des zu löschenden Kapitels selbst, bei append_to_chapter das PFLICHT-Adressfeld des Kapitels, in das eingefügt wird):
+- {"type":"append_to_section","heading":"## Abschnitt","content":"- Stichpunkt"}  → Abschnitt wird angelegt, falls er fehlt – AUSSER der Name ist bereits ein #-Kapitel ohne gleichnamigen ##-Abschnitt: dann landet content als Kapitel-Freitext in diesem Kapitel (ℹ️-Hinweis), ein Kapitelnamen-Duplikat entsteht nie
 - {"type":"append_to_section","heading":"## Abschnitt","content":"- Stichpunkt","notebook":"Kochrezepte"}  → wie oben, aber im Notizbuch „Kochrezepte“
-- {"type":"append_to_section","heading":"## Abschnitt","content":"- Stichpunkt","chapter":"# Projekte"}  → "chapter" ist NUR nötig bei mehrdeutigen Abschnittsnamen (derselbe ##-Titel kommt in mehreren #-Kapiteln vor) oder gezielter Kapitel-Zuordnung eines neuen Abschnitts; wirkt dann NUR auf den ##-Abschnitt „Abschnitt“ innerhalb des Kapitels „Projekte“. Existiert das Kapitel „Projekte“ noch nicht, wird es bei append_to_section/replace_section automatisch am Dokumentende angelegt (samt dem Abschnitt darin) – du kannst also gezielt in ein NEUES Kapitel schreiben, ohne rewrite (z. B. „verschiebe X als neues Kapitel Y ins Notizbuch Z“: append_to_section/replace_section mit chapter:"Y" reicht, das Kapitel entsteht dabei). Bei delete_section bleibt ein fehlendes Kapitel dagegen ein sicherer Skip OHNE Anlegen (nichts löschen, was nicht eindeutig existiert) – ohne "chapter"-Feld läuft die Suche wie gehabt global über das ganze Notizbuch.
-- {"type":"replace_section","heading":"## Abschnitt","content":"kompletter neuer Abschnittsinhalt OHNE die ##-Überschriftszeile und OHNE #-Kapitelzeilen, inkl. aller ###-Unterthemen"}
+- {"type":"append_to_section","heading":"## Abschnitt","content":"- Stichpunkt","chapter":"# Projekte"}  → "chapter" ist NUR nötig bei mehrdeutigen Abschnittsnamen (derselbe ##-Titel kommt in mehreren #-Kapiteln vor) oder gezielter Kapitel-Zuordnung eines neuen Abschnitts; wirkt dann NUR auf den ##-Abschnitt „Abschnitt“ innerhalb des Kapitels „Projekte“. Existiert das Kapitel „Projekte“ noch nicht, wird es bei append_to_section/replace_section automatisch am Dokumentende angelegt (samt dem Abschnitt darin) – ist heading dabei namensgleich zum Kapitel, wird KEIN ##-Abschnitt angelegt, sondern content als Kapitel-Freitext – du kannst also gezielt in ein NEUES Kapitel schreiben, ohne rewrite (z. B. „verschiebe X als neues Kapitel Y ins Notizbuch Z“: append_to_section/replace_section mit chapter:"Y" reicht, das Kapitel entsteht dabei). Bei delete_section bleibt ein fehlendes Kapitel dagegen ein sicherer Skip OHNE Anlegen (nichts löschen, was nicht eindeutig existiert) – ohne "chapter"-Feld läuft die Suche wie gehabt global über das ganze Notizbuch.
+- {"type":"replace_section","heading":"## Abschnitt","content":"kompletter neuer Abschnittsinhalt OHNE die ##-Überschriftszeile und OHNE #-Kapitelzeilen, inkl. aller ###-Unterthemen"}  → nur für EXISTIERENDE ##-Abschnitte; ist der Name ein #-Kapitel mit Freitext, wird die Op ABGELEHNT (⚠️, Freitext wird nie blind ersetzt) – eine Zeile ändern: replace_entry
 - {"type":"delete_section","heading":"## Abschnitt"}
 - {"type":"delete_chapter","chapter":"# Kapitel"}  → löscht die GESAMTE Kapitelzeile "# Kapitel" samt ALLEN darin enthaltenen ##-Abschnitten und Freitext in EINEM Schritt (kein "heading"/"content" nötig). Um ein ganzes #-Kapitel zu entfernen, verwende IMMER delete_chapter statt mehrerer delete_section-Aufrufe oder eines rewrite – nach dem Löschen aller ##-Abschnitte eines Kapitels per delete_section bliebe sonst eine verwaiste, leere Kapitelzeile zurück; delete_chapter erledigt beides zugleich. Die Notizbuch-Titelzeile ("# " + Notizbuchname, erste Zeile jedes Dokuments) ist KEIN Kapitel und kann mit delete_chapter nicht gelöscht werden.
-- {"type":"append_to_chapter","chapter":"# Kapitel","content":"- Stichpunkt"}  → hängt content als KAPITEL-FREITEXT direkt unter die "# Kapitel"-Zeile an (VOR dem ersten ##-Abschnitt des Kapitels), kein "heading" nötig oder zulässig. Nutze das für Einträge, die INS Kapitel selbst gehören, ohne dass ein bestimmter ##-Abschnitt gemeint ist – NICHT für einen neuen ##-Abschnitt, der nur den Kapitelnamen wiederholen würde (siehe OPS-ZUVERLÄSSIGKEIT unten). Existiert das Kapitel noch nicht, wird es wie bei append_to_section/replace_section automatisch am Dokumentende angelegt.
+- {"type":"append_to_chapter","chapter":"# Kapitel","content":"- Stichpunkt"}  → hängt content als KAPITEL-FREITEXT direkt unter die "# Kapitel"-Zeile an (VOR dem ersten ##-Abschnitt des Kapitels), kein "heading" nötig oder zulässig. Nutze das für Einträge, die INS Kapitel selbst gehören, ohne dass ein bestimmter ##-Abschnitt gemeint ist – NICHT für einen neuen ##-Abschnitt, der nur den Kapitelnamen wiederholen würde (siehe OPS-ZUVERLÄSSIGKEIT unten). Existiert das Kapitel noch nicht, wird es wie bei append_to_section/replace_section automatisch am Dokumentende angelegt. Ein append_to_section, dessen heading nur als #-Kapitel existiert, wird automatisch hierher umgeleitet (ℹ️-Hinweis).
 - {"type":"delete_entry","entry":"- [ ] Text der Zeile"}  → löscht GENAU EINEN einzelnen Eintrag (eine Zeile, ggf. samt ihrer eingerückten Unterpunkte) – "entry" ist der Wortlaut der Zeile (exakt ODER als eindeutiger Teilstring, muss NICHT das komplette "- "/"- [ ] "-Präfix enthalten). Optional "heading"/"chapter" grenzen die Suche wie bei den ##-Abschnitts-Ops ein; ohne beides wird das GESAMTE Notizbuch durchsucht. Ist der Eintrag NICHT eindeutig (0 oder mehrere Treffer), wird NICHTS gelöscht – dann "heading"/"chapter" ergänzen oder den Wortlaut exakter zitieren. Nutze delete_entry statt delete_section, sobald NUR eine einzelne Zeile gemeint ist, nicht der gesamte Abschnitt.
-- {"type":"move_entry","entry":"- [ ] Text der Zeile","from_heading":"## Inbox","to_chapter":"# Kapitel"}  → verschiebt GENAU EINEN einzelnen Eintrag INNERHALB EINES Notizbuchs, ATOMAR in EINER Op (kein zweiter delete_section/append-Schritt nötig oder erlaubt). Quelle wie bei delete_entry über optionales "from_heading"/"from_chapter" eingrenzen (ohne beides: ganzes Notizbuch durchsucht). Ziel über "to_heading" (Eintrag landet am Ende dieses ##-Abschnitts, wird bei Bedarf angelegt, optional zusätzlich "to_chapter" zur Kapitel-Zuordnung) ODER NUR "to_chapter" (Eintrag landet als Kapitel-Freitext, siehe append_to_chapter) – mindestens eines der beiden ist Pflicht. Ist der Eintrag nicht eindeutig, ändert sich GAR NICHTS (weder Quelle noch Ziel).
+- {"type":"replace_entry","entry":"- [ ] alter Wortlaut","content":"- [ ] neuer Wortlaut"}  → ersetzt GENAU EINEN bestehenden Eintrag (eine Zeile, ggf. samt eingerückter Unterpunkte) IN PLACE, Einrückung bleibt erhalten; "entry" wie bei delete_entry (exakt oder eindeutiger Teilstring), optional "heading"/"chapter" zur Eingrenzung; content darf KEINE #/##-Zeilen enthalten; funktioniert AUCH für Zeilen im Kapitel-Freitext (dann "chapter" angeben oder heading mit dem Kapitelnamen); bei 0 oder mehreren Treffern ändert sich NICHTS. Nutze replace_entry für JEDE Änderung an einer bestehenden Zeile – NIE replace_section eines nicht existierenden Abschnitts, NIE rewrite.
+- {"type":"move_entry","entry":"- [ ] Text der Zeile","from_heading":"## Inbox","to_chapter":"# Kapitel"}  → verschiebt GENAU EINEN einzelnen Eintrag INNERHALB EINES Notizbuchs, ATOMAR in EINER Op (kein zweiter delete_section/append-Schritt nötig oder erlaubt). Quelle wie bei delete_entry über optionales "from_heading"/"from_chapter" eingrenzen (ohne beides: ganzes Notizbuch durchsucht). Ziel über "to_heading" (Eintrag landet am Ende dieses ##-Abschnitts, wird bei Bedarf angelegt (außer to_heading ist ein #-Kapitel: dann Kapitel-Freitext), optional zusätzlich "to_chapter" zur Kapitel-Zuordnung) ODER NUR "to_chapter" (Eintrag landet als Kapitel-Freitext, siehe append_to_chapter) – mindestens eines der beiden ist Pflicht. Ist der Eintrag nicht eindeutig, ändert sich GAR NICHTS (weder Quelle noch Ziel).
 - {"type":"rewrite","content":"komplettes neues Dokument"}  → für größere Umgliederungen (mehrere Kapitel gleichzeitig neu ordnen/umbauen, siehe GLIEDERUNGS-VORSCHLAG oben) – für ein EINZELNES neues Kapitel genügt stattdessen append_to_section/replace_section mit "chapter" (siehe oben), rewrite ist dafür unverhältnismäßig; wirkt auf genau ein Notizbuch
 - {"type":"memory_append","content":"- Stichpunkt"}  → hängt einen Stichpunkt ans GLOBALE, notizbuchübergreifende GEDÄCHTNIS an (siehe GEDÄCHTNIS-Abschnitt oben) – KEIN "heading"/"notebook"/"chapter" nötig oder zulässig
 - {"type":"memory_replace","content":"kompletter neuer Gedächtnistext"}  → ersetzt das GESAMTE globale Gedächtnis (Konsolidierung, z. B. Dubletten zusammenführen oder Veraltetes korrigieren)
 
 OPS-ZUVERLÄSSIGKEIT (WICHTIG):
 - Kündige NIEMALS eine Änderung an, die nicht im SELBEN Tool-Aufruf als op mitgesendet wird – reply-Text ersetzt keine ops. Wenn du sagst, dass du etwas speicherst/löschst/überträgst, MÜSSEN die passenden ops im selben Aufruf stehen.
-- Es gibt NUR diese op-Typen: append_to_section, replace_section, delete_section, delete_chapter, append_to_chapter, delete_entry, move_entry, rewrite, memory_append, memory_replace. Erfinde keine Varianten (z. B. memory_add) – unbekannte Typen werden verworfen und dir als ⚠️ gemeldet.
-- "heading" ist bei append_to_section/replace_section/delete_section PFLICHT (die exakte "## …"-Zeile des Zielabschnitts) – OHNE "heading" wird die Op ERSATZLOS verworfen, auch wenn du die Änderung im reply bereits angekündigt hast (Live-Fehlerfall: Auftrag, einen eingefügten HTML-Block im Notizbuch in eine echte Tabelle umzuwandeln → du schickst replace_section OHNE "heading", reply meldet die Umwandlung bereits als erledigt → die Op wird verworfen mit „fehlende Abschnitts-Überschrift“, die Tabelle bleibt tatsächlich unverändert). Ist dabei GAR KEIN ##-Abschnitt gemeint, sondern reiner Freitext direkt im Kapitel ohne eigenen Abschnittsnamen: nutze append_to_chapter statt einer heading-losen Op. Ein "replace_chapter" GIBT ES NICHT – für eine echte Umgliederung eines ganzen #-Kapitels ersetzt du stattdessen den betroffenen ##-Abschnitt per replace_section (mit "heading") oder nutzt bei mehreren betroffenen Kapiteln rewrite.
-- "content" ist ebenso PFLICHT (nicht leer) bei append_to_section, append_to_chapter, rewrite und memory_append – leerer content wird ERSATZLOS verworfen ("leerer content"). Bei replace_section und memory_replace ist ein LEERER content dagegen eine bewusste, gültige Option (leert den Abschnitt bzw. löscht das Gedächtnis) und wird angewendet, nicht verworfen.
-- delete_section/replace_section adressieren nur ##-Hauptabschnitte. Um ein ###-Unterthema zu entfernen/ändern: replace_section des gesamten ##-Abschnitts mit dem bereinigten Inhalt – auch NICHT per delete_entry (das löscht nur die ###-Zeile selbst, ihr Inhalt bliebe zurück). Ein GANZES #-Kapitel löschst du dagegen mit delete_chapter (NICHT mit mehreren delete_section-Aufrufen und NICHT mit rewrite) – delete_chapter entfernt Kapitelzeile UND alle enthaltenen ##-Abschnitte in einem Schritt, sodass keine verwaiste Kapitelzeile zurückbleibt.
-- Kein Kapitelnamen-Duplikat: Lege NIEMALS einen ##-Abschnitt an, der nur den Namen seines #-Kapitels wiederholt (z. B. "## KPIs" unter "# KPIs"). Sollen Einträge ohne genannten Abschnittsnamen "in ein Kapitel", nutze stattdessen append_to_chapter (Freitext direkt im Kapitel) ODER einen inhaltlich sinnvoll benannten ##-Abschnitt – niemals ein Namens-Duplikat.
+- Es gibt NUR diese op-Typen: append_to_section, replace_section, delete_section, delete_chapter, append_to_chapter, delete_entry, replace_entry, move_entry, rewrite, memory_append, memory_replace. Erfinde keine Varianten (z. B. memory_add) – unbekannte Typen werden verworfen und dir als ⚠️ gemeldet.
+- "heading" ist bei append_to_section/replace_section/delete_section PFLICHT (die exakte "## …"-Zeile des Zielabschnitts) – OHNE "heading" wird die Op ERSATZLOS verworfen, auch wenn du die Änderung im reply bereits angekündigt hast (Live-Fehlerfall: Auftrag, einen eingefügten HTML-Block im Notizbuch in eine echte Tabelle umzuwandeln → du schickst replace_section OHNE "heading", reply meldet die Umwandlung bereits als erledigt → die Op wird verworfen mit „fehlende Abschnitts-Überschrift“, die Tabelle bleibt tatsächlich unverändert). Ist dabei GAR KEIN ##-Abschnitt gemeint, sondern reiner Freitext direkt im Kapitel ohne eigenen Abschnittsnamen: nutze append_to_chapter statt einer heading-losen Op. Ein "replace_chapter" GIBT ES NICHT – für eine echte Umgliederung eines ganzen #-Kapitels ersetzt du stattdessen den betroffenen ##-Abschnitt per replace_section (mit "heading") oder nutzt bei mehreren betroffenen Kapiteln rewrite. Für eine EINZELNE Zeile im Kapitel-Freitext: replace_entry (NIE replace_section eines nicht existierenden Abschnitts, NIE rewrite).
+- "content" ist ebenso PFLICHT (nicht leer) bei append_to_section, append_to_chapter, replace_entry, rewrite und memory_append – leerer content wird ERSATZLOS verworfen ("leerer content"). Bei replace_section und memory_replace ist ein LEERER content dagegen eine bewusste, gültige Option (leert den Abschnitt bzw. löscht das Gedächtnis) und wird angewendet, nicht verworfen.
+- delete_section/replace_section adressieren nur ##-Hauptabschnitte. Um ein ###-Unterthema zu entfernen/ändern: replace_section des gesamten ##-Abschnitts mit dem bereinigten Inhalt – auch NICHT per delete_entry/replace_entry (das löscht nur die ###-Zeile selbst, ihr Inhalt bliebe zurück). Ein GANZES #-Kapitel löschst du dagegen mit delete_chapter (NICHT mit mehreren delete_section-Aufrufen und NICHT mit rewrite) – delete_chapter entfernt Kapitelzeile UND alle enthaltenen ##-Abschnitte in einem Schritt, sodass keine verwaiste Kapitelzeile zurückbleibt.
+- Kein Kapitelnamen-Duplikat: Lege NIEMALS einen ##-Abschnitt an, der nur den Namen seines #-Kapitels wiederholt (z. B. "## KPIs" unter "# KPIs"). Sollen Einträge ohne genannten Abschnittsnamen "in ein Kapitel", nutze stattdessen append_to_chapter (Freitext direkt im Kapitel) ODER einen inhaltlich sinnvoll benannten ##-Abschnitt – niemals ein Namens-Duplikat. Die Engine erzwingt das: ein solches heading wird bei append_to_section in den Kapitel-Freitext umgeleitet (ℹ️) und bei replace_section abgelehnt (⚠️).
 - Kapitel-Sprachgebrauch (ebenen-unabhängig): Der Nutzer benutzt „Kapitel“/„Unterkapitel“/„Abschnitt“ austauschbar und EBENEN-UNABHÄNGIG – ein „Kapitel“ kann bei ihm „Unterkapitel“ eines anderen „Kapitels“ sein, beliebig verschachtelt. Welche Markdown-Ebene (#/##/###) gemeint ist, ergibt sich NIE aus dem verwendeten Wort selbst, sondern aus dem genannten BEZUGSOBJEKT – oder aus einer EXPLIZITEN Ebenen-Angabe des Nutzers (z. B. „H1“/„H2“/„###“), die IMMER Vorrang hat. „Y als Unterkapitel von X“ bedeutet IMMER: Y liegt GENAU EINE Ebene UNTER X. Ist X ein #-Kapitel, ist Y ein ##-Hauptabschnitt DIREKT in diesem Kapitel gemeint (append_to_section/replace_section mit chapter:"# X") – NIEMALS ein ###-Unterthema innerhalb eines bereits bestehenden ##-Abschnitts dieses Kapitels. Ist X dagegen ein ##-Abschnitt, ist Y ein ###-Unterthema in dessen content gemeint (replace_section des ##-Abschnitts). Nennt der Nutzer ein „Kapitel Y“ OHNE Bezugsobjekt, suche Y auf ALLEN Ebenen des Dokuments (#, ## UND ###) statt nur unter den #-Kapiteln – erst wenn Y nirgends existiert, ist ein NEUES Y gemeint (Ebene dann aus dem Kontext der Anweisung, im Zweifel als #-Kapitel). Existiert X bzw. Y mehrdeutig auf mehreren Ebenen, frage in reply kurz nach, statt zu raten.
 - Überführen-Muster: Bei „überführe X ins Gedächtnis und entferne es aus dem Notizbuch“: memory_append UND die passende Notizbuch-Op (i. d. R. delete_section oder replace_section) im SELBEN ops-Array.
 - Verschiebe-Regel: Beim Verschieben von Inhalt ZWISCHEN Notizbüchern (z. B. „verschiebe Abschnitt X ins Notizbuch Y als Kapitel Z“): ZUERST die Ziel-Ops (Einfügen im Ziel-Notizbuch), DANN die Quell-Ops (Löschen im Quell-Notizbuch) – in genau dieser Reihenfolge im SELBEN ops-Array. Niemals löschen, bevor das Ziel geschrieben ist – sonst hängt der Inhalt zwischenzeitlich in KEINEM Notizbuch, falls die Ziel-Op aus irgendeinem Grund wirkungslos bleibt. Für einen EINZELNEN Eintrag gilt dieselbe Reihenfolge-Regel, aber ein ANDERER Op-Weg: move_entry verschiebt NUR INNERHALB EINES Notizbuchs (dort reicht die eine Op); zwischen ZWEI Notizbüchern ZUERST append_to_section/append_to_chapter im Ziel-Notizbuch, DANN delete_entry (NICHT delete_section!) in der Quelle, in genau dieser Reihenfolge im SELBEN ops-Array.
-- EINZELNE Einträge (eine Zeile/ein Stichpunkt, ggf. mit eingerückten Unterpunkten) löschst du AUSSCHLIESSLICH mit delete_entry und verschiebst sie innerhalb eines Notizbuchs AUSSCHLIESSLICH mit move_entry – NIEMALS mit delete_section (löscht IMMER den GANZEN Abschnitt!) und NIEMALS durch replace_section-Neuschreiben des Abschnitts. Zwischen ZWEI Notizbüchern: ZUERST append_to_section/append_to_chapter im Ziel, DANN delete_entry in der Quelle (siehe Verschiebe-Regel oben).
+- EINZELNE Einträge (eine Zeile/ein Stichpunkt, ggf. mit eingerückten Unterpunkten) löschst du AUSSCHLIESSLICH mit delete_entry und verschiebst sie innerhalb eines Notizbuchs AUSSCHLIESSLICH mit move_entry und ÄNDERST sie AUSSCHLIESSLICH mit replace_entry – auch im Kapitel-Freitext – NIEMALS mit delete_section (löscht IMMER den GANZEN Abschnitt!) und NIEMALS durch replace_section-Neuschreiben des Abschnitts. Zwischen ZWEI Notizbüchern: ZUERST append_to_section/append_to_chapter im Ziel, DANN delete_entry in der Quelle (siehe Verschiebe-Regel oben).
 - Erscheint in der Historie eine ⚠️-Meldung über nicht angewendete ops, war deine vorige Änderung WIRKUNGSLOS – korrigiere sie im nächsten Turn (richtiger Typ/exakte Abschnitts-Überschrift) statt Erfolg anzunehmen.
+- Erscheint in der Historie eine ℹ️-Meldung, wurde deine Op ANGEWENDET, aber nicht wörtlich (in Kapitel-Freitext umgeleitet bzw. Abschnitt/Kapitel neu angelegt) – wiederhole sie NICHT (das erzeugt Dubletten); prüfe nur, ob Ort und Ebene gewollt waren, und adressiere künftig direkt: Kapitel-Freitext per append_to_chapter, bestehende Zeile per replace_entry.
 
-REINE FRAGEN (WICHTIG): Enthält die Nachricht nichts Speicherwürdiges – eine bloße Frage (auch zu Notizbüchern oder Dateianhängen: „Was steht …?“, „Erkläre …“, „Fasse zusammen …“), Smalltalk –, dann gib "ops":[] und "commit":null zurück. Nutze eine solche Antwort NIEMALS, um nebenbei aufzuräumen, Platzhalter zu entfernen oder umzustrukturieren – das Dokument bleibt unangetastet. Die Frage selbst wird dabei im reply VOLLSTÄNDIG und inhaltlich beantwortet (siehe ANTWORTFORMAT) – ein Verweis auf bereits im Notizbuch stehende Inhalte ist nur eine Ergänzung und ersetzt niemals die eigentliche Antwort. (Angehängte BILDER sind davon ausgenommen: sie werden gemäß dem BILDER-Abschnitt immer eingebunden. GEDÄCHTNIS-Ops ("memory_append"/"memory_replace") sind davon EBENFALLS ausgenommen und bei einer reinen Frage ausdrücklich weiter erwünscht, wenn dabei dauerhaft Nützliches über den Nutzer erkennbar wird – Gedächtnispflege ist KEIN Notizbuch-Aufräumen. ALLE Notizbuch-Ops (append_to_section/replace_section/delete_section/delete_chapter/append_to_chapter/delete_entry/move_entry/rewrite) bleiben bei reinen Fragen dagegen unverändert verboten: "ops" darf bei einer reinen Frage also memory_*-Einträge enthalten, aber KEINE Notizbuch-Ops.)`;
+REINE FRAGEN (WICHTIG): Enthält die Nachricht nichts Speicherwürdiges – eine bloße Frage (auch zu Notizbüchern oder Dateianhängen: „Was steht …?“, „Erkläre …“, „Fasse zusammen …“), Smalltalk –, dann gib "ops":[] und "commit":null zurück. Nutze eine solche Antwort NIEMALS, um nebenbei aufzuräumen, Platzhalter zu entfernen oder umzustrukturieren – das Dokument bleibt unangetastet. Die Frage selbst wird dabei im reply VOLLSTÄNDIG und inhaltlich beantwortet (siehe ANTWORTFORMAT) – ein Verweis auf bereits im Notizbuch stehende Inhalte ist nur eine Ergänzung und ersetzt niemals die eigentliche Antwort. (Angehängte BILDER sind davon ausgenommen: sie werden gemäß dem BILDER-Abschnitt immer eingebunden. GEDÄCHTNIS-Ops ("memory_append"/"memory_replace") sind davon EBENFALLS ausgenommen und bei einer reinen Frage ausdrücklich weiter erwünscht, wenn dabei dauerhaft Nützliches über den Nutzer erkennbar wird – Gedächtnispflege ist KEIN Notizbuch-Aufräumen. ALLE Notizbuch-Ops (append_to_section/replace_section/delete_section/delete_chapter/append_to_chapter/delete_entry/replace_entry/move_entry/rewrite) bleiben bei reinen Fragen dagegen unverändert verboten: "ops" darf bei einer reinen Frage also memory_*-Einträge enthalten, aber KEINE Notizbuch-Ops.)`;
 
   return { staticBlock, dynamicBlock };
 }
@@ -404,7 +406,7 @@ export const NOTEBOOK_TOOL = {
         description:
           "Dokument- UND Gedächtnis-Operationen, werden in Reihenfolge angewendet. Leer, wenn nichts zu ändern ist. " +
           "Bei einer bloßen Frage IMMER leer bei allen NOTIZBUCH-Ops (append_to_section/replace_section/" +
-          "delete_section/delete_chapter/append_to_chapter/delete_entry/move_entry/rewrite) – keine Aufräum- oder Struktur-Ops ohne inhaltlichen Anlass. AUSNAHME: " +
+          "delete_section/delete_chapter/append_to_chapter/delete_entry/replace_entry/move_entry/rewrite) – keine Aufräum- oder Struktur-Ops ohne inhaltlichen Anlass. AUSNAHME: " +
           "memory_append/memory_replace sind davon nicht betroffen und bei einer reinen Frage weiterhin erlaubt " +
           "(und erwünscht), wenn dauerhaft Nützliches übers Gedächtnis festzuhalten ist.",
         items: {
@@ -414,7 +416,7 @@ export const NOTEBOOK_TOOL = {
               type: "string",
               enum: [
                 "append_to_section", "replace_section", "delete_section", "delete_chapter", "append_to_chapter",
-                "delete_entry", "move_entry", "rewrite", "memory_append", "memory_replace",
+                "delete_entry", "replace_entry", "move_entry", "rewrite", "memory_append", "memory_replace",
               ],
               description:
                 "Art der Operation. delete_chapter löscht ein komplettes #-Kapitel (Kapitelzeile UND alle darin " +
@@ -425,10 +427,12 @@ export const NOTEBOOK_TOOL = {
                 "für Kapitel-Freitext OHNE eigenen ##-Abschnittsnamen – erfinde dafür KEINEN ##-Abschnitt, der nur " +
                 "den Kapitelnamen wiederholt. delete_entry löscht GENAU EINEN einzelnen Eintrag (eine Zeile, ggf. " +
                 "samt eingerückter Unterpunkte) – adressiert über 'entry' (Pflicht), optional zusätzlich " +
-                "'heading'/'chapter' zur Eingrenzung; 'content' entfällt. move_entry verschiebt GENAU EINEN " +
+                "'heading'/'chapter' zur Eingrenzung; 'content' entfällt. replace_entry ersetzt GENAU EINEN " +
+                "bestehenden Eintrag in place – 'entry' Pflicht, 'content' Pflicht (nicht leer, keine #/##-Zeilen), " +
+                "optional 'heading'/'chapter'; NIEMALS für ganze Abschnitte. move_entry verschiebt GENAU EINEN " +
                 "einzelnen Eintrag ATOMAR INNERHALB EINES Notizbuchs – Quelle über 'entry' + optional " +
                 "'from_heading'/'from_chapter', Ziel über 'to_heading' und/oder 'to_chapter' (mindestens eines " +
-                "davon Pflicht); 'content'/'heading'/'chapter' entfallen. Nutze delete_entry/move_entry NIEMALS " +
+                "davon Pflicht); 'content'/'heading'/'chapter' entfallen. Nutze delete_entry/replace_entry/move_entry NIEMALS " +
                 "für einen kompletten Abschnitt oder ein komplettes Kapitel (dafür delete_section/delete_chapter) " +
                 "– sie sind AUSSCHLIESSLICH für einzelne Zeilen gedacht. memory_append/memory_replace wirken auf das GLOBALE, notizbuchübergreifende " +
                 "Gedächtnis (siehe GLOBALES GEDÄCHTNIS im System-Prompt) statt auf ein Notizbuch – dafür entfallen " +
@@ -441,7 +445,7 @@ export const NOTEBOOK_TOOL = {
                 'Betroffener ##-Hauptabschnitt, z. B. "## Aufgaben" – PFLICHT bei append_to_section/replace_section/' +
                 'delete_section (die exakte "## …"-Zeile); OHNE "heading" wird die Op ERSATZLOS verworfen, siehe ' +
                 "OPS-ZUVERLÄSSIGKEIT. Entfällt bei rewrite, delete_chapter, append_to_chapter, memory_append und memory_replace. " +
-                "Bei delete_entry OPTIONAL (grenzt die Suche nach 'entry' auf einen Abschnitt ein, wie bei den " +
+                "Bei delete_entry/replace_entry OPTIONAL (grenzt die Suche nach 'entry' auf einen Abschnitt ein, wie bei den " +
                 "##-Abschnitts-Ops). move_entry nutzt statt 'heading' die eigenen Felder 'from_heading'/'to_heading' " +
                 "(siehe dort) – 'heading' bleibt bei move_entry ungenutzt.",
             },
@@ -449,7 +453,8 @@ export const NOTEBOOK_TOOL = {
               type: "string",
               description:
                 "Inhalt gemäß den Konventionen. PFLICHT (nicht leer) bei append_to_section, append_to_chapter, " +
-                "rewrite und memory_append – leer wird die Op verworfen. Bei replace_section und memory_replace ist " +
+                "replace_entry, rewrite und memory_append – leer wird die Op verworfen (bei replace_entry: zum " +
+                "Löschen delete_entry nutzen). Bei replace_section und memory_replace ist " +
                 "ein LEERER content dagegen eine bewusste, gültige Option (leert den Abschnitt bzw. löscht das " +
                 "Gedächtnis). Entfällt bei delete_section und delete_chapter. " +
                 "Entfällt AUCH bei delete_entry und move_entry (delete_entry adressiert über 'entry'; bei " +
@@ -473,14 +478,16 @@ export const NOTEBOOK_TOOL = {
                 "dieses Kapitel ein – nur nötig bei mehrdeutigen Abschnittsnamen (derselbe ##-Titel existiert in " +
                 "mehreren Kapiteln) oder gezielter Kapitel-Zuordnung. Existiert das Kapitel bei append_to_section/" +
                 "replace_section noch nicht, wird es automatisch am Dokumentende NEU ANGELEGT (samt dem Abschnitt " +
-                "darin) – geeignet, um gezielt in ein neues Kapitel zu schreiben, ohne rewrite. Bei delete_section " +
+                "darin) – ist 'heading' dabei namensgleich zum Kapitel, wird KEIN ##-Duplikat angelegt, sondern " +
+                "'content' landet als Kapitel-Freitext (append_to_section: ℹ️-Hinweis, replace_section: ⚠️-Ablehnung " +
+                "bei bereits vorhandenem Freitext) – geeignet, um gezielt in ein neues Kapitel zu schreiben, ohne rewrite. Bei delete_section " +
                 "bleibt ein fehlendes Kapitel dagegen ein sicherer Skip OHNE Anlegen. Bei delete_chapter ist " +
                 "'chapter' dagegen das PFLICHT-Adressfeld – das komplette, zu löschende Kapitel selbst, nicht nur " +
                 "eine Eingrenzung; 'heading'/'content' entfallen dort. Die Notizbuch-Titelzeile (erste Zeile des " +
                 "Dokuments) ist niemals ein gültiges delete_chapter-Ziel. Bei append_to_chapter ist 'chapter' " +
                 "ebenfalls das PFLICHT-Adressfeld – das Ziel-Kapitel für den KAPITEL-FREITEXT aus 'content' (VOR " +
                 "dem ersten ##-Abschnitt); fehlt das Kapitel, wird es wie bei append_to_section/replace_section " +
-                "automatisch am Dokumentende neu angelegt. Bei delete_entry OPTIONAL (identische Eingrenzung wie " +
+                "automatisch am Dokumentende neu angelegt. Bei delete_entry/replace_entry OPTIONAL (identische Eingrenzung wie " +
                 "bei den ##-Abschnitts-Ops, nur zusammen mit 'heading' wirksam). move_entry nutzt statt 'chapter' " +
                 "die eigenen Felder 'from_chapter' (Quelle, optional) und 'to_chapter' (Ziel, PFLICHT wenn " +
                 "'to_heading' fehlt) – 'chapter' bleibt bei move_entry ungenutzt.",
@@ -488,10 +495,10 @@ export const NOTEBOOK_TOOL = {
             entry: {
               type: "string",
               description:
-                'Wortlaut der zu löschenden/verschiebenden Zeile, z. B. "- [ ] Text" – exakt ODER als eindeutiger ' +
+                'Wortlaut der zu löschenden/zu ersetzenden/verschiebenden Zeile, z. B. "- [ ] Text" – exakt ODER als eindeutiger ' +
                 'Teilstring, muss NICHT das komplette "- "/"- [ ] "-Präfix enthalten. PFLICHT (nicht leer) bei ' +
-                "delete_entry und move_entry. Ist der Eintrag NICHT eindeutig (0 oder mehrere Treffer im " +
-                "adressierten Bereich), passiert GAR NICHTS – dann heading/chapter (delete_entry) bzw. " +
+                "delete_entry, replace_entry und move_entry. Ist der Eintrag NICHT eindeutig (0 oder mehrere Treffer im " +
+                "adressierten Bereich), passiert GAR NICHTS – dann heading/chapter (delete_entry/replace_entry) bzw. " +
                 "from_heading/from_chapter (move_entry) ergänzen oder den Wortlaut exakter zitieren. Entfällt bei " +
                 "allen anderen Op-Typen.",
             },
@@ -515,7 +522,9 @@ export const NOTEBOOK_TOOL = {
               type: "string",
               description:
                 'Ziel-##-Abschnitt bei move_entry, z. B. "## Aufgaben" – der Eintrag landet an dessen Ende ' +
-                "(Abschnitt wird bei Bedarf angelegt, optional zusätzlich 'to_chapter' zur Kapitel-Zuordnung, " +
+                "(Abschnitt wird bei Bedarf angelegt, außer to_heading ist namensgleich zu einem bereits " +
+                "existierenden #-Kapitel ohne eigenen ##-Abschnitt: dann landet der Eintrag stattdessen als " +
+                "Kapitel-Freitext, analog zur 'chapter'-Kollisionsregel oben, optional zusätzlich 'to_chapter' zur Kapitel-Zuordnung, " +
                 "analog zu 'chapter' bei append_to_section). Mindestens eines von to_heading/to_chapter ist " +
                 "PFLICHT bei move_entry. Entfällt bei allen anderen Op-Typen.",
             },
@@ -524,7 +533,8 @@ export const NOTEBOOK_TOOL = {
               description:
                 'Ziel-#-Kapitel bei move_entry, z. B. "# KPIs" – NUR "to_chapter" gesetzt (ohne "to_heading"): ' +
                 "der Eintrag landet als KAPITEL-FREITEXT direkt im Kapitel (analog zu append_to_chapter); " +
-                "zusätzlich zu 'to_heading' gesetzt: grenzt den Ziel-Abschnitt auf dieses Kapitel ein. Fehlendes " +
+                "zusätzlich zu 'to_heading' gesetzt: grenzt den Ziel-Abschnitt auf dieses Kapitel ein (siehe " +
+                "Kollisions-Nebensatz bei 'to_heading' oben). Fehlendes " +
                 "Ziel-Kapitel wird wie bei append_to_section/append_to_chapter automatisch am Dokumentende neu " +
                 "angelegt. Mindestens eines von to_heading/to_chapter ist PFLICHT bei move_entry. Entfällt bei " +
                 "allen anderen Op-Typen.",
@@ -747,6 +757,10 @@ export function buildChatReply(data, hits, toolReply) {
 // Senke angewendet, NICHT auf die React-Chat-Pille oder das Archiv-
 // Markdown (siehe DECISIONS): dort ist rohes m.warning unkritisch (React
 // escaped Text ohnehin, chatToMarkdown quotet zeilenweise mit ">").
+// v7.52 (ℹ️-Kanal, DECISIONS #106): wird jetzt auch auf den kombinierten
+// "sysNote"-String (m.warning + m.opsInfo, siehe callClaude#msgs) angewendet
+// – dieselbe Schicht schützt beide Quellen, ops.js#explainNote säubert
+// m.opsInfo bereits an der Quelle (Schicht 1) exakt wie explainSkip.
 const sanitizeWarningForHistory = (w) =>
   String(w || "")
     .replace(/\r\n|\r|\n/g, " · ")
@@ -872,14 +886,25 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
   const msgs = priorChat
     .filter((m) => !m.error && (m.text || m.imgId || m.fileName))
     .slice(-12)
-    .map((m) => ({
-      role: m.role,
-      content:
-        (m.imgId ? "[Bild " + m.imgId + "] " : "") +
-        (m.fileName ? "[Datei „" + m.fileName + "“] " : "") +
-        stripCiteTags(m.text || "") +
-        (m.warning ? "\n\n[SYSTEM-HINWEIS: " + sanitizeWarningForHistory(m.warning) + "]" : ""),
-    }));
+    .map((m) => {
+      // v7.52 (ℹ️-Kanal, DECISIONS #106): EIN gemeinsamer SYSTEM-HINWEIS-
+      // Rahmen für ⚠️-Warnung UND ℹ️-Hinweis derselben historischen
+      // Nachricht (statt zweier separater Rahmen) – die bestehende
+      // Rahmen-Integritäts-Garantie (GENAU EIN Marker, siehe
+      // sanitizeWarningForHistory/Tests) bleibt dadurch unverändert gültig,
+      // ein zweiter Rahmen hätte den bestehenden "GENAU EIN Marker"-Vertrag
+      // gebrochen. " · " trennt beide Teile (dieselbe Trenn-Konvention wie
+      // eine Zeilenumbruch-Ersetzung in sanitizeWarningForHistory selbst).
+      const sysNote = [m.warning, m.opsInfo].filter(Boolean).join(" · ");
+      return {
+        role: m.role,
+        content:
+          (m.imgId ? "[Bild " + m.imgId + "] " : "") +
+          (m.fileName ? "[Datei „" + m.fileName + "“] " : "") +
+          stripCiteTags(m.text || "") +
+          (sysNote ? "\n\n[SYSTEM-HINWEIS: " + sanitizeWarningForHistory(sysNote) + "]" : ""),
+      };
+    });
 
   const content = [];
   if (img && imgId) {

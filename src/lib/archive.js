@@ -69,7 +69,7 @@ const noNul = (s) => String(s).replace(/\u0000/g, "");
 // Chat-Verlauf als Markdown für die Ablage im Daten-Repo.
 //
 // chat: Nachrichten wie im State ({ role, text, ts, imgId, fileName,
-// sources, commit, info, error }); Einträge ohne ts (Begrüßung) werden
+// sources, commit, warning, opsInfo, info, error }); Einträge ohne ts (Begrüßung) werden
 // übersprungen. opts.resolveImg liefert zu einer imgId den Repo-Pfad
 // (z. B. "bilder/img-1.png") oder null; Links im Archiv sind relativ zu
 // chats/, damit sie in der GitHub-Ansicht funktionieren. opts.now
@@ -150,6 +150,18 @@ export function chatToMarkdown(chat, opts = {}) {
     if (m.warning) {
       parts.push("");
       for (const line of noNul(m.warning).split("\n")) parts.push("> " + line);
+    }
+    // ℹ️-Hinweis-Badge (v7.52, Ops-Zuverlässigkeit, siehe DECISIONS #106):
+    // identischer Aufbau wie die ⚠️-Warn-Badge oben (App.jsx#buildOpsInfo
+    // liefert das fertige ℹ️-Präfix, hier nur zeilenweise mit ">" quotieren).
+    // Eigenes Feld "opsInfo" (NICHT "info" – das ist bereits als BOOLEAN
+    // Flag für die separate System-Pillen-Nachricht "Notizbuch manuell
+    // bearbeitet" vergeben, siehe die Sonderbehandlung "if (m.info)" oben in
+    // dieser Funktion; ein zweiter, andersartiger Gebrauch desselben Felds
+    // würde dort in die falsche Verzweigung laufen).
+    if (m.opsInfo) {
+      parts.push("");
+      for (const line of noNul(m.opsInfo).split("\n")) parts.push("> " + line);
     }
   }
 

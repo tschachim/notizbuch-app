@@ -204,6 +204,57 @@ describe("chatToMarkdown", () => {
     expect(md).toContain("Bse");
   });
 
+  // v7.52 (ℹ️-Kanal, DECISIONS #106): identischer Archiv-Pfad wie die
+  // ⚠️-Warnung oben, eigenes Feld "opsInfo" (NICHT "info" – Namenskollision
+  // mit der bestehenden System-Pillen-Nachricht, siehe chatToMarkdown).
+  it("vermerkt eine EINZEILIGE ℹ️-Hinweis-Meldung als eigene Zitatzeile", () => {
+    const md = chatToMarkdown([
+      {
+        role: "assistant", ts: TS, text: "Erledigt.",
+        opsInfo: 'ℹ️ Hinweis: append_to_section „KPIs“ in Kapitel-Freitext „KPIs“ eingefügt',
+      },
+    ]);
+    expect(md).toContain('> ℹ️ Hinweis: append_to_section „KPIs“ in Kapitel-Freitext „KPIs“ eingefügt');
+  });
+
+  it("eine MEHRZEILIGE ℹ️-Hinweis-Meldung bekommt auf JEDER Zeile ein eigenes '>'", () => {
+    const md = chatToMarkdown([
+      {
+        role: "assistant", ts: TS, text: "Erledigt.",
+        opsInfo: "ℹ️ Hinweis:\n– Kapitel „X“ neu angelegt\n– Kapitel „Y“ neu angelegt",
+      },
+    ]);
+    expect(md).toContain("> ℹ️ Hinweis:");
+    expect(md).toContain('> – Kapitel „X“ neu angelegt');
+    expect(md).toContain('> – Kapitel „Y“ neu angelegt');
+  });
+
+  it("ein Turn mit Warnung UND Hinweis zeigt beide Zeilen (unabhängige Kanäle)", () => {
+    const md = chatToMarkdown([
+      {
+        role: "assistant", ts: TS, text: "Teilweise erledigt.",
+        warning: "⚠️ Nicht angewendet: memory_append (leerer content)",
+        opsInfo: 'ℹ️ Hinweis: Kapitel „X“ neu angelegt',
+      },
+    ]);
+    expect(md).toContain("> ⚠️ Nicht angewendet: memory_append (leerer content)");
+    expect(md).toContain('> ℹ️ Hinweis: Kapitel „X“ neu angelegt');
+  });
+
+  it("ohne opsInfo-Feld erscheint KEINE ℹ️-Zeile", () => {
+    const md = chatToMarkdown([{ role: "assistant", ts: TS, text: "Alles gut." }]);
+    expect(md).not.toContain("ℹ️ Hinweis");
+  });
+
+  it("entfernt Nullbytes auch aus dem ℹ️-Hinweis", () => {
+    const NUL = String.fromCharCode(0);
+    const md = chatToMarkdown([
+      { role: "assistant", ts: TS, text: "x", opsInfo: "Hinweis: Kapitel „B" + NUL + "se“ neu angelegt" },
+    ]);
+    expect(md).not.toContain(NUL);
+    expect(md).toContain("Bse");
+  });
+
   it("liefert bei leerem Verlauf nur den Kopf", () => {
     const md = chatToMarkdown([]);
     expect(md).toContain("0 Nachrichten");

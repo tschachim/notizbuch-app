@@ -3,7 +3,7 @@ import {
   BookOpen, Send, Pencil, X, Check, History, Download, Copy,
   RotateCcw, GitCommit, ChevronDown, Loader2, Upload, ImagePlus,
   Settings, AlertTriangle, StickyNote, Paperclip, Trash2, FileUp,
-  ArrowUp, ArrowDown, Plus, ListTree, Archive, Maximize2, Minimize2,
+  ArrowUp, ArrowDown, Plus, ListTree, Archive, Maximize2, Minimize2, Info,
 } from "lucide-react";
 
 import { applyOpsDetailed, dispHead, PLACEHOLDER_LINE, stripInboxPlaceholder } from "./lib/ops.js";
@@ -304,28 +304,57 @@ function sanitizeWarnLabel(s) {
   return bracketsSafe.length > WARN_LABEL_MAX ? bracketsSafe.slice(0, WARN_LABEL_MAX) + "…" : bracketsSafe;
 }
 
-// Baut den Text einer ⚠️-Warn-Pille aus den NICHT angewendeten Ops eines
-// Turns (v7.21, Ops-Zuverlässigkeit – siehe DECISIONS #63: das Modell kann
-// bisher ohne jede Rückmeldung eine Änderung ankündigen, die stillschweigend
-// wirkungslos bleibt). "items": flache Liste von { type?, heading?,
-// notebook?, reason }, aus applyOpsDetailed()/applyMemoryOpsDetailed()-
-// Ergebnissen (nur die NICHT angewendeten, reason gesetzt) plus optional
-// einem "bare" Hinweis ohne type/heading (z. B. "Commit angekündigt, aber
-// keine Änderung wirksam geworden" – siehe send()). Bündelt MEHRERE nicht
-// angewendete Ops in EINER Pille (Auftrag) statt vieler einzelner. Liefert
-// null, wenn nichts zu warnen ist (Pille wird dann gar nicht gerendert).
-// Reine Funktion, exportiert für tests/appOps.test.js.
-export function buildOpsWarning(items) {
+// Gemeinsamer Baustein für buildOpsWarning (⚠️, NICHT angewendete Ops) UND
+// das neue buildOpsInfo (v7.52, ℹ️-Kanal, DECISIONS #106: ANGEWENDETE Ops mit
+// lesenswertem Nebeneffekt – Kollisions-Umleitung/implizite Kapitel-/
+// Abschnitts-Anlage, siehe ops.js#explainNote) – IDENTISCHE Label-/
+// Sanitisierungs-Logik für beide Kanäle (DRY, kein zweiter, potenziell
+// abweichender Formatierungspfad), NUR das Präfix ("label") unterscheidet
+// die beiden dünnen Exporte unten. "items": flache Liste von { type?,
+// heading?, notebook?, reason }; reason trägt bei buildOpsWarning den
+// Skip-Grund (aus applyOpsDetailed()/applyMemoryOpsDetailed(), NICHT
+// angewendete Ops), bei buildOpsInfo den Note-Text (nur ANGEWENDETE Ops mit
+// gesetztem note, siehe send()). Liefert null, wenn nichts zu melden ist
+// (keine Pille wird dann gerendert). Reine Funktion.
+function describeOpItems(items, label) {
   const list = (Array.isArray(items) ? items : []).filter((it) => it && it.reason);
   if (!list.length) return null;
   const describe = (it) => {
     if (!it.type) return it.reason; // bare Hinweis ohne konkrete Op
-    const label = sanitizeWarnLabel(it.type) + (it.heading ? ' „' + sanitizeWarnLabel(it.heading) + '“' : "");
+    const opLabel = sanitizeWarnLabel(it.type) + (it.heading ? ' „' + sanitizeWarnLabel(it.heading) + '“' : "");
     const where = it.notebook ? " in „" + sanitizeWarnLabel(it.notebook) + "“" : "";
-    return label + where + " (" + it.reason + ")";
+    return opLabel + where + " (" + it.reason + ")";
   };
-  if (list.length === 1) return "⚠️ Nicht angewendet: " + describe(list[0]);
-  return "⚠️ Nicht angewendet:\n" + list.map((it) => "– " + describe(it)).join("\n");
+  if (list.length === 1) return label + ": " + describe(list[0]);
+  return label + ":\n" + list.map((it) => "– " + describe(it)).join("\n");
+}
+
+// Baut den Text einer ⚠️-Warn-Pille aus den NICHT angewendeten Ops eines
+// Turns (v7.21, Ops-Zuverlässigkeit – siehe DECISIONS #63: das Modell kann
+// bisher ohne jede Rückmeldung eine Änderung ankündigen, die stillschweigend
+// wirkungslos bleibt). Bündelt MEHRERE nicht angewendete Ops in EINER Pille
+// (Auftrag) statt vieler einzelner. Präfix UNVERÄNDERT seit v7.21 (siehe
+// tests/appOps.test.js-Pins) – reiner Wrapper um describeOpItems() seit
+// v7.52. Reine Funktion, exportiert für tests/appOps.test.js.
+export function buildOpsWarning(items) {
+  return describeOpItems(items, "⚠️ Nicht angewendet");
+}
+
+// v7.52 (ℹ️-Kanal, Live-Vorfall "KPIs"-Duplikat, DECISIONS #106): Pendant zu
+// buildOpsWarning für ANGEWENDETE Ops, die aber NICHT wörtlich umgesetzt
+// wurden (Kollisions-Umleitung in einen Kapitel-Freitext, implizite Kapitel-/
+// Abschnitts-Anlage – siehe ops.js#explainNote/entryScope) – vorher lief so
+// eine Op "erfolgreich" (applied:true) OHNE jede sichtbare Meldung (genau der
+// Live-Vorfall: ein redundantes "## KPIs"-Duplikat entstand unbemerkt).
+// Eigenes Feld (App.jsx#send: m.opsInfo statt m.info – "info" ist bereits als
+// BOOLEAN Flag für die separate System-Pillen-Nachricht "Notizbuch manuell
+// bearbeitet" vergeben, siehe chat.map/archive.js; ein String hier würde
+// diesen bestehenden Rendering-/Archiv-Zweig kollidieren und eine normale
+// Assistent-Antwort fälschlich als bloße graue System-Pille ohne Text/
+// Commit/Warnung darstellen) – rein additiv, kein bestehendes Verhalten
+// geändert.
+export function buildOpsInfo(items) {
+  return describeOpItems(items, "ℹ️ Hinweis");
 }
 
 /* ------------------------------------------------------------------ */
@@ -1453,6 +1482,15 @@ export default function NotizbuchApp() {
       // ⚠️-Warn-Pille (siehe buildOpsWarning), statt sie wie bisher
       // kommentarlos verschwinden zu lassen.
       const notApplied = [];
+      // v7.52 (ℹ️-Kanal, DECISIONS #106): sammelt ANGEWENDETE Ops dieses
+      // Turns, die einen von ops.js#explainNote gemeldeten Nebeneffekt haben
+      // (Kollisions-Umleitung/implizite Anlage, siehe applyOpsDetailed
+      // weiter unten) – gleiche Item-Form wie notApplied, damit
+      // sanitizeWarnLabel/describeOpItems (buildOpsInfo) unverändert greift.
+      // NUR Notizbuch-Ops (die Ergebnis-Schleife weiter unten) füllen diese
+      // Liste – memory_*-Ops haben kein note-Feld (applyMemoryOpsDetailed
+      // liefert das nicht, siehe lib/memory.js).
+      const infos = [];
 
       // Ops splitten (v7.16): memory_* wirken auf das globale, notizbuch-
       // übergreifende Gedächtnis (eigene Datei/eigener Commit, siehe
@@ -1505,6 +1543,11 @@ export default function NotizbuchApp() {
           const detailed = applyOpsDetailed(before, ops);
           for (const r of detailed.results) {
             if (!r.applied) notApplied.push({ type: r.type, heading: r.heading, notebook: nb ? nb.name : nbId, reason: r.reason });
+            // v7.52 (ℹ️-Kanal, DECISIONS #106): r.note ist NUR bei
+            // applied:true gesetzt (siehe ops.js#applyOpsDetailed) – der
+            // else-Zweig hier ist also implizit auf "applied:true UND
+            // note vorhanden" beschränkt.
+            else if (r.note) infos.push({ type: r.type, heading: r.heading, notebook: nb ? nb.name : nbId, reason: r.note });
           }
           // Nach dem Anwenden dokumentweit durchnummerieren: neue Quellen-
           // Fußnoten kommen als [0](url)-Platzhalter aus den ops.
@@ -1567,6 +1610,13 @@ export default function NotizbuchApp() {
             // durchlaufenen Notizbuch-Gruppen) bleiben auch im Konflikt-Fall
             // sichtbar – teilweiser Erfolg soll ehrlich abgebildet werden.
             warning: buildOpsWarning(notApplied) || undefined,
+            // v7.52 (ℹ️-Kanal, DECISIONS #106): wie bei warning oben bleibt
+            // ein bereits vor dem Konflikt gesammelter Hinweis sichtbar –
+            // bewusst akzeptierter Historie-Verlust wie bei warning (diese
+            // Nachricht trägt error:true und wird beim nächsten Turn aus der
+            // an das Modell gesendeten History gefiltert, siehe
+            // lib/anthropic.js#callClaude), der NUTZER sieht ihn trotzdem.
+            opsInfo: buildOpsInfo(infos) || undefined,
             text: saved.length
               ? "Teilweise gespeichert (" + saved.join(", ") + "). Ein weiteres Notizbuch wurde " +
                 "parallel geändert und NICHT gespeichert – bitte nur den fehlenden Teil neu erfassen " +
@@ -1645,6 +1695,10 @@ export default function NotizbuchApp() {
         // lib/anthropic.js#callClaude (History-Mapping hängt sie an den
         // content-String DIESER Assistent-Nachricht an).
         warning: buildOpsWarning(notApplied) || undefined,
+        // v7.52 (ℹ️-Kanal, DECISIONS #106): siehe buildOpsInfo-Kommentar
+        // oben – eigenes Feld m.opsInfo statt m.info (Namenskollision mit
+        // der bestehenden System-Pillen-Nachricht, siehe dort).
+        opsInfo: buildOpsInfo(infos) || undefined,
         sources: res.sources && res.sources.length ? res.sources : undefined,
       };
       const finalChat = [...chatWithUser, aMsg].slice(-80);
@@ -2895,7 +2949,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.51</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.52</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -3116,13 +3170,25 @@ export default function NotizbuchApp() {
                     <span>{m.warning}</span>
                   </div>
                 )}
+                {/* ℹ️-Hinweis-Pille (v7.52, DECISIONS #106): gleiche Optik-
+                    Familie/Struktur wie die ⚠️-Warn-Pille direkt darüber,
+                    aber sky statt amber (angewendet, aber nicht wörtlich –
+                    Kollisions-Umleitung/implizite Anlage, siehe
+                    buildOpsInfo/ops.js#explainNote) – KEINE Verwechslung mit
+                    Fehler/Wirkungslosigkeit. */}
+                {m.opsInfo && (
+                  <div className="mt-1 inline-flex items-start gap-1.5 max-w-[88%] sm:max-w-md text-xs text-sky-800 bg-sky-50 border border-sky-300 rounded-lg px-2.5 py-1.5 whitespace-pre-wrap break-words">
+                    <Info size={12} className="shrink-0 mt-0.5" />
+                    <span>{m.opsInfo}</span>
+                  </div>
+                )}
                 {/* Dezenter Zeitstempel für alle übrigen Nachrichten (C4, v7.4).
                     WELCOME hat ts:0 (falsy) und bleibt bewusst ohne Zeit; bei
-                    einer Commit-/Gedächtnis-/Warn-Badge keinen doppelten
-                    Stempel (die Commit-Badge zeigt die Zeit schon).
+                    einer Commit-/Gedächtnis-/Warn-/Hinweis-Badge keinen
+                    doppelten Stempel (die Commit-Badge zeigt die Zeit schon).
                     Ausrichtung folgt items-end/items-start des umgebenden
                     flex-col-Containers automatisch. */}
-                {!m.commit && !m.memory && !m.warning && m.ts ? (
+                {!m.commit && !m.memory && !m.warning && !m.opsInfo && m.ts ? (
                   <div className="mt-0.5 px-1 text-[10px] text-slate-400">{fmtTime(m.ts)}</div>
                 ) : null}
               </div>

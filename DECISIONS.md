@@ -10692,3 +10692,307 @@ aus `referenz-app.jsx` übernommen.
        erweiterte `ghCommitMeta`-Tests für die drei Netz-Zweige
        (Grenzfund/<100/100-Fallback) und `tests/anthropic.test.js` für den
        „auf Deutsch“-Zusatz.
+
+106. **v7.52, Live-Vorfall 2026-09-07 (dritte Instanz der
+     Kapitelnamen-Duplikat-Familie, siehe #80/#103): Kollisions-Resolver,
+     Umleitung statt stiller Anlage, `replace_entry`, ℹ️-Kanal.** Der Nutzer
+     pflegte in einem Notizbuch ein Kapitel „# KPIs“, dessen Einträge
+     ausschließlich als reiner Kapitel-FREITEXT direkt unter der
+     Kapitelzeile standen (zwei Stichpunkte + ein Bild, KEIN eigener
+     „## KPIs“-Abschnitt).
+     - **Turn 1 (Ergänzen):** Auftrag, einen weiteren Stichpunkt „in das
+       Kapitel QA-Test KPIs“ einzufügen. Das Modell schickte
+       `append_to_section` mit `{"heading":"## KPIs","chapter":"# KPIs"}`.
+       `findSection()` fand keinen `## KPIs`-Abschnitt und die v7.23-Regel
+       „wird angelegt, falls er fehlt“ legte klaglos ein REDUNDANTES
+       „## KPIs“ INNERHALB von „# KPIs“ an – `applied:true`, KEINE
+       Warn-Pille (`explainSkip`/`explainNote` griffen nicht, weil die Op
+       aus Sicht der Engine vollständig erfolgreich war). Der bestehende
+       Freitext blieb unverändert daneben stehen: sichtbares, aber
+       unbemerktes Duplikat.
+     - **Turn 2 (eine bestehende Zeile ändern):** Auftrag, an einer bereits
+       vorhandenen Freitext-Zeile („Offener Punkt: KPI-Definition klären“)
+       einen Klammer-Zusatz anzuhängen. Für „ändere GENAU DIESE EINE
+       bestehende Zeile“ gab es bis dahin KEINE Op – `replace_section`
+       hätte den KOMPLETTEN Kapitel-Freitext (inkl. Bild) durch eine
+       Vollkopie ersetzt (dieselbe „vertraue der Vollkopie“-Annahme, die in
+       #103 bereits zu Datenverlust führte), `delete_entry` +
+       `append_to_chapter` hätte die Zeile an das Freitext-ENDE verschoben
+       statt sie an Ort und Stelle zu ändern (Positionsverlust hinter dem
+       Bild) und wäre nicht atomar (zwei Ops, zwei Fehlerquellen).
+     - **Wurzelursache:** `findSection()` unterschied „Abschnitt fehlt
+       komplett“ NICHT von „ein GLEICHNAMIGES `#`-Kapitel OHNE eigenen
+       `##`-Abschnitt existiert bereits“ – beide Fälle lieferten `null`,
+       und „wird angelegt, falls er fehlt“ (v7.23) behandelte sie
+       identisch. Diese Ebenen-blinde Adressierung plus das STILLE Anlegen
+       an insgesamt ZEHN Stellen im Code (`append_to_section`/
+       `replace_section` je zwei Zweige – Kapitel fehlt UND Abschnitt
+       fehlt –, `append_to_chapter`, `move_entry`-Zielinsert, sowie deren
+       jeweilige `explainSkip`-Spiegelung) plus die fehlende In-Place-Op für
+       „eine Zeile ändern“ bilden dieselbe Fehlerfamilie wie #80 (v7.40) und
+       #103 (v7.50): ein fehlender/zu grobkörniger Op-Typ zwingt das Modell
+       zu unsicheren Behelfslösungen. Reproduziert in DREI unabhängigen
+       Läufen gegen die echte Engine (nicht nur ein einmaliger Ausrutscher).
+       Nebenbefund: OHNE `chapter`-Feld hätte dieselbe Kollision NICHT im
+       genannten Kapitel, sondern im zufällig LETZTEN Kapitel des Dokuments
+       gelandet (bestehendes v7.23-Verhalten bei fehlendem `chapter` – siehe
+       Restrisiko unten).
+     - **Entscheidung 1 – gemeinsamer, rein lesender Kollisions-Resolver
+       (`resolveSectionTarget()` in `src/lib/ops.js`, Spiegelprinzip der
+       Datei):** EIN Helfer klärt VOR jeder Mutation, ob `heading` (ggf. mit
+       `chapter`) ein `##`-Duplikat anlegen würde oder stattdessen ein
+       echtes, gleichnamiges `#`-Kapitel ohne eigenen Abschnitt trifft –
+       genutzt von `applyOne` UND `explainSkip`/`explainNote` gemeinsam
+       (kein zweiter, potenziell abweichender Entscheidungspfad, das
+       Grundprinzip dieser Datei seit ihrem Kopfkommentar). Analog dazu
+       `entryScope()` für `delete_entry`/`replace_entry`/`move_entry`
+       (`redirected`-Flag statt eines eigenen zweiten Resolvers).
+     - **Entscheidung 2 – bei `append_to_section`/`append_to_chapter`:
+       Umleitung in den Kapitel-Freitext statt Skip.** Ein Skip hätte beim
+       Cross-Notebook-Verschieben (Ziel-Op zuerst, siehe Verschiebe-Regel)
+       exakt das #65-Muster reproduziert: der Inhalt wäre NIRGENDS
+       gelandet, während eine bereits gelaufene Quell-Op ihn längst entfernt
+       hätte. Umleitung ist dagegen NIE destruktiv (der Inhalt landet
+       IMMER irgendwo im richtigen Kapitel) und trifft exakt die Absicht
+       des Live-Vorfalls („das gehört ins Kapitel KPIs“, nicht „das gehört
+       in einen NEUEN Abschnitt namens KPIs“).
+     - **Entscheidung 3 – bei `replace_section`: Skip NUR bei
+       nicht-leerer Präambel, sonst befüllen.** Eine bereits vorhandene
+       Kapitel-Präambel BLIND per Vollkopie zu ersetzen wäre erneut die
+       „vertraue der Vollkopie“-Annahme aus #103 (Turn 2 des Vorfalls zeigt
+       genau, wie unzuverlässig das Modell eine Vollkopie reproduziert) –
+       `replace_section` wird deshalb bei nicht-leerer Kollisions-Präambel
+       ABGELEHNT (⚠️, `reason` verweist auf `replace_entry`/`delete_entry`/
+       `append_to_chapter`; `delete_section` auf ein solches Kapitel
+       verweist auf `delete_chapter`). Eine LEERE Präambel (Kapitel gerade erst per
+       `append_to_chapter` angelegt, noch kein Freitext) bzw. ein komplett
+       fehlendes Kapitel (chapter===heading) dürfen dagegen befüllt werden
+       – dort gibt es nichts zu überschreiben.
+     - **Entscheidung 4 – Titelzeile bleibt von der Umleitung
+       ausgenommen (`chapterIsTitle`).** Eine Kollision mit der
+       Notizbuch-TITELZEILE leitet NICHT in den Dokument-Vorspann um
+       (Altverhalten seit v7.32/#74 unangetastet: die Titelzeile ist nie ein
+       normales Kapitel) – sonst hätte ein Notizbuch namens „KPIs“ mit
+       einem `## KPIs`-Adressierungsversuch plötzlich in den Vorspann
+       zwischen Titel und erstem Abschnitt geschrieben.
+     - **Entscheidung 5 – `replace_entry` als kleinste atomare
+       Primitive.** Neuer Op-Typ `{"type":"replace_entry","entry":"…",
+       "content":"…","heading"?,"chapter"?}` ersetzt GENAU EINEN bereits
+       gefundenen Eintrag TEXTUELL, IN PLACE (Einrückung/Position bleiben
+       erhalten) – nutzt dieselbe `entryScope()`/`findEntryLines()`/
+       `entryBlockRange()`-Such-Infrastruktur wie `delete_entry`/
+       `move_entry` (kein zweiter Matching-Pfad) und denselben
+       GENAU-1-Treffer-Schutz (0 oder ≥2 Treffer: nichts ändert sich). Der
+       ersetzte Text darf selbst KEINE `#`/`##`-Zeile enthalten (derselbe
+       Struktur-Injektionsschutz wie bei `dedentBlock()`, siehe #104) –
+       `replace_entry` kann dadurch niemals eine Kapitel-/Abschnittsgrenze
+       einschmuggeln. Funktioniert bewusst AUCH für Zeilen im
+       Kapitel-Freitext (der eigentliche Live-Bedarf aus Turn 2).
+     - **Entscheidung 6 – ℹ️-Kanal als EIGENES Feld, NICHT im
+       ⚠️-Feld.** Neues, rein lesendes `note`-Feld in `applyOpsDetailed()`
+       (nur bei `applied:true` gesetzt, über `explainNote()` – Read-Only wie
+       `explainSkip`, beeinflusst den Ergebnistext nie) macht implizite
+       Kapitel-/Abschnitts-Anlagen UND die neue Kollisions-Umleitung
+       sichtbar – vorher lief genau das OHNE jede Meldung (der eigentliche
+       Auslöser des Live-Vorfalls: der Nutzer bemerkte das „## KPIs“-
+       Duplikat nur zufällig). In `App.jsx` bekommt das eine EIGENE
+       Chat-Nachrichten-Eigenschaft `m.opsInfo` (NICHT `m.info` – dieser
+       Feldname war bereits als BOOLEAN Flag für die separate
+       System-Pillen-Nachricht „Notizbuch manuell bearbeitet“ vergeben,
+       siehe `App.jsx#chat.map`/`lib/archive.js#chatToMarkdown`; ein
+       zweiter, andersartiger String-Gebrauch desselben Felds hätte eine
+       normale Assistent-Antwort mit Text/Commit/Warnung fälschlich als
+       bloße graue System-Pille dargestellt – **Abweichung vom
+       ursprünglichen Auftragstext**, der das Feld `info` nannte, siehe
+       Kommentar in `App.jsx#buildOpsInfo`) plus eine EIGENE Prompt-Regel
+       direkt nach der bestehenden ⚠️-Regel: im ⚠️-Feld hätte die
+       „WIRKUNGSLOS – korrigiere sie“-Regel das Modell dazu verleitet, eine
+       bereits erfolgreich (nur eben umgeleitet) angewendete Op zu
+       WIEDERHOLEN und damit Dubletten zu erzeugen – die neue ℹ️-Regel sagt
+       stattdessen explizit „wiederhole sie NICHT“. `buildOpsWarning`/
+       `buildOpsInfo` teilen sich denselben `describeOpItems()`-Baustein
+       (DRY), der SYSTEM-HINWEIS-Rahmen in `lib/anthropic.js#callClaude`
+       bündelt beide Kanäle (`[m.warning, m.opsInfo].filter(Boolean).join("
+       · ")`) in EINEM Rahmen – ein zweiter Rahmen hätte die bestehende
+       „GENAU EIN Marker“-Garantie gebrochen.
+     - **Bewusstes Fehlfeuer-Restrisiko (ohne `chapter`-Feld):** Schickt
+       das Modell `append_to_section` NUR mit `heading` (kein `chapter`)
+       und der genannte Name trifft zufällig ein `#`-Kapitel OHNE eigenen
+       Abschnitt, landet der Freitext in GENAU DIESEM (namensgleichen)
+       Kapitel – bei einer fehlenden Kollision (kein solches Kapitel)
+       bleibt das alte v7.23-Verhalten unverändert: Anlage im ZULETZT
+       bestehenden Kapitel des Dokuments. `explainNote()` benennt diesen
+       Fall ausdrücklich („… ggf. `chapter` angeben“) und macht ihn damit
+       SICHTBAR statt still – kein Datenverlust, nur ein potenziell
+       unerwarteter Ablageort.
+     - **Historie-Verlust bei `m.opsInfo` im SHA-Konflikt-Pfad:** wie bei
+       `m.warning` bereits seit v7.21 akzeptiert – die Konflikt-Nachricht
+       trägt `error:true` und wird beim nächsten Turn aus der an das Modell
+       gesendeten Historie gefiltert (`lib/anthropic.js#callClaude`); der
+       NUTZER sieht die Pille trotzdem, nur das Modell erfährt im
+       Konfliktfall nichts davon.
+     - **Bewusst NICHT in v7.52 (mögliche Folgeaufträge):** Ambiguitäts-
+       Sperre für `replace_section`/`delete_section` bei mehrdeutigem
+       Treffer auf mehreren Ebenen, `###`-Ebenen-Adressierung als eigene
+       Op, ein Struktur-Filter für `append_to_section`/`append_to_chapter`-
+       `content` (derzeit nur bei `replace_entry` erzwungen), ein
+       Titel-Duplikat-Schutz bei `append_to_chapter` (analog zu #74s
+       Titelzeilen-Schutz), ein `##`-Fallback für `delete_chapter`s
+       `heading`-Feld, ein Skip „bitte `chapter` angeben“ bei einer Anlage
+       ohne `chapter` in bereits Kapitel-strukturierten Dokumenten,
+       explizites `create:true`-Flag statt impliziter Anlage, ein
+       Verify-then-Commit-Gate vor jedem Commit sowie ein Replay-Korpus
+       echter Live-Vorfälle als Regressionsnetz. Zusätzlich (Review-Fund
+       🔵, Runde 1): eine Konsistenzlücke bei `chapterIsTitle` UND einem
+       ECHTEN, gleichnamigen `#`-Kapitel weiter unten im selben Dokument
+       (Titelzeile „# Projekte“ + reguläres Kapitel „# Projekte“) –
+       `append_to_section`/`replace_section` (Fall (ii) in
+       `resolveSectionTarget`) legen den Abschnitt bewusst weiter in den
+       TITEL-Vorspann (Spec verlangt Altverhalten bei `chapterIsTitle`,
+       siehe Entscheidung 4), während `replace_entry`/`delete_entry` (über
+       `entryScope`/`findAddressableChapter`) UND `append_to_chapter` mit
+       denselben Feldern das ECHTE Kapitel treffen. Ein Folgeauftrag
+       könnte `resolveSectionTarget` bei `chapterIsTitle` zusätzlich
+       `findAddressableChapter`-Logik (Suche AB der Zeile nach der
+       Titelzeile) prüfen lassen und `collisionRange` bei einem Treffer
+       auf dieses echte Kapitel umbiegen – bewusst NICHT in v7.52
+       (Restrisiko: nur bei der seltenen Kombination Titel+Kapitel
+       GLEICHEN Namens relevant, kein Datenverlust, nur ein potenziell
+       unerwarteter Ablageort, analog zum Fehlfeuer-Restrisiko oben).
+     - **Tests:** `tests/ops.test.js` (`resolveSectionTarget`/`entryScope`-
+       Kollisions-Fälle: Turn 1/Turn 2 des Vorfalls 1:1 nachgebaut, Titel-
+       zeilen-Ausnahme, leere vs. gefüllte Präambel, Fehlfeuer ohne
+       `chapter`, Sequenzen im selben Turn, `replace_entry`-Matching/
+       Fence-Awareness/Struktur-Schutz, Rahmen-Integrität der ℹ️-Notes),
+       `tests/anthropic.test.js` (neue Prompt-/Schema-Vertragstests für
+       `replace_entry` und alle Kollisions-Nebensätze, History-Inklusion
+       für `m.opsInfo` allein UND kombiniert mit `m.warning`, Rahmen-
+       Integrität gegen Injektion), `tests/appOps.test.js` (`buildOpsInfo`:
+       leer/einzeln/mehrzeilig/Sanitisierung, End-zu-Ende über
+       `applyOpsDetailed`, `replace_entry`-Skip in der Warn-Pille),
+       `tests/archive.test.js` (`m.opsInfo` im Chat-Archiv, analog zu
+       `m.warning`). Version v7.52 (`src/App.jsx`-Header).
+
+107. **Code-Review-Nachbesserung zu #106 (🟡🟡, Runde 1):** zwei
+     Findings am uncommitteten v7.52-Paket behoben.
+     - **Finding 1 (🟡) – Kollisions-Guard umging sich selbst bei
+       `chapterMissing` + gleichnamigem `##`-Abschnitt ANDERSWO im
+       Dokument:** `resolveSectionTarget()` (`src/lib/ops.js`) suchte den
+       Abschnitt bei fehlendem Kapitel bisher GLOBAL (`chapterRange` war
+       `null`, `findSection()` fiel auf die globale Suche zurück) – fand
+       sie dabei einen FREMDEN, gleichnamigen `##`-Abschnitt in einem
+       ANDEREN Kapitel, wurde `sectionRange` fälschlich NICHT-`null` und
+       die gesamte Kollisions-Prüfung (die nur bei `sectionRange===null`
+       greift) lief ins Leere – `applyOne` legte daraufhin exakt das
+       Live-Anti-Muster an: ein neues `# X`-Kapitel MIT einem
+       redundanten `## X`-Abschnitt darin, applied:true, `note` behauptete
+       fälschlich „Kapitel und Abschnitt neu angelegt“. Fix: EIN Einzeiler
+       – bei `chapterMissing` bleibt `sectionRange` immer `null` (ein
+       frisch anzulegendes Kapitel kann per Definition noch keinen eigenen
+       Abschnitt haben, ein globaler Treffer ist zwangsläufig fremd).
+       `isNewSectionCase()` vereinfacht sich dadurch von
+       `chapterMissing || sectionRange===null` zu reinem
+       `sectionRange===null` (der Sonderfall entfällt, weil
+       `chapterMissing` jetzt immer `sectionRange===null` impliziert).
+       Betraf `append_to_section`, `replace_section` UND das
+       `move_entry`-Ziel (alle drei nutzen denselben Resolver –
+       Spiegelprinzip greift auch für den Fix). Ohne Nebenwirkung auf die
+       bestehenden Byte-Identitäts-Pins, da `applyOne` `resolved.
+       sectionRange` im Nicht-Kollisions-Pfad ohnehin nie wiederverwendet
+       (dort wird im frisch angelegten, garantiert leeren Kapitel erneut
+       gesucht).
+     - **Finding 2 (🟡) – `replace_entry`-Skip-Pfade „Kapitel/Abschnitt
+       nicht gefunden“ ungetestet:** Coverage-Lücke (Spec F/16 verlangt
+       identisches heading/chapter-Scoping wie `delete_entry`) – zwei neue
+       Tests pinnen die `reason`-Texte UND vergleichen sie per `toBe`
+       gegen das `delete_entry`-Ergebnis derselben Datenlage (byte-gleich,
+       wie von der Spec gefordert).
+     - **Zwei 🔵-Findings zusätzlich behoben** (billig, aber wertvoll):
+       eine dritte `move_entry`-QUELL-Umleitungs-Note inhaltlich gepinnt
+       (vorher nur indirekt über den Wrapper-Äquivalenz-Test berührt);
+       der `replace_section`-`reason`-Text in Entscheidung 3 oben korrigiert
+       (nannte fälschlich `delete_chapter` statt `replace_entry`/
+       `delete_entry`/`append_to_chapter`). Die verbleibende 🔵-
+       Konsistenzlücke (`chapterIsTitle` + echtes gleichnamiges Kapitel,
+       s. o. unter „Bewusst NICHT in v7.52“) bleibt bewusst offen – Spec
+       verlangt für v7.52 explizit Altverhalten bei `chapterIsTitle`,
+       eine Verhaltensänderung dort wäre ein Scope-Sprung über den
+       Review-Auftrag hinaus.
+     - **Tests:** `tests/ops.test.js`, Block „Kapitelnamen-Kollision“:
+       Fall 6c (`append_to_section`/`replace_section`, `chapterMissing` +
+       fremder `##`-Abschnitt anderswo → kein Anti-Muster, fremder
+       Abschnitt unangetastet, `note` erwähnt „content als
+       Kapitel-Freitext“), Fall 6d (dieselbe Datenlage über
+       `move_entry`-Ziel), Fall 15b (`move_entry`-Quell-Umleitungs-Note
+       inhaltlich gepinnt); Block „replace_entry (v7.52)“ / „Skip-
+       Gründe“: zwei neue Tests für `chapter`/`heading` nicht gefunden,
+       je mit `toBe`-Vergleich gegen `delete_entry`. Alle bestehenden
+       Pins (insbesondere DOC_DUP Z. 1150–1185 und Fall 13, `chapter≠
+       heading`) bleiben unverändert grün. **Kein eigener Versions-Bump** –
+       das gesamte Paket (#106 + diese Nachbesserung + #108 unten) ist bis
+       zum Commit EIN uncommitteter v7.52-Stand (Konvention wie bei
+       `v7.45.1`/`v7.50.1`/`v7.50.2`: Zwischenstände während laufender
+       Review-Runden bekommen nur eine Bezeichnung im DECISIONS-Text, der
+       `src/App.jsx`-Header bleibt bis zum tatsächlichen Commit bei EINER
+       Versionsnummer; ein zwischenzeitlicher Bump auf v7.53 im Header war
+       ein Versehen, siehe #108, Review-Fund 🔵).
+
+108. **Code-Review-Nachbesserung zu #106/#107 (🟡, Runde 2).** Ein Finding
+     am uncommitteten v7.52-Paket behoben (🟡), plus mehrere billige
+     🔵-Findings.
+     - **Finding (🟡) – `delete_section` gab bei `chapterMissing` eine
+       irreführende `delete_chapter`-Meldung aus:** `resolveSectionTarget()`
+       setzt `collisionRange` bewusst auf `null`, wenn `chapter`/`heading`
+       namensgleich sind, aber BEIDE (Kapitel UND Abschnitt) fehlen – für
+       `append_to_section`/`replace_section` korrekt (Kapitel wird
+       angelegt), `explainSkip()` (`src/lib/ops.js`) wertete das für
+       `delete_section` aber nicht aus und behauptete fälschlich, es gäbe
+       ein `#`-Kapitel gleichen Namens ohne `##`-Abschnitt – der Verweis
+       „zum Löschen des Kapitels `delete_chapter` nutzen“ ging damit ins
+       Leere (`delete_chapter` hätte ebenfalls „Kapitel nicht gefunden“
+       gemeldet, eine Modell-Runde verschenkt). Fix: der
+       `delete_chapter`-Verweis wird nur noch ausgegeben, wenn
+       `resolved.collisionRange` TATSÄCHLICH gesetzt ist (das Kapitel also
+       wirklich existiert); bei `chapterMissing` fällt die Prüfung jetzt
+       bewusst durch in die alte, zutreffende Kapitel-Suche darunter
+       („Kapitel „X“ nicht gefunden – Op übersprungen“). Der
+       Ergebnistext/`applyOne` selbst ist unverändert (identisch in beiden
+       Zweigen), betroffen ist ausschließlich die `reason`.
+     - **🔵-Findings zusätzlich behoben (billig):**
+       - `entryScope`-Umleitung (`redirected`) durchsucht bei einer
+         Kollision das GESAMTE Kapitel (inkl. aller `##`-Unterabschnitte),
+         die `explainNote`-Texte für `move_entry`-Quelle und
+         `delete_entry`/`replace_entry` behaupteten aber „im
+         Kapitel-Freitext gesucht/gefunden“ – bei einem Treffer in einem
+         `##`-Unterabschnitt irreführend. Wortlaut auf „im gesamten
+         Kapitel gesucht/gefunden“ korrigiert (minimal-invasiv: nur der
+         Text, nicht der tatsächliche Suchbereich, um das Verhalten
+         nicht zusätzlich zum Wortlaut zu ändern).
+       - `move_entry` mit Ziel-Kollision UND `collisionRange===null`
+         (Zielkapitel wird dabei NEU angelegt) verschwieg das in der
+         `note` – anders als der analoge `append_to_section`/
+         `replace_section`-Zweig, der „neu angelegt“ explizit nennt.
+         `explainNote()` verzweigt jetzt auch für `move_entry` auf
+         `resolved.collisionRange === null`.
+       - Versions-Inkonsistenz aus Runde 1 (Header `v7.53`, aber
+         `DECISIONS.md`/`TESTFAELLE.md` durchgängig `v7.52`) behoben:
+         Header zurück auf `v7.52` (siehe Begründung/Konvention am Ende
+         von #107 oben), #107 nicht mehr als eigener Versions-Bump
+         betitelt.
+     - **Bewusst NICHT umgesetzt:** die Prompt-Wortlaut-Schärfung
+       (`src/lib/anthropic.js`, „nur für EXISTIERENDE ##-Abschnitte“ vs.
+       „legt fehlende Kapitel/Abschnitte an“) und die beiden zusätzlichen
+       Vertragstest-Pins (System-Prompt-Text, `to_chapter`-Nebensatz) –
+       beides 🔵, spec-konform im Bestand, reine Formulierungsschärfung
+       ohne Funktionsbezug; aus Zeit-/Scope-Gründen für eine spätere
+       Runde zurückgestellt (Prompt-Änderungen verdienen eigene
+       Aufmerksamkeit statt einer Nebenbei-Korrektur in einem
+       Review-Nachbesserungs-Paket).
+     - **Tests:** `tests/ops.test.js` – Fall 14b (`delete_section`,
+       `chapter==heading`, beides fehlt: „nicht gefunden“, KEIN
+       `delete_chapter`-Verweis), zusätzliche Zeile im Tabellen-Test
+       (`resolveSectionTarget`/Kollisions-Tabelle) für denselben Fall,
+       Wortlaut-Anpassung im bestehenden „heading trifft #-Kapitel OHNE
+       ##-Abschnitt“-Test (`replace_entry`/`delete_entry`), Fall 6d um
+       `note`-Prüfung „neu angelegt“ erweitert. Version weiterhin v7.52
+       (`src/App.jsx`-Header, siehe #107).

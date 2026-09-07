@@ -220,7 +220,10 @@ erscheint rechts im Dokument (Datum im Format JJJJ-MM-TT). Beobachtungspunkt
 Anschluss an B1): der Einladungstext „_Noch nichts erfasst. Die erste Notiz
 im Chat legt hier los._“ ist nach diesem ersten Eintrag aus dem Inbox-
 Abschnitt verschwunden – bei einem bereits länger genutzten QA-Notizbuch
-ohne Platzhalter ist dieser Punkt gegenstandslos.
+ohne Platzhalter ist dieser Punkt gegenstandslos. Hinweis (v7.52): Legt das
+Modell dabei einen neuen Abschnitt/ein neues Kapitel an, darf zusätzlich
+eine ℹ️-Pille „Abschnitt … neu angelegt“ (blau/sky) erscheinen – das ist
+KEIN Finding, siehe C26.
 
 **C2 [VERBUNDEN][API] Frage ohne Speicherung.** „Was steht in diesem
 Notizbuch?“ Erwartet: Antwort fasst Inhalt zusammen, KEIN neuer Commit,
@@ -602,6 +605,11 @@ Stichpunkten – entweder direkt als Kapitel-Freitext (kein eigener
 vor, wenn stattdessen ein `##`-Abschnitt entsteht, der NUR den
 Kapitelnamen wiederholt (z. B. „## QA-Test KPIs“ unter „# QA-Test KPIs“ –
 genau das Live-Befund-Duplikat, das append_to_chapter vermeiden soll).
+Hinweis (v7.52): Eine zusätzliche ℹ️-Pille (blau/sky, z. B. „Kapitel …
+neu angelegt“ oder „in Kapitel-Freitext … eingefügt“) ist dabei KEIN
+Finding – sie zeigt nur die automatische Umleitung/Neuanlage an, siehe
+C26. Nur eine ⚠️-Pille (amber) oder ein tatsächliches „## QA-Test
+KPIs“-Duplikat sind Findings.
 Danach aufräumen: „Lösche das Kapitel QA-Test KPIs.“ (1 API-Aufruf, siehe
 C20).
 
@@ -675,6 +683,25 @@ und in reply nachfragt statt eine Op zu schicken (dann ebenfalls KEINE
 trotzdem einer der beiden Stichpunkte verschoben/gelöscht wurde. Danach
 aufräumen (nur falls nötig): „Lösche den Abschnitt QA-Test Duplikate.“
 (1 API-Aufruf).
+
+**C26 [VERBUNDEN][API] Bestehendes Freitext-Kapitel per Chat ergänzen und
+eine Zeile ändern – kein Kapitelnamen-Duplikat (Kollisions-Umleitung +
+replace_entry, v7.52, Live-Vorfall).** Voraussetzung: per Editor oder
+Chat ein `#`-Kapitel „QA-Test KPIs“ mit ZWEI Stichpunkten als
+Kapitel-Freitext (kein `##`-Abschnitt), davon einer „- [ ] Offener
+Punkt: KPI-Definition klären“, plus ein Bild (per Editor eingefügt,
+falls verfügbar – sonst ohne Bild). Turn 1 (1 API-Aufruf): „Füge in das
+Kapitel QA-Test KPIs den offenen Punkt ‚zwei KPIs in Gruppe Bewertung,
+Namen korrigieren‘ ein.“ Turn 2 (1 API-Aufruf): „Ergänze beim offenen
+Punkt ‚KPI-Definition klären‘ die Nummern 40220/40230.“ Bestanden:
+genau eine „# QA-Test KPIs“-Zeile, KEIN „## QA-Test KPIs“, jeder
+Stichpunkt und das Bild genau 1× im Dokument, die geänderte Zeile steht
+an ihrer alten Position mit „40220/40230“, keine ⚠️-Pille; eine
+ℹ️-Pille ist erlaubt (erscheint, wenn das Modell append_to_section/
+replace_section geschickt hat und die Engine umgeleitet hat). 🔴, wenn
+ein „## QA-Test KPIs“ entsteht, ein Stichpunkt/Bild doppelt steht oder
+Turn 2 den Kapitelinhalt verdoppelt/verliert. Aufräumen: „Lösche das
+Kapitel QA-Test KPIs.“
 
 ## D. Manuelles Bearbeiten (WYSIWYG)
 
