@@ -1304,6 +1304,25 @@ describe("buildSystem", () => {
       );
     });
 
+    // v7.52.2 (Review-Finding 2, E2E-Lauf v7.52, DECISIONS #110): das Modell
+    // schickte replace_entry mit dem Wortlaut einer Bash-Kommandozeile aus
+    // einem Codeblock als "entry" – die Engine lehnte KORREKT ab (Codezeilen
+    // sind keine Einträge), der Prompt sagte dem Modell dafür aber nirgends
+    // vorher, dass entry-Ops Codeblock-Zeilen grundsätzlich nie treffen und
+    // welcher Op-Weg stattdessen richtig ist.
+    it("EINZELNE-Einträge-Regel UND replace_entry-Beispielzeile UND entry-Feldbeschreibung warnen jetzt vor Codeblock-Zeilen (Finding 2)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      const hint =
+        "Zeilen INNERHALB eines ```-Codeblocks sind KEINE Einträge – delete_entry/replace_entry/move_entry " +
+        "treffen sie nie; Code änderst du per replace_section des ganzen ##-Abschnitts (kompletter Inhalt " +
+        "inkl. des vollständigen Codeblocks).";
+      // Zweimal im statischen Prompt: am Ende der EINZELNE-Einträge-Regel UND
+      // am Ende der replace_entry-Beispielzeile in der Ops-Liste.
+      expect(sys.split(hint).length - 1).toBe(2);
+      const props = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties;
+      expect(props.entry.description).toContain(hint);
+    });
+
     it("neue ℹ️-Regel steht DIREKT NACH der bestehenden ⚠️-Regel und weist explizit vor Dubletten-Wiederholung", () => {
       const sys = buildSystem(nbs, "Wissensbasis", null);
       const warnAt = sys.indexOf("Erscheint in der Historie eine ⚠️-Meldung über nicht angewendete ops");

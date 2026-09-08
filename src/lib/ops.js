@@ -104,6 +104,14 @@
 /* über explainNote()) macht implizite Kapitel-/Abschnitts-Anlagen UND die   */
 /* neue Kollisions-Umleitung für App.jsx/den Nutzer sichtbar - vorher lief   */
 /* eine solche Anlage "erfolgreich" (applied:true) OHNE jede Meldung.        */
+/* v7.52.2 (Review-Finding 2, E2E-Lauf v7.52, siehe DECISIONS #110): trifft  */
+/* delete_entry/replace_entry/move_entry KEINE Zeile (0 Treffer), weil der   */
+/* gesuchte Text NUR innerhalb eines ```-Codeblocks steht (Codezeilen sind   */
+/* laut Kopfkommentar oben bewusst KEINE Einträge), nennt explainSkip() das   */
+/* jetzt explizit statt des generischen "nicht gefunden" - inkl. Verweis auf */
+/* replace_section als Ausweg für Codeblock-Änderungen. Rein lesender        */
+/* Zusatz-Check (findFenceMaskedEntryMatch, siehe dort) - applyOne() und     */
+/* damit das tatsächliche Anwendungsverhalten bleiben unverändert.           */
 /* ------------------------------------------------------------------ */
 
 import { computeFenceLineMask, matchFenceBlock } from "./code.jsx";
@@ -518,6 +526,33 @@ function findEntryLines(lines, range, entryText) {
   if (exact.length) return exact;
   const needleLower = needle.toLowerCase();
   return candidates.filter((i) => norm(lines[i]).toLowerCase().includes(needleLower));
+}
+
+// v7.52.2 (Review-Finding 2, E2E-Lauf v7.52 – siehe DECISIONS #110): liefert
+// true, wenn ein NICHT gefundener "entry"-Text (findEntryLines() oben
+// lieferte 0 Treffer) auf eine Zeile INNERHALB eines geschlossenen
+// ```-Codeblocks zeigen würde – Codezeilen sind laut Kopfkommentar dieser
+// Datei bewusst KEINE Einträge (findEntryLines schließt fence-maskierte
+// Zeilen aus). Live-Befund: das Modell schickte replace_entry mit dem
+// exakten Wortlaut einer Bash-Kommandozeile in einem Codeblock, die Engine
+// meldete nur den generischen "nicht gefunden"-Text – ohne zu verraten,
+// WARUM (der Text steht sichtbar im Dokument) und WAS stattdessen zu tun
+// ist. Rein lesend, DIESELBE zweistufige Match-Logik wie findEntryLines
+// (erst exakt, dann Substring), aber auf die fence-MASKIERTEN Zeilen des
+// Bereichs angewendet statt sie auszuschließen – ändert applyOne() NICHT,
+// nur explainSkip() nutzt das Ergebnis für einen präziseren Skip-Grund
+// (Skip bleibt Skip).
+function findFenceMaskedEntryMatch(lines, range, entryText) {
+  const needle = norm(entryText);
+  if (!needle) return false;
+  const mask = computeFenceLineMask(lines);
+  const candidates = [];
+  for (let i = range[0]; i < range[1]; i++) {
+    if (mask[i]) candidates.push(i);
+  }
+  if (candidates.some((i) => norm(lines[i]) === needle)) return true;
+  const needleLower = needle.toLowerCase();
+  return candidates.some((i) => norm(lines[i]).toLowerCase().includes(needleLower));
 }
 
 // Liefert den vollständigen EINTRAGSBLOCK [s, e) ab einer bereits gefundenen
@@ -1190,7 +1225,16 @@ function explainSkip(text, op) {
       return "Abschnitt „" + sanitizeForWarning(dispHead(op.heading)) + "“ nicht gefunden";
     }
     const hits = findEntryLines(lines, range, entryText);
-    if (hits.length === 0) return "Eintrag „" + sanitizeForWarning(entryDisp) + "“ nicht gefunden";
+    if (hits.length === 0) {
+      // v7.52.2 (Review-Finding 2, DECISIONS #110): steht der gesuchte Text
+      // NUR in einem Codeblock, ist das der eigentliche Grund für die 0
+      // Treffer – siehe findFenceMaskedEntryMatch-Kommentar oben.
+      if (findFenceMaskedEntryMatch(lines, range, entryText)) {
+        return "Eintrag „" + sanitizeForWarning(entryDisp) +
+          "“ steht in einem Codeblock – Codezeilen sind keine Einträge; den Abschnitt samt Codeblock per replace_section ändern";
+      }
+      return "Eintrag „" + sanitizeForWarning(entryDisp) + "“ nicht gefunden";
+    }
     if (hits.length > 1) {
       return "Eintrag „" + sanitizeForWarning(entryDisp) + "“ mehrdeutig (" + hits.length +
         " Treffer) – exakteren Wortlaut oder heading/chapter angeben";
@@ -1217,7 +1261,15 @@ function explainSkip(text, op) {
       return "Abschnitt „" + sanitizeForWarning(dispHead(op.from_heading)) + "“ nicht gefunden";
     }
     const hits = findEntryLines(lines, range, entryText);
-    if (hits.length === 0) return "Eintrag „" + sanitizeForWarning(entryDisp) + "“ nicht gefunden";
+    if (hits.length === 0) {
+      // v7.52.2 (Review-Finding 2, DECISIONS #110): siehe delete_entry-Zweig
+      // oben – dieselbe Codeblock-Erkennung, hier auf dem QUELL-Bereich.
+      if (findFenceMaskedEntryMatch(lines, range, entryText)) {
+        return "Eintrag „" + sanitizeForWarning(entryDisp) +
+          "“ steht in einem Codeblock – Codezeilen sind keine Einträge; den Abschnitt samt Codeblock per replace_section ändern";
+      }
+      return "Eintrag „" + sanitizeForWarning(entryDisp) + "“ nicht gefunden";
+    }
     if (hits.length > 1) {
       return "Eintrag „" + sanitizeForWarning(entryDisp) + "“ mehrdeutig (" + hits.length +
         " Treffer) – exakteren Wortlaut oder heading/chapter angeben";
@@ -1245,7 +1297,15 @@ function explainSkip(text, op) {
       return "Abschnitt „" + sanitizeForWarning(dispHead(op.heading)) + "“ nicht gefunden";
     }
     const hits = findEntryLines(lines, range, entryText);
-    if (hits.length === 0) return "Eintrag „" + sanitizeForWarning(entryDisp) + "“ nicht gefunden";
+    if (hits.length === 0) {
+      // v7.52.2 (Review-Finding 2, DECISIONS #110): siehe delete_entry-Zweig
+      // oben – dieselbe Codeblock-Erkennung.
+      if (findFenceMaskedEntryMatch(lines, range, entryText)) {
+        return "Eintrag „" + sanitizeForWarning(entryDisp) +
+          "“ steht in einem Codeblock – Codezeilen sind keine Einträge; den Abschnitt samt Codeblock per replace_section ändern";
+      }
+      return "Eintrag „" + sanitizeForWarning(entryDisp) + "“ nicht gefunden";
+    }
     if (hits.length > 1) {
       return "Eintrag „" + sanitizeForWarning(entryDisp) + "“ mehrdeutig (" + hits.length +
         " Treffer) – exakteren Wortlaut oder heading/chapter angeben";

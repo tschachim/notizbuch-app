@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 
 import { applyOpsDetailed, dispHead, PLACEHOLDER_LINE, stripInboxPlaceholder } from "./lib/ops.js";
+import { resolveMetaForDisplay, applyMetaResult, metaAfterError, bumpMetaCount, isStaleResponse } from "./lib/meta.js";
 import { applyMemoryOps, applyMemoryOpsDetailed } from "./lib/memory.js";
 import { diffLines, contextize } from "./lib/diff.js";
 import { DocView, IMG_REF_RE, TASK_RE, parseTree, renumberCitations, decodeBasicEntities } from "./lib/markdown.jsx";
@@ -554,7 +555,10 @@ export default function NotizbuchApp() {
   // defaultEnabled-Kategorien aktiv, keine eigenen Ersetzungen).
   const [autocorrect, setAutocorrect] = useState(() => sanitizeAutocorrectConfig(null));
   const [collapsedAll, setCollapsedAll] = useState({}); // nbId -> Klappzustände
-  const [meta, setMeta] = useState({ count: 0, lastTs: null });
+  // v7.52.2 (Review-Finding 1, DECISIONS #110): Start-Default ist der
+  // "unbekannt"-Platzhalter (count:null) statt einer geratenen Zahl – vor
+  // dem ersten refreshMeta-Abruf gilt "…", nie eine potenziell falsche "0".
+  const [meta, setMeta] = useState({ count: null, lastTs: null });
   const [showNewNb, setShowNewNb] = useState(false);
   const [newNbName, setNewNbName] = useState("");
   const [creatingNb, setCreatingNb] = useState(false);
@@ -675,6 +679,25 @@ export default function NotizbuchApp() {
   const lastRefresh = useRef(0);
   const imgIndex = useRef({}); // id -> Pfad im Daten-Repo
   const versionCache = useRef(new Map()); // Commit-SHA -> Dokumenttext
+  // v7.52.2 (Review-Finding 1, DECISIONS #110): Versionszähler-Cache PRO
+  // Notizbuch (nbId -> {count,lastTs}) – "meta" (State, siehe oben) zeigt
+  // IMMER nur das aktive Notizbuch; dieser Cache hält daneben auch die
+  // Stände aller ANDEREN, bereits einmal geladenen Notizbücher, damit ein
+  // Wechsel sofort einen bekannten Wert zeigen kann statt eines fremden
+  // (siehe switchNotebook) oder eines geratenen. Die eigentliche
+  // Entscheidungslogik (Race-Guard, Fehlerfall, Inkrement) steckt rein
+  // lesend/schreibend in lib/meta.js (unit-testbar, siehe tests/meta.test.js).
+  const metaCache = useRef(new Map());
+  // v7.52.2 (Review-Nachbesserung, Finding 1(d), DECISIONS #110): Epoche der
+  // AKTUELLEN Verbindung – connect() erhöht sie bei JEDEM erfolgreichen
+  // Reconnect (auch bei gleichbleibenden Zugangsdaten, denn ein anderes
+  // Daten-Repo hat eine andere Commit-Historie, selbst bei identischer
+  // nbId wie ROOT_NB_ID). refreshMeta() merkt sich die zum Startzeitpunkt
+  // gültige Epoche und verwirft die Antwort, falls sich die Epoche bis zur
+  // Ankunft geändert hat (siehe lib/meta.js#isStaleResponse) – sonst könnte
+  // eine spät eintreffende Antwort aus dem VERLASSENEN Repo den frisch
+  // geleerten Cache des neuen Repos wieder mit fremden Werten befüllen.
+  const connectEpoch = useRef(0);
 
   useEffect(() => { connectedRef.current = connected; }, [connected]);
   useEffect(() => { docRef.current = doc; }, [doc]);
@@ -685,9 +708,35 @@ export default function NotizbuchApp() {
   useEffect(() => { activeNbRef.current = activeNb; }, [activeNb]);
   useEffect(() => { stateRef.current = { chat, model, collapsedAll, quickNotesAll, autocorrect }; }, [chat, model, collapsedAll, quickNotesAll, autocorrect]);
 
-  /* ---------- Metadaten (Stand & Versionszahl des aktiven Notizbuchs) ---------- */
-  const refreshMeta = useCallback(async (cfg, path) => {
-    try { setMeta(await ghCommitMeta(cfg, path || DOC_PATH)); } catch (e) { /* unkritisch */ }
+  /* ---------- Metadaten (Stand & Versionszahl PRO Notizbuch) ---------- */
+  // v7.52.2 (Review-Finding 1, DECISIONS #110): Signatur um "nbId" erweitert
+  // (Cache-Schlüssel UND Race-Guard, siehe lib/meta.js) – ALLE Aufrufer unten
+  // übergeben jetzt explizit, FÜR WELCHES Notizbuch der Abruf lief, statt
+  // implizit über den zufälligen Zeitpunkt der Antwort auf das dann gerade
+  // aktive Notizbuch zu schließen (das war der Kern der drei a/b/c-Lücken,
+  // siehe Kopfkommentar von lib/meta.js).
+  const refreshMeta = useCallback(async (cfg, nbId, path) => {
+    // v7.52.2 (Review-Nachbesserung, Finding 1(d)): Epoche UND Startzeitpunkt
+    // VOR dem await festhalten – "epoch" für den Reconnect-Guard (verwirft
+    // Antworten einer bereits verlassenen Verbindung), "startedAt" für den
+    // Bump-Schutz in applyMetaResult() (verwirft Antworten, die vor einem
+    // zwischenzeitlichen lokalen Commit gestartet sind, siehe lib/meta.js).
+    const epoch = connectEpoch.current;
+    const startedAt = Date.now();
+    try {
+      const result = await ghCommitMeta(cfg, path || DOC_PATH);
+      if (isStaleResponse(epoch, connectEpoch.current)) return;
+      const { displayMeta } = applyMetaResult(metaCache.current, nbId, activeNbRef.current, result, startedAt);
+      if (displayMeta) setMeta(displayMeta);
+    } catch (e) {
+      if (isStaleResponse(epoch, connectEpoch.current)) return;
+      // v7.52.2: NICHT mehr still verschluckt (Finding 1c) – zumindest in der
+      // Konsole sichtbar, damit ein wiederholter Fehlschlag (Netz,
+      // Rate-Limit) nicht spurlos bleibt.
+      console.warn("Versionszähler für Notizbuch „" + nbId + "“ nicht ladbar", e);
+      const fallback = metaAfterError(metaCache.current, nbId, activeNbRef.current);
+      if (fallback) setMeta(fallback);
+    }
   }, []);
 
   const activeNotebook = () =>
@@ -792,6 +841,19 @@ export default function NotizbuchApp() {
       imgIndex.current = idx;
       failedImgs.current = new Set();
       versionCache.current = new Map();
+      // v7.52.2 (Review-Nachbesserung, Finding 1(d), DECISIONS #110): der
+      // Versionszähler-Cache gehört zur VERBINDUNG, nicht zum bloßen
+      // Notizbuch-NAMEN – ein anderes Daten-Repo hat eine andere
+      // Commit-Historie, selbst wenn eine nbId (z. B. ROOT_NB_ID
+      // "wissensbasis") in BEIDEN Repos existiert. Ohne diesen Reset zeigte
+      // ein Reconnect auf ein anderes Repo bis zur ersten Antwort (oder bei
+      // einem fehlschlagenden ersten Abruf sogar dauerhaft) den Zähler des
+      // ALTEN Repos an. Die Epoche wird gleichzeitig erhöht, damit eine noch
+      // unterwegs befindliche Antwort AUS der alten Verbindung (die nach
+      // diesem Reset erst eintrifft) den frisch geleerten Cache nicht wieder
+      // mit einem fremden Wert befüllt (siehe refreshMeta/isStaleResponse).
+      metaCache.current = new Map();
+      connectEpoch.current += 1;
 
       // Notizbuch-Icons laden (icons/<nbId>.png, parallel). Icons sind Deko:
       // Fehler hier dürfen das Verbinden nicht verhindern.
@@ -853,7 +915,12 @@ export default function NotizbuchApp() {
       setSaveState("saved");
       setStorageError(null);
       setBanner(null);
-      refreshMeta(cfg, activePath);
+      // v7.52.2 (Review-Nachbesserung, Finding 1(d)): SOFORT den (nach dem
+      // Reset oben stets leeren) Cache-Stand zeigen, VOR dem asynchronen
+      // Abruf – wie switchNotebook: der Zähler des ALTEN Repos bleibt dadurch
+      // nie auch nur kurz auf dem Bildschirm stehen (UNKNOWN_META → "…").
+      setMeta(resolveMetaForDisplay(metaCache.current, active));
+      refreshMeta(cfg, active, activePath);
       // Nach erfolgreichem Verbinden (v7.30): owner/repo aus der sichtbaren
       // URL nehmen – saubere Adresse, keine Verwirrung beim Teilen. Läuft
       // bei JEDEM erfolgreichen connect() (auch ohne Prefill-Herkunft), ist
@@ -1029,9 +1096,19 @@ export default function NotizbuchApp() {
       const put = await ghPutFile(cfg, nb.path, utf8ToB64(newText), message, docShas.current[nbId] || undefined);
       docShas.current[nbId] = put.sha;
       docCache.current[nbId] = newText;
-      if (nbId === activeNbRef.current) {
-        setMeta((m) => ({ count: (m.count || 0) + 1, lastTs: Date.now() }));
-      }
+      // v7.52.2 (Review-Finding 1b, DECISIONS #110): das Inkrement landet
+      // IMMER im Cache – auch für ein NICHT-aktives Notizbuch (Cross-
+      // Notizbuch-Op über das "notebook"-Feld, siehe send()/"Ops nach
+      // Ziel-Notizbuch gruppieren" weiter unten) – angezeigt (setMeta) wird
+      // der Wert weiterhin nur, wenn nbId aktiv ist.
+      const bumped = bumpMetaCount(metaCache.current, nbId, Date.now());
+      if (nbId === activeNbRef.current) setMeta(bumped);
+      // v7.52.2 (Review-Nachbesserung, Finding 2, DECISIONS #110): war die
+      // Basis unbekannt (kein vorheriger Cache-Eintrag, z. B. Cross-
+      // Notizbuch-Commit auf ein in dieser Session nie besuchtes Buch),
+      // bleibt "count" bewusst null statt einer geratenen "1" – ein sofortiger
+      // Nachhol-Abruf holt den ECHTEN Stand (N+1) statt zu raten.
+      if (bumped.count === null) refreshMeta(cfg, nbId, nb.path);
       setSaveState("saved");
       setStorageError(null);
       return true;
@@ -1044,7 +1121,12 @@ export default function NotizbuchApp() {
             docCache.current[nbId] = f.text;
             if (nbId === activeNbRef.current) setDoc(f.text);
           }
-          refreshMeta(cfg, nb.path);
+          // v7.52.2 (Review-Finding 1b): "nbId" statt implizit des aktiven
+          // Notizbuchs – der Konflikt-Reload betrifft das COMMITTETE Buch,
+          // das nicht zwangsläufig das aktive ist; der Race-Guard in
+          // refreshMeta() sorgt dafür, dass die Anzeige trotzdem nur bei
+          // Übereinstimmung mit dem aktiven Notizbuch aktualisiert wird.
+          refreshMeta(cfg, nbId, nb.path);
         } catch (e2) { /* Reload fehlgeschlagen – Banner reicht */ }
         setSaveState("saved");
         setBanner({
@@ -1225,7 +1307,13 @@ export default function NotizbuchApp() {
             activeNbRef.current = reconciled.activeId;
             setDoc(docCache.current[reconciled.activeId] ?? INITIAL_DOC);
             setActiveSec(0);
-            if (nextActive) refreshMeta(cfg, nextActive.path);
+            // v7.52.2 (Review-Finding 1, DECISIONS #110): sofort den
+            // gecachten (oder "unbekannt")-Stand zeigen, wie bei
+            // switchNotebook (siehe dort) – dieser Reconcile kann das aktive
+            // Notizbuch wegschalten (remote gelöscht), der bis dahin
+            // angezeigte Zähler gehörte sonst kurz zum WEGGESCHALTETEN Buch.
+            setMeta(resolveMetaForDisplay(metaCache.current, reconciled.activeId));
+            if (nextActive) refreshMeta(cfg, reconciled.activeId, nextActive.path);
           }
         }
         for (const en of entries) {
@@ -1244,7 +1332,16 @@ export default function NotizbuchApp() {
           else if (nbs[i].name !== name) { nbs[i] = { ...nbs[i], name }; nbsChanged = true; }
           if (en.id === activeNbRef.current) {
             setDoc(f.text);
-            refreshMeta(cfg, en.path);
+            refreshMeta(cfg, en.id, en.path);
+          } else {
+            // v7.52.2 (Review-Nachbesserung, Finding 5, DECISIONS #110): der
+            // Blob-SHA eines INAKTIVEN Notizbuchs hat sich remote geändert
+            // (anderes Gerät ODER Cross-Notizbuch-Commit) – der gecachte
+            // Versionszähler gehört zum ALTEN Stand und macht beim nächsten
+            // Wechsel dorthin kurz einen veralteten Wert sichtbar. Löschen
+            // statt stehen lassen zeigt stattdessen "…", bis switchNotebook
+            // den frischen Stand nachlädt.
+            metaCache.current.delete(en.id);
           }
         }
         // Epoche ERNEUT prüfen (Review-Nachbesserung zu v7.47): Die Schleife
@@ -1935,7 +2032,12 @@ export default function NotizbuchApp() {
     setActiveSec(0);
     setExpanded(null);
     setExpandedData(null);
-    if (settingsRef.current && connectedRef.current) refreshMeta(settingsRef.current, nb.path);
+    // v7.52.2 (Review-Finding 1, DECISIONS #110): SOFORT den gecachten (oder
+    // "unbekannt")-Stand zeigen, VOR dem asynchronen refreshMeta-Abruf – nie
+    // den Zähler des gerade VERLASSENEN Notizbuchs stehen lassen (Kern des
+    // Tester-Befunds, auch wenn der exakte Auslöser nicht reproduziert wurde).
+    setMeta(resolveMetaForDisplay(metaCache.current, id));
+    if (settingsRef.current && connectedRef.current) refreshMeta(settingsRef.current, id, nb.path);
   };
 
   const createNotebook = async (rawName) => {
@@ -1967,7 +2069,13 @@ export default function NotizbuchApp() {
       activeNbRef.current = id;
       setDoc(init);
       setActiveSec(0);
-      setMeta({ count: 1, lastTs: Date.now() });
+      // v7.52.2 (Review-Finding 1, DECISIONS #110): auch in den Cache
+      // schreiben (sonst zeigte ein Wegwechseln-und-Zurückwechseln vor dem
+      // ersten refreshMeta-Abruf den "unbekannt"-Platzhalter statt der
+      // korrekten 1).
+      const created = { count: 1, lastTs: Date.now() };
+      metaCache.current.set(id, created);
+      setMeta(created);
       setShowNewNb(false);
       setNewNbName("");
     } catch (e) {
@@ -2137,6 +2245,7 @@ export default function NotizbuchApp() {
       delete docCache.current[id];
       delete docShas.current[id];
       delete knowledgeIndex.current[id];
+      metaCache.current.delete(id); // v7.52.2 (DECISIONS #110): kein Zähler für ein gelöschtes Notizbuch behalten
       setCollapsedAll((prev) => {
         const next = { ...prev };
         delete next[id];
@@ -2154,7 +2263,8 @@ export default function NotizbuchApp() {
         activeNbRef.current = first.id;
         setDoc(docCache.current[first.id] ?? INITIAL_DOC);
         setActiveSec(0);
-        refreshMeta(cfg, first.path);
+        setMeta(resolveMetaForDisplay(metaCache.current, first.id)); // v7.52.2: siehe switchNotebook
+        refreshMeta(cfg, first.id, first.path);
       }
       setNbDeleteId(null);
     } catch (e) {
@@ -2914,7 +3024,19 @@ export default function NotizbuchApp() {
     );
   }
 
-  const lastStand = meta.lastTs ? fmtStamp(meta.lastTs) : "neu";
+  // v7.52.2 (Review-Finding 1, DECISIONS #110): count===null (noch kein
+  // bekannter Stand, siehe lib/meta.js UNKNOWN_META) zeigt "…" statt "neu"
+  // ODER einer geratenen Zahl – kompakt, kein Layoutsprung, aber auch NIE
+  // eine potenziell falsche/fremde Zahl. Review-Nachbesserung (Finding 4,
+  // 🔵): "connected &&" ergänzt – ohne Verbindung ist "meta" schlicht der
+  // (bewusste) UNKNOWN_META-Startwert, KEIN "noch unterwegs"-Ladezustand;
+  // ohne diese Bedingung zeigte die Kopfzeile im unverbundenen Zustand
+  // dauerhaft "…" statt wie vor v7.52.2 "neu"/"0 Versionen".
+  const metaLoading = connected && meta.count === null;
+  const lastStand = metaLoading ? "…" : (meta.lastTs ? fmtStamp(meta.lastTs) : "neu");
+  // Unverbunden: kein Ladezustand, sondern schlicht "0" (siehe metaLoading
+  // oben) statt eines rendernden "null" ohne Ziffer.
+  const metaCountDisplay = metaLoading ? "…" : (meta.count ?? 0);
   const activeName = (notebooks.find((n) => n.id === activeNb) || { name: "Wissensbasis" }).name;
   const dotClass =
     saveState === "saving" ? "bg-amber-500 animate-pulse"
@@ -2949,7 +3071,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.52.1</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.52.2</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -3333,7 +3455,7 @@ export default function NotizbuchApp() {
           <div className="flex items-center gap-2 px-4 pt-4 pb-2">
             <div className="flex flex-col">
               <span className="text-xs tracking-widest uppercase text-slate-500 truncate max-w-56">{activeName}</span>
-              <span className="font-mono text-xs text-slate-400">Stand {lastStand} · {meta.count} Versionen</span>
+              <span className="font-mono text-xs text-slate-400">Stand {lastStand} · {metaCountDisplay} Versionen</span>
             </div>
             <div className="flex-1" />
             {!editing && (
@@ -3501,7 +3623,7 @@ export default function NotizbuchApp() {
               <History size={16} className="text-indigo-700" />
               <span className="font-semibold">Historie</span>
               <span className="font-mono text-xs text-slate-400">
-                {meta.count} Versionen · Git-Commits in {settings ? settings.owner + "/" + settings.repo : "–"}
+                {metaCountDisplay} Versionen · Git-Commits in {settings ? settings.owner + "/" + settings.repo : "–"}
               </span>
               <div className="flex-1" />
               <button onClick={() => setShowHistory(false)}

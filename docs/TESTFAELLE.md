@@ -176,7 +176,11 @@ mit Inbox-Abschnitt. Beobachtungspunkt (v7.22): der Inbox-Abschnitt zeigt
 zunächst den Einladungstext „_Noch nichts erfasst. Die erste Notiz im
 Chat legt hier los._“ – das ist so gewollt (Erststart-Hinweis); relevant
 ist NUR, dass er nach der ersten echten Notiz wieder verschwindet (siehe
-C1). Beobachtungspunkt (v7.27): Editor auf diesem frischen Notizbuch
+C1). Klarstellung (v7.22, Eintrag #64, kein Finding – siehe auch C1 und
+DECISIONS #110/Finding 3): der Text verschwindet mit der ERSTEN echten
+Änderung am gesamten Notizbuch, auch wenn sie in einem ANDEREN Kapitel/
+Abschnitt als der Inbox landet – die Prüfung darf sich also nicht auf
+einen Eintrag IN der Inbox selbst beschränken. Beobachtungspunkt (v7.27): Editor auf diesem frischen Notizbuch
 öffnen (Stift-Knopf) – erwartet erscheint der Einladungstext dort NICHT
 (weder als Text noch anklickbar/editierbar), die Inbox-Überschrift ist im
 Editor einfach leer; Editor ohne jede Änderung per „Abbrechen“ ODER
@@ -220,7 +224,12 @@ erscheint rechts im Dokument (Datum im Format JJJJ-MM-TT). Beobachtungspunkt
 Anschluss an B1): der Einladungstext „_Noch nichts erfasst. Die erste Notiz
 im Chat legt hier los._“ ist nach diesem ersten Eintrag aus dem Inbox-
 Abschnitt verschwunden – bei einem bereits länger genutzten QA-Notizbuch
-ohne Platzhalter ist dieser Punkt gegenstandslos. Hinweis (v7.52): Legt das
+ohne Platzhalter ist dieser Punkt gegenstandslos. Klarstellung (v7.22,
+Eintrag #64, kein Finding – siehe DECISIONS #110/Finding 3): der
+Einladungstext verschwindet mit der ERSTEN echten Änderung am gesamten
+Notizbuch – auch wenn diese erste Änderung in einem ANDEREN Kapitel/
+Abschnitt als der Inbox landet, nicht erst bei einem Eintrag IN der
+Inbox selbst. Hinweis (v7.52): Legt das
 Modell dabei einen neuen Abschnitt/ein neues Kapitel an, darf zusätzlich
 eine ℹ️-Pille „Abschnitt … neu angelegt“ (blau/sky) erscheinen – das ist
 KEIN Finding, siehe C26.
@@ -1780,6 +1789,35 @@ danach löschen.
 echter Versionen mit Zeitstempel/Commit-Text, jüngste als „aktuell“
 markiert. NICHT wiederherstellen (verändert Nutzerdaten), außer es
 betrifft ausschließlich das QA-Notizbuch.
+
+**G1b [VERBUNDEN] Versionszähler folgt dem Notizbuch-Wechsel (v7.52.2,
+DECISIONS #110).** Zwei Notizbücher mit UNTERSCHIEDLICHER Versionszahl
+wählen (z. B. ein länger genutztes mit vielen Versionen und ein frisches
+QA-Notizbuch mit wenigen). Mehrfach SCHNELL zwischen beiden hin- und
+herwechseln (Dropdown, ohne zwischen den Klicks zu warten), danach ca.
+3 Sekunden warten. Erwartet: Kopfzeile („Stand … · N Versionen“) UND
+Historie-Dialog zeigen für JEDES der beiden Bücher dessen EIGENE Zahl,
+identisch zur Anzahl der Einträge in der Historien-LISTE des jeweiligen
+Buchs. Während des Ladens (unmittelbar nach einem Wechsel) darf die
+Zahl kurz durch „…“ ersetzt sein – sie darf zu KEINEM Zeitpunkt die Zahl
+des JEWEILS ANDEREN Notizbuchs zeigen (der ursprüngliche Tester-Befund:
+nach A→B→A stand kurzzeitig „2 Versionen“ statt des korrekten Stands von
+A, obwohl die Historien-Liste bereits korrekt war).
+
+**G1c [VERBUNDEN] Versionszähler nach Reconnect auf ein ANDERES Daten-Repo
+(v7.52.2, Review-Nachbesserung, DECISIONS #110).** NUR ausführbar, wenn
+zwei unterschiedliche Daten-Repos bekannt sind (z. B. das reguläre Repo
+UND ein „-qa“-Repo); ist nur eines bekannt, als ÜBERSPRUNGEN melden.
+Mit dem ERSTEN Repo verbinden, ein Notizbuch mit bereits mehreren
+Versionen merken (z. B. „7 Versionen“ in der Kopfzeile). Über
+Einstellungen → „Speichern & Verbinden“ auf das ZWEITE Repo wechseln
+(andere owner/repo-Kombination, ggf. per Vorbelegungs-URL). Erwartet:
+Die Kopfzeile zeigt NACH dem Reconnect entweder „…“ (kurz, während der
+erste Abruf noch läuft) oder direkt den korrekten Zähler des ZWEITEN
+Repos – zu KEINEM Zeitpunkt die vorher gemerkte Zahl des ERSTEN Repos
+(auch nicht kurz aufblitzend). Gilt insbesondere, wenn beide Repos ein
+gleichnamiges Notizbuch haben (z. B. die Wissensbasis/„wissensbasis“,
+die in jedem Repo existiert).
 
 **G2 [OFFEN] Markdown kopieren/exportieren.** Kopier- und Download-Knopf
 im Dokumentkopf. Erwartet: kein Fehler; Download liefert eine .md-Datei.

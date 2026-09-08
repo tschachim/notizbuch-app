@@ -2832,6 +2832,114 @@ describe("replace_entry (v7.52)", () => {
   });
 });
 
+// v7.52.2 (Review-Finding 2, E2E-Lauf v7.52 – siehe DECISIONS #110): Auftrag
+// "Ergänze im Bash-Snippet eine Kommentarzeile über dem Kommando" schickte
+// replace_entry mit dem exakten Wortlaut der Kommandozeile als "entry" -
+// findEntryLines() liefert dafür KORREKT 0 Treffer (Codezeilen sind keine
+// Einträge, siehe Kopfkommentar der Datei), aber explainSkip() meldete nur
+// den generischen "nicht gefunden"-Text, ohne den eigentlichen Grund (die
+// Zeile steht ja sichtbar im Dokument) oder einen Ausweg zu nennen.
+describe("Codeblock-Hinweis bei 0 Treffern (v7.52.2, Review-Finding 2, DECISIONS #110)", () => {
+  const CMD = 'find . -type f -name "*.tmp" -delete';
+  const DOC_CODE = [
+    "# NB", "",
+    "## Skripte", "",
+    "- Vorbereitung",
+    "",
+    "```bash",
+    CMD,
+    "```",
+    "",
+    "## Sonstiges", "",
+    "- x",
+    "",
+  ].join("\n");
+
+  const opsFor = (entry) => [
+    ["delete_entry", { type: "delete_entry", entry }],
+    ["replace_entry", { type: "replace_entry", entry, content: "- neu" }],
+    ["move_entry", { type: "move_entry", entry, to_heading: "## Sonstiges" }],
+  ];
+
+  for (const [label, op] of opsFor(CMD)) {
+    it(label + " mit EXAKTEM entry-Text aus dem Codeblock: Skip nennt Codeblock und replace_section, Dokument byte-identisch", () => {
+      const { text, results } = applyOpsDetailed(DOC_CODE, [op]);
+      expect(text).toBe(DOC_CODE); // Skip bleibt Skip – applyOne() unverändert
+      expect(results[0].applied).toBe(false);
+      expect(results[0].reason).toContain("Codeblock");
+      expect(results[0].reason).toContain("replace_section");
+    });
+  }
+
+  for (const [label, op] of opsFor("type f -name")) {
+    it(label + " mit SUBSTRING-entry aus dem Codeblock: derselbe Codeblock-Hinweis (Stufe-2-Match zählt ebenfalls)", () => {
+      const { text, results } = applyOpsDetailed(DOC_CODE, [op]);
+      expect(text).toBe(DOC_CODE);
+      expect(results[0].applied).toBe(false);
+      expect(results[0].reason).toContain("Codeblock");
+      expect(results[0].reason).toContain("replace_section");
+    });
+  }
+
+  it("Kontrollfall: derselbe Wortlaut AUSSERHALB eines Fences wird ganz normal getroffen (KEIN Codeblock-Hinweis)", () => {
+    const docOutside = [
+      "# NB", "",
+      "## Skripte", "",
+      CMD,
+      "",
+    ].join("\n");
+    const { text, results } = applyOpsDetailed(docOutside, [{ type: "delete_entry", entry: CMD }]);
+    expect(results[0].applied).toBe(true);
+    expect(text).not.toContain(CMD);
+  });
+
+  it("Ambiguität geht dem Codeblock-Hinweis vor: >1 Treffer AUSSERHALB des Fences liefert weiterhin die Mehrdeutigkeits-Meldung", () => {
+    const docAmbig = [
+      "# NB", "",
+      "## Skripte", "",
+      "- " + CMD,
+      "- " + CMD,
+      "",
+      "```bash",
+      CMD,
+      "```",
+      "",
+    ].join("\n");
+    const { results } = applyOpsDetailed(docAmbig, [{ type: "delete_entry", entry: CMD }]);
+    expect(results[0].applied).toBe(false);
+    expect(results[0].reason).toContain("mehrdeutig");
+    expect(results[0].reason).not.toContain("Codeblock");
+  });
+
+  // v7.52.2 Review-Nachbesserung (Finding 6, 🔵, DECISIONS #110): zwei
+  // zusätzliche Pins – ein UNTERMINIERTER Fence maskiert (anders als ein
+  // erwartungsgemäß geschlossener) gar nichts, und ein heading-Scope
+  // schließt den Codeblock eines ANDEREN Abschnitts korrekt aus.
+  it("unterminierter Fence (```bash OHNE Schlusszaun): computeFenceLineMask maskiert NICHTS – die Kommandozeile ist ein ganz normaler Eintrag (applied:true)", () => {
+    const docUnterminated = [
+      "# NB", "",
+      "## Skripte", "",
+      "```bash",
+      CMD,
+      "",
+    ].join("\n");
+    const { text, results } = applyOpsDetailed(docUnterminated, [{ type: "delete_entry", entry: CMD }]);
+    expect(results[0].applied).toBe(true);
+    expect(results[0].reason).toBeUndefined(); // kein Skip-Grund bei Erfolg
+    expect(text).not.toContain(CMD); // Zeile tatsächlich gelöscht, wie bei jedem normalen Eintrag
+  });
+
+  it("heading-Scope 'nicht gefunden': entry steht per Text im Dokument, aber NUR im Codeblock eines ANDEREN Abschnitts – generische Meldung OHNE Codeblock-Hinweis (Scope respektiert)", () => {
+    const { text, results } = applyOpsDetailed(DOC_CODE, [
+      { type: "delete_entry", entry: CMD, heading: "## Sonstiges" },
+    ]);
+    expect(text).toBe(DOC_CODE); // Skip – nichts geändert
+    expect(results[0].applied).toBe(false);
+    expect(results[0].reason).toContain("nicht gefunden");
+    expect(results[0].reason).not.toContain("Codeblock"); // der Fence liegt AUSSERHALB des adressierten Abschnitts
+  });
+});
+
 // v7.52 (Tabellen-Test, DECISIONS #106): eine breitere Fixture mit mehreren
 // gleichzeitig relevanten Konstellationen (Kapitel mit reinem Freitext,
 // Kapitel mit ##-Unterthemen, mehrdeutiger ##-Titel über zwei Kapitel) gegen

@@ -11149,3 +11149,299 @@ aus `referenz-app.jsx` übernommen.
        - **Restrisiko (unverändert):** siehe „Bewusst weiterhin offen“ oben
          (`chapterIsTitle`-Konsistenzlücke) – von dieser Nachbesserung
          nicht berührt.
+
+110. **v7.52.2, E2E-Findings aus dem v7.52-Lauf: Versionszähler pro
+     Notizbuch (Race-Guard/Cache), Codeblock-Hinweis für entry-Ops,
+     TESTFAELLE-Klarstellung.** Drei Tester-Findings gegen die live
+     deployte v7.52 (2026-09-08):
+
+     - **Finding 1 (🟡, Versionszähler zeigt nach Notizbuch-Wechsel einen
+       falschen, zu niedrigen Stand).** Tester-Repro: Notizbuch A (34
+       Versionen) → zu B wechseln → zurück zu A → Kopfzeile UND
+       Historie-Dialog zeigen sofort „2 Versionen“; die Historien-LISTE
+       selbst ist korrekt, F5 korrigiert die Anzeige. **Ehrlich
+       dokumentiert: der exakte Auslöser wurde NICHT reproduziert** – ein
+       einfacher Wechsel A→B→A lieferte im eigenen Test korrekt
+       46→1→46, die Commit-Abfragen der App (`ghCommitMeta`,
+       `truncateToCurrentIncarnation`, beide seit #105 verifiziert
+       korrekt und in diesem Paket bewusst NICHT verändert) sind
+       unverdächtig. Im Code (`App.jsx`) gab es aber DREI unabhängige
+       Wege, auf denen der Anzeige-State `meta` einem ANDEREN als dem
+       AKTIVEN Notizbuch gehören konnte – dieser Fix schließt die
+       gesamte Klasse „Meta gehört einem anderen Notizbuch“, unabhängig
+       davon, welcher der drei Wege den Live-Befund tatsächlich
+       auslöste:
+       - **(a) Race beim schnellen Wechseln:** `refreshMeta(cfg, path)`
+         setzte das Ergebnis eines async `ghCommitMeta`-Aufrufs
+         BEDINGUNGSLOS per `setMeta()` – eine VERSPÄTETE Antwort für das
+         vorher aktive Notizbuch überschrieb die Anzeige des inzwischen
+         aktiven Notizbuchs.
+       - **(b) `commitDocNb` im SHA-Konflikt-Pfad** rief `refreshMeta(cfg,
+         nb.path)` für das COMMITTETE Notizbuch auf, auch wenn es NICHT
+         das aktive war (Cross-Notizbuch-Op über das optionale
+         `"notebook"`-Feld einer Op, siehe die Gruppierung nach
+         Ziel-Notizbuch in der Sende-Pipeline) – die Kopfzeile zeigte
+         danach den Zähler des ZIELBUCHS statt des eigenen.
+       - **(c) `refreshMeta` verschluckte Fehler still** (`catch { /*
+         unkritisch */ }`) – schlug der Abruf nach einem Wechsel fehl
+         (Netz, Rate-Limit), blieb der Zähler des VORHERIGEN Notizbuchs
+         stehen, ohne dass irgendetwas darauf hindeutete.
+       - **Fix:** Neues Modul `src/lib/meta.js` zieht die dafür nötige
+         Entscheidungslogik in reine, exportierte, unit-testbare Helfer
+         (die eigentliche GitHub-Abfrage bleibt unverändert in
+         `lib/github.js`):
+         `resolveMetaForDisplay(cache, nbId)` liefert den gecachten Stand
+         eines Notizbuchs oder den „unbekannt“-Platzhalter
+         `{count:null,lastTs:null}` (`UNKNOWN_META`) – nie den Wert eines
+         anderen Buchs; `applyMetaResult(cache, nbId, activeId, result)`
+         ist der Race-Guard für (a): schreibt IMMER in den Cache, liefert
+         `displayMeta` aber NUR, wenn `nbId === activeId`;
+         `metaAfterError(cache, nbId, activeId)` behebt (c): der Cache
+         bleibt bei einem Fehler UNANGETASTET, nur ein aktives Notizbuch
+         OHNE jeden Cache-Wert bekommt den „unbekannt“-Platzhalter (nie
+         mehr ein für immer hängender Fremd-Stand); `bumpMetaCount(cache,
+         nbId, ts)` behebt (b)/(d): das Inkrement nach einem erfolgreichen
+         Commit landet IMMER im Cache, unabhängig davon, ob `nbId` aktiv
+         ist – ursprünglich startete das Inkrement bei einer unbekannten
+         Basis („Anlage-Fall“) bei 1; die Review-Nachbesserung unten
+         korrigiert das (KEINE geratene Zahl mehr, siehe dort). `App.jsx`
+         hält dafür einen neuen `metaCache = useRef(new
+         Map())` (nbId → `{count,lastTs}`) NEBEN dem bisherigen
+         `meta`-State (der weiterhin NUR das aktive Notizbuch anzeigt).
+         `refreshMeta` bekam die Signatur `refreshMeta(cfg, nbId, path)` –
+         alle Aufrufer (connect, commitDocNb-Nachholabruf im
+         Erfolgspfad, commitDocNb-Konfliktpfad, maybeRefresh-Reconcile,
+         maybeRefresh-Entry-Schleife, switchNotebook, deleteNotebook)
+         übergeben jetzt explizit, FÜR
+         WELCHES Notizbuch der Abruf lief, statt implizit über den
+         Zeitpunkt der Antwort auf das dann zufällig aktive Notizbuch zu
+         schließen. `switchNotebook` UND der Reconcile-Zweig von
+         `maybeRefresh` (dort kann ein entferntes aktives Notizbuch
+         automatisch weggeschaltet werden) rufen zusätzlich SOFORT
+         `setMeta(resolveMetaForDisplay(...))` VOR dem asynchronen Abruf
+         auf – der Zähler des verlassenen Notizbuchs bleibt dadurch nie
+         auch nur kurz sichtbar. `createNotebook` schreibt den
+         Anlage-Stand (`{count:1,...}`) jetzt zusätzlich in den Cache;
+         `deleteNotebook` löscht den Cache-Eintrag des gelöschten
+         Notizbuchs. Anzeige (Kopfzeile UND Historie-Dialog):
+         `meta.count === null` zeigt kompakt „…“ statt einer geratenen
+         Zahl (initialer `useState`-Default ist jetzt ebenfalls
+         `{count:null,lastTs:null}` statt `{count:0,...}`) – kein
+         Layoutsprung, aber auch nie mehr eine potenziell falsche Zahl.
+       - **Tests:** neues `tests/meta.test.js` (24 Fälle nach der
+         Review-Nachbesserung) – verspätete
+         Antwort für ein inzwischen inaktives Notizbuch ändert die
+         Anzeige nicht (schreibt aber in den Cache); vollständiges
+         A→B→A-Wechselszenario mit verspäteter A-Antwort NACH dem
+         Rückwechsel; ein Fehler löscht/verfälscht nie einen vorhandenen
+         Cache-Eintrag für ein anderes Notizbuch; ein Inkrement auf ein
+         inaktives Notizbuch landet nur im Cache; `count:null`-Platzhalter
+         bleibt beim Inkrementieren `null` (siehe Review-Nachbesserung).
+       - **Restrisiko (korrigiert im Review-Nachbesserung-Absatz unten):**
+         Da der exakte Live-Auslöser nicht reproduziert wurde, blieb offen,
+         ob (a), (b) oder (c) (oder eine Kombination) die tatsächliche
+         Ursache war – (a)–(c) sind geschlossen. Die ursprüngliche
+         Formulierung an dieser Stelle („kein vierter Weg erkennbar“,
+         „Wiederauftreten ausgeschlossen“) war VORSCHNELL: der Code-Review
+         dieses Pakets fand tatsächlich einen vierten Weg, `connect()` selbst
+         (Reconnect auf ein ANDERES Daten-Repo, siehe (d) im
+         Review-Nachbesserung-Absatz) – der hier reklamierte Ausschluss galt
+         nur für (a)–(c), nicht für „jeden denkbaren Weg“. Diese Datei wird
+         nach jedem Review-Fund ehrlich nachgeführt, statt die überholte
+         Formulierung stehen zu lassen.
+
+     - **Finding 2 (🟡, `replace_entry`/`delete_entry`/`move_entry` treffen
+       Codeblock-Zeilen nie – der Prompt sagte dem Modell das nirgends,
+       die Skip-Meldung nannte keinen Ausweg).** Auftrag „Ergänze im
+       Bash-Snippet eine Kommentarzeile über dem Kommando“ → das Modell
+       schickte `replace_entry` mit `entry` = der exakten Kommandozeile;
+       `findEntryLines()` liefert dafür KORREKT 0 Treffer (fence-maskierte
+       Zeilen sind laut Kopfkommentar von `ops.js` bewusst keine
+       Einträge), die ⚠️-Pille „Eintrag „…“ nicht gefunden“ erschien, der
+       Codeblock blieb unangetastet – aber weder der Prompt noch die
+       Meldung verrieten, WARUM (der Text steht sichtbar im Dokument) und
+       WAS stattdessen zu tun ist.
+       - **Fix in `src/lib/ops.js`:** neuer, rein lesender Helfer
+         `findFenceMaskedEntryMatch(lines, range, entryText)` – DIESELBE
+         zweistufige Match-Logik wie `findEntryLines()` (erst exakt, dann
+         Substring), aber auf die fence-MASKIERTEN Zeilen des Bereichs
+         angewendet statt sie auszuschließen. `explainSkip()` prüft ihn in
+         allen drei betroffenen Zweigen (`delete_entry`, `move_entry`,
+         `replace_entry`) genau dann, wenn `findEntryLines()` 0 Treffer
+         liefert, und gibt bei einem Fence-Treffer eine spezifischere
+         Meldung zurück: „Eintrag „…“ steht in einem Codeblock –
+         Codezeilen sind keine Einträge; den Abschnitt samt Codeblock per
+         replace_section ändern“ statt des generischen „nicht gefunden“.
+         `applyOne()` bleibt UNVERÄNDERT – Skip bleibt Skip, dies ist eine
+         reine Erklärungs-Verbesserung (Spiegelprinzip dieser Datei: EIN
+         Entscheidungspfad, hier nur um eine zusätzliche, rein lesende
+         Diagnose ergänzt).
+       - **Fix in `src/lib/anthropic.js`:** derselbe Hinweissatz „Zeilen
+         INNERHALB eines ```-Codeblocks sind KEINE Einträge –
+         delete_entry/replace_entry/move_entry treffen sie nie; Code
+         änderst du per replace_section des ganzen ##-Abschnitts
+         (kompletter Inhalt inkl. des vollständigen Codeblocks).“ wurde an
+         DREI Stellen ergänzt: der `replace_entry`-Beispielzeile in der
+         „Erlaubte ops“-Liste, der OPS-ZUVERLÄSSIGKEIT-Regel „EINZELNE
+         Einträge …“ und der `entry`-Feldbeschreibung im
+         `NOTEBOOK_TOOL`-Schema (Backticks im großen Prompt-Template
+         mussten dabei wie an anderen Stellen der Datei als `` \` ``
+         escaped werden, da der gesamte statische Block ein
+         Template-Literal ist).
+       - **Tests:** `tests/ops.test.js`, neue `describe`-Gruppe
+         „Codeblock-Hinweis bei 0 Treffern“ – ein Bash-Fence mit einer
+         Kommandozeile, `delete_entry`/`replace_entry`/`move_entry` mit
+         EXAKTEM und mit SUBSTRING-`entry` treffen alle die neue Meldung
+         (`reason` enthält „Codeblock“ UND „replace_section“), Dokument
+         bleibt dabei byte-identisch; Kontrollfall: derselbe Wortlaut
+         AUSSERHALB eines Fences wird normal getroffen (`applied:true`,
+         KEIN Codeblock-Hinweis); zusätzlicher Vorrang-Test: mehrere
+         Treffer AUSSERHALB des Fences liefern weiterhin die
+         Mehrdeutigkeits-Meldung, nicht den Codeblock-Hinweis.
+         `tests/anthropic.test.js`, neuer Pin, der alle drei
+         Prompt-Ergänzungen UND die Schema-Beschreibung auf denselben
+         Wortlaut prüft.
+
+     - **Finding 3 (🔵, kein Bug – TESTFAELLE-Klarstellung).** Der
+       Inbox-Einladungstext „_Noch nichts erfasst …_“ verschwindet mit
+       der ERSTEN echten Änderung IRGENDWO im Notizbuch (v7.22, Eintrag
+       #64: `stripInboxPlaceholder` läuft bei jedem Schreibvorgang über
+       das GANZE Dokument), nicht erst bei einem Eintrag in der Inbox
+       selbst – das ist gewolltes v7.22-Design, kein Finding. Der Tester
+       hatte B1/C1 zu eng gelesen. Fix NUR in `docs/TESTFAELLE.md`: in B1
+       und C1 je ein Klarstellungssatz ergänzt.
+
+     - **Review-Nachbesserung (noch v7.52.2, derselbe Code-Review-Durchgang
+       wie oben, bevor das Paket committet wurde).** Der Code-Reviewer fand
+       im frisch geschriebenen Finding-1-Fix selbst zwei weitere Lücken
+       derselben Klasse „Meta gehört einem anderen Notizbuch/Repo“ – beide
+       geschlossen, BEVOR dieses Paket committet wurde:
+       - **🔴 (d) Reconnect auf ein ANDERES Daten-Repo zeigte den Zähler des
+         ALTEN Repos.** `connect()` ersetzte `docCache`/`docShas`/
+         `versionCache`/`knowledgeIndex` bereits vollständig, NICHT aber
+         `metaCache` – und rief `setMeta()` auch nicht neu auf. Folge: (i)
+         die Kopfzeile zeigte bis zur ersten Antwort weiterhin den Stand des
+         ALTEN Repos; (ii) `ROOT_NB_ID` „wissensbasis“ existiert in JEDEM
+         Repo, `switchNotebook` lieferte über `resolveMetaForDisplay` den
+         Zähler des ANDEREN Repos als vermeintlich „bekannt“; (iii)
+         schlug der erste Abruf nach dem Reconnect fehl, blieb der
+         Fremd-Repo-Zähler DAUERHAFT stehen (`metaAfterError` liefert null,
+         weil `cache.has(nbId)` für die alte, nicht geleerte Map wahr war);
+         (iv) eine noch laufende `ghCommitMeta`-Antwort AUS der alten
+         Verbindung landete über `applyMetaResult` im neuen Cache. **Fix:**
+         neuer `connectEpoch = useRef(0)` (Zähler-Stil wie das bestehende
+         `notebookEpoch`); `connect()` leert `metaCache.current` an genau
+         der Stelle, an der auch `versionCache` neu gesetzt wird, und
+         erhöht `connectEpoch.current` – ein anderes Repo hat eine andere
+         Commit-Historie, selbst bei gleicher `nbId`. Direkt vor dem
+         `refreshMeta`-Aufruf am Ende von `connect()` steht jetzt zusätzlich
+         `setMeta(resolveMetaForDisplay(metaCache.current, active))` (nach
+         dem Reset stets `UNKNOWN_META` → „…“), analog zu `switchNotebook`.
+         `refreshMeta` merkt sich `epoch = connectEpoch.current` UND
+         `startedAt = Date.now()` VOR dem `await`; nach der Antwort (Erfolg
+         UND Fehler, jeweils als ERSTE Prüfung) verwirft ein neuer,
+         unit-testbarer Helfer `isStaleResponse(epochAtStart,
+         currentEpoch)` in `lib/meta.js` eine Antwort, deren Epoche nicht
+         mehr aktuell ist – weder Cache noch Anzeige werden dann berührt.
+         Der Epoch-Guard selbst ist reine `useRef`/`App.jsx`-Verdrahtung und
+         daher nicht End-to-End über Unit-Tests abbildbar; der reine
+         Vergleichs-Helfer `isStaleResponse` IST getestet (`tests/
+         meta.test.js`).
+       - **🟡 (e) `bumpMetaCount` erfand einen Zähler ohne bekannte Basis;
+         ein bereits laufender Abruf konnte ein frisches Inkrement wieder
+         überschreiben.** Zwei Belege, beide NEU gegenüber dem
+         ursprünglichen v7.52-Befund: (1) ein Cross-Notizbuch-Commit (über
+         das `"notebook"`-Feld einer Op, Import oder eine Umbenennung von
+         der Admin-Seite) auf ein in dieser Session nie besuchtes Buch ohne
+         Cache-Eintrag lieferte `0+1=1`; ein späterer `switchNotebook`
+         zeigte „1/2 Versionen“ als vermeintlich „bekannten“ Wert an, obwohl
+         das Buch z. B. bereits 34 Versionen hatte – exakt die FORM des
+         ursprünglichen Tester-Befunds. (2) Bei einem aktiven Buch mit
+         bereits laufendem `refreshMeta`-Abruf löste ein SOFORTIGER weiterer
+         Commit (z. B. ein Checkbox-Klick → `toggleTask` → `commitDocNb`)
+         ein Inkrement aus, die Kopfzeile zeigte `N+1` – der VORHER
+         gestartete, langsamere Abruf kam anschließend mit dem alten `N`
+         zurück und überschrieb das Inkrement wieder. **Fix in
+         `lib/meta.js`:** `bumpMetaCount` rät nicht mehr – ist die
+         Basis (`prev.count`) keine Zahl, bleibt `count` explizit `null`
+         (nie mehr `0+1`), `lastTs`/ein neues Feld `bumpedAt` werden trotzdem
+         gesetzt. `applyMetaResult` bekam einen fünften, optionalen
+         Parameter `startedAt` (Zeitpunkt, zu dem der jeweilige
+         `refreshMeta`-Abruf GESTARTET wurde): ist im Cache bereits ein
+         `bumpedAt` vermerkt, das NACH `startedAt` liegt, gehört die Antwort
+         zu einem Abruf, der VOR dem lokalen Inkrement losgeschickt wurde –
+         sie wird verworfen (`{displayMeta:null}`, Cache bleibt beim
+         frischeren `N+1`). **Fix in `App.jsx#commitDocNb`:** bleibt
+         `bumped.count === null` (Basis war unbekannt), löst der Aufruf
+         SOFORT einen `refreshMeta(cfg, nbId, nb.path)`-Nachholabruf aus,
+         der den echten Stand holt statt zu raten. `createNotebook` bleibt
+         UNVERÄNDERT (`{count:1,...}` ist dort korrekt, kein Raten – ein
+         frisch angelegtes Notizbuch hat garantiert genau einen Commit).
+       - **🔵 Zusätzlich im selben Durchgang mitgenommen (billig, gehören
+         inhaltlich zur selben Klasse):**
+         - `UNKNOWN_META` ist jetzt `Object.freeze`d (wird per Referenz in
+           den React-State gereicht – ein versehentliches Mutieren an einer
+           Stelle darf nie alle anderen Aufrufer mit-verfälschen).
+         - Das ungenutzte Rückgabefeld `cache` von `applyMetaResult` wurde
+           entfernt (`App.jsx` destrukturiert ohnehin nur `displayMeta`).
+         - Anzeige im UNVERBUNDENEN Zustand: `metaLoading` prüft jetzt
+           zusätzlich `connected` (`connected && meta.count === null`) –
+           ohne Verbindung ist der `useState`-Startwert kein „lädt gerade“,
+           sondern schlicht „nichts verbunden“; ohne diese Bedingung zeigte
+           die Kopfzeile im unverbundenen Zustand dauerhaft „…“ statt wie
+           vor v7.52.2 „neu“/„0 Versionen“. Neue Hilfsvariable
+           `metaCountDisplay` (`metaLoading ? "…" : (meta.count ?? 0)`)
+           ersetzt an beiden Anzeigestellen (Kopfzeile, Historie-Dialog) das
+           bisherige Inline-`meta.count`.
+         - Fokus-Refresh (`maybeRefresh`, Entry-Schleife): ändert sich remote
+           die Blob-SHA eines INAKTIVEN Notizbuchs (anderes Gerät oder
+           Cross-Notizbuch-Commit), wird sein Cache-Eintrag jetzt gelöscht
+           (`else metaCache.current.delete(en.id)`) statt stehen zu bleiben –
+           der nächste Wechsel dorthin zeigt „…“ statt kurz eines veralteten
+           Zählers.
+         - `tests/ops.test.js`, Gruppe „Codeblock-Hinweis bei 0 Treffern“: um
+           zwei Pins ergänzt – ein UNTERMINIERTER Fence (` ```bash ` ohne
+           Schlusszaun) maskiert laut `computeFenceLineMask`/`matchFenceBlock`
+           (`lib/code.jsx`) gar nichts, die Kommandozeile ist dort ein ganz
+           normaler `entry`-Treffer (`applied:true`) – Kontrollfall gegen
+           eine falsche Erwartung „jeder Fence-Opener maskiert“; und ein
+           `heading`-Scope, der den Codeblock eines ANDEREN Abschnitts
+           ausschließt, liefert weiterhin die generische
+           „nicht gefunden“-Meldung OHNE Codeblock-Hinweis (Scope wird von
+           `findFenceMaskedEntryMatch` respektiert, da es dieselbe `range`
+           wie `findEntryLines` bekommt – reiner Bestätigungstest, kein
+           Bug).
+       - **Tests (Review-Nachbesserung):** `tests/meta.test.js` – die beiden
+         alten Fälle „startet bei 1“ und „`count:null` wie 0“ wurden durch
+         `bumpMetaCount`-Fälle ohne erfundene Basis ersetzt (Inkrement ohne
+         Cache-Eintrag UND auf einen vorhandenen `UNKNOWN_META`-Eintrag
+         bleiben beide `count:null`, `lastTs`/`bumpedAt` werden trotzdem
+         gesetzt); neue `applyMetaResult`-Fälle mit explizitem `startedAt`
+         (ein Abruf, der VOR einem `bumpedAt` gestartet wurde, wird
+         verworfen und der Cache behält das frischere `N+1`; ein Abruf, der
+         DANACH gestartet wurde, wird akzeptiert; ein Bestandsfall
+         `{count:34}` → Bump auf 35 → ein verspäteter Abruf mit dem alten
+         Stand 34 wird verworfen); neuer `isStaleResponse`-Block (gleiche
+         Epoche → nicht veraltet, unterschiedliche Epoche → veraltet).
+       - **Restrisiko:** Der Epoch-Guard schützt NUR gegen Antworten aus
+         einer bereits verlassenen VERBINDUNG (Reconnect), nicht gegen jede
+         denkbare Race innerhalb derselben Verbindung – dafür bleiben
+         weiterhin `applyMetaResult`s `activeId`-Vergleich und der neue
+         `bumpedAt`-Schutz zuständig. Der `bumpedAt`-Schutz vergleicht
+         Zeitstempel (`Date.now()`) statt einer monoton steigenden
+         Sequenznummer – bei zwei Ereignissen mit IDENTISCHEM Millisekunden-
+         Zeitstempel (praktisch nur bei synchronem Test-Code relevant,
+         nicht bei echten Netzwerk-Roundtrips) entscheidet `>` (nicht `>=`)
+         zugunsten des Abrufs; das theoretische Fenster wird als
+         vernachlässigbar eingeschätzt, ist aber nicht formal ausgeschlossen.
+
+     - **Version:** Header `src/App.jsx` auf `v7.52.2`.
+     - **Tests gesamt (nach der Review-Nachbesserung):** 2056 Tests grün
+       (`npm run test:coverage`), Coverage auf `src/lib` 91.9 % Statements /
+       87.53 % Branches / 90.51 % Funktionen / 94.2 % Zeilen – deutlich über
+       dem 60 %-Gate (`src/lib/meta.js` weiterhin bei 100 % in allen vier
+       Metriken; erscheint deshalb – wie `autocorrect.js`/`diff.js`/
+       `settings.js` schon vorher – NICHT in der Text-Tabelle des
+       Coverage-Reports: der `text`-Reporter blendet 100-%-Dateien aus,
+       bestätigt über den `json-summary`-Reporter separat geprüft, kein
+       Fehler).
