@@ -13077,3 +13077,434 @@ aus `referenz-app.jsx` übernommen.
          96.77 %/85 %/100 %/100 %). Version bleibt `v7.54` (weiterhin kein
          Feature-Bump für eine Review-Nacharbeitsrunde vor dem ersten Commit,
          wie schon bei Nacharbeit Runde 1–4).
+
+113. **v7.55, Vorschlag B Stufe 2: In-Turn-Retry – ein verworfener oder
+     Selbstverweis-Turn bekommt NOCH IM SELBEN Turn genau EINEN
+     automatischen Nachbesserungs-Versuch, bevor der Nutzer überhaupt eine
+     Verwerfungs-Pille sieht.**
+     - **Anlass:** #112 (v7.54) liefert seit dem Verify-then-Commit-Gate
+       eine ehrliche ⚠️-Pille samt Diff/Override, wenn eine Op-Liste
+       strukturell unmöglich ist oder nur teilweise gewirkt hätte (H/A) –
+       der Nutzer musste den kompletten Turn manuell neu formulieren oder
+       den Override klicken. Zweiter, unabhängiger Auslöser aus dem
+       E2E-Nachlauf zu v7.53 (Fall C14, 🔴): auf „Schlage mir eine
+       zweistufige Gliederung vor“ antwortete das Modell nur mit „Vorschlag
+       ist oben ausformuliert …“, obwohl KEIN Vorab-Text existierte –
+       dieselbe Selbstverweis-Fehlerfamilie wie #53/#57 (POINTER_ONLY/
+       `isSubstantialReply`), aber diesmal OHNE jeden Inhalt zum Anzeigen.
+       Statt einer sechsten Prompt-Regel für dieselbe Fehlerfamilie:
+       ein Code-Netz, das die Antwort automatisch nachfordert, BEVOR sie
+       den Chat erreicht.
+     - **Mechanik (`src/lib/anthropic.js#callClaude`):** `doPost(mode,
+       startConvo)` ist jetzt parametrisierbar; `finalMode`/`finalConvo`/
+       `finalData` verfolgen an JEDER Erfolgsstelle der bestehenden
+       search→forced→none-Kaskade UND am eingebetteten forced-Nachfassen
+       (beide Zweige), auf welcher Konversation/Antwort ein In-Turn-Retry
+       aufsetzt. Die bisherige Tail-Logik (ops/reply/sources aufbereiten)
+       ist als `finalize(parsedObj, retryOpts)` ausgelagert und läuft für
+       Erstversuch UND Retry identisch. `result.retryWith(diagnosis)`:
+       genau EIN Retry pro Turn (`retryUsed`-Flag, zweiter Aufruf wirft),
+       Merge-Regel bei `pause_turn`-Ursprung (Konkatenation statt einer
+       zweiten `assistant`-Nachricht in Folge – Anthropic verlangt strikt
+       alternierende Rollen), EIN `tool_result` je `tool_use`-Block der
+       Erstantwort (`update_notebook` → `is_error` + Diagnose,
+       `lookup_wissen` → echtes `runLookup()`-Ergebnis, damit der Retry die
+       bereits gestellte Wissensfrage nicht verschweigt), Text-Fallback für
+       Modus „none“ (kein Tool, Diagnose als `[PRÜFERGEBNIS – …]`-Text),
+       Ursprungsmodus-Erhalt (Retry im SELBEN Modus mit derselben
+       Konversation – im `search`-Modus bleiben Server-Tool-/
+       `web_search_tool_result`-Blöcke zulässig, ein pauschales „forced“
+       hätte einen 400 provoziert), einmaliges forced-Nachfassen NUR auf
+       der Retry-Konversation (nie „von vorn“, sonst ginge das
+       Prüfergebnis verloren), `clampDiag()` als zweite, unabhängige
+       Sanitisierungs-Schicht direkt an der Senke (NUL raus, ≤ 800
+       Zeichen).
+     - **Zweiter Auslöser (E2E-Fall C14):** `isPointerOnlyReply(reply,
+       preTextBlocks)` – reiner, exportierter Helfer, wiederverwendet das
+       bestehende `POINTER_ONLY_RE` (jetzt erweitert um „oben
+       ausformuliert“/„wie oben <Partizip>“ – wirkt automatisch auch auf
+       `isSubstantialReply` mit, ein solcher Verweis sollte dort ohnehin
+       nie als eigenständiger Inhalt zählen) und die Prüfung auf fehlenden
+       substanziellen Vorab-Text (`isSubstantialReply(preText)`); KEINE
+       Kürze-Bedingung auf `reply` selbst (siehe Review-Fix Runde 1 unten –
+       der reale C14-Live-Text liegt über der Schwelle). `callClaude`
+       liefert zusätzlich `retryReason: "pointer_only" | null` und den
+       festen Diagnosetext `POINTER_ONLY_RETRY_DIAGNOSIS`; `callClaude`
+       LÖST den Retry NICHT selbst aus (kein impliziter zweiter
+       API-Roundtrip ohne App-Kontrolle) – das übernimmt `App.jsx#send`.
+     - **`src/App.jsx#send`:** Op-Split + Auto-Titel-Auflösung +
+       Gruppierung + `evaluateTurn()` ist jetzt die Helper-Funktion
+       `planForOps(ops)` statt Inline-Code – der Retry braucht GENAU
+       dieselbe Aufbereitung für die Retry-Antwort wie der Erstversuch,
+       ohne den Async-Ablauf zu duplizieren. Zwei sich gegenseitig
+       ausschließende Zweige (können nie beide greifen, weil
+       `res.retryWith` nach dem ersten Aufruf wirft): (1) `plan.rejected`
+       → `res.retryWith(buildTurnDiagnosis(plan))` (turn.js, unverändert);
+       (2) sonst, falls `res.retryReason === "pointer_only"` →
+       `res.retryWith(POINTER_ONLY_RETRY_DIAGNOSIS)`. „Letzter Versuch
+       gewinnt“: bei einer Antwort ersetzen `res`/`plan`/`memoryOps`
+       VOLLSTÄNDIG das Erstversuch-Ergebnis – auch wenn der Retry selbst
+       wieder verworfen wird, laufen Pille/Diff/Override dann auf dem
+       Retry-Ergebnis (Ergebnis des Retrys ist in sich stimmig, kein
+       Zusammenführen mit dem verworfenen Erstversuch). Scheitert der
+       Retry (Netzwerkfehler, `retryWith` wirft, `null`-Rückgabe – kein
+       `update_notebook` in der Retry-Antwort, erneut verworfen,
+       API-Fehler), gilt unverändert das B1-Verhalten (Verwerfungs-Pille +
+       Override auf dem Erstversuch). Bild-/Datei-Uploads laufen bereits
+       VOR diesem Punkt in `send()` (vor dem Op-Split) und werden für den
+       Retry NICHT erneut ausgeführt. Busy-Anzeige während des Retry:
+       `setBusyLabel("Nachbesserung …")`, danach zurück auf
+       `"strukturiert …"`. Bei Erfolg hängt `send()` einen dezenten
+       ℹ️-Hinweis („Automatisch nachgebessert: …“, neuer reiner Builder
+       `buildRetryInfo()`) an `opsInfo` – EIGENER fester Wortlaut-Kopf statt
+       eines `describeOpItems()`-Items ohne `type`, damit der Nutzer sofort
+       sieht, dass hier NICHT wieder eine übersprungene Op gemeint ist. Der
+       Hinweis läuft wie jeder ℹ️-Hinweis über `m.opsInfo` in denselben
+       `[SYSTEM-HINWEIS: …]`-Rahmen des nächsten Turns (anthropic.js
+       `sysNote` aus `m.warning` + `m.opsInfo`, ein Marker, kein neuer
+       Kanal) – auch im SHA-Konflikt-Pfad, weil der Retry bereits VOR der
+       Konfliktprüfung gelaufen ist.
+     - **Kosten/Latenz:** normaler Turn 0 zusätzliche Requests. Nur bei
+       Verwerfung/Selbstverweis (deutlich unter 5 % der Schreib-Turns): +1
+       Request (+1 bei eingebettetem Nachfassen). `tools`/`system` treffen
+       weiterhin den Cache; unkached sind die History (wie jeder Turn), das
+       Assistant-Echo mit VOLLEM `tool_use`-Input (ein rewrite eines
+       mittleren Notizbuchs 2–8 k Token) und ggf. alle
+       Websuche-Ergebnisblöcke plus die Diagnose (≤ ~250 Token) – realistisch
+       30–60 % eines Turns bei rewrite/Websuche, 15–25 % bei kleinen
+       Op-Listen; Latenz +3–10 s (mehr bei erneuter Websuche im
+       `search`-Modus).
+     - **Restrisiken:** das Modell kann im Retry dieselben Ops unverändert
+       erneut schicken oder mit `ops:[]`/erneutem Selbstverweis antworten –
+       dann bleibt es beim B1-Verhalten, es gibt bewusst KEINEN zweiten
+       Retry (Kosten-/Latenz-Deckelung, der Prompt weist explizit auf
+       „KEIN rewrite“ hin). Verwaiste Bild-Uploads bei einem am Ende doch
+       verworfenen Turn (Upload läuft vor der Bewertung, wie bisher bei
+       Skips – unverändert gegenüber v7.54). Im `search`-Ursprungsmodus
+       kann das Modell im Retry erneut suchen (zusätzliche Kosten/Latenz,
+       bewusst in Kauf genommen – ein pauschales Umschalten auf „forced“
+       hätte einen 400 provoziert, siehe Mechanik oben). Der
+       Selbstverweis-Auslöser fängt nur Antworten, die `POINTER_ONLY_RE`
+       matchen UND KEINEN substanziellen Vorab-Text davor haben – eine
+       PARAPHRASIERTE, inhaltsleere Verweis-Antwort, die keine der
+       hinterlegten Formulierungen trifft (z. B. eine gänzlich andere
+       Umschreibung von „steht oben“), löst den Retry nicht aus – wie bei
+       #53/#57 ein Restrisiko, nicht vollständig ausschließbar ohne
+       semantisches Verständnis.
+     - **Review-Fix Runde 1 (code-reviewer-Subagent, sechs Findings: 1×🔴,
+       3×🟡, 2×🔵 – das zweite 🔵 betrifft die Tests 13/14 unten):**
+       (🔴) `isPointerOnlyReply` enthielt eine nicht spezifizierte
+       Kürze-Bedingung (`if (t.length >= SUBSTANTIAL_REPLY_MIN_LENGTH)
+       return false;`), die den echten C14-Live-Text (120 Zeichen, über
+       der Schwelle) verfehlt hätte – die Test-Fixture war auf 47 Zeichen
+       gekürzt und bewies nichts über den Vorfall. Zeile ersatzlos
+       gestrichen; Tests auf den ungekürzten Live-Wortlaut umgestellt.
+       (🟡) `POINTER_ONLY_RE`s „wie oben“-Zweig (ohne Partizip-Pflicht)
+       matchte legitime Kurzbestätigungen MIT bereits durchgeführten ops,
+       die auf den CHATVERLAUF verweisen („Wie oben besprochen
+       eingetragen.“, „Notiert wie oben gewünscht.“) – Risiko eines
+       stillen Op-Verlusts, weil das Modell im Retry ops:[] liefern und
+       „letzter Versuch gewinnt“ die korrekten ops verwerfen könnte. Auf
+       „wie oben (ausformuliert|beschrieben|erklärt|dargestellt|
+       skizziert|aufgeführt)“ eingeschränkt (Selbstverweis auf einen
+       anderen Teil DERSELBEN Antwort, nicht auf den Chatverlauf). (🟡)
+       `retryWith()`s eingebettetes forced-Nachfassen lief bisher auch im
+       Ursprungsmodus „none“ (Text-Fallback, Tools bereits serverseitig
+       abgelehnt) – entgegen Spec 9.2 ein sicher vergeblicher Request samt
+       `tools_changed`-Signaturwechsel; Guard `finalMode !== "none"`
+       ergänzt. (🟡) `App.jsx#send` setzte den ℹ️-Hinweis „… vollständig
+       nachgereicht“ auch dann, wenn die Retry-Antwort SELBST wieder ein
+       reiner Verweis war (`res2.retryReason === "pointer_only"`) – eine
+       vorgetäuschte Erfolgsmeldung, die das Modell im Folge-Turn über
+       den SYSTEM-HINWEIS-Kanal aktiv daran hindern würde, die nie
+       gelieferte Antwort nachzuliefern. Hinweis wird jetzt nur noch bei
+       `res2.retryReason !== "pointer_only"` gesetzt. (🔵) Prompt-Bullet
+       zum „Automatisch nachgebessert“-Hinweis präzisiert: „… BEREITS IM
+       SELBEN Turn automatisch korrigiert (und, falls sie ops enthielt,
+       erfolgreich gespeichert)“ statt einer pauschalen „erfolgreich
+       gespeichert“-Behauptung, die beim `pointer_only`-Auslöser (typisch
+       `ops:[]`) sachlich falsch war. (🔵, erst bei der Abschluss-Durchsicht
+       vor dem Commit gefunden und hier nachgetragen) Der zweite
+       Retry-Auslöser in `App.jsx#send` prüfte bis dahin nur
+       `!(plan && plan.rejected)` – er griff also AUCH bei einem Turn mit
+       GÜLTIGEN, nicht verworfenen Notizbuch-Ops, sofern `reply` zufällig
+       `POINTER_ONLY_RE` traf (Live-Beispiel: „Eingetragen wie oben
+       beschrieben.“ als harmlose Bestätigung ECHTER ops – die
+       Mustererkennung selbst arbeitet hier korrekt, siehe Test 14 unten).
+       Antwortete das Modell im Retry mit `ops:[]` (typisch bei „schon
+       erledigt“), hätte „letzter Versuch gewinnt“ (TURN-REGELN 8) die
+       bereits korrekt geplanten Ops des Erstversuchs ERSATZLOS verworfen.
+       FIX: auf `!plan` eingeschränkt – exakt die C14-Klasse (reiner
+       Verweis-Reply OHNE jede Notizbuch-Op im selben Tool-Aufruf). `plan`
+       ist nach `App.jsx#planForOps()` GENAU DANN `null`, wenn `splitOps()`
+       keine `notebookOps` lieferte (siehe der Kommentar dort). Die
+       Bedingung ist als reiner, aus `App.jsx#send` extrahierter Builder
+       `anthropic.js#shouldRetryPointerOnly(plan, res)` getestet (Test 13
+       unten pinnt genau den Bug-Fall). Zusätzliche, redundante Sicherung
+       direkt im Retry-Zweig selbst (defense-in-depth, falls die äußere
+       Bedingung durch eine künftige Änderung je bricht): liefert der Retry
+       `ops.length === 0`, OBWOHL der Erstversuch (entgegen der neuen
+       Bedingung) Notizbuch-Ops gehabt haben sollte, bleibt der Erstversuch
+       bestehen statt dass „letzter Versuch gewinnt“ sie überschreibt.
+     - **Tests:** B2 Teil 1 (uncommitted vom entwickler-Subagenten
+       übernommen, in dieser Runde unverändert): `tests/anthropic.test.js`
+       um „isPointerOnlyReply“ und „callClaude – B2 In-Turn-Retry“
+       (Merge-Regel, Modus-Erhalt, `lookup_wissen`-Doppel-
+       `tool_result`, Nachfassen, `retryUsed`, Diagnose-Clamp,
+       `previous_message_id`, Server-Tool-Echo, Kosten, `retryReason`)
+       erweitert. B2 Teil 2: `tests/appOps.test.js` um den
+       Describe-Block „buildRetryInfo“ (6 Tests: leer/Whitespace ⇒ `null`,
+       fester Wortlaut-Kopf ohne „ℹ️ Hinweis“-Präfix, Whitespace-Kollaps,
+       Klammer-Sanitisierung gegen `[SYSTEM-HINWEIS:`-Injektion, 100-Zeichen-
+       Kappung mit „…“, End-zu-Ende-Pin auf den in `App.jsx#send`
+       verwendeten `pointer_only`-Wortlaut); `tests/anthropic.test.js` um
+       einen Positions-/Inhalts-Pin für das neue Prompt-Bullet zum
+       „Automatisch nachgebessert“-Hinweis (NACH dem bestehenden
+       is_error-Bullet, VOR REINE FRAGEN – ohne diese Erklärung könnte das
+       Modell die im Hinweis genannte „erste Antwort verworfen“-Formulierung
+       fälschlich als aktuell gescheiterten Turn lesen und die Änderung
+       wiederholen). Review-Fix Runde 1 (5 neue Tests in
+       `tests/anthropic.test.js`): der C14-Live-Fund und die integrierte
+       `retryReason`-Prüfung laufen jetzt auf dem UNGEKÜRZTEN Live-Wortlaut
+       (120 Zeichen), ein LANGER reiner Verweis liefert jetzt `true` statt
+       `false` (Wegfall der Kürze-Bedingung), ein Pin gegen „wie oben
+       besprochen/gewünscht“-False-Positives (isPointerOnlyReply UND
+       isSubstantialReply), Test 13 („forced auf lastConvo“-Ursprung über
+       eine Lookup-Runde ohne `update_notebook`), Test 14 (Schnappschuss-
+       Vergleich: `reply`/`ops`/`sources` bleiben nach einem `null`-Retry
+       byte-identisch) und Test 3b (none-Ursprung, Retry ohne JSON → `null`
+       OHNE forced-Nachfassen, GENAU 4 Fetch-Aufrufe – pinnt den neuen
+       `finalMode !== "none"`-Guard). Kein Unit-Test pinnt die React-State-
+       Verdrahtung in `send()` selbst (`retryWith`/`retryReason` sind reine
+       Funktions-/Feld-Aufrufe auf einem nicht-exportierten, internen
+       `useCallback` mit GitHub-I/O – dieselbe bewusste Grenze wie bei
+       `commitPlannedGroups`/`applyRejectedTurn` in #112, das gilt auch für
+       den Review-Fix am `retryNote`-Zweig); die zugrundeliegende Logik
+       (`evaluateTurn`, `retryWith`, `isPointerOnlyReply`) ist über
+       `turn.test.js`/`anthropic.test.js` vollständig abgedeckt,
+       `docs/TESTFAELLE.md#C34` deckt den End-zu-Ende-Ablauf im Browser ab.
+       **Gesamt (vor der Abschluss-Runde unten): 2483 Tests grün** (2478 +
+       5 neu, Review-Fix Runde 1), Coverage Gesamt-Repo 93.01 % Statements /
+       86.80 % Branches / 92.73 % Funktionen / 95.45 % Zeilen (Gate 60 % auf
+       `src/lib`; `anthropic.js` 94.83 %/84.76 %/100 %/96.92 %, `turn.js`
+       unverändert 96.77 %/85 %/100 %/100 %). Version `v7.55`.
+     - **Abschluss vor Commit (fünf Punkte, uncommitted-Review kurz vor dem
+       ersten Commit von v7.55, siehe „sechs Findings“ oben):**
+       1. **Zweites 🔵-Finding (Ops-Verlust-Risiko) behoben** – siehe die
+          Findings-Liste oben (Details, Tests 13/14) sowie
+          `anthropic.js#shouldRetryPointerOnly` und `App.jsx#send`
+          (zweiter Retry-Zweig).
+       2. **Diese Findings-Kopfzeile selbst korrigiert** – „vier Findings“
+          → „sechs Findings: 1×🔴, 3×🟡, 2×🔵“ (das erste 🔵 war bereits
+          dokumentiert, das zweite fehlte bis zu dieser Abschluss-Runde).
+       3. **E2E-Finding C32 (🟡, kein App-Bug im engeren Sinn, sondern ein
+          fehlendes Code-Netz gegen ein Modell-Verhalten):** nach einer
+          Historie-Wiederherstellung (`App.jsx#restore`, schreibt den alten
+          Stand als NEUEN Commit; `docCache`/der Prompt zeigten dadurch
+          bereits den korrekten, wiederhergestellten Stand) behauptete das
+          Modell trotzdem, zwei Kapitel existierten „nicht mehr, wurden
+          durch das rewrite im vorherigen Schritt entfernt“ – es vertraute
+          seiner EIGENEN älteren Chat-Aussage mehr als dem aktuellen
+          Dokument. Zwei-teiliger Fix: **(a)** `restore()` hängt nach
+          erfolgreichem Commit eine Info-Pille an den Chat – dieselbe
+          Mechanik wie die bestehende „manuell bearbeitet“-Pille
+          (`requestFeedback`, `role:"user", info:true`), Wortlaut über den
+          neuen, reinen Builder `App.jsx#buildRestoreInfo(name, ts)`:
+          „Notizbuch „<Name>“: Stand vom <Datum/Uhrzeit> wiederhergestellt –
+          der aktuelle Dokumentstand ist maßgeblich, frühere Chat-Aussagen
+          dazu sind überholt.“ (Wortlaut im Abschluss-Delta unten
+          korrigiert: „oben“ → „aktuelle“, siehe dort.)
+          **Abweichung von `requestFeedback`, bewusst:**
+          anders als dessen Pille ist diese HIER NICHT garantiert von einer
+          Assistent-Antwort im selben `setChat`-Aufruf gefolgt (`restore()`
+          macht bewusst KEINEN zusätzlichen API-Aufruf, rein lokale
+          GitHub-Aktion) – das hätte bei einem DIREKT folgenden normalen
+          Chat-Turn zwei `role:"user"`-Einträge in Folge in `msgs` erzeugt
+          und laut Anthropic („roles must alternate“, siehe DECISIONS #106
+          Punkt C) einen 400-Fehler ausgelöst – **ursprüngliche Annahme bei
+          diesem Fix, siehe Korrektur im Review-Fix-Absatz weiter unten
+          (Abschluss-Delta): die aktuelle Messages-API führt gleichrollige
+          Turns serverseitig selbst zusammen statt hart abzulehnen; der
+          clientseitige Merge bleibt trotzdem sinnvoll, weil deterministisch
+          und explizit.** Statt App.jsx eine zweite,
+          fragile Paar-Disziplin aufzuerlegen: **(b)**
+          `anthropic.js#callClaude#msgs` bekommt eine GENERISCHE Sicherung
+          direkt an der einen Senke, an der die komplette History
+          linearisiert wird – zwei aufeinanderfolgende Einträge DERSELBEN
+          Rolle werden zu einem Eintrag zusammengeführt (Content-
+          Konkatenation, normalisiert String- und Array-Content auf
+          dieselbe Block-Form, KEIN Nachrichtenverlust), unabhängig davon,
+          welche Chat-Quelle die Kollision verursacht (damals angenommen:
+          nur die neue restore()-Pille direkt vor dem nächsten Turn –
+          Review-Korrektur unten ergänzt eine ZWEITE, seit v7.21 bereits
+          regelmäßige Quelle: Resend nach einem Fehler-/Konflikt-Turn).
+          **(c)** Neuer Satz
+          im `OPS-ZUVERLÄSSIGKEIT`-Block (letzter Bullet, nach dem
+          „Automatisch nachgebessert“-Hinweis, vor `REINE FRAGEN`): „Der
+          Dokumentstand unter ALLE NOTIZBÜCHER ist IMMER maßgeblich – auch
+          wenn frühere Chat-Nachrichten (deine eigenen eingeschlossen)
+          etwas anderes behaupten, z. B. nach einer Wiederherstellung einer
+          älteren Version oder einer manuellen Bearbeitung.“
+          `docs/TESTFAELLE.md#G1d` (neu) deckt den End-zu-Ende-Ablauf im
+          Browser ab (Restore → Pille erscheint → „Welche Kapitel gibt es
+          in diesem Notizbuch?“ nennt den wiederhergestellten Stand).
+          **Restrisiko, ehrlich benannt:** die History-Merge-Sicherung
+          fängt NUR die Rollenfolge ab (kein 400-Fehler mehr) – ob das
+          Modell die zusammengeführte Nachricht inhaltlich korrekt trennt
+          (Restore-Hinweis vs. eigentliche Frage), bleibt wie bei jeder
+          anderen Prompt-Konvention dieser App ein reiner Vertrag ohne
+          erzwingbare Garantie; das neue `OPS-ZUVERLÄSSIGKEIT`-Bullet ist
+          das eigentliche inhaltliche Gegengewicht dazu.
+       4. **E2E-Fall C30 (🟡 laut Tester, inhaltlich KEIN Bug):** beim
+          Cross-Notizbuch-Verschieben „in das Unterthema Details“ hängte
+          das Modell den Eintrag per `append_to_section` ans Ende von „##
+          QA-Test Bereich“ – das liegt HINTER dem `###`-Unterthema
+          „Details“, der Eintrag erscheint also sichtbar IM Unterthema,
+          genau wie verlangt; der `wrong_level`-Schutz betrifft nur ein
+          `heading`, das direkt ein `###` adressiert. Reiner
+          Doku-Fix: `docs/TESTFAELLE.md#C30` um diesen dritten, ebenfalls
+          bestandenen Ausgang (c) ergänzt und klargestellt, dass bei C30
+          ausschließlich Datenverlust/Duplikat 🔴 ist, nicht die Wahl des
+          Anhängepunkts.
+       5. **Zweite Review-Runde auf denselben uncommitted-Diff (1×🟡,
+          4×🔵), alle fünf Findings umgesetzt:**
+          **(🟡) Falsche Begründung der History-Merge-Sicherung
+          korrigiert:** die Aussage „zwei `role:"user"`-Einträge in Folge
+          sind in echten Chat-Verläufen unmöglich, heute nur die
+          restore()-Pille“ (Punkt 3 oben, Kommentare in `anthropic.js`,
+          Test-Fixture in `tests/anthropic.test.js`) war falsch – im
+          catch-Pfad UND im SHA-Konflikt-Pfad von `App.jsx#send` bleibt die
+          user-Nachricht unmarkiert im Chat, während die zugehörige
+          Assistent-Antwort `error:true` bekommt und im History-Mapping
+          (`.filter((m) => !m.error …)`) verworfen wird – ein Resend nach
+          einem Fehler-/Konflikt-Turn erzeugt also ebenfalls zwei
+          `role:"user"`-Einträge in Folge, seit v7.21 ein regelmäßiger
+          Pfad, nicht nur ein theoretischer Randfall. Alle drei genannten
+          Stellen korrigiert: „Quellen heute: (1) restore()-Pille vor dem
+          nächsten Turn, (2) Resend nach Fehler-/Konflikt-Turn“; der
+          „roles must alternate → 400“-Satz zusätzlich als URSPRÜNGLICHE
+          ANNAHME gekennzeichnet – die aktuelle Messages-API führt
+          gleichrollige Turns serverseitig selbst zusammen statt hart
+          abzulehnen, der clientseitige Merge bleibt trotzdem sinnvoll
+          (deterministisch, explizit, unabhängig von unsicherem
+          Server-Verhalten). Neuer Test „Resend nach Fehler-Turn: user A +
+          assistant(error) + user A → EINE user-Nachricht, Fehlertext nicht
+          enthalten“ im Block `History-Merge gleichrolliger Nachbarn`
+          (`tests/anthropic.test.js`) pinnt genau diesen zweiten Pfad.
+          **(🔵 1) Ops-Verlust-Risiko im pointer_only-Retry-Zweig
+          (`App.jsx#send`):** Erstversuch mit `memory_*`-Ops NEBEN einer
+          reinen Verweis-Antwort (kein Notizbuch-`plan`, siehe
+          `shouldRetryPointerOnly`), Retry antwortet mit `ops:[]`
+          (`POINTER_ONLY_RETRY_DIAGNOSIS` fragt gezielt nur die fehlende
+          Notizbuch-Antwort nach, erwähnt Gedächtnis-Ops mit keinem Wort) –
+          die bisherige blinde `memoryOps = replanned.memoryOps`-Ersetzung
+          hätte die Erstversuch-Gedächtnis-Ops still verworfen, OHNE dass
+          sie je committet wurden. Fix als reiner, exportierter Helfer
+          `src/lib/turn.js#mergeRetryMemoryOps(first, retry)` (leere
+          Retry-Liste → Erstversuch bleibt bestehen; eigene Retry-Ops →
+          Retry gewinnt, unverändert „letzter Versuch gewinnt“) – in
+          `App.jsx#send` eingesetzt, 5 neue Tests in `tests/turn.test.js`.
+          Der bereits vorher kommentierte, unter der aktuellen
+          `shouldRetryPointerOnly`-Invariante unerreichbare
+          `firstHadNotebookOps`-Zweig (Notizbuch-Ops-Sicherung, siehe Punkt
+          1 oben) bleibt unverändert als bewusst redundante Sicherung
+          bestehen (Kommentar sagt das bereits aus).
+          **(🔵 2) `buildRestoreInfo`-Wortlaut:** „der Dokumentstand oben
+          ist maßgeblich“ → „der aktuelle Dokumentstand ist maßgeblich“
+          (`App.jsx`) – die Pille erscheint immer im Chat, „oben“ bezog
+          sich implizit auf einen Dokumentbereich, der insbesondere auf
+          Mobilgeräten (nur eine sichtbare Spalte) zum Pillen-Zeitpunkt oft
+          nicht sichtbar ist; „aktuelle“ ist layout-unabhängig eindeutig.
+          Pin in `tests/appOps.test.js` sowie die Fixture in
+          `tests/anthropic.test.js` und `docs/TESTFAELLE.md#G1d`
+          entsprechend angepasst.
+          **(🔵 3) Restore-Pille bekommt ein eigenes Icon:** `RotateCcw`
+          statt `Pencil` (`App.jsx`, `m.restore`-Flag auf der von
+          `App.jsx#restore` erzeugten Chat-Nachricht) – bisher teilte sich
+          die Wiederherstellen-Pille das Stift-Symbol mit der inhaltlich
+          anderen „manuell bearbeitet“-Pille (`requestFeedback`), obwohl
+          beide dieselbe `info:true`-Rendering-/History-Mechanik nutzen.
+          `docs/TESTFAELLE.md#G1d` ergänzt.
+          **(🔵 4) Kommentar-Ergänzung in `anthropic.js#callClaude`:** ein
+          theoretischer `assistant`/`assistant`-Merge würde zwei
+          `[SYSTEM-HINWEIS: …]`-Rahmen in eine einzige Nachricht legen –
+          heute UNERREICHBAR (jeder Turn erzeugt höchstens eine
+          `role:"assistant"`-Nachricht in `priorChat`), aber als
+          Grenzfall dokumentiert, falls ein künftiger Aufrufer doch
+          aufeinanderfolgende Assistent-Nachrichten erzeugt.
+          **Version bleibt `v7.55`** (alle fünf Punkte sind Doku-/
+          Test-/Code-Netz-Korrekturen ohne neues Nutzer-Feature).
+       - **Neue Tests (15, alle in dieser Abschluss-Runde, hier NACH THEMA
+         geordnet – Punkt 3/C32 zuerst als 1–8, Punkt 1/zweites 🔵 danach
+         als 9–15, unabhängig von der Reihenfolge in den Testdateien):**
+         Punkt 3 (C32, 8 Tests): 1) `buildSystem`-Prompt-Bullet „Der
+         Dokumentstand … maßgeblich“: Position (nach „Automatisch
+         nachgebessert“, vor `REINE FRAGEN`) + Wortlaut-Pin
+         (`tests/anthropic.test.js`); 2) `buildRestoreInfo` End-zu-Ende-
+         Wortlaut-Pin (Notizbuchname + `fmtStamp(ts)`, exakt der in
+         `App.jsx#restore` verwendete Text, `tests/appOps.test.js`); 3)
+         `buildRestoreInfo` mit Sonderzeichen im Namen (Anführungszeichen/
+         eckige Klammern) – UNVERÄNDERT übernommen (kein
+         `[SYSTEM-HINWEIS: …]`-Rahmen hier, siehe Kommentar in `App.jsx`,
+         daher keine `sanitizeWarnLabel`-Pflicht); 4) `buildRestoreInfo`:
+         unterschiedliche Namen/Zeitstempel erzeugen unterschiedliche,
+         stabile Texte; 5–6) `History-Merge gleichrolliger Nachbarn`
+         (`tests/anthropic.test.js`): zwei bzw. drei aufeinanderfolgende
+         `role:"user"`-Einträge (z. B. restore()-Pille + normaler
+         Folge-Turn, bzw. zwei Pillen ohne Zwischen-Turn) werden zu EINER
+         Nachricht zusammengeführt, Text bleibt vollständig erhalten,
+         Rollenfolge alterniert danach korrekt; 7) bereits alternierende
+         History bleibt UNVERÄNDERT (kein Merge ohne Kollision, Content
+         bleibt `String` statt Array); 8) ein Bild-Upload im aktuellen Turn
+         wird beim Merge korrekt zu einem content-Array normalisiert
+         (String- + Block-Content gemischt). `fmtStamp` zusätzlich aus
+         `App.jsx` exportiert (war zuvor modul-intern), damit Test 2 das
+         Zeitformat nicht dupliziert.
+         Punkt 1 (zweites 🔵, 7 Tests, alle `tests/anthropic.test.js`,
+         `describe shouldRetryPointerOnly`): 9)
+         `shouldRetryPointerOnly(null, pointer_only-res)` → `true` (exakt
+         die C14-Klasse); 10) `shouldRetryPointerOnly(rejectedPlan, …)` →
+         `false` (gehört zum ERSTEN Auslöser in `send()`, nicht zu
+         diesem); 11) `shouldRetryPointerOnly(null,
+         retryReason≠"pointer_only")` → `false`; 12)
+         `shouldRetryPointerOnly(null, kaputtes/fehlendes retryWith)` →
+         `false`; **13) `shouldRetryPointerOnly(planWithOps,
+         pointer_only-res)` → `false` – pinnt DIREKT den zweiten
+         🔵-Fund** (ein Turn MIT Notizbuch-Ops löst den zweiten
+         Retry-Auslöser NICHT mehr aus, unabhängig davon, ob `reply`
+         `POINTER_ONLY_RE` trifft); **14)
+         `isPointerOnlyReply("Eingetragen wie oben beschrieben.")` →
+         `true`** (die Mustererkennung bleibt unverändert korrekt – der Fix
+         sitzt in Test 13, nicht in der Erkennung selbst); 15) `res`
+         fehlt/`null`/`undefined` → keine Exception, `false`;
+         `plan===undefined` verhält sich wie `null` (`true`).
+         Bestandscode-Fixes an ZWEI bestehenden Test-Fixtures
+         (`tests/anthropic.test.js`, keine Verhaltensänderung, nur
+         unrealistische Fixtures korrigiert, GEFUNDEN beim Schreiben der
+         History-Merge-Tests): „History strippt cite-Marker…“ hatte zwei
+         `role:"user"`-Einträge direkt hintereinander – umgestellt auf
+         alternierende Rollen, aber NICHT weil zwei `role:"user"`-Einträge
+         in Folge in echten Chat-Verläufen unmöglich wären (Review-Korrektur
+         siehe Punkt 5 oben: sie kommen regelmäßig vor), sondern aus
+         Test-technischen Gründen – dieser Test prüft mehrere Nachrichten
+         GETRENNT über `toContain()`, die neue History-Merge-Sicherung hätte
+         sie sonst vor der Prüfung zu einem `content`-Array verschmolzen;
+         der Prompt-Caching-Test „…12-Nachrichten-Fenster…“ hatte zehn
+         `role:"user"`-Einträge in Folge aus demselben Test-technischen
+         Grund – ebenfalls auf alternierend umgestellt (Testaussage
+         unverändert: mehrere Nachrichten ohne `cache_control`).
+       - **Zusätzliche Tests aus Punkt 5 (zweite Review-Runde, 6 neu):** 1)
+         „Resend nach Fehler-Turn: user A + assistant(error) + user A → EINE
+         user-Nachricht, Fehlertext nicht enthalten“ (`tests/anthropic.test.js`,
+         Block `History-Merge gleichrolliger Nachbarn`) – pinnt den zweiten,
+         bisher unerwähnten Kollisionspfad aus dem 🟡-Fund; 2–6)
+         `describe mergeRetryMemoryOps` (`tests/turn.test.js`): leere
+         Retry-Liste → Erstversuch bleibt (der eigentliche Live-Bug), eigene
+         Retry-Ops → Retry gewinnt, beide leer → leeres Array, Erstversuch
+         leer + Retry gefüllt → Retry gewinnt, kaputte/fehlende Eingaben
+         (`undefined`/`null`/Nicht-Array) werfen nicht.
+       - **Gesamt NACH der Abschluss-Runde: 2504 Tests grün** (2483 + 15 +
+         6 neu), Coverage Gesamt-Repo 93.07 % Statements / 86.96 % Branches /
+         92.77 % Funktionen / 95.52 % Zeilen (Gate 60 % auf `src/lib`;
+         `anthropic.js` 95.36 %/85.79 %/100 %/97.47 %; `turn.js` 96.87 %/
+         85.84 %/100 %/100 %). Version bleibt `v7.55`.

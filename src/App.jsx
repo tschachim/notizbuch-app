@@ -13,7 +13,9 @@ import { applyOpsDetailed, dispHead, PLACEHOLDER_LINE, stripInboxPlaceholder } f
 // kommentare) - App.jsx ruft sie nur noch auf und kümmert sich um I/O
 // (Commit/Rendering), siehe send()/commitPlannedGroups()/applyRejectedTurn()
 // unten.
-import { evaluateTurn, buildRejectWarning, overrideOpsFor, DESTRUCTIVE_OP_TYPES } from "./lib/turn.js";
+import {
+  evaluateTurn, buildRejectWarning, buildTurnDiagnosis, overrideOpsFor, mergeRetryMemoryOps, DESTRUCTIVE_OP_TYPES,
+} from "./lib/turn.js";
 import { verifyTurn, sanitizeDiagFragment } from "./lib/verify.js";
 import { resolveMetaForDisplay, applyMetaResult, metaAfterError, bumpMetaCount, isStaleResponse } from "./lib/meta.js";
 import { applyMemoryOps, applyMemoryOpsDetailed } from "./lib/memory.js";
@@ -24,7 +26,7 @@ import {
   prepareImage, newImgId, extForMime, mimeForName, dataUrlParts, blobToDataURL,
   makeNotebookIcon, uploadEditorImage,
 } from "./lib/images.js";
-import { MODELS, callClaude } from "./lib/anthropic.js";
+import { MODELS, callClaude, POINTER_ONLY_RETRY_DIAGNOSIS, shouldRetryPointerOnly } from "./lib/anthropic.js";
 import { buildFeedbackTrigger, isNoFeedback, dedupeFeedbackParagraphs } from "./lib/feedback.js";
 import {
   ShaConflictError, utf8ToB64, ghGetFile, ghGetBlob, ghListDir, ghPutFile,
@@ -238,7 +240,10 @@ const WELCOME = {
 const fmtTime = (ts) =>
   new Date(ts).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
 
-const fmtStamp = (ts) =>
+// Exportiert (v7.55.1): tests/appOps.test.js pinnt buildRestoreInfo() gegen
+// GENAU dieses Format, statt es im Test zu duplizieren (ein zweiter,
+// potenziell abweichender Formatierungspfad wäre ein Pflegerisiko).
+export const fmtStamp = (ts) =>
   new Date(ts).toLocaleString("de-DE", {
     day: "2-digit", month: "2-digit", year: "2-digit",
     hour: "2-digit", minute: "2-digit",
@@ -364,6 +369,49 @@ export function buildOpsWarning(items) {
 // geändert.
 export function buildOpsInfo(items) {
   return describeOpItems(items, "ℹ️ Hinweis");
+}
+
+// v7.55 (B2, In-Turn-Retry, DECISIONS #113): dezenter Hinweis, wenn der
+// In-Turn-Retry (send()#planForOps/retryWith, siehe unten) die Antwort
+// dieses Turns bereits automatisch nachgebessert hat – EIGENER Builder statt
+// eines describeOpItems()-Items ohne "type", weil der feste Wortlaut
+// "Automatisch nachgebessert" (anders als buildOpsInfo/buildOpsWarning) NIE
+// mit "ℹ️ Hinweis" bzw. "⚠️ Nicht angewendet" beginnen soll – der Nutzer
+// soll auf den ersten Blick sehen, dass hier NICHT wieder eine übersprungene
+// Op gemeint ist, sondern eine bereits erfolgreich korrigierte Antwort.
+// Reine Funktion (kein State-Zugriff), sanitizeWarnLabel() schützt wie bei
+// den übrigen Kanälen vor Klammer-/Zeilenumbruch-Injection Richtung des
+// "[SYSTEM-HINWEIS: …]"-Rahmens (anthropic.js#callClaude). Liefert null bei
+// leerem/fehlendem reason (kein Retry gelaufen), damit [...].filter(Boolean)
+// an den Aufrufstellen sauber greift.
+export function buildRetryInfo(reason) {
+  const r = String(reason || "").trim();
+  return r ? "ℹ️ Automatisch nachgebessert: " + sanitizeWarnLabel(r) : null;
+}
+
+// v7.55.1 (E2E-Fall C32 🟡, Review-Fix Runde 1, DECISIONS #113 „Abschluss vor
+// Commit“): reiner Wortlaut-Builder für die restore()-Info-Pille (analog
+// buildRetryInfo oben) – exportiert für tests/appOps.test.js. Live-Befund:
+// nach einer Historie-Wiederherstellung (App.jsx#restore, committet den
+// alten Stand als NEUEN Commit) glaubte das Modell seiner EIGENEN früheren
+// Chat-Aussage ("Kapitel X wurde im vorherigen Schritt entfernt") mehr als
+// dem tatsächlichen, bereits korrekten Dokumentstand – obwohl docCache/der
+// Prompt längst den wiederhergestellten Stand zeigten. sanitizeWarnLabel()
+// NICHT nötig: anders als buildOpsInfo/buildOpsWarning/buildRetryInfo landet
+// dieser Text NICHT in einem "[SYSTEM-HINWEIS: …]"-Rahmen (siehe restore()
+// unten), sondern als GEWÖHNLICHER Nachrichtentext wie bei der bestehenden
+// "manuell bearbeitet"-Pille (requestFeedback oben) – dieselbe, dort bereits
+// akzeptierte Konvention. name/ts kommen aus App-State (Notizbuchname/
+// Zeitstempel des wiederhergestellten Eintrags), nicht aus Modellantworten.
+export function buildRestoreInfo(name, ts) {
+  // Review-Fix (🔵 2, DECISIONS #113 Abschluss-Delta): "aktuelle" statt
+  // "oben" – die Pille erscheint IMMER im Chat (linke Spalte), "oben"
+  // bezog sich implizit auf den Dokumentbereich, der auf Mobilgeräten (nur
+  // EINE sichtbare Spalte, siehe "Mobiler Umschalter" oben) zum Zeitpunkt
+  // der Pille oft gar nicht sichtbar/"oben" ist – "aktuelle" ist layout-
+  // unabhängig eindeutig.
+  return "Notizbuch „" + name + "“: Stand vom " + fmtStamp(ts) +
+    " wiederhergestellt – der aktuelle Dokumentstand ist maßgeblich, frühere Chat-Aussagen dazu sind überholt.";
 }
 
 /* ------------------------------------------------------------------ */
@@ -1900,7 +1948,10 @@ export default function NotizbuchApp() {
       }
 
       const nbCtx = await buildNbCtx();
-      const res = await callClaude(cfg.apiKey, text, nbCtx, chat, model, img, imgId, fileInfo);
+      // v7.55 (B2, In-Turn-Retry, DECISIONS #113): "let" statt "const" – der
+      // In-Turn-Retry weiter unten ersetzt res bei Erfolg vollständig durch
+      // das Retry-Ergebnis (res.retryWith()).
+      let res = await callClaude(cfg.apiKey, text, nbCtx, chat, model, img, imgId, fileInfo);
 
       // Bild erst nach erfolgreicher Antwort als Datei ins Daten-Repo legen
       // (keine verwaisten Dateien bei API-Fehlern), aber vor dem Dokument-
@@ -1959,52 +2010,169 @@ export default function NotizbuchApp() {
       // also auch gemeinsam scheitern oder gemeinsam gelingen). Erhalten
       // bleibt: bei SHA-Konflikt UND bei reinen Skips läuft commitMemory
       // trotzdem (C19 unverändert, siehe unten).
-      const { memoryOps, notebookOps } = splitOps(res.ops);
+      //
+      // v7.55 (B2, In-Turn-Retry, DECISIONS #113): Split + Auto-Titel-
+      // Auflösung + Gruppierung + evaluateTurn() sind jetzt eine eigene
+      // Helper-Funktion statt Inline-Code – der In-Turn-Retry weiter unten
+      // braucht GENAU dieselbe Aufbereitung für die Retry-Antwort wie für
+      // den Erstversuch, ohne den Async-Ablauf zu duplizieren (zweite,
+      // potenziell abweichende Kopie wäre ein Pflegerisiko).
+      const planForOps = async (ops) => {
+        const { memoryOps: mOps, notebookOps: nOps } = splitOps(ops);
+        // v7.54 (Verify-then-Commit-Gate, DECISIONS #112, Spec 5.1 Schritt 4):
+        // evaluateTurn() (src/lib/turn.js) übernimmt die komplette v7.53
+        // Drei-Phasen-Logik (Phase 1 applyOpsDetailed je Gruppe, Phase 2
+        // turnGuard.js#planTurn UNVERÄNDERT als Teilregel, Phase 3 Neu-
+        // Anwendung der gefilterten Ops nach einem Hold) UND ergänzt Phase 4
+        // (verifyTurn je Gruppe, src/lib/verify.js) sowie die Verwerfungs-
+        // Entscheidung (4.3, TURN-REGELN 1) - reine, ohne React/GitHub-API
+        // testbare Logik (tests/turn.test.js/tests/verify.test.js/
+        // tests/replay.test.js). App.jsx liefert nur noch den REINEN
+        // Phase-1-Snapshot je Ziel-Notizbuch ("before" = docCache.current[nbId]
+        // JETZT, vor jedem Commit dieses Turns).
+        let p = null;
+        if (nOps.length) {
+          // Auto-Titel-Auflösung (v7.12 Teil B, Auftrag "automatische
+          // Titel-Ermittlung überall"): NUR das neue op.content-Fragment läuft
+          // durch resolveProviderLinkTitles, NIE das Bestandsdokument – Chat-
+          // Änderungen bleiben minimal-invasiv (applyOps wendet das Fragment
+          // ohnehin gezielt auf einen Abschnitt an). resolveProviderLinkTitles
+          // wirft laut eigenem Vertrag nie; ein Fetch-Fehler lässt content
+          // unverändert.
+          const resolvedOps = await Promise.all(
+            nOps.map(async (op) =>
+              op && typeof op.content === "string"
+                ? { ...op, content: await resolveProviderLinkTitles(op.content) }
+                : op
+            )
+          );
 
-      // v7.54 (Verify-then-Commit-Gate, DECISIONS #112, Spec 5.1 Schritt 4):
-      // evaluateTurn() (src/lib/turn.js) übernimmt die komplette v7.53
-      // Drei-Phasen-Logik (Phase 1 applyOpsDetailed je Gruppe, Phase 2
-      // turnGuard.js#planTurn UNVERÄNDERT als Teilregel, Phase 3 Neu-
-      // Anwendung der gefilterten Ops nach einem Hold) UND ergänzt Phase 4
-      // (verifyTurn je Gruppe, src/lib/verify.js) sowie die Verwerfungs-
-      // Entscheidung (4.3, TURN-REGELN 1) - reine, ohne React/GitHub-API
-      // testbare Logik (tests/turn.test.js/tests/verify.test.js/
-      // tests/replay.test.js). App.jsx liefert nur noch den REINEN
-      // Phase-1-Snapshot je Ziel-Notizbuch ("before" = docCache.current[nbId]
-      // JETZT, vor jedem Commit dieses Turns).
-      let plan = null;
-      if (notebookOps.length) {
-        // Auto-Titel-Auflösung (v7.12 Teil B, Auftrag "automatische
-        // Titel-Ermittlung überall"): NUR das neue op.content-Fragment läuft
-        // durch resolveProviderLinkTitles, NIE das Bestandsdokument – Chat-
-        // Änderungen bleiben minimal-invasiv (applyOps wendet das Fragment
-        // ohnehin gezielt auf einen Abschnitt an). resolveProviderLinkTitles
-        // wirft laut eigenem Vertrag nie; ein Fetch-Fehler lässt content
-        // unverändert.
-        const resolvedOps = await Promise.all(
-          notebookOps.map(async (op) =>
-            op && typeof op.content === "string"
-              ? { ...op, content: await resolveProviderLinkTitles(op.content) }
-              : op
-          )
-        );
+          // Ops nach Ziel-Notizbuch gruppieren (Default und unbekannte Namen → aktives)
+          const byName = new Map(notebooksRef.current.map((n) => [n.name.trim().toLowerCase(), n]));
+          const groups = new Map();
+          for (const op of resolvedOps) {
+            const target =
+              (op && typeof op.notebook === "string" && byName.get(op.notebook.trim().toLowerCase())) ||
+              activeNotebook();
+            if (!groups.has(target.id)) groups.set(target.id, []);
+            groups.get(target.id).push(op);
+          }
 
-        // Ops nach Ziel-Notizbuch gruppieren (Default und unbekannte Namen → aktives)
-        const byName = new Map(notebooksRef.current.map((n) => [n.name.trim().toLowerCase(), n]));
-        const groups = new Map();
-        for (const op of resolvedOps) {
-          const target =
-            (op && typeof op.notebook === "string" && byName.get(op.notebook.trim().toLowerCase())) ||
-            activeNotebook();
-          if (!groups.has(target.id)) groups.set(target.id, []);
-          groups.get(target.id).push(op);
+          const groupsInput = Array.from(groups, ([nbId, gOps]) => {
+            const nb = notebooksRef.current.find((n) => n.id === nbId);
+            return { nbId, name: nb ? nb.name : nbId, ops: gOps, before: docCache.current[nbId] || "" };
+          });
+          p = evaluateTurn(groupsInput);
         }
+        return { memoryOps: mOps, plan: p };
+      };
 
-        const groupsInput = Array.from(groups, ([nbId, ops]) => {
-          const nb = notebooksRef.current.find((n) => n.id === nbId);
-          return { nbId, name: nb ? nb.name : nbId, ops, before: docCache.current[nbId] || "" };
-        });
-        plan = evaluateTurn(groupsInput);
+      let { memoryOps, plan } = await planForOps(res.ops);
+
+      // v7.55 (B2, In-Turn-Retry, DECISIONS #113, TURN-REGELN 8): EIN
+      // automatischer Nachfass-Versuch NOCH IM SELBEN Turn, bevor der Nutzer
+      // die Verwerfungs-Pille überhaupt sieht. Zwei unabhängige Auslöser
+      // (können nie beide zugleich greifen, weil res.retryWith nach dem
+      // ersten Aufruf wirft – siehe anthropic.js#callClaude):
+      // (1) evaluateTurn() hat den Turn bereits verworfen (H/A) – Diagnose
+      //     kommt aus turn.js#buildTurnDiagnosis (tool_result is_error).
+      // (2) callClaude() erkennt eine reine Verweis-Antwort OHNE Vorab-Text
+      //     (retryReason==="pointer_only", siehe anthropic.js#
+      //     isPointerOnlyReply, E2E-Fall C14 🔴) – nur wenn (1) NICHT bereits
+      //     gegriffen hat, sonst wäre der eine erlaubte Retry am falschen
+      //     Fall verbraucht und ein wirklich verworfener Turn bekäme keine
+      //     Chance mehr. Review-Fix (Runde 1, zweites 🔵): (2) greift
+      //     ZUSÄTZLICH nur, wenn der Erstversuch GAR KEINE Notizbuch-Ops
+      //     hatte (anthropic.js#shouldRetryPointerOnly prüft `!plan`, siehe
+      //     dort) – sonst hätte ein reply, das zufällig POINTER_ONLY_RE
+      //     trifft, OBWOHL echte Ops im selben Tool-Aufruf standen (Live-
+      //     Beispiel: „Eingetragen wie oben beschrieben.“), einen Retry
+      //     ausgelöst, dessen typische ops:[]-Antwort die bereits korrekt
+      //     geplanten Ops des Erstversuchs überschrieben hätte.
+      // "Letzter Versuch gewinnt" (TURN-REGELN 8): bei Erfolg ersetzen
+      // res/plan/memoryOps VOLLSTÄNDIG das Erstversuch-Ergebnis, auch wenn
+      // der Retry selbst wieder verworfen wird (Pille/Diff/Override laufen
+      // dann auf dem Retry-Ergebnis, nicht auf dem Erstversuch). Bild-/
+      // Datei-Uploads liefen bereits VOR diesem Punkt (siehe oben) und
+      // werden für den Retry nicht erneut ausgeführt.
+      let retryNote = null;
+      if (plan && plan.rejected && typeof res.retryWith === "function") {
+        const rejectedCodes = plan.reasons.flatMap((r) => r.codes).join(", ");
+        setBusyLabel("Nachbesserung …");
+        let res2 = null;
+        try {
+          res2 = await res.retryWith(buildTurnDiagnosis(plan));
+        } catch (e) {
+          res2 = null; // z. B. "In-Turn-Retry bereits verbraucht" – B1-Verhalten unten
+        }
+        setBusyLabel("strukturiert …");
+        if (res2) {
+          const replanned = await planForOps(res2.ops);
+          res = res2;
+          plan = replanned.plan;
+          memoryOps = replanned.memoryOps;
+          if (!(plan && plan.rejected)) {
+            retryNote = "erste Antwort verworfen (" + rejectedCodes + "), Korrektur im selben Turn übernommen";
+          }
+        }
+      } else if (shouldRetryPointerOnly(plan, res)) {
+        setBusyLabel("Nachbesserung …");
+        let res2 = null;
+        try {
+          res2 = await res.retryWith(POINTER_ONLY_RETRY_DIAGNOSIS);
+        } catch (e) {
+          res2 = null;
+        }
+        setBusyLabel("strukturiert …");
+        if (res2) {
+          const replanned = await planForOps(res2.ops);
+          // Review-Fix (Runde 1, zweites 🔵) – ZWEITE, redundante Sicherung:
+          // shouldRetryPointerOnly() oben garantiert bereits, dass `plan` an
+          // DIESER Stelle null ist (Erstversuch hatte keine Notizbuch-Ops) –
+          // es gibt also nichts zu verlieren. Trotzdem hier defensiv (statt
+          // sich allein auf die äußere Bedingung zu verlassen) geprüft: nur
+          // falls diese Invariante durch eine künftige Änderung an der
+          // Bedingung oben je bricht UND der Retry ebenfalls KEINE
+          // Notizbuch-Ops liefert, bleibt der Erstversuch bestehen statt
+          // dass "letzter Versuch gewinnt" (TURN-REGELN 8) bereits geplante
+          // Ops stillschweigend verwirft – exakt die C14-Gegenklasse.
+          const firstHadNotebookOps = !!plan;
+          const retryHasNoNotebookOps = !replanned.plan;
+          if (firstHadNotebookOps && retryHasNoNotebookOps) {
+            // Erstversuch (res/plan/memoryOps) bleibt unverändert bestehen.
+          } else {
+            // ops bleiben die des Retry-Ergebnisses (kein Zusammenführen mit
+            // dem verworfenen Erstversuch – der Prompt-Vertrag verlangt eine
+            // vollständige, in sich stimmige Antwort je Versuch). Review-Fix
+            // (🔵 1, DECISIONS #113 Abschluss-Delta) – memoryOps NICHT
+            // dieselbe blinde Ersetzung: POINTER_ONLY_RETRY_DIAGNOSIS
+            // erwähnt Gedächtnis-Ops mit keinem Wort, fragt gezielt nur die
+            // fehlende Notizbuch-Antwort nach. Live-Szenario: Erstversuch
+            // liefert memory_*-Ops UND eine reine Verweis-Antwort ohne
+            // Notizbuch-Ops, der Retry liefert dann typischerweise ops:[]
+            // (Modell wiederholt die bereits "erledigten" Gedächtnis-Ops
+            // nicht) – eine blinde Übernahme von replanned.memoryOps hätte
+            // die Erstversuch-Ops hier still verworfen, obwohl sie nie
+            // committet wurden. turn.js#mergeRetryMemoryOps: leere
+            // Retry-Liste → Erstversuch-Liste bleibt bestehen; liefert der
+            // Retry EIGENE memory_*-Ops, gewinnen die (unverändert "letzter
+            // Versuch gewinnt").
+            res = res2;
+            plan = replanned.plan;
+            memoryOps = mergeRetryMemoryOps(memoryOps, replanned.memoryOps);
+            // Review-Fix (Runde 1, 🟡): nur bei TATSÄCHLICHER Behebung melden.
+            // Bleibt res2.retryReason weiterhin "pointer_only" (Retry-Antwort
+            // verweist selbst wieder nur auf "oben"), würde die ℹ️-Pille eine
+            // Behebung vortäuschen, die nie stattfand – und über den SYSTEM-
+            // HINWEIS-Kanal (Prompt-Bullet "als bereits angewendet behandeln,
+            // NICHT wiederholen") das Modell im Folge-Turn aktiv daran hindern,
+            // die nie gelieferte Antwort nachzuliefern (verschärft C14, statt
+            // es zu lösen).
+            if (res2.retryReason !== "pointer_only") {
+              retryNote = "Antwort verwies nur auf „oben“ ohne Text davor – vollständig nachgereicht";
+            }
+          }
+        }
       }
 
       // 4.3/TURN-REGELN 1 (Verwerfungsregel): (H) irgendeine Gruppe mit
@@ -2107,7 +2275,11 @@ export default function NotizbuchApp() {
           // durchlaufenen Notizbuch-Gruppen) bleiben auch im Konflikt-Fall
           // sichtbar – teilweiser Erfolg soll ehrlich abgebildet werden.
           warning: buildOpsWarning(notApplied) || undefined,
-          opsInfo: buildOpsInfo(infos) || undefined,
+          // v7.55 (B2, DECISIONS #113): retryNote (siehe oben) läuft NACH
+          // buildRetryInfo() im selben ℹ️-Kanal wie buildOpsInfo – beide
+          // landen im SELBEN SYSTEM-HINWEIS-Rahmen des nächsten Turns
+          // (anthropic.js#callClaude, "sysNote" aus m.warning + m.opsInfo).
+          opsInfo: [buildRetryInfo(retryNote), buildOpsInfo(infos)].filter(Boolean).join("\n") || undefined,
           text: saved.length
             ? "Teilweise gespeichert (" + saved.join(", ") + "). Ein weiteres Notizbuch wurde " +
               "parallel geändert und NICHT gespeichert – bitte nur den fehlenden Teil neu erfassen " +
@@ -2190,11 +2362,17 @@ export default function NotizbuchApp() {
         // #/##-Zeilen an, Spec 2.3 "created[]") + softInfos (Verify-
         // Prüfhinweise ℹ️, siehe verify.js) - nur NICHT-verworfene Turns
         // erreichen diese Stelle überhaupt (siehe plan.rejected-Return oben).
-        opsInfo: buildOpsInfo([
-          ...infos,
-          ...(plan ? plan.createdInfos : []),
-          ...(plan ? plan.softInfos : []),
-        ]) || undefined,
+        // v7.55 (B2, DECISIONS #113): retryNote (siehe oben, buildRetryInfo)
+        // steht VOR den übrigen ℹ️-Hinweisen – der dezente Hinweis "wurde
+        // automatisch nachgebessert" soll zuerst auffallen.
+        opsInfo: [
+          buildRetryInfo(retryNote),
+          buildOpsInfo([
+            ...infos,
+            ...(plan ? plan.createdInfos : []),
+            ...(plan ? plan.softInfos : []),
+          ]),
+        ].filter(Boolean).join("\n") || undefined,
         sources: res.sources && res.sources.length ? res.sources : undefined,
       };
       const finalChat = [...chatWithUser, aMsg].slice(-80);
@@ -3364,6 +3542,32 @@ export default function NotizbuchApp() {
       setShowHistory(false);
       setExpanded(null);
       setExpandedData(null);
+      // v7.55.1 (E2E-Fall C32 🟡, Review-Fix Runde 1, DECISIONS #113
+      // „Abschluss vor Commit“): dieselbe Pillen-Mechanik wie die
+      // "manuell bearbeitet"-Pille oben (requestFeedback) – role:"user",
+      // info:true, dadurch identisches Rendering/Archivieren UND identischer
+      // Weg in die API-History (anthropic.js#callClaude#msgs, siehe dort).
+      // ANDERS als requestFeedbacks Pille NICHT zwingend von einer
+      // Assistent-Antwort im selben setChat-Aufruf gefolgt (restore() macht
+      // bewusst KEINEN API-Aufruf) - die dadurch mögliche Kollision "zwei
+      // user-Nachrichten in Folge", sobald direkt danach eine normale
+      // Chat-Nachricht kommt, fängt anthropic.js#callClaude jetzt generisch
+      // ab (History-Merge gleichrolliger Nachbarn, siehe dort). Text kommt
+      // aus buildRestoreInfo() (reiner Builder, oben) statt Inline-String,
+      // damit tests/appOps.test.js den Wortlaut unabhängig pinnen kann.
+      // Review-Fix (🔵 3, DECISIONS #113 Abschluss-Delta): restore:true
+      // steuert unten im Rendering das Pillen-Icon (RotateCcw statt Pencil)
+      // – rein optisch, unterscheidet die Wiederherstellen-Pille von der
+      // "manuell bearbeitet"-Pille trotz identischer info:true-Mechanik.
+      setChat((prev) =>
+        [...prev, {
+          role: "user", info: true, restore: true, ts: Date.now(), text: buildRestoreInfo(nb.name, entry.ts),
+        }].slice(-80)
+      );
+      // Gleiche Sichtbarkeits-Konvention wie requestFeedbacks Pille oben:
+      // Historie lässt sich auch aus der Dokumentansicht öffnen, der Nutzer
+      // sieht die neue Pille dann nicht sofort.
+      if (viewRef.current !== "chat") setChatDirty(true);
     }
   };
 
@@ -3623,7 +3827,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.54</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.55</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -3727,7 +3931,14 @@ export default function NotizbuchApp() {
             {chat.map((m, i) => m.info ? (
               <div key={i} className="flex justify-center">
                 <span className="inline-flex items-center gap-1 text-xs text-slate-400 bg-slate-100 border border-slate-200 rounded-full px-2.5 py-0.5">
-                  <Pencil size={10} />
+                  {/* Review-Fix (🔵 3, DECISIONS #113 Abschluss-Delta): die
+                      Wiederherstellen-Pille (App.jsx#restore, restore:true)
+                      bekommt ein eigenes Icon statt des Stift-Symbols der
+                      "manuell bearbeitet"-Pille (requestFeedback) - beide
+                      teilen sich zwar dieselbe info:true-Rendering-/
+                      History-Mechanik, sind inhaltlich aber unterschiedliche
+                      Ereignisse. */}
+                  {m.restore ? <RotateCcw size={10} /> : <Pencil size={10} />}
                   {m.text}
                 </span>
               </div>

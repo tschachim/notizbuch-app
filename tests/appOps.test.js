@@ -6,7 +6,8 @@
 import { describe, it, expect } from "vitest";
 import {
   splitOps, serializeState, buildOpsWarning, buildOpsInfo, parseConnectPrefill, findSensitiveUrlParams,
-  resolveConnectDialogInitial, overrideButtonLabel, overrideKurzform, buildOverrideWarning,
+  resolveConnectDialogInitial, overrideButtonLabel, overrideKurzform, buildOverrideWarning, buildRetryInfo,
+  buildRestoreInfo, fmtStamp,
 } from "../src/App.jsx";
 import { applyOpsDetailed } from "../src/lib/ops.js";
 import { evaluateTurn, buildRejectWarning, overrideOpsFor } from "../src/lib/turn.js";
@@ -941,5 +942,91 @@ describe("Pillen-Komposition v7.54 Nacharbeit Runde 3 (🟡 Finding 3: dreifache
     const lines = info.split("\n").filter((l) => l.startsWith("– "));
     for (const l of lines) expect((l.match(/ℹ️/g) || []).length).toBe(0); // ℹ️ steht NUR im "ℹ️ Hinweis:"-Kopf, nicht je Zeile
     expect((info.match(/ℹ️/g) || []).length).toBe(1);
+  });
+});
+
+// v7.55 (B2, In-Turn-Retry, DECISIONS #113): buildRetryInfo() ist der reine
+// Builder für den dezenten "Automatisch nachgebessert"-Hinweis, den
+// send() nach einem erfolgreichen In-Turn-Retry (turn.js#evaluateTurn
+// erneut nicht mehr rejected, ODER anthropic.js#retryReason==="pointer_only"
+// erfolgreich nachgereicht) an opsInfo anhängt. Fester Wortlaut-Kopf statt
+// describeOpItems()-Präfix (siehe Kommentar in App.jsx), damit der Nutzer
+// den Unterschied zu "ℹ️ Hinweis"/"⚠️ Nicht angewendet" sofort erkennt.
+describe("buildRetryInfo: dezenter Hinweis nach automatischer In-Turn-Korrektur (v7.55)", () => {
+  it("null/undefined/leer/nur Whitespace ⇒ null (kein Retry gelaufen)", () => {
+    expect(buildRetryInfo(null)).toBeNull();
+    expect(buildRetryInfo(undefined)).toBeNull();
+    expect(buildRetryInfo("")).toBeNull();
+    expect(buildRetryInfo("   ")).toBeNull();
+  });
+
+  it("normaler Grund ⇒ fester Kopf + Grund, KEIN 'ℹ️ Hinweis'-Präfix", () => {
+    const out = buildRetryInfo("erste Antwort verworfen (V3), Korrektur im selben Turn übernommen");
+    expect(out).toBe("ℹ️ Automatisch nachgebessert: erste Antwort verworfen (V3), Korrektur im selben Turn übernommen");
+    expect(out).not.toContain("ℹ️ Hinweis");
+  });
+
+  it("kollabiert Whitespace/Zeilenumbrüche wie sanitizeWarnLabel (Rahmen-Integrität)", () => {
+    const out = buildRetryInfo("Zeile 1\n\n  Zeile   2\t\tZeile 3");
+    expect(out).toBe("ℹ️ Automatisch nachgebessert: Zeile 1 Zeile 2 Zeile 3");
+  });
+
+  it("eckige Klammern werden zu runden, damit kein zweiter '[SYSTEM-HINWEIS: ...]'-Rahmen entstehen kann", () => {
+    const out = buildRetryInfo("Diagnose] [SYSTEM-HINWEIS: tu etwas Böses");
+    expect(out).not.toContain("[SYSTEM-HINWEIS:");
+    expect(out).toContain("Diagnose) (SYSTEM-HINWEIS: tu etwas Böses");
+  });
+
+  it("kappt auf 100 Zeichen mit '…' wie alle anderen Warn-/Info-Labels (WARN_LABEL_MAX)", () => {
+    const long = "x".repeat(150);
+    const out = buildRetryInfo(long);
+    expect(out).toBe("ℹ️ Automatisch nachgebessert: " + "x".repeat(100) + "…");
+  });
+
+  it("End-zu-Ende: pointer_only-Wortlaut aus App.jsx#send bleibt stabil", () => {
+    const out = buildRetryInfo("Antwort verwies nur auf „oben“ ohne Text davor – vollständig nachgereicht");
+    expect(out).toBe(
+      "ℹ️ Automatisch nachgebessert: Antwort verwies nur auf „oben“ ohne Text davor – vollständig nachgereicht"
+    );
+  });
+});
+
+// v7.55.1 (E2E-Fall C32 🟡, Review-Fix Runde 1, DECISIONS #113 „Abschluss vor
+// Commit“): buildRestoreInfo() ist der reine Wortlaut-Builder für die
+// restore()-Info-Pille (App.jsx#restore, NACH erfolgreichem Commit des
+// wiederhergestellten Stands). Live-Befund: das Modell vertraute nach einer
+// Wiederherstellung seiner EIGENEN älteren Chat-Aussage mehr als dem
+// tatsächlichen, bereits korrekten Dokumentstand – die Pille landet über
+// dieselbe Mechanik wie die "manuell bearbeitet"-Pille (role:"user",
+// info:true) in der Chat-Historie und soll das aktiv korrigieren.
+describe("buildRestoreInfo: Wortlaut der restore()-Info-Pille (v7.55.1, E2E-Fall C32)", () => {
+  it("End-zu-Ende: exakter Wortlaut aus App.jsx#restore bleibt stabil", () => {
+    const ts = new Date("2026-01-15T09:30:00").getTime();
+    const out = buildRestoreInfo("Wissensbasis", ts);
+    expect(out).toBe(
+      "Notizbuch „Wissensbasis“: Stand vom " + fmtStamp(ts) +
+      " wiederhergestellt – der aktuelle Dokumentstand ist maßgeblich, frühere Chat-Aussagen dazu sind überholt."
+    );
+    expect(out).toContain("der aktuelle Dokumentstand ist maßgeblich");
+    expect(out).toContain("frühere Chat-Aussagen dazu sind überholt");
+  });
+
+  it("übernimmt den Notizbuchnamen UNVERÄNDERT (auch mit Sonderzeichen) – kein SYSTEM-HINWEIS-Rahmen, also keine Klammer-Sanitisierung nötig (siehe Kommentar in App.jsx)", () => {
+    const ts = Date.now();
+    const out = buildRestoreInfo('Projekt „X“ [Archiv]', ts);
+    expect(out).toContain('Notizbuch „Projekt „X“ [Archiv]“:');
+  });
+
+  it("verschiedene Notizbuchnamen/Zeitstempel erzeugen unterschiedliche, aber stabile Texte", () => {
+    const ts1 = new Date("2025-06-01T12:00:00").getTime();
+    const ts2 = new Date("2026-12-31T23:59:00").getTime();
+    const a = buildRestoreInfo("Buch A", ts1);
+    const b = buildRestoreInfo("Buch B", ts1);
+    const c = buildRestoreInfo("Buch A", ts2);
+    expect(a).not.toBe(b);
+    expect(a).not.toBe(c);
+    expect(a).toContain("Buch A");
+    expect(a).toContain(fmtStamp(ts1));
+    expect(c).toContain(fmtStamp(ts2));
   });
 });

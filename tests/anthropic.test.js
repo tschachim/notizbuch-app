@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   MODELS, webSearchToolFor, buildSystem, buildSystemBlocks, buildChatReply, callClaude, NOTEBOOK_TOOL,
   LOOKUP_TOOL, parseLooseJson, isSubstantialReply, SUBSTANTIAL_REPLY_MIN_LENGTH,
+  isPointerOnlyReply, POINTER_ONLY_RETRY_DIAGNOSIS, shouldRetryPointerOnly,
   formatCacheDebug, resetCacheDiagnosticsForTests,
 } from "../src/lib/anthropic.js";
 import { MEMORY_SOFT_LIMIT, MEMORY_HARD_LIMIT } from "../src/lib/memory.js";
@@ -103,6 +104,168 @@ describe("isSubstantialReply / SUBSTANTIAL_REPLY_MIN_LENGTH", () => {
         "Aktuell ist nur die Präferenz für das 24-Stunden-Format bei Uhrzeiten gespeichert – siehe Antwort.";
       expect(isSubstantialReply(farPointer)).toBe(true);
     });
+
+    // Review-Fix (Runde 1, 🟡, Pin): "wie oben besprochen/gewünscht/vereinbart"
+    // (Verweis auf den CHATVERLAUF, kein Partizip-Selbstverweis) bleibt auch
+    // bei GROSSER Länge substanziell – nur "wie oben <Partizip>" (Selbstverweis
+    // auf einen anderen Teil DERSELBEN Antwort) wird ausgeschlossen.
+    it("'wie oben besprochen' NAHE AM ANFANG, aber mit ausreichend eigenem Inhalt danach, bleibt substanziell", () => {
+      const t =
+        "Wie oben besprochen habe ich die zweistufige Gliederung jetzt vollständig ausgearbeitet und " +
+        "mit allen relevanten Details ergänzt.";
+      expect(t.length).toBeGreaterThanOrEqual(SUBSTANTIAL_REPLY_MIN_LENGTH);
+      expect(isSubstantialReply(t)).toBe(true);
+    });
+  });
+});
+
+// v7.55 (B2, In-Turn-Retry, DECISIONS #113, zweiter Retry-Auslöser, E2E-Fall
+// C14 🔴): isPointerOnlyReply entscheidet den ZWEITEN Retry-Trigger in
+// callClaude (der ERSTE ist die B1-Verwerfung/turn.js#evaluateTurn, das
+// betrifft App.jsx, siehe dort). Pure Funktion, unabhängig von callClaude/
+// fetch testbar – die Integration in callClaude (Feld "retryReason") wird
+// zusätzlich unten im "callClaude (fetch gemockt)"-Block geprüft.
+describe("isPointerOnlyReply (B2, zweiter Retry-Auslöser, DECISIONS #113, E2E-Fall C14)", () => {
+  it("der reale C14-Live-Fund (ungekürzter Wortlaut, 120 Zeichen ≥ SUBSTANTIAL_REPLY_MIN_LENGTH): " +
+     "reiner Verweis OHNE jeden Vorab-Text → true", () => {
+    // 'Schlage mir eine zweistufige Gliederung vor' -> reply verweist auf
+    // 'oben', obwohl NICHTS davor stand (kein Websuche-Vorab-Text). Review-Fix
+    // (Runde 1, 🔴): der ECHTE Live-Text ist LÄNGER als SUBSTANTIAL_REPLY_MIN_
+    // LENGTH – eine (inzwischen entfernte) Kürze-Bedingung in isPointerOnlyReply
+    // hätte genau diesen Auftragsfall verfehlt (eine gekürzte Test-Fixture
+    // hatte das verschleiert).
+    const liveText =
+      "Vorschlag ist oben ausformuliert. Ich habe noch nichts umgebaut – sag Bescheid, wenn ich die " +
+      "Gliederung so anlegen soll.";
+    expect(liveText.length).toBeGreaterThanOrEqual(SUBSTANTIAL_REPLY_MIN_LENGTH);
+    expect(isPointerOnlyReply(liveText, [])).toBe(true);
+  });
+
+  it("reiner Verweis MIT substanziellem Vorab-Text (echte Websuche-Antwort) → false", () => {
+    const preText = [{
+      text: "Kapitel A: Einleitung und Grundlagen, mehrere Unterpunkte. Kapitel B: Vertiefung, " +
+        "Beispiele und eine ausführliche Zusammenfassung am Ende.",
+    }];
+    expect(preText[0].text.length).toBeGreaterThanOrEqual(SUBSTANTIAL_REPLY_MIN_LENGTH);
+    expect(isPointerOnlyReply("Vorschlag ist oben ausformuliert.", preText)).toBe(false);
+  });
+
+  it("normale kurze Bestätigung OHNE Verweis-Muster → false (kein Retry für harmlose Kurzantworten)", () => {
+    expect(isPointerOnlyReply("Notiert.", [])).toBe(false);
+    expect(isPointerOnlyReply("Eingetragen.", [])).toBe(false);
+  });
+
+  it("ein LANGER, im Kern reiner Verweis (>= SUBSTANTIAL_REPLY_MIN_LENGTH) OHNE Vorab-Text → true " +
+     "(Review-Fix Runde 1: KEINE Kürze-Anforderung mehr auf reply selbst – konsistent zum echten C14-Fund " +
+     "oben, der ebenfalls über der Schwelle liegt)", () => {
+    const longPointer =
+      "Wie oben erklärt, ist das Verfahren geeignet für alle gängigen Anwendungsfälle und sollte in " +
+      "den allermeisten praktischen Szenarien zuverlässig funktionieren.";
+    expect(longPointer.trim().length).toBeGreaterThanOrEqual(SUBSTANTIAL_REPLY_MIN_LENGTH);
+    expect(isPointerOnlyReply(longPointer, [])).toBe(true);
+  });
+
+  it("leer/undefined/null/Nicht-String → false, ohne zu werfen", () => {
+    expect(isPointerOnlyReply("", [])).toBe(false);
+    expect(isPointerOnlyReply("   ", [])).toBe(false);
+    expect(isPointerOnlyReply(undefined, [])).toBe(false);
+    expect(isPointerOnlyReply(null, [])).toBe(false);
+    expect(isPointerOnlyReply(42, [])).toBe(false);
+  });
+
+  it("preTextBlocks akzeptiert sowohl { text }-Objekte (wie callClaude#textBlocks) als auch rohe Strings", () => {
+    expect(isPointerOnlyReply("Steht oben.", ["Ein kurzer Satz."])).toBe(true); // kurzer Vorab-Text bleibt nicht-substanziell
+    expect(isPointerOnlyReply("Steht oben.", [{ text: "a".repeat(SUBSTANTIAL_REPLY_MIN_LENGTH) }])).toBe(false);
+  });
+
+  it("fehlendes preTextBlocks-Argument (undefined) wird wie 'kein Vorab-Text' behandelt", () => {
+    expect(isPointerOnlyReply("Steht oben.", undefined)).toBe(true);
+  });
+
+  it("erweiterte Muster 'wie oben <Partizip>' und 'oben ausformuliert' werden erkannt (Erweiterung ggü. dem " +
+     "bestehenden POINTER_ONLY-Muster)", () => {
+    expect(isPointerOnlyReply("Wie oben skizziert.", [])).toBe(true);
+    expect(isPointerOnlyReply("Wie oben dargestellt.", [])).toBe(true);
+    expect(isPointerOnlyReply("Das Ergebnis ist oben ausformuliert.", [])).toBe(true);
+    // die vier bereits vorhandenen Muster funktionieren unverändert weiter
+    expect(isPointerOnlyReply("Siehe oben.", [])).toBe(true);
+    expect(isPointerOnlyReply("Steht oben.", [])).toBe(true);
+    expect(isPointerOnlyReply("Oben beschrieben.", [])).toBe(true);
+  });
+
+  // Review-Fix (Runde 1, 🟡): "wie oben" OHNE Partizip-Pflicht matchte auch
+  // legitime Kurzbestätigungen MIT bereits durchgeführten ops, die sich auf
+  // den vorherigen CHATVERLAUF beziehen (nicht auf einen Selbstverweis
+  // innerhalb derselben Antwort). Ein Retry dort würde riskieren, dass das
+  // Modell im Retry ops:[] liefert ("schon erledigt") und die korrekten ops
+  // des Erstversuchs stillschweigend verloren gehen ("letzter Versuch
+  // gewinnt").
+  it("'wie oben' als Verweis auf den CHATVERLAUF (kein Partizip danach) löst KEINEN Retry aus", () => {
+    expect(isPointerOnlyReply("Wie oben besprochen eingetragen.", [])).toBe(false);
+    expect(isPointerOnlyReply("Notiert wie oben gewünscht.", [])).toBe(false);
+    expect(isPointerOnlyReply("Eingetragen, wie oben vereinbart.", [])).toBe(false);
+  });
+
+  it("POINTER_ONLY_RETRY_DIAGNOSIS ist ein fester, nicht-leerer Text (App.jsx Teil 2 übergibt ihn unverändert an retryWith)", () => {
+    expect(typeof POINTER_ONLY_RETRY_DIAGNOSIS).toBe("string");
+    expect(POINTER_ONLY_RETRY_DIAGNOSIS.length).toBeGreaterThan(0);
+    expect(POINTER_ONLY_RETRY_DIAGNOSIS).toContain("reply-Feld");
+  });
+
+  // Review-Fix Runde 1 (zweites 🔵, DECISIONS #113 „Abschluss vor Commit“):
+  // "Eingetragen wie oben beschrieben." trifft POINTER_ONLY_RE ("wie oben
+  // beschrieben" ist einer der zugelassenen Partizip-Fälle) UND ist damit
+  // aus Sicht dieser reinen Mustererkennung weiterhin korrekt true – auch
+  // wenn der reply MIT bereits durchgeführten Notizbuch-Ops einherging (Live-
+  // Fall des zweiten 🔵-Findings). Die Erkennung selbst bleibt unverändert
+  // (Pin hier); der eigentliche FIX sitzt NICHT hier, sondern in
+  // shouldRetryPointerOnly() unten (bzw. App.jsx#send) – der zweite Retry-
+  // Auslöser darf nur greifen, wenn der Turn GAR KEINE Notizbuch-Ops hatte.
+  it("'Eingetragen wie oben beschrieben.' bleibt true (Mustererkennung unverändert – der Fix sitzt in shouldRetryPointerOnly)", () => {
+    expect(isPointerOnlyReply("Eingetragen wie oben beschrieben.", [])).toBe(true);
+  });
+});
+
+// v7.55.1 (Review-Fix Runde 1, zweites 🔵-Finding, DECISIONS #113 „Abschluss
+// vor Commit“): shouldRetryPointerOnly(plan, res) ist der reine, aus
+// App.jsx#send extrahierte Entscheidungs-Baustein für den zweiten Retry-
+// Auslöser – unabhängig von React/callClaude testbar. `plan` simuliert hier
+// GENAU die beiden Zustände, die App.jsx#planForOps liefert: `null` (keine
+// Notizbuch-Ops im Erstversuch) oder ein Objekt (mindestens eine Gruppe,
+// unabhängig von .rejected – das übernimmt der ERSTE, davor geprüfte Zweig
+// in send()).
+describe("shouldRetryPointerOnly (App.jsx#send, zweiter Retry-Auslöser, Review-Fix Runde 1 zweites 🔵)", () => {
+  const retryableRes = { retryReason: "pointer_only", retryWith: () => {} };
+
+  it("plan===null (keine Notizbuch-Ops im Erstversuch) UND retryReason pointer_only UND retryWith vorhanden → true (exakt die C14-Klasse)", () => {
+    expect(shouldRetryPointerOnly(null, retryableRes)).toBe(true);
+  });
+
+  it("plan ist ein Objekt (Erstversuch HATTE Notizbuch-Ops, auch wenn nicht rejected) → false, KEIN Retry (das zweite 🔵-Finding)", () => {
+    const planWithOps = { rejected: false, groups: [{ nbId: "n1", before: "", text: "x" }] };
+    expect(shouldRetryPointerOnly(planWithOps, retryableRes)).toBe(false);
+  });
+
+  it("plan ist ein rejected-Objekt → ebenfalls false (dieser Fall gehört zum ERSTEN Auslöser in send(), nicht zu diesem)", () => {
+    const rejectedPlan = { rejected: true, reasons: [] };
+    expect(shouldRetryPointerOnly(rejectedPlan, retryableRes)).toBe(false);
+  });
+
+  it("plan===null, aber retryReason ist NICHT 'pointer_only' → false", () => {
+    expect(shouldRetryPointerOnly(null, { retryReason: null, retryWith: () => {} })).toBe(false);
+    expect(shouldRetryPointerOnly(null, { retryReason: "irgendwas", retryWith: () => {} })).toBe(false);
+  });
+
+  it("plan===null, retryReason pointer_only, aber retryWith fehlt/ist kein Funktion (Retry bereits verbraucht) → false", () => {
+    expect(shouldRetryPointerOnly(null, { retryReason: "pointer_only" })).toBe(false);
+    expect(shouldRetryPointerOnly(null, { retryReason: "pointer_only", retryWith: null })).toBe(false);
+    expect(shouldRetryPointerOnly(null, { retryReason: "pointer_only", retryWith: "nope" })).toBe(false);
+  });
+
+  it("res fehlt/ist null/undefined → false, wirft nie", () => {
+    expect(shouldRetryPointerOnly(null, null)).toBe(false);
+    expect(shouldRetryPointerOnly(null, undefined)).toBe(false);
+    expect(shouldRetryPointerOnly(undefined, retryableRes)).toBe(true); // undefined ist ebenso falsy wie null
   });
 });
 
@@ -1441,6 +1604,46 @@ describe("buildSystem", () => {
       expect(sys).toContain("dafür gilt weiterhin die ⚠️-Regel oben (nicht angewendete Ops): korrigiere diesen Teil im nächsten Turn, statt ihn als erledigt zu behandeln");
     });
 
+    // v7.55 (B2, In-Turn-Retry, DECISIONS #113): der ℹ️-Hinweis "Automatisch
+    // nachgebessert: ..." (App.jsx#send/buildRetryInfo) landet über den
+    // bestehenden SYSTEM-HINWEIS-Kanal (m.opsInfo) in der Chat-Historie -
+    // ohne diese Regel könnte das Modell die genannte "erste Antwort
+    // verworfen"-Formulierung darin fälschlich als aktuell gescheiterten
+    // Turn lesen und die Änderung im nächsten Turn wiederholen.
+    it("v7.55: erklärt den 'Automatisch nachgebessert'-Hinweis als bereits erfolgreich gespeicherte Korrektur, NACH dem is_error-Bullet und VOR REINE FRAGEN", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      const isErrorAt = sys.indexOf("Kommt auf deinen update_notebook-Aufruf ein tool_result mit is_error zurück");
+      const retryInfoAt = sys.indexOf("Erscheint in der Historie eine ℹ️-Meldung, die mit „Automatisch nachgebessert“ beginnt");
+      const reineFragenAt = sys.indexOf("REINE FRAGEN (WICHTIG)");
+      expect(isErrorAt).toBeGreaterThan(-1);
+      expect(retryInfoAt).toBeGreaterThan(isErrorAt);
+      expect(retryInfoAt).toBeLessThan(reineFragenAt);
+      expect(sys).toContain("wurde die ursprünglich verworfene bzw. unvollständige Antwort BEREITS IM SELBEN Turn automatisch korrigiert (und, falls sie ops enthielt, erfolgreich gespeichert)");
+      expect(sys).toContain("Behandle die genannte Änderung als bereits angewendet und wiederhole sie NICHT im nächsten Turn");
+    });
+
+    // v7.55.1 (E2E-Fall C32 🟡, Review-Fix Runde 1, DECISIONS #113 „Abschluss
+    // vor Commit“): Live-Befund – nach einer Historie-Wiederherstellung
+    // (App.jsx#restore, docCache/Prompt zeigten bereits den korrekten,
+    // wiederhergestellten Stand) behauptete das Modell trotzdem, zwei
+    // Kapitel existierten nicht mehr, weil es seiner EIGENEN älteren
+    // Chat-Aussage mehr vertraute als dem aktuellen Dokument. Letzter Bullet
+    // im OPS-ZUVERLÄSSIGKEIT-Block, NACH dem "Automatisch nachgebessert"-
+    // Hinweis und VOR REINE FRAGEN.
+    it("v7.55.1: 'Der Dokumentstand unter ALLE NOTIZBÜCHER ist IMMER maßgeblich' – letzter Bullet vor REINE FRAGEN (E2E-Fall C32)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      const retryInfoAt = sys.indexOf("Erscheint in der Historie eine ℹ️-Meldung, die mit „Automatisch nachgebessert“ beginnt");
+      const docStateAt = sys.indexOf("Der Dokumentstand unter ALLE NOTIZBÜCHER ist IMMER maßgeblich");
+      const reineFragenAt = sys.indexOf("REINE FRAGEN (WICHTIG)");
+      expect(docStateAt).toBeGreaterThan(retryInfoAt);
+      expect(docStateAt).toBeLessThan(reineFragenAt);
+      expect(sys).toContain(
+        "Der Dokumentstand unter ALLE NOTIZBÜCHER ist IMMER maßgeblich – auch wenn frühere Chat-Nachrichten " +
+        "(deine eigenen eingeschlossen) etwas anderes behaupten, z. B. nach einer Wiederherstellung einer " +
+        "älteren Version oder einer manuellen Bearbeitung."
+      );
+    });
+
     it("move_entry-Zielzeile nennt die Kollisions-Ausnahme bei einem #-Kapitel-heading, jetzt mit CHAPTER-PFLICHT-Zusatz (v7.53)", () => {
       const sys = buildSystem(nbs, "Wissensbasis", null);
       expect(sys).toContain('wird bei Bedarf angelegt – in einem Notizbuch mit Kapiteln NUR zusammen mit "to_chapter" (außer to_heading ist ein #-Kapitel: dann Kapitel-Freitext)');
@@ -2140,15 +2343,130 @@ describe("callClaude (fetch gemockt)", () => {
 
   it("History strippt cite-Marker und markiert Bilder/Dateien", async () => {
     respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] });
+    // v7.55.1: alternierende Rollen in dieser Fixture - NICHT weil zwei
+    // direkt aufeinanderfolgende user-Eintraege in echten Chat-Verlaeufen
+    // unmoeglich waeren (Review-Korrektur: sie kommen regelmaessig vor,
+    // siehe die zwei Quellen im Block "History-Merge gleichrolliger
+    // Nachbarn" unten - restore()-Pille vor dem naechsten Turn, Resend nach
+    // einem Fehler-/Konflikt-Turn), sondern aus rein Test-technischen
+    // Gruenden: DIESER Test prueft mehrere Nachrichten GETRENNT ueber
+    // toContain() auf eigene, unverschmolzene content-Strings - mit
+    // gleichrollig aufeinanderfolgenden Fixture-Eintraegen wuerde die
+    // generische History-Merge-Sicherung (gleichrollige Nachbarn werden
+    // zusammengefuehrt, siehe callClaude#msgs) genau diese Trennung vor
+    // toContain() aufheben. Das Merge-Verhalten selbst wird gezielt im
+    // eigenen Block unten getestet.
     await callClaude("key", "neu", NB_CTX, [
       { role: "assistant", text: 'Alt <cite index="1">zitiert</cite>', sources: [] },
       { role: "user", text: "frage", imgId: "ab12" },
+      { role: "assistant", text: "Antwort dazwischen" },
       { role: "user", text: "", fileName: "plan.pdf" },
+      { role: "assistant", text: "Letzte Antwort vor der neuen Frage" },
     ], "claude-sonnet-5", null, null);
     const body = JSON.parse(fetch.mock.calls[0][1].body);
     expect(body.messages[0].content).toBe("Alt zitiert");
     expect(body.messages[1].content).toContain("[Bild ab12]");
-    expect(body.messages[2].content).toContain("plan.pdf");
+    expect(body.messages[3].content).toContain("plan.pdf");
+  });
+
+  // v7.55.1 (E2E-Fall C32 🟡, Review-Fix Runde 1, DECISIONS #113 „Abschluss
+  // vor Commit“): App.jsx#restore hängt nach einer Historie-Wiederherstellung
+  // eine role:"user"-Info-Pille an den Chat, OHNE (anders als requestFeedbacks
+  // "manuell bearbeitet"-Pille) garantiert von einer Assistent-Antwort im
+  // selben setChat-Aufruf gefolgt zu werden. Kommt direkt danach ein normaler
+  // Chat-Turn, stünden in "msgs" zwei role:"user"-Einträge in Folge –
+  // Anthropic lehnt das mit einem 400-Fehler ab ("roles must alternate",
+  // DECISIONS #106 Punkt C). callClaude#msgs führt gleichrollige Nachbarn
+  // deshalb jetzt generisch zu EINEM Eintrag zusammen (Content-Konkatenation,
+  // kein Nachrichtenverlust) – unabhängig davon, welche Chat-Quelle die
+  // Kollision verursacht.
+  describe("History-Merge gleichrolliger Nachbarn (Sicherung gegen 'roles must alternate', E2E-Fall C32)", () => {
+    it("zwei aufeinanderfolgende role:\"user\"-Historieneinträge (z. B. restore()-Pille + normaler Folge-Turn) werden zu EINER Nachricht zusammengeführt, Text bleibt vollständig erhalten", async () => {
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] });
+      await callClaude("key", "Welche Kapitel gibt es in diesem Notizbuch?", NB_CTX, [
+        { role: "assistant", text: "Letzte Antwort vor der Wiederherstellung" },
+        { role: "user", info: true, text: 'Notizbuch „Wissensbasis“: Stand vom 01.01.26, 10:00 wiederhergestellt – der aktuelle Dokumentstand ist maßgeblich, frühere Chat-Aussagen dazu sind überholt.' },
+      ], "claude-sonnet-5", null, null);
+      const body = JSON.parse(fetch.mock.calls[0][1].body);
+      const roles = body.messages.map((m) => m.role);
+      // GENAU EIN assistant-Eintrag, GENAU EIN user-Eintrag (Pille + neuer Turn gemergt) – alterniert korrekt.
+      expect(roles).toEqual(["assistant", "user"]);
+      const mergedBlocks = body.messages[1].content;
+      expect(Array.isArray(mergedBlocks)).toBe(true);
+      const mergedText = mergedBlocks.map((b) => b.text).join(" ");
+      expect(mergedText).toContain("wiederhergestellt");
+      expect(mergedText).toContain("Welche Kapitel gibt es in diesem Notizbuch?");
+    });
+
+    it("DREI aufeinanderfolgende role:\"user\"-Einträge (Randfall: zwei restore()-Pillen ohne Zwischen-Turn) werden alle zu EINER Nachricht zusammengeführt", async () => {
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] });
+      await callClaude("key", "neue Frage", NB_CTX, [
+        { role: "assistant", text: "Antwort davor" },
+        { role: "user", info: true, text: "Pille 1" },
+        { role: "user", info: true, text: "Pille 2" },
+      ], "claude-sonnet-5", null, null);
+      const body = JSON.parse(fetch.mock.calls[0][1].body);
+      expect(body.messages.map((m) => m.role)).toEqual(["assistant", "user"]);
+      const mergedText = body.messages[1].content.map((b) => b.text).join(" ");
+      expect(mergedText).toContain("Pille 1");
+      expect(mergedText).toContain("Pille 2");
+      expect(mergedText).toContain("neue Frage");
+    });
+
+    it("normale, bereits alternierende History bleibt UNVERÄNDERT (kein Merge, wenn keine Kollision vorliegt)", async () => {
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] });
+      await callClaude("key", "dritte Frage", NB_CTX, [
+        { role: "user", text: "erste Frage" },
+        { role: "assistant", text: "erste Antwort" },
+        { role: "user", text: "zweite Frage" },
+        { role: "assistant", text: "zweite Antwort" },
+      ], "claude-sonnet-5", null, null);
+      const body = JSON.parse(fetch.mock.calls[0][1].body);
+      expect(body.messages).toHaveLength(5);
+      expect(body.messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant", "user"]);
+      // unveränderte Einträge bleiben STRINGS (kein Array-Wrapping ohne Merge)
+      expect(typeof body.messages[0].content).toBe("string");
+      expect(body.messages[0].content).toBe("erste Frage");
+    });
+
+    it("Bild-Upload im aktuellen Turn wird beim Merge korrekt zu einem content-Array normalisiert (String + Blöcke)", async () => {
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] });
+      const img = { mime: "image/png", dataUrl: "data:image/png;base64,QUJD" };
+      await callClaude("key", "schau dir das an", NB_CTX, [
+        { role: "assistant", text: "davor" },
+        { role: "user", info: true, text: "Pille" },
+      ], "claude-sonnet-5", img, "img-1");
+      const body = JSON.parse(fetch.mock.calls[0][1].body);
+      expect(body.messages.map((m) => m.role)).toEqual(["assistant", "user"]);
+      const blocks = body.messages[1].content;
+      expect(blocks.some((b) => b.type === "image")).toBe(true);
+      expect(blocks.some((b) => b.type === "text" && b.text.includes("Pille"))).toBe(true);
+      expect(blocks.some((b) => b.type === "text" && b.text.includes("img:img-1"))).toBe(true);
+    });
+
+    // Review-Fix (🟡, DECISIONS #113 Abschluss-Delta): die restore()-Pille ist
+    // NICHT die einzige reale Quelle für zwei aufeinanderfolgende
+    // role:"user"-Einträge. App.jsx#send lässt im catch-Pfad UND im
+    // SHA-Konflikt-Pfad die user-Nachricht unmarkiert im Chat stehen, während
+    // die zugehörige Assistent-Antwort error:true bekommt und deshalb oben im
+    // History-Filter (".filter((m) => !m.error …)") verworfen wird. Sendet
+    // der Nutzer danach dieselbe Nachricht erneut (genau die vorgeschlagene
+    // Fehlerbehandlung – "sende sie einfach noch einmal"), landen zwei
+    // role:"user"-Einträge für dieselbe Frage in priorChat – ein seit v7.21
+    // regelmäßiger Pfad, nicht nur der restore()-Sonderfall.
+    it("Resend nach Fehler-Turn: user A + assistant(error) + user A → EINE user-Nachricht, Fehlertext nicht enthalten", async () => {
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] });
+      await callClaude("key", "Frage A", NB_CTX, [
+        { role: "assistant", text: "davor" },
+        { role: "user", text: "Frage A" },
+        { role: "assistant", error: true, text: "Anfrage fehlgeschlagen: kaputt" },
+      ], "claude-sonnet-5", null, null);
+      const body = JSON.parse(fetch.mock.calls[0][1].body);
+      expect(body.messages.map((m) => m.role)).toEqual(["assistant", "user"]);
+      const txt = body.messages[1].content.map((b) => b.text).join(" ");
+      expect(txt).not.toContain("fehlgeschlagen");
+      expect((txt.match(/Frage A/g) || []).length).toBe(2);
+    });
   });
 
   // v7.21 (Ops-Zuverlässigkeit, History-Variante B3 – siehe DECISIONS #63):
@@ -2527,7 +2845,13 @@ describe("callClaude (fetch gemockt)", () => {
 
     it("messages bekommen BEWUSST KEIN cache_control (gleitendes 12-Nachrichten-Fenster, Cache-Miss garantiert)", async () => {
       respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] });
-      const priorChat = Array.from({ length: 10 }, (_, i) => ({ role: "user", ts: i, text: "Nachricht " + i }));
+      // v7.55.1: alternierende Rollen statt 10x role:"user" in Folge - die
+      // NEUE History-Merge-Sicherung (gleichrollige Nachbarn werden
+      // zusammengefuehrt, siehe callClaude#msgs) wuerde sonst alle zehn zu
+      // EINER Nachricht verschmelzen; das Ziel dieses Tests (mehrere
+      // Nachrichten OHNE cache_control) bleibt mit alternierenden Rollen
+      // unveraendert erfuellt.
+      const priorChat = Array.from({ length: 10 }, (_, i) => ({ role: i % 2 === 0 ? "user" : "assistant", ts: i, text: "Nachricht " + i }));
       await callClaude("key", "neueste Frage", NB_CTX, priorChat, "claude-sonnet-5", null, null);
       const body = JSON.parse(fetch.mock.calls[0][1].body);
       expect(body.messages.length).toBeGreaterThan(1);
@@ -2913,6 +3237,390 @@ describe("callClaude (fetch gemockt)", () => {
         expect(fetch.mock.calls[2][1].headers["anthropic-beta"]).toBe("cache-diagnosis-2026-04-07");
       });
     });
+  });
+});
+
+// v7.55 (B2, In-Turn-Retry, DECISIONS #113): callClaude()#retryWith() gegen
+// einen gestubbten fetch – dieselbe respond()/toolUse()-Konvention wie im
+// Block "callClaude (fetch gemockt)" oben, hier bewusst als eigener,
+// unabhängiger describe-Block (frisches beforeEach/afterEach), damit die
+// zusätzlichen Requests je Test klar durchzählbar bleiben (fetch.mock.calls-
+// Indizes sind Teil der Assertions). toolUse() bekommt hier ZUSÄTZLICH eine
+// "id" (im Original-Block ungenutzt) – retryWith baut tool_result-Blöcke
+// über "tool_use_id", die MUSS mit der id des jeweiligen tool_use-Blocks
+// übereinstimmen.
+describe("callClaude – B2 In-Turn-Retry (retryWith, v7.55, DECISIONS #113)", () => {
+  const NB_CTX = { notebooks: [{ name: "W", doc: "# W" }], activeName: "W", knowledge: null };
+  const toolUse = (input, id) => ({ type: "tool_use", id, name: "update_notebook", input });
+
+  beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); resetCacheDiagnosticsForTests(); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  const respond = (body, ok = true, status = 200) =>
+    fetch.mockResolvedValueOnce({ ok, status, json: async () => body });
+
+  it("normaler Turn liefert eine retryWith-Funktion am Rückgabeobjekt", async () => {
+    respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] }, "tu_1")] });
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+    expect(typeof res.retryWith).toBe("function");
+  });
+
+  it("max_tokens: KEINE retryWith-Funktion (callClaude kehrt vorher mit ops:[] zurück)", async () => {
+    respond({ stop_reason: "max_tokens", content: [toolUse({ reply: "Anfang", ops: [{ type: "rewrite", content: "x" }] }, "tu_1")] });
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+    expect(res.retryWith).toBeUndefined();
+    expect(res.ops).toEqual([]);
+  });
+
+  it("1) search-Ursprung: alternierende Rollen, EIN tool_result je tool_use, is_error true, Diagnose enthalten; tools/tool_choice/system wie Request 1; Rückgabe retried:true", async () => {
+    respond({
+      id: "msg_1", stop_reason: "end_turn",
+      content: [toolUse({ reply: "Erledigt.", ops: [{ type: "append_to_section", heading: "## A", content: "x" }] }, "tu_1")],
+    });
+    const res = await callClaude("key", "tu", NB_CTX, [], "claude-sonnet-5", null, null);
+    respond({ id: "msg_2", stop_reason: "end_turn", content: [toolUse({ reply: "Korrigiert.", ops: [] }, "tu_2")] });
+    const res2 = await res.retryWith("VERWORFEN – nichts gespeichert. Grund X");
+    expect(res2.retried).toBe(true);
+    expect(res2.reply).toBe("Korrigiert.");
+    const first = JSON.parse(fetch.mock.calls[0][1].body);
+    const second = JSON.parse(fetch.mock.calls[1][1].body);
+    expect(second.tools).toEqual(first.tools);
+    expect(second.tool_choice).toEqual(first.tool_choice);
+    expect(second.system).toEqual(first.system);
+    const roles = second.messages.map((m) => m.role);
+    expect(roles).toEqual(["user", "assistant", "user"]); // Erst-msgs(user) + assistant(Erstantwort) + user(tool_result) – KEIN doppeltes assistant
+    const toolResultMsg = second.messages[second.messages.length - 1];
+    expect(toolResultMsg.content).toHaveLength(1);
+    expect(toolResultMsg.content[0]).toMatchObject({ type: "tool_result", tool_use_id: "tu_1", is_error: true });
+    expect(toolResultMsg.content[0].content).toContain("Grund X");
+  });
+
+  it("2) forced-Ursprung: Retry mit tool_choice {type:'tool'}, OHNE web_search", async () => {
+    respond({ error: { type: "invalid_request_error", message: "web_search tool is not available" } });
+    respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "ohne Suche", ops: [] }, "tu_1")] });
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+    respond({ id: "msg_2", stop_reason: "end_turn", content: [toolUse({ reply: "Korrigiert.", ops: [] }, "tu_2")] });
+    await res.retryWith("VERWORFEN – Grund");
+    const third = JSON.parse(fetch.mock.calls[2][1].body);
+    expect(third.tool_choice).toEqual({ type: "tool", name: "update_notebook" });
+    expect(third.tools.map((t) => t.name)).toEqual(["update_notebook"]);
+  });
+
+  it("3) none-Ursprung: kein tool_result, User-Text beginnt mit '[PRÜFERGEBNIS', Request ohne tools", async () => {
+    const toolErr = { error: { type: "invalid_request_error", message: "tool use failed" } };
+    respond(toolErr); // search scheitert
+    respond(toolErr); // forced scheitert auch
+    respond({ id: "msg_1", stop_reason: "end_turn", content: [{ type: "text", text: '{"reply":"aus Text","ops":[],"commit":null}' }] });
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+    respond({ id: "msg_2", stop_reason: "end_turn", content: [{ type: "text", text: '{"reply":"korrigiert","ops":[],"commit":null}' }] });
+    await res.retryWith("VERWORFEN – Grund Y");
+    const fourth = JSON.parse(fetch.mock.calls[3][1].body);
+    expect(fourth.tools).toBeUndefined();
+    const lastMsg = fourth.messages[fourth.messages.length - 1];
+    expect(lastMsg.role).toBe("user");
+    expect(lastMsg.content[0].type).toBe("text");
+    expect(lastMsg.content[0].text).toMatch(/^\[PRÜFERGEBNIS/);
+  });
+
+  // Review-Fix (Runde 1, 🟡): Spec 9.2 – im Ursprungsmodus "none" (Tools
+  // waren serverseitig bereits zweimal abgelehnt, search UND forced) darf
+  // das eingebettete forced-Nachfassen NICHT laufen, selbst wenn die
+  // Retry-Antwort kein verwertbares JSON enthält. Vorher hätte genau das
+  // einen dritten, sicher vergeblichen Tool-Request in diesem Turn
+  // ausgelöst.
+  it("3b) none-Ursprung: Retry-Antwort OHNE verwertbares JSON → null OHNE forced-Nachfassen (Spec 9.2, GENAU " +
+     "1 zusätzlicher Retry-Request, kein 5. Fetch-Aufruf)", async () => {
+    const toolErr = { error: { type: "invalid_request_error", message: "tool use failed" } };
+    respond(toolErr); // search scheitert
+    respond(toolErr); // forced scheitert auch
+    respond({ id: "msg_1", stop_reason: "end_turn", content: [{ type: "text", text: '{"reply":"aus Text","ops":[],"commit":null}' }] });
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    respond({ id: "msg_2", stop_reason: "end_turn", content: [{ type: "text", text: "kein JSON hier" }] });
+    const res2 = await res.retryWith("VERWORFEN – Grund");
+    expect(res2).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(4); // 3 Erst-Requests + GENAU 1 Retry, KEIN Nachfassen
+  });
+
+  it("4) pause_turn-Ursprung: Merge-Regel – GENAU EIN assistant-Eintrag, konkateniert aus Pause- und Final-Content", async () => {
+    respond({ stop_reason: "pause_turn", content: [{ type: "server_tool_use", name: "web_search" }] });
+    respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "Fertig.", ops: [] }, "tu_1")] });
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+    respond({ id: "msg_2", stop_reason: "end_turn", content: [toolUse({ reply: "Korrigiert.", ops: [] }, "tu_2")] });
+    await res.retryWith("VERWORFEN – Grund Z");
+    const third = JSON.parse(fetch.mock.calls[2][1].body);
+    const roles = third.messages.map((m) => m.role);
+    expect(roles.filter((r) => r === "assistant")).toHaveLength(1);
+    for (let i = 1; i < roles.length; i++) expect(roles[i]).not.toBe(roles[i - 1]); // strikt alternierend
+    const mergedAssistant = third.messages.find((m) => m.role === "assistant");
+    expect(mergedAssistant.content.some((b) => b.type === "server_tool_use")).toBe(true); // Pause-Content
+    expect(mergedAssistant.content.some((b) => b.type === "tool_use" && b.id === "tu_1")).toBe(true); // Final-Content
+  });
+
+  it("5) lookup_wissen + update_notebook in EINER Antwort: user-Nachricht enthält ZWEI tool_results (lookup ECHT ausgeführt, update is_error)", async () => {
+    const ctxWithKnow = {
+      ...NB_CTX,
+      knowledge: { activeFiles: [{ name: "handbuch.pdf", text: "## Seite 1\n\nInhalt " + "x".repeat(90000) }], others: [] },
+    };
+    respond({
+      id: "msg_1", stop_reason: "end_turn",
+      content: [
+        { type: "tool_use", id: "lk1", name: "lookup_wissen", input: { datei: "handbuch.pdf", suchbegriffe: "Inhalt" } },
+        toolUse({ reply: "Laut Handbuch …", ops: [] }, "tu_1"),
+      ],
+    });
+    const res = await callClaude("key", "x", ctxWithKnow, [], "claude-sonnet-5", null, null);
+    respond({ id: "msg_2", stop_reason: "end_turn", content: [toolUse({ reply: "Korrigiert.", ops: [] }, "tu_2")] });
+    await res.retryWith("VERWORFEN – Grund");
+    const second = JSON.parse(fetch.mock.calls[1][1].body);
+    const lastMsg = second.messages[second.messages.length - 1];
+    expect(lastMsg.content).toHaveLength(2);
+    const lookupResult = lastMsg.content.find((c) => c.tool_use_id === "lk1");
+    const updateResult = lastMsg.content.find((c) => c.tool_use_id === "tu_1");
+    expect(lookupResult.is_error).toBeUndefined();
+    expect(lookupResult.content).not.toBe("nicht ausgeführt"); // ECHT ausgeführt (runLookup)
+    expect(updateResult.is_error).toBe(true);
+  });
+
+  it("6) pause_turn/lookup INNERHALB des Retrys werden fortgesetzt (doPost-Schleife läuft auch im Retry)", async () => {
+    respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "Erste.", ops: [] }, "tu_1")] });
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+    respond({ stop_reason: "pause_turn", content: [{ type: "server_tool_use", name: "web_search" }] }); // Retry pausiert zunächst
+    respond({ id: "msg_2", stop_reason: "end_turn", content: [toolUse({ reply: "Nach Pause korrigiert.", ops: [] }, "tu_2")] });
+    const res2 = await res.retryWith("VERWORFEN – Grund");
+    expect(res2.reply).toBe("Nach Pause korrigiert.");
+    expect(fetch).toHaveBeenCalledTimes(3); // Erst + Retry-Pause + Retry-Final
+  });
+
+  it("7a) Retry-Antwort ohne update_notebook → genau EIN forced-Nachfassen, danach Erfolg", async () => {
+    respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "Erste.", ops: [] }, "tu_1")] });
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+    respond({ stop_reason: "end_turn", content: [{ type: "text", text: "kein Tool-Aufruf" }] });
+    respond({ id: "msg_3", stop_reason: "end_turn", content: [toolUse({ reply: "Nachgefasst.", ops: [] }, "tu_3")] });
+    const res2 = await res.retryWith("VERWORFEN – Grund");
+    expect(res2).not.toBeNull();
+    expect(res2.reply).toBe("Nachgefasst.");
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("7b) Retry-Antwort ohne update_notebook UND ohne erfolgreiches Nachfassen → null (2 zusätzliche fetch-Aufrufe)", async () => {
+    respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "Erste.", ops: [] }, "tu_1")] });
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+    respond({ stop_reason: "end_turn", content: [{ type: "text", text: "immer noch kein Tool-Aufruf" }] });
+    respond({ error: { type: "invalid_request_error", message: "tool use failed" } });
+    const res2 = await res.retryWith("VERWORFEN – Grund");
+    expect(res2).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(3); // Erst + Retry + Nachfassen (2 zusätzliche)
+  });
+
+  it("7c) Retry-Antwort selbst mit error → null OHNE Nachfassen (nur 1 zusätzlicher fetch-Aufruf)", async () => {
+    respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "Erste.", ops: [] }, "tu_1")] });
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+    respond({ error: { type: "invalid_request_error", message: "kaputt" } });
+    const res2 = await res.retryWith("VERWORFEN – Grund");
+    expect(res2).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(2); // Erst + Retry, KEIN Nachfassen
+  });
+
+  it("7d) Retry-Antwort mit max_tokens → null OHNE Nachfassen", async () => {
+    respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "Erste.", ops: [] }, "tu_1")] });
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+    respond({ stop_reason: "max_tokens", content: [{ type: "text", text: "abgeschnitten" }] });
+    const res2 = await res.retryWith("VERWORFEN – Grund");
+    expect(res2).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("8) zweiter retryWith-Aufruf wirft ('In-Turn-Retry bereits verbraucht')", async () => {
+    respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "Erste.", ops: [] }, "tu_1")] });
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+    respond({ id: "msg_2", stop_reason: "end_turn", content: [toolUse({ reply: "Korrigiert.", ops: [] }, "tu_2")] });
+    await res.retryWith("VERWORFEN – Grund");
+    await expect(res.retryWith("VERWORFEN – noch mal")).rejects.toThrow(/bereits verbraucht/);
+  });
+
+  it("9) Diagnose > 800 Zeichen wird gekappt, NUL entfernt", async () => {
+    respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "Erste.", ops: [] }, "tu_1")] });
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+    respond({ id: "msg_2", stop_reason: "end_turn", content: [toolUse({ reply: "Korrigiert.", ops: [] }, "tu_2")] });
+    const longDiag = "VERWORFEN – " + "a\u0000b".repeat(300); // enthält NUL, weit über 800 Zeichen
+    await res.retryWith(longDiag);
+    const second = JSON.parse(fetch.mock.calls[1][1].body);
+    const sent = second.messages[second.messages.length - 1].content[0].content;
+    expect(sent).not.toContain("\u0000");
+    expect(sent.length).toBeLessThanOrEqual(800);
+  });
+
+  it("10) previous_message_id des Retry-Requests = id der Erstantwort", async () => {
+    respond({ id: "msg_erst", stop_reason: "end_turn", content: [toolUse({ reply: "Erste.", ops: [] }, "tu_1")] });
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+    respond({ id: "msg_retry", stop_reason: "end_turn", content: [toolUse({ reply: "Korrigiert.", ops: [] }, "tu_2")] });
+    await res.retryWith("VERWORFEN – Grund");
+    const second = JSON.parse(fetch.mock.calls[1][1].body);
+    expect(second.diagnostics).toEqual({ previous_message_id: "msg_erst" });
+  });
+
+  it("11) Server-Tool-Blöcke aus dem Websuche-Modus bleiben in der Fortsetzung unverändert als assistant-content erhalten; web_search weiterhin deklariert", async () => {
+    respond({
+      id: "msg_1", stop_reason: "end_turn",
+      content: [
+        { type: "server_tool_use", name: "web_search", input: { query: "x" } },
+        { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://q.de", title: "Q" }] },
+        { type: "text", text: "Fakt X", citations: [{ url: "https://q.de", title: "Q" }] },
+        toolUse({ reply: "Eingetragen.", ops: [] }, "tu_1"),
+      ],
+    });
+    const res = await callClaude("key", "recherchiere", NB_CTX, [], "claude-sonnet-5", null, null);
+    respond({ id: "msg_2", stop_reason: "end_turn", content: [toolUse({ reply: "Korrigiert.", ops: [] }, "tu_2")] });
+    await res.retryWith("VERWORFEN – Grund");
+    const second = JSON.parse(fetch.mock.calls[1][1].body);
+    const assistantMsg = second.messages.find((m) => m.role === "assistant");
+    expect(assistantMsg.content.some((b) => b.type === "server_tool_use")).toBe(true);
+    expect(assistantMsg.content.some((b) => b.type === "web_search_tool_result")).toBe(true);
+    expect(second.tools.map((t) => t.name)).toContain("web_search"); // pauschales "forced" würde hier einen 400 provozieren
+  });
+
+  it("12) doPost('forced')-von-vorn-Ursprung (K-🔴3): Retry-Konversation ist die NEUE forced-Konversation, NICHT die stale Websuche-Konversation mit Pause-Historie", async () => {
+    respond({ stop_reason: "pause_turn", content: [{ type: "server_tool_use", name: "web_search" }] }); // 1: search pausiert
+    respond({ stop_reason: "end_turn", content: [{ type: "text", text: "kein Tool-Aufruf nach Pause" }] }); // 2: Fortsetzung, immer noch kein update_notebook -> convo endet auf "assistant", NICHT "user"
+    respond({ id: "msg_forced", stop_reason: "end_turn", content: [toolUse({ reply: "Erste (forced von vorn).", ops: [] }, "tu_1")] }); // 3: doPost("forced") von vorn -> Erfolg
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    respond({ id: "msg_retry", stop_reason: "end_turn", content: [toolUse({ reply: "Korrigiert.", ops: [] }, "tu_2")] }); // 4: Retry
+    await res.retryWith("VERWORFEN – Grund");
+    const fourth = JSON.parse(fetch.mock.calls[3][1].body);
+    const roles = fourth.messages.map((m) => m.role);
+    // Die stale Pause-Historie (server_tool_use aus dem gescheiterten Websuche-
+    // Versuch) darf NICHT in der Retry-Konversation auftauchen – vor dem Fix
+    // (K-🔴3) wurde "convo" bei diesem Fallback verworfen, ein Retry hätte
+    // dann mit der VERALTETEN, Pause-behafteten Konversation fortgesetzt.
+    expect(roles.filter((r) => r === "assistant")).toHaveLength(1);
+    const assistantMsg = fourth.messages.find((m) => m.role === "assistant");
+    expect(assistantMsg.content.some((b) => b.type === "server_tool_use")).toBe(false);
+    expect(assistantMsg.content.some((b) => b.type === "tool_use" && b.id === "tu_1")).toBe(true);
+  });
+
+  // Review-Fix (Runde 1, 🔵): bisher ungetesteter Ursprungs-Pfad – der
+  // Erstversuch endet über eine lookup_wissen-Runde OHNE update_notebook,
+  // die anschließende Lookup-Fortsetzung liefert ebenfalls kein Tool, und
+  // erst das eingebettete forced-Nachfassen AUF lastConvo (nicht "von vorn")
+  // liefert den finalen update_notebook-Aufruf. finalMode/finalConvo müssen
+  // in diesem Fall "forced" bzw. die Lookup-Konversation sein.
+  it("13) 'forced auf lastConvo'-Ursprung (Lookup-Runde ohne update_notebook, danach forced-Nachfassen auf " +
+     "lastConvo erfolgreich): Retry-Konversation ist lastConvo (inkl. Lookup-tool_result) + assistant(Erstantwort) " +
+     "+ user(tool_result is_error), Modus forced", async () => {
+    const ctxWithKnow = {
+      ...NB_CTX,
+      knowledge: { activeFiles: [{ name: "handbuch.pdf", text: "## Seite 1\n\nInhalt " + "x".repeat(90000) }], others: [] },
+    };
+    // Runde 1 (search): NUR lookup_wissen, KEIN update_notebook -> Lookup-Fortsetzung
+    respond({
+      id: "msg_1", stop_reason: "end_turn",
+      content: [{ type: "tool_use", id: "lk1", name: "lookup_wissen", input: { datei: "handbuch.pdf", suchbegriffe: "Inhalt" } }],
+    });
+    // Runde 2 (nach der Lookup-Antwort): weiterhin KEIN Tool-Aufruf -> Lookup-Schleife bricht ab,
+    // "convo" bleibt auf der Lookup-tool_result-Nachricht (role "user") stehen
+    respond({ id: "msg_2", stop_reason: "end_turn", content: [{ type: "text", text: "kein Tool-Aufruf" }] });
+    // Runde 3: forced-Nachfassen AUF lastConvo (NICHT "von vorn") -> Erfolg
+    respond({ id: "msg_forced", stop_reason: "end_turn", content: [toolUse({ reply: "Laut Handbuch erledigt.", ops: [] }, "tu_1")] });
+    const res = await callClaude("key", "x", ctxWithKnow, [], "claude-sonnet-5", null, null);
+    expect(fetch).toHaveBeenCalledTimes(3);
+
+    respond({ id: "msg_retry", stop_reason: "end_turn", content: [toolUse({ reply: "Korrigiert.", ops: [] }, "tu_2")] });
+    await res.retryWith("VERWORFEN – Grund");
+    const fourth = JSON.parse(fetch.mock.calls[3][1].body);
+    // Modus-Erhalt "forced": tool_choice erzwungen, KEIN web_search deklariert
+    expect(fourth.tool_choice).toEqual({ type: "tool", name: "update_notebook" });
+    expect(fourth.tools.map((t) => t.name)).toEqual(["update_notebook"]);
+    const roles = fourth.messages.map((m) => m.role);
+    expect(roles).toEqual(["user", "assistant", "user", "assistant", "user"]);
+    const lookupResultMsg = fourth.messages[2];
+    expect(lookupResultMsg.content[0]).toMatchObject({ type: "tool_result", tool_use_id: "lk1" });
+    const finalUserMsg = fourth.messages[fourth.messages.length - 1];
+    expect(finalUserMsg.content).toHaveLength(1); // NUR das tool_result der forced-Erstantwort (tu_1), NICHT lk1 erneut
+    expect(finalUserMsg.content[0]).toMatchObject({ type: "tool_result", tool_use_id: "tu_1", is_error: true });
+  });
+
+  // Review-Fix (Runde 1, 🔵): B1-Verhalten "byte-identisch bei null-Retry"
+  // war bisher nur per Code-Lesen belegt (finalize()/retryWith() mutieren
+  // gemeinsam genutzte Closure-Variablen wie textBlocks/sources/usedSearch)
+  // – hier ein Schnappschuss-Vergleich VOR und NACH einem scheiternden Retry.
+  it("14) result.reply/ops/sources bleiben nach einem gescheiterten (null) Retry BYTE-IDENTISCH (B1-Fallback " +
+     "bleibt intakt, keine nachträgliche Mutation über gemeinsame Closure-Variablen)", async () => {
+    respond({
+      id: "msg_1", stop_reason: "end_turn",
+      content: [
+        { type: "server_tool_use", name: "web_search" },
+        { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://q.de", title: "Q" }] },
+        { type: "text", text: "Fakt X." },
+        toolUse({ reply: "Eingetragen.", ops: [{ type: "append_to_section", heading: "## A", content: "y" }] }, "tu_1"),
+      ],
+    });
+    const res = await callClaude("key", "recherchiere", NB_CTX, [], "claude-sonnet-5", null, null);
+    expect(res.sources.length).toBeGreaterThan(0); // Vorbedingung: es gibt überhaupt etwas zu mutieren
+    const snap = JSON.parse(JSON.stringify({ reply: res.reply, ops: res.ops, sources: res.sources }));
+
+    // Retry-Versuch scheitert vollständig (API-Fehler, KEIN Nachfassen, KEIN Fallback)
+    respond({ error: { type: "invalid_request_error", message: "kaputt" } });
+    const res2 = await res.retryWith("VERWORFEN – Grund");
+    expect(res2).toBeNull();
+    expect({ reply: res.reply, ops: res.ops, sources: res.sources }).toEqual(snap);
+  });
+
+  it("Kosten (K-🔵12): ein normaler Turn verursacht KEINEN zusätzlichen Request; ein genutzter Retry GENAU EINEN", async () => {
+    respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "Normal.", ops: [] }, "tu_1")] });
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    respond({ id: "msg_2", stop_reason: "end_turn", content: [toolUse({ reply: "Korrigiert.", ops: [] }, "tu_2")] });
+    await res.retryWith("VERWORFEN – Grund");
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  // retryReason (zweiter Trigger, isPointerOnlyReply) – Integrationstest: der
+  // Helfer selbst ist oben pur getestet, hier wird die tatsächliche
+  // Verdrahtung in callClaude()#finalize geprüft.
+  it("retryReason='pointer_only', wenn die finale Antwort ein reiner Verweis ohne Vorab-Text ist (E2E-Fall C14, " +
+     "ungekürzter Live-Wortlaut ≥ SUBSTANTIAL_REPLY_MIN_LENGTH)", async () => {
+    const liveText =
+      "Vorschlag ist oben ausformuliert. Ich habe noch nichts umgebaut – sag Bescheid, wenn ich die " +
+      "Gliederung so anlegen soll.";
+    expect(liveText.length).toBeGreaterThanOrEqual(SUBSTANTIAL_REPLY_MIN_LENGTH);
+    respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: liveText, ops: [] }, "tu_1")] });
+    const res = await callClaude("key", "Schlage mir eine zweistufige Gliederung vor", NB_CTX, [], "claude-sonnet-5", null, null);
+    expect(res.retryReason).toBe("pointer_only");
+  });
+
+  it("retryReason=null bei einer normalen, nicht-verweisenden Antwort", async () => {
+    respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "Notiert.", ops: [] }, "tu_1")] });
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+    expect(res.retryReason).toBeNull();
+  });
+
+  it("retryReason=null trotz Verweis-Muster, wenn substanzieller Vorab-Text existiert (Websuche-Antwort)", async () => {
+    respond({
+      id: "msg_1", stop_reason: "end_turn",
+      content: [
+        { type: "server_tool_use", name: "web_search" },
+        { type: "web_search_tool_result", content: [] },
+        {
+          type: "text",
+          text: "Eine lange, eigenständige Vorab-Antwort mit ausreichend Inhalt, damit sie als substanziell zählt " +
+            "und der Retry-Trigger deshalb NICHT greifen darf.",
+        },
+        toolUse({ reply: "Wie oben ausformuliert.", ops: [] }, "tu_1"),
+      ],
+    });
+    const res = await callClaude("key", "recherchiere und schlage vor", NB_CTX, [], "claude-sonnet-5", null, null);
+    expect(res.retryReason).toBeNull();
+  });
+
+  it("retryReason bleibt auf dem Retry-Ergebnis verfügbar (retried:true UND retryReason gemeinsam möglich)", async () => {
+    respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "Erste.", ops: [] }, "tu_1")] });
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+    respond({ id: "msg_2", stop_reason: "end_turn", content: [toolUse({ reply: "Notiert.", ops: [] }, "tu_2")] });
+    const res2 = await res.retryWith("VERWORFEN – Grund");
+    expect(res2.retried).toBe(true);
+    expect(res2.retryReason).toBeNull(); // "Notiert." ist kein Verweis-Reply
   });
 });
 

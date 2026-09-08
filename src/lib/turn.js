@@ -198,3 +198,27 @@ export function overrideOpsFor(plan) {
   }
   return map;
 }
+
+/* ------------------------------ mergeRetryMemoryOps -------------------- */
+// Review-Fix (🔵 1, v7.55.1, DECISIONS #113 Abschluss-Delta): reiner Helfer
+// für App.jsx#send's pointer_only-Retry-Zweig (zweiter In-Turn-Retry-
+// Auslöser, siehe evaluateTurn-Kopfkommentar/anthropic.js#
+// shouldRetryPointerOnly). "Letzter Versuch gewinnt" (TURN-REGELN 8) gilt
+// grundsätzlich für JEDES Retry-Ergebnis - ABER
+// POINTER_ONLY_RETRY_DIAGNOSIS fragt gezielt NUR die fehlende Notizbuch-
+// Antwort nach und erwähnt Gedächtnis-Ops mit keinem Wort. Hatte der
+// Erstversuch bereits memory_*-Ops NEBEN der reinen Verweis-Antwort
+// geplant, liefert der Retry deshalb regelmäßig ops:[] (das Modell
+// wiederholt die aus seiner Sicht bereits "erledigten" Gedächtnis-Ops
+// nicht) - eine leere Retry-Op-Liste bedeutet hier NICHT "Erstversuch
+// zurückgenommen", sondern "zum Retry-Thema (Notizbuch) nichts Neues".
+// Ohne diesen Helfer hätte die blinde "letzter Versuch gewinnt"-Ersetzung
+// die Erstversuch-Gedächtnis-Ops still verworfen, ohne dass sie je
+// committet wurden (Datenverlust ohne jede Fehlermeldung). Liefert der
+// Retry EIGENE memory_*-Ops, gewinnen weiterhin die (unverändert "letzter
+// Versuch gewinnt") - der Helfer greift NUR bei einer leeren Retry-Liste.
+export function mergeRetryMemoryOps(firstMemoryOps, retryMemoryOps) {
+  const retry = Array.isArray(retryMemoryOps) ? retryMemoryOps : [];
+  const first = Array.isArray(firstMemoryOps) ? firstMemoryOps : [];
+  return retry.length ? retry : first;
+}

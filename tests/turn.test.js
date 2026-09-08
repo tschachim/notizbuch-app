@@ -3,7 +3,9 @@
 // Diagnose-Wortlaute, Sanitisierung. evaluateTurn() ist rein (kein I/O) -
 // jeder Test übergibt Gruppen mit before/ops direkt, keine Mocks nötig.
 import { describe, it, expect } from "vitest";
-import { evaluateTurn, buildRejectWarning, buildTurnDiagnosis, overrideOpsFor, DESTRUCTIVE_OP_TYPES } from "../src/lib/turn.js";
+import {
+  evaluateTurn, buildRejectWarning, buildTurnDiagnosis, overrideOpsFor, mergeRetryMemoryOps, DESTRUCTIVE_OP_TYPES,
+} from "../src/lib/turn.js";
 import { applyOps, applyOpsDetailed, MAX_OPS } from "../src/lib/ops.js";
 
 describe("evaluateTurn: Verwerfungsregel (H)/(A)", () => {
@@ -299,5 +301,42 @@ describe("Robustheit / Randfälle", () => {
     const ops = [{ type: "append_to_section", heading: "## X", content: "- b" }];
     const plan = evaluateTurn([{ nbId: "a", name: "A", ops, before }]);
     expect(applyOps(before, plan.groups[0].finalOps)).toBe(plan.groups[0].text);
+  });
+});
+
+// Review-Fix (🔵 1, v7.55.1, DECISIONS #113 Abschluss-Delta): App.jsx#send's
+// pointer_only-Retry-Zweig übernahm bisher blind replanned.memoryOps -
+// POINTER_ONLY_RETRY_DIAGNOSIS fragt aber gezielt NUR die fehlende
+// Notizbuch-Antwort nach, der Retry liefert deshalb regelmäßig ops:[] OHNE
+// im Erstversuch geplante memory_*-Ops zu wiederholen (der Retry "vergisst"
+// sie nicht bewusst - das Thema kommt in seiner eigenen Diagnose gar nicht
+// vor). Reiner Helfer, unabhängig von App.jsx/anthropic.js testbar.
+describe("mergeRetryMemoryOps (Review-Fix 🔵 1, DECISIONS #113 Abschluss-Delta)", () => {
+  it("Retry liefert KEINE Ops (leeres Array) → Erstversuch-Ops bleiben erhalten (der eigentliche Live-Bug)", () => {
+    const first = [{ type: "memory_add", text: "mag TT.MM.JJJJ" }];
+    expect(mergeRetryMemoryOps(first, [])).toBe(first);
+  });
+
+  it("Retry liefert EIGENE Ops → Retry gewinnt (unverändert 'letzter Versuch gewinnt')", () => {
+    const first = [{ type: "memory_add", text: "alt" }];
+    const retry = [{ type: "memory_add", text: "neu" }];
+    expect(mergeRetryMemoryOps(first, retry)).toBe(retry);
+  });
+
+  it("beide leer → leeres Array (kein Fehler, keine Phantom-Ops)", () => {
+    expect(mergeRetryMemoryOps([], [])).toEqual([]);
+  });
+
+  it("Erstversuch ohne Gedächtnis-Ops, Retry liefert welche → Retry-Ops werden übernommen", () => {
+    const retry = [{ type: "memory_add", text: "neu aus Retry" }];
+    expect(mergeRetryMemoryOps([], retry)).toBe(retry);
+  });
+
+  it("fehlende/kaputte Eingaben (undefined/null/Nicht-Array) werfen nicht, wirken wie leere Listen", () => {
+    expect(mergeRetryMemoryOps(undefined, undefined)).toEqual([]);
+    expect(mergeRetryMemoryOps(null, null)).toEqual([]);
+    expect(mergeRetryMemoryOps("kaputt", 5)).toEqual([]);
+    const first = [{ type: "memory_add", text: "bleibt" }];
+    expect(mergeRetryMemoryOps(first, null)).toBe(first);
   });
 });

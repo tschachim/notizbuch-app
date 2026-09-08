@@ -396,6 +396,9 @@ OPS-ZUVERLÄSSIGKEIT (WICHTIG):
 - Erscheint in der Historie eine ⚠️-Meldung über nicht angewendete ops, war deine vorige Änderung WIRKUNGSLOS – korrigiere sie im nächsten Turn (richtiger Typ/exakte Abschnitts-Überschrift) statt Erfolg anzunehmen. Nennt die ⚠️ Kandidaten („Kapitel: …“, „meintest du …“) oder ein konkretes Feld (chapter/to_chapter/from_chapter/heading), übernimm GENAU diese Angabe im Korrektur-Turn; weiche NIE auf rewrite aus.
 - Erscheint in der Historie eine ℹ️-Meldung, wurde deine Op ANGEWENDET, aber nicht wörtlich (in Kapitel-Freitext umgeleitet bzw. Abschnitt/Kapitel neu angelegt) – wiederhole sie NICHT (das erzeugt Dubletten); prüfe nur, ob Ort und Ebene gewollt waren, und adressiere künftig direkt: Kapitel-Freitext per append_to_chapter, bestehende Zeile per replace_entry. Nennt die ℹ️ einen ÄHNLICH benannten vorhandenen Eintrag („ähnlich vorhanden: …“), frage den Nutzer im reply, ob dieser gemeint war – lösche nichts eigenmächtig. Eine ℹ️ „Titelzeile – als Eingrenzung gewertet“ bedeutet: der Vorspann-Abschnitt wurde getroffen, nichts Neues entstand.
 - Erscheint in der Historie eine ⚠️-Meldung, die mit „Änderung verworfen (nichts gespeichert)“ beginnt, hat die Prüfung vor dem Speichern die GESAMTE Op-Liste dieses Turns abgelehnt – KEINE Op (auch keine memory_*-Op) ist wirksam geworden. Die Meldung nennt den Grund (V1 Kapitelnamen-Duplikat, V2 doppelte Zeilen, V3 Zeilenverlust, V4 Struktur aus content, V7 zerrissener Codeblock, V8 rewrite neben anderen Ops, oder „Turn nicht teilweise übernommen“: eine Ziel-Op wurde übersprungen, während eine Lösch-/Ersetz-Op gewirkt hätte). Sende im nächsten Turn eine korrigierte, VOLLSTÄNDIGE Op-Liste (Ziel- und Quell-Op zusammen, nie nur die Hälfte) und weiche nie auf rewrite aus. Steht dort „trotz Prüfhinweis übernommen“ oder „ohne Lösch-/Ersetz-Ops übernommen“, hat der Nutzer die (ggf. um Lösch-Ops gekürzte) Änderung bewusst gespeichert – behandle sie als angewendet und wiederhole sie nicht. Steht darunter zusätzlich eine zweite Zeile „Nicht angewendet: …“ oder der Zusatz „haben nicht gewirkt, nichts gespeichert“, ist GENAU der dort genannte Teil trotz Übernahme weiterhin wirkungslos geblieben – dafür gilt weiterhin die ⚠️-Regel oben (nicht angewendete Ops): korrigiere diesen Teil im nächsten Turn, statt ihn als erledigt zu behandeln.
+- Kommt auf deinen update_notebook-Aufruf ein tool_result mit is_error zurück, dessen Text mit „VERWORFEN“ beginnt, wurde deine Op-Liste im SELBEN Turn verworfen und NICHTS gespeichert. Antworte darauf mit GENAU EINEM neuen update_notebook-Aufruf mit der korrigierten, vollständigen Op-Liste (reply darf kurz erklären, was du geändert hast); sende nie dieselben Ops unverändert erneut und nie ein rewrite, wenn das Prüfergebnis „KEIN rewrite“ sagt – lieber "ops":[] und eine Rückfrage im reply.
+- Erscheint in der Historie eine ℹ️-Meldung, die mit „Automatisch nachgebessert“ beginnt, wurde die ursprünglich verworfene bzw. unvollständige Antwort BEREITS IM SELBEN Turn automatisch korrigiert (und, falls sie ops enthielt, erfolgreich gespeichert) – der Turn ist NICHT tatsächlich gescheitert, auch wenn die Meldung eine anfängliche Verwerfung nennt. Behandle die genannte Änderung als bereits angewendet und wiederhole sie NICHT im nächsten Turn.
+- Der Dokumentstand unter ALLE NOTIZBÜCHER ist IMMER maßgeblich – auch wenn frühere Chat-Nachrichten (deine eigenen eingeschlossen) etwas anderes behaupten, z. B. nach einer Wiederherstellung einer älteren Version oder einer manuellen Bearbeitung.
 
 REINE FRAGEN (WICHTIG): Enthält die Nachricht nichts Speicherwürdiges – eine bloße Frage (auch zu Notizbüchern oder Dateianhängen: „Was steht …?“, „Erkläre …“, „Fasse zusammen …“), Smalltalk –, dann gib "ops":[] und "commit":null zurück. Nutze eine solche Antwort NIEMALS, um nebenbei aufzuräumen, Platzhalter zu entfernen oder umzustrukturieren – das Dokument bleibt unangetastet. Die Frage selbst wird dabei im reply VOLLSTÄNDIG und inhaltlich beantwortet (siehe ANTWORTFORMAT) – ein Verweis auf bereits im Notizbuch stehende Inhalte ist nur eine Ergänzung und ersetzt niemals die eigentliche Antwort. (Angehängte BILDER sind davon ausgenommen: sie werden gemäß dem BILDER-Abschnitt immer eingebunden. GEDÄCHTNIS-Ops ("memory_append"/"memory_replace") sind davon EBENFALLS ausgenommen und bei einer reinen Frage ausdrücklich weiter erwünscht, wenn dabei dauerhaft Nützliches über den Nutzer erkennbar wird – Gedächtnispflege ist KEIN Notizbuch-Aufräumen. ALLE Notizbuch-Ops (append_to_section/replace_section/delete_section/delete_chapter/append_to_chapter/delete_entry/replace_entry/move_entry/rewrite) bleiben bei reinen Fragen dagegen unverändert verboten: "ops" darf bei einer reinen Frage also memory_*-Einträge enthalten, aber KEINE Notizbuch-Ops.)`;
 
@@ -703,7 +706,22 @@ export const SUBSTANTIAL_REPLY_MIN_LENGTH = 80;
 // Live-Fällen unten: deren reply trägt eigenen Inhalt, auch wenn ein Teil
 // davon zusätzlich auf "die Antwort" verweist – dort greift NUR die
 // Längen-Schwelle, absichtlich, siehe DECISIONS).
-const POINTER_ONLY_RE = /^(die|der|das|siehe|steht|wie)?\s*.{0,40}\b(siehe (antwort|oben)|steht oben|oben beschrieben|oben erklärt)\b/i;
+// v7.55 (B2, zweiter Retry-Auslöser, E2E-Fall C14 🔴): um "oben ausformuliert"
+// und "wie oben <Partizip>" erweitert – der reale Live-Fund ("Vorschlag ist
+// oben ausformuliert …" auf "Schlage mir eine zweistufige Gliederung vor"
+// OHNE jeden Vorab-Text) traf die bisherigen vier Formulierungen nicht.
+// Review-Fix (Runde 1, 🟡): "wie oben" OHNE Partizip-Pflicht war zu breit und
+// matchte legitime Kurzbestätigungen MIT Ops, die sich auf den Chatverlauf
+// beziehen ("Wie oben besprochen eingetragen.", "Notiert wie oben
+// gewünscht."). Solche Sätze tragen eigenen Inhalt (die Bestätigung der
+// durchgeführten Änderung) und dürfen keinen Retry auslösen – sonst droht ein
+// stiller Verlust der bereits korrekten ops (siehe DECISIONS #113). Deshalb
+// jetzt nur noch "wie oben ausformuliert/beschrieben/erklärt/dargestellt/
+// skizziert/aufgeführt" (Selbstverweis auf einen anderen Teil DERSELBEN
+// Antwort), nicht aber "wie oben besprochen/gewünscht/vereinbart" (Verweis
+// auf den vorherigen Chatverlauf). Diese Erweiterung wirkt automatisch auch
+// auf isSubstantialReply() (siehe unten) – gewünscht, keine Nebenwirkung.
+const POINTER_ONLY_RE = /^(die|der|das|siehe|steht|wie)?\s*.{0,40}\b(siehe (antwort|oben)|steht oben|oben beschrieben|oben erklärt|oben ausformuliert|wie oben (ausformuliert|beschrieben|erklärt|dargestellt|skizziert|aufgeführt))\b/i;
 
 // Entscheidet, ob eine model-generierte reply inhaltlich genug ist, um im
 // Vorab-Text-Gate (siehe callClaude) einen zusätzlichen Vorab-Textblock ohne
@@ -714,6 +732,64 @@ export function isSubstantialReply(toolReply) {
   if (!t) return false;
   if (POINTER_ONLY_RE.test(t)) return false;
   return t.length >= SUBSTANTIAL_REPLY_MIN_LENGTH;
+}
+
+// v7.55 (B2, In-Turn-Retry, zweiter Auslöser, DECISIONS #113): eigenständiger,
+// reiner Helfer (kein Seiteneffekt) für den zweiten Retry-Trigger in
+// callClaude – "die finale Antwort ist ein reiner Verweis-Reply UND es gibt
+// KEINEN substanziellen Vorab-Text davor" (E2E-Fall C14: "Vorschlag ist oben
+// ausformuliert …" ohne jeden Text vor dem Tool-Aufruf). BEWUSST keine
+// Längen-Schwelle auf reply selbst (Review-Fix nach Runde 1: der reale C14-
+// Live-Text "Vorschlag ist oben ausformuliert. Ich habe noch nichts umgebaut
+// – sag Bescheid, wenn ich die Gliederung so anlegen soll." misst getrimmt
+// 120 Zeichen, also über SUBSTANTIAL_REPLY_MIN_LENGTH – eine Kürze-Bedingung
+// hier hätte genau den Auftragsfall verfehlt). POINTER_ONLY_RE selbst ist
+// bereits eng auf einen Verweis nahe am Anfang verankert (siehe Kommentar
+// dort); der eigentliche Inhalts-Check ist preText: nur wenn der Vorab-Text
+// (die Textblöcke VOR dem Tool-Aufruf) selbst NICHT substanziell ist, fehlt
+// der Inhalt tatsächlich komplett und ein Retry ist gerechtfertigt.
+// preTextBlocks sind die rohen Textblöcke VOR dem Tool-Aufruf (wie
+// callClaude#textBlocks) – ein Array von { text } ODER von reinen Strings,
+// beides wird akzeptiert.
+export function isPointerOnlyReply(reply, preTextBlocks) {
+  const t = typeof reply === "string" ? reply.trim() : "";
+  if (!t) return false;
+  if (!POINTER_ONLY_RE.test(t)) return false;
+  const preText = (Array.isArray(preTextBlocks) ? preTextBlocks : [])
+    .map((b) => (b && typeof b.text === "string" ? b.text : typeof b === "string" ? b : ""))
+    .join("");
+  return !isSubstantialReply(preText);
+}
+
+// Fixer Diagnose-Text für den zweiten Retry-Auslöser (siehe isPointerOnlyReply
+// oben) – exportiert, damit App.jsx (Teil 2) ihn unverändert an
+// callClaude()#retryWith übergeben kann, ohne den Wortlaut zu duplizieren.
+export const POINTER_ONLY_RETRY_DIAGNOSIS =
+  "Dein reply verweist auf „oben“, aber diese Nachricht enthält keinen Text davor. Schreibe die vollständige " +
+  "Antwort (z. B. die komplette Gliederung als Outline) in das reply-Feld; ops unverändert lassen.";
+
+// v7.55.1 (Review-Fix Runde 1, zweites 🔵-Finding, DECISIONS #113 „Abschluss
+// vor Commit“): reiner Entscheidungs-Baustein für den ZWEITEN Retry-Auslöser
+// in App.jsx#send (dort bisher inline `!(plan && plan.rejected) && …`) –
+// extrahiert, weil die bisherige Bedingung eine ECHTE Lücke hatte: sie ließ
+// den Auslöser auch bei einem Turn zu, der GÜLTIGE, NICHT verworfene
+// Notizbuch-Ops enthielt, sofern reply zufällig POINTER_ONLY_RE traf (Live-
+// Beispiel: „Eingetragen wie oben beschrieben.“ als harmlose Bestätigung
+// ECHTER ops – isPointerOnlyReply liefert dafür weiterhin true, siehe die
+// Pins oben; das ist KEIN Fehler der Mustererkennung, sondern der
+// Entscheidung, WANN ein Retry überhaupt sinnvoll ist). Ein Retry auf so
+// einem Turn ist gefährlich: antwortet das Modell im Retry mit „ops“:[]
+// (typisch bei „schon erledigt“), überschreibt „letzter Versuch gewinnt“
+// (TURN-REGELN 8) die bereits korrekt geplanten Ops des Erstversuchs
+// ersatzlos. FIX: der Auslöser greift NUR, wenn der Erstversuch GAR KEINE
+// Notizbuch-Ops hatte – exakt die C14-Klasse (reiner Verweis-Reply OHNE
+// jede Substanz, weder im reply noch in ops). `plan` ist nach App.jsx#
+// planForOps() GENAU DANN null, wenn splitOps() keine notebookOps lieferte
+// (siehe der Kommentar dort: `if (nOps.length) { … p = evaluateTurn(…); }`,
+// sonst bleibt p null) – `!plan` ist also äquivalent zu "keine Notizbuch-
+// Ops im Erstversuch", ohne dass diese Funktion turn.js importieren muss.
+export function shouldRetryPointerOnly(plan, res) {
+  return !plan && !!res && res.retryReason === "pointer_only" && typeof res.retryWith === "function";
 }
 
 // Bei Websuche steht die inhaltliche Antwort meist in den Textblöcken VOR
@@ -907,6 +983,26 @@ export function formatCacheDebug(usage, diagnostics) {
   return out;
 }
 
+// v7.55 (B2, In-Turn-Retry, DECISIONS #113): Kappungs-Grenze für die
+// Diagnose-Strings, die callClaude()#retryWith() als tool_result-Inhalt an
+// die API zurückschickt (turn.js#buildTurnDiagnosis liefert bereits ≤ 800,
+// POINTER_ONLY_RETRY_DIAGNOSIS oben ist ein kurzer Festtext – dieselbe
+// Zahl wie verify.js/turn.js#DIAG_MAX, damit ein künftiger Aufrufer sich
+// nicht auf eine andere Deckelung verlassen kann).
+const DIAG_CLAMP_MAX = 800;
+
+// Zweite, unabhängige Sanitisierungs-Schicht direkt an der Senke (wie
+// verify.js#sanitizeDiagFragment/ops.js#sanitizeForWarning an ihren
+// jeweiligen Stellen): NUL raus, auf DIAG_CLAMP_MAX gekappt. Bewusst OHNE
+// die Klammer-/Whitespace-Umschreibung von sanitizeWarningForHistory oben –
+// der String landet hier NICHT in einem "[SYSTEM-HINWEIS: …]"-Rahmen
+// (dieser Rahmen betrifft nur die Chat-HISTORIE künftiger Turns), sondern
+// direkt als tool_result-content INNERHALB desselben API-Requests.
+function clampDiag(s) {
+  const noNul = String(s ?? "").split("\u0000").join("");
+  return noNul.length > DIAG_CLAMP_MAX ? noNul.slice(0, DIAG_CLAMP_MAX - 1) + "…" : noNul;
+}
+
 // nbContext: { notebooks: [{ name, doc }], activeName }
 // fileInfo (optional): { name, text|null } – Dateianhang dieses Turns;
 // der Inhalt geht nur in DIESEN Aufruf, im Verlauf bleibt nur der Name.
@@ -992,6 +1088,60 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
   }
   content.push({ type: "text", text });
   msgs.push({ role: "user", content });
+
+  // v7.55.1 (Review-Fix Runde 1, E2E-Fall C32, DECISIONS #113 „Abschluss vor
+  // Commit“): Sicherung gegen gleichrollige Nachbarn in der History.
+  // URSPRÜNGLICHE ANNAHME beim Einbau (Review-Korrektur 🟡, DECISIONS #113
+  // Abschluss-Delta): Anthropics Messages-API verlange STRIKT alternierende
+  // Rollen und lehne einen Verstoß mit einem 400-Fehler „roles must
+  // alternate“ ab (siehe DECISIONS #106 Punkt C – requestFeedbacks
+  // Info-Pillen umgehen das bisher NUR, weil sie IMMER im selben setChat-
+  // Aufruf von einer Assistent-Antwort gefolgt werden). Tatsächlich führt
+  // die aktuelle Messages-API zwei aufeinanderfolgende Turns DERSELBEN Rolle
+  // serverseitig selbst zusammen, statt hart abzulehnen – der clientseitige
+  // Merge hier bleibt trotzdem sinnvoll: er ist DETERMINISTISCH und
+  // EXPLIZIT (die App bestimmt die Zusammenführung selbst und macht sie im
+  // Request sichtbar, statt sich auf ein undokumentiertes, jederzeit
+  // änderbares Server-Verhalten zu verlassen). Die restore()-Info-Pille
+  // (App.jsx#restore/buildRestoreInfo) hat KEINE garantiert folgende
+  // Assistent-Nachricht im selben Turn – sie ist role:"user" wie jede andere
+  // Chat-Nachricht, damit sie hier oben ganz normal in "msgs" landet. Statt
+  // App.jsx eine zweite, fragile Paar-Disziplin aufzuerlegen: HIER, an der
+  // EINEN Senke, in der die komplette History linearisiert wird, werden ZWEI
+  // AUFEINANDERFOLGENDE Einträge DERSELBEN Rolle zu einem zusammengeführt
+  // (Content-Konkatenation, KEIN Nachrichtenverlust) – unabhängig davon,
+  // welche Chat-Quelle die Kollision verursacht hat. Quellen heute: (1) die
+  // restore()-Pille direkt vor dem nächsten Nutzer-Turn (siehe oben), (2)
+  // Resend nach einem Fehler-/Konflikt-Turn (App.jsx#send catch-Pfad bzw.
+  // SHA-Konflikt-Pfad: die Assistent-Antwort bekommt error:true und wird
+  // weiter oben im History-Filter verworfen – ".filter((m) => !m.error …)"
+  // – die dazugehörige user-Nachricht bleibt aber unmarkiert im Chat und
+  // erzeugt beim Resend zwei user-Einträge in Folge, seit v7.21 ein
+  // regelmäßiger Pfad, nicht bloß ein theoretischer Randfall). Siehe Test
+  // "History-Merge gleichrolliger Nachbarn". Rückwärts iteriert (Ende → 0),
+  // damit splice() die noch zu prüfenden Indizes nicht verschiebt; toArr()
+  // normalisiert historische String-Contents und den array-förmigen Content
+  // des aktuellen Turns (Bild-/Text-Blöcke) auf dieselbe Block-Form, bevor
+  // sie aneinandergehängt werden. Ein assistant/assistant-Merge (heute
+  // UNERREICHBAR – jeder Turn erzeugt höchstens EINE role:"assistant"-
+  // Nachricht in "priorChat", zwei Assistent-Turns in Folge entstehen in
+  // der aktuellen App-Logik nicht) würde dabei ZWEI
+  // "[SYSTEM-HINWEIS: …]"-Rahmen (siehe msgs-Mapping oben) in eine einzige
+  // Nachricht legen – strukturell unproblematisch (der Rahmen-Vertrag
+  // verlangt nur GENAU EINEN Marker JE historischer Original-Nachricht,
+  // nicht je gemergter API-Nachricht), aber bewusst als Grenzfall notiert,
+  // falls ein künftiger Aufrufer doch aufeinanderfolgende Assistent-
+  // Nachrichten in priorChat erzeugt.
+  const toContentBlocks = (c) => (typeof c === "string" ? [{ type: "text", text: c }] : c);
+  for (let i = msgs.length - 1; i > 0; i--) {
+    if (msgs[i].role === msgs[i - 1].role) {
+      msgs[i - 1] = {
+        role: msgs[i - 1].role,
+        content: [...toContentBlocks(msgs[i - 1].content), ...toContentBlocks(msgs[i].content)],
+      };
+      msgs.splice(i, 1);
+    }
+  }
 
   // lookup_wissen anbieten, sobald der Prompt Index-Einträge enthält:
   // Einzeldatei über dem Datei-Deckel ODER Summe über dem Gesamt-Deckel
@@ -1293,8 +1443,16 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     }
   };
 
-  const doPost = async (mode) => {
-    let data = await postOnce(msgs, mode);
+  // v7.55 (B2, DECISIONS #113): "startConvo" (Default: das Erst-Turn-"msgs")
+  // macht doPost() wiederverwendbar für den In-Turn-Retry (retryWith weiter
+  // unten) – der Retry setzt auf einer bereits erweiterten Konversation auf
+  // (Erstantwort + Prüfergebnis als tool_result), statt immer bei msgs neu
+  // zu beginnen. Rückgabe unverändert { data, convo }; "convo" ist dabei
+  // IMMER die Konversation, MIT der "data" angefragt wurde (endet im
+  // pause_turn-/lookup-Zweig auf assistant bzw. user, siehe Schleife unten) –
+  // nie die um "data" selbst erweiterte Folge-Konversation.
+  const doPost = async (mode, startConvo = msgs) => {
+    let data = await postOnce(startConvo, mode);
     collectSources(data);
     if (mode === "search") collectText(data);
     // Fortsetzungs-Schleife für zwei Fälle:
@@ -1304,7 +1462,7 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     //    an – die App beantwortet den Tool-Aufruf lokal und setzt fort
     //    (max. LOOKUP_MAX_ROUNDS Runden; ein vorhandener update_notebook-
     //    Aufruf beendet den Turn, dann kein Lookup mehr).
-    let convo = msgs;
+    let convo = startConvo;
     let cont = 0;
     let lookups = 0;
     for (;;) {
@@ -1347,6 +1505,7 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     return { data, convo };
   };
 
+  let mode = "search";
   let { data, convo: lastConvo } = await doPost("search");
   if (data && data.error && /web_search|tool/i.test(String(data.error.message || data.error.type || ""))) {
     // Websuche nicht verfügbar (Modell/Org): ohne Recherche, Tool erzwungen.
@@ -1354,10 +1513,12 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     // ohnehin leer) – für den frischen Anlauf verwerfen, sonst könnte Prosa
     // aus einem verworfenen Versuch in die finale Antwort durchsickern.
     textBlocks.length = 0;
+    mode = "forced";
     ({ data, convo: lastConvo } = await doPost("forced"));
   }
   if (data && data.error && /tool/i.test(String(data.error.message || data.error.type || ""))) {
     textBlocks.length = 0;
+    mode = "none";
     ({ data, convo: lastConvo } = await doPost("none"));
   }
   if (!data || data.error) {
@@ -1367,6 +1528,21 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     }
     throw new Error((data && data.error && data.error.message) || "API-Fehler");
   }
+
+  // v7.55 (B2, DECISIONS #113): finalMode/finalConvo/finalData verfolgen den
+  // Ursprungsmodus (search/forced/none) und die Konversation/Antwort, AUF
+  // DER ein etwaiger In-Turn-Retry (retryWith, siehe ganz unten) aufsetzt –
+  // "let" statt "const", weil das anschließende Forced-Nachfassen (falls
+  // die Erstantwort ohne update_notebook endet) alle drei bei Erfolg erneut
+  // überschreibt (siehe dort). Modus-Erhalt statt pauschal "forced": im
+  // search-Modus bleiben Server-Tool-/Websuche-Blöcke im Retry zulässig,
+  // weil buildRequest(…, "search") web_search weiterhin deklariert –
+  // pauschales "forced" würde bei vorhandenen web_search_tool_result-Blöcken
+  // in der Konversation einen 400 provozieren (derselbe Grund wie beim
+  // bestehenden Forced-Nachfassen weiter unten).
+  let finalMode = mode;
+  let finalConvo = lastConvo;
+  let finalData = data;
 
   const extractParsed = (d) => {
     // 1. Bevorzugt: strukturierter update_notebook-Aufruf
@@ -1413,8 +1589,24 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
         if (next && next.error) next = null;
       } catch (e) { next = null; }
     }
-    if (next) data = next;
-    else ({ data } = await doPost("forced"));
+    if (next) {
+      data = next;
+      // (K-🔴3) dieselbe Konversation wie zuvor, nur im forced-Modus erneut
+      // angefragt – kein neuer convo-Zustand entstanden.
+      finalMode = "forced";
+      finalConvo = lastConvo;
+      finalData = data;
+    } else {
+      // "von vorn" OHNE Recherche: doPost() liefert eine NEUE Konversation
+      // ab msgs zurück – die MUSS übernommen werden (K-🔴3, Review-Fund:
+      // vorher wurde nur "data" destrukturiert und "convo" verworfen, ein
+      // späterer Retry hätte dann mit der VERALTETEN lastConvo (aus dem
+      // gescheiterten Suchversuch) fortgesetzt).
+      ({ data, convo: lastConvo } = await doPost("forced"));
+      finalMode = "forced";
+      finalConvo = lastConvo;
+      finalData = data;
+    }
     if (!data || data.error) {
       throw new Error((data && data.error && data.error.message) || "API-Fehler");
     }
@@ -1439,66 +1631,199 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     };
   }
 
-  // cite-Tags in Dokument-Inhalten werden zu Fußnoten-Links [0](url)
-  // aufgelöst (Platzhalter-Nummer; die dokumentweite Durchnummerierung
-  // passiert beim Schreiben). Ohne Recherche gibt es keine Quellen –
-  // dann werden die Tags wie bisher gestrippt.
-  const ops = (Array.isArray(parsed.ops) ? parsed.ops : []).map((op) =>
-    op && typeof op === "object"
-      ? { ...op, content: citeTagsToDocLinks(op.content, usedSearch ? sources : []) }
-      : op
-  );
+  // v7.55 (B2, DECISIONS #113): Die bisherige Tail-Logik (ops/reply/sources
+  // aufbereiten) ist jetzt eine benannte Funktion statt Inline-Code am Ende
+  // von callClaude – sowohl der ERSTE Versuch (Aufruf direkt unten) als
+  // auch ein erfolgreicher retryWith()-Versuch (siehe ganz unten) laufen
+  // durch DIESELBE Logik, kein zweiter, potenziell abweichender Pfad.
+  // max_tokens wird an BEIDEN Aufrufstellen bereits VOR finalize() behandelt
+  // (oben für den ersten Versuch, in retryWith für den Retry) – finalize()
+  // selbst braucht "data" deshalb nicht mehr für eine solche Prüfung.
+  const finalize = (parsedObj, retryOpts = {}) => {
+    const retried = !!retryOpts.retried;
+    // Schnappschuss VOR jeder Mutation von textBlocks weiter unten (die
+    // Substanz-Gate-Zeile kann textBlocks bei Bedarf leeren) – der zweite
+    // Retry-Auslöser (isPointerOnlyReply) braucht den ECHTEN Vorab-Text-
+    // Zustand, unabhängig von der Reihenfolge der folgenden Zeilen.
+    const preTextSnapshot = textBlocks.slice();
 
-  // Roh-reply übergeben (ohne "Notiert."-Default): der Default soll nicht
-  // an eine vollständige Recherche-Antwort angehängt werden.
-  const toolReply = typeof parsed.reply === "string" ? parsed.reply : "";
-  // v7.6 (Sicherheitsnetz zu QA-Finding C9a): Vorab-Textblöcke werden IMMER
-  // mit reply kombiniert, nicht mehr nur bei usedSearch===true. Trotz der
-  // Prompt-Anweisung (ANTWORTFORMAT/INTERNET-RECHERCHE), ohne Websuche
-  // NIEMALS Text vor dem Tool-Aufruf zu schreiben, tat das Modell es im
-  // Live-Finding trotzdem (vollständige Erklärung inkl. Formel) und verwies
-  // in reply nur knapp auf „oben“ – beim alten usedSearch-Gate wurde dieser
-  // Text komplett verworfen, reply verwies auf ein „oben“, das im Chat nie
-  // existierte (kompletter Inhaltsverlust). buildChatReply schützt weiterhin
-  // vor Doppelungen (exakter Vergleich mit toolReply) und vor JSON-/Codeblock-
-  // Leaks (Payload-Heuristik) – das gilt unabhängig von usedSearch. Quellen/
-  // cite-Marker bleiben dagegen strikt an echte Websuchen gebunden: ohne
-  // Suche ist "sources" ohnehin leer (collectSources füllt es nur bei einem
-  // web_search_tool_result-Block), das hits-Argument wird zusätzlich explizit
-  // damit gegated, damit ein versehentlicher <cite>-Tag ohne Suche nie eine
-  // Quellenliste ohne recherchierte Belege erzeugt.
-  //
-  // v7.19 (Code-Netz, Nutzer-Entscheidung nach FÜNF dokumentierten Live-
-  // Fällen derselben Fehlerfamilie – siehe DECISIONS #57 Abschluss-Nachtrag):
-  // Ohne Websuche gehört laut Prompt-Vertrag (ANTWORTFORMAT/INTERNET-
-  // RECHERCHE) die GESAMTE Antwort ins reply-Feld. Schreibt das Modell
-  // TROTZDEM einen Vorab-Textblock UND eine SUBSTANZIELLE reply
-  // (isSubstantialReply), ist der Vorab-Text nach fünf Live-Fällen praktisch
-  // immer eine – ggf. paraphrasierte, gekürzte oder selbstverweisende –
-  // Dublette derselben Aussage: buildChatReply()s normalisierter
-  // Gleichheits-Check (v7.10) erkennt NUR formale Abweichungen, keine
-  // Paraphrasen (bewusste v7.11-Entscheidung, bleibt unverändert – siehe
-  // buildChatReply selbst, hier NICHT angefasst). Das Gate verwirft den
-  // Vorab-Text DAVOR, reply wird kanonisch. isSubstantialReply() schützt
-  // weiterhin GENAU den v7.6-Fall (C9a: reply war nur ein Kurzverweis ohne
-  // eigenen Inhalt) – dort bleibt der Vorab-Text erhalten, sonst
-  // Inhaltsverlust. WICHTIG: Das Gate hängt EXPLIZIT an usedSearch, NICHT an
-  // hits/sources – eine Websuche ganz OHNE Treffer (sources leer) darf die
-  // recherchierte Prosa NIEMALS verwerfen (siehe Tests).
-  if (!usedSearch && textBlocks.length && isSubstantialReply(toolReply)) textBlocks.length = 0;
-  const chat = buildChatReply({ content: textBlocks }, usedSearch ? sources : [], toolReply);
-  // Recherchiert, aber nichts inline zitiert: die konsultierten Quellen
-  // trotzdem anzeigen (dedupliziert, gedeckelt), statt sie zu verschweigen.
-  if (usedSearch && !chat.sources.length && sources.length) {
-    const seen = new Set();
-    chat.sources = sources
-      .filter((s) => !seen.has(s.url) && seen.add(s.url))
-      .slice(0, 6);
-  }
-  return {
-    reply: chat.reply || "Notiert.",
-    ops,
-    commit: typeof parsed.commit === "string" && parsed.commit.trim() ? parsed.commit.trim() : null,
-    sources: chat.sources,
+    // cite-Tags in Dokument-Inhalten werden zu Fußnoten-Links [0](url)
+    // aufgelöst (Platzhalter-Nummer; die dokumentweite Durchnummerierung
+    // passiert beim Schreiben). Ohne Recherche gibt es keine Quellen –
+    // dann werden die Tags wie bisher gestrippt.
+    const ops = (Array.isArray(parsedObj.ops) ? parsedObj.ops : []).map((op) =>
+      op && typeof op === "object"
+        ? { ...op, content: citeTagsToDocLinks(op.content, usedSearch ? sources : []) }
+        : op
+    );
+
+    // Roh-reply übergeben (ohne "Notiert."-Default): der Default soll nicht
+    // an eine vollständige Recherche-Antwort angehängt werden.
+    const toolReply = typeof parsedObj.reply === "string" ? parsedObj.reply : "";
+    // v7.6 (Sicherheitsnetz zu QA-Finding C9a): Vorab-Textblöcke werden IMMER
+    // mit reply kombiniert, nicht mehr nur bei usedSearch===true. Trotz der
+    // Prompt-Anweisung (ANTWORTFORMAT/INTERNET-RECHERCHE), ohne Websuche
+    // NIEMALS Text vor dem Tool-Aufruf zu schreiben, tat das Modell es im
+    // Live-Finding trotzdem (vollständige Erklärung inkl. Formel) und verwies
+    // in reply nur knapp auf „oben“ – beim alten usedSearch-Gate wurde dieser
+    // Text komplett verworfen, reply verwies auf ein „oben“, das im Chat nie
+    // existierte (kompletter Inhaltsverlust). buildChatReply schützt weiterhin
+    // vor Doppelungen (exakter Vergleich mit toolReply) und vor JSON-/Codeblock-
+    // Leaks (Payload-Heuristik) – das gilt unabhängig von usedSearch. Quellen/
+    // cite-Marker bleiben dagegen strikt an echte Websuchen gebunden: ohne
+    // Suche ist "sources" ohnehin leer (collectSources füllt es nur bei einem
+    // web_search_tool_result-Block), das hits-Argument wird zusätzlich explizit
+    // damit gegated, damit ein versehentlicher <cite>-Tag ohne Suche nie eine
+    // Quellenliste ohne recherchierte Belege erzeugt.
+    //
+    // v7.19 (Code-Netz, Nutzer-Entscheidung nach FÜNF dokumentierten Live-
+    // Fällen derselben Fehlerfamilie – siehe DECISIONS #57 Abschluss-Nachtrag):
+    // Ohne Websuche gehört laut Prompt-Vertrag (ANTWORTFORMAT/INTERNET-
+    // RECHERCHE) die GESAMTE Antwort ins reply-Feld. Schreibt das Modell
+    // TROTZDEM einen Vorab-Textblock UND eine SUBSTANZIELLE reply
+    // (isSubstantialReply), ist der Vorab-Text nach fünf Live-Fällen praktisch
+    // immer eine – ggf. paraphrasierte, gekürzte oder selbstverweisende –
+    // Dublette derselben Aussage: buildChatReply()s normalisierter
+    // Gleichheits-Check (v7.10) erkennt NUR formale Abweichungen, keine
+    // Paraphrasen (bewusste v7.11-Entscheidung, bleibt unverändert – siehe
+    // buildChatReply selbst, hier NICHT angefasst). Das Gate verwirft den
+    // Vorab-Text DAVOR, reply wird kanonisch. isSubstantialReply() schützt
+    // weiterhin GENAU den v7.6-Fall (C9a: reply war nur ein Kurzverweis ohne
+    // eigenen Inhalt) – dort bleibt der Vorab-Text erhalten, sonst
+    // Inhaltsverlust. WICHTIG: Das Gate hängt EXPLIZIT an usedSearch, NICHT an
+    // hits/sources – eine Websuche ganz OHNE Treffer (sources leer) darf die
+    // recherchierte Prosa NIEMALS verwerfen (siehe Tests).
+    if (!usedSearch && textBlocks.length && isSubstantialReply(toolReply)) textBlocks.length = 0;
+    const chat = buildChatReply({ content: textBlocks }, usedSearch ? sources : [], toolReply);
+    // Recherchiert, aber nichts inline zitiert: die konsultierten Quellen
+    // trotzdem anzeigen (dedupliziert, gedeckelt), statt sie zu verschweigen.
+    if (usedSearch && !chat.sources.length && sources.length) {
+      const seen = new Set();
+      chat.sources = sources
+        .filter((s) => !seen.has(s.url) && seen.add(s.url))
+        .slice(0, 6);
+    }
+    // B2, zweiter Retry-Auslöser (E2E-Fall C14 🔴, siehe isPointerOnlyReply):
+    // "reply" bewusst der ROHE toolReply, NICHT chat.reply – die beiden
+    // Argumente von isPointerOnlyReply bilden GENAU die Prompt-Unterscheidung
+    // "reply-Feld" vs. "Text VOR dem Tool-Aufruf" ab, buildChatReply hätte sie
+    // hier schon (ggf.) zusammengeführt. App.jsx (Teil 2) entscheidet anhand
+    // dieses Felds, ob retryWith(POINTER_ONLY_RETRY_DIAGNOSIS) aufgerufen wird
+    // – callClaude erkennt den Fall, ohne selbst den Retry auszulösen.
+    const retryReason = isPointerOnlyReply(toolReply, preTextSnapshot) ? "pointer_only" : null;
+    return {
+      reply: chat.reply || "Notiert.",
+      ops,
+      commit: typeof parsedObj.commit === "string" && parsedObj.commit.trim() ? parsedObj.commit.trim() : null,
+      sources: chat.sources,
+      retryReason,
+      retried,
+    };
   };
+
+  const result = finalize(parsed, { retried: false });
+
+  // v7.55 (B2, In-Turn-Retry, DECISIONS #113, K-🔴3): retryWith() wird NUR
+  // an einem erfolgreichen Ergebnis angehängt – max_tokens/Fehlerpfade
+  // kehren weiter oben bereits vorher zurück (throw bzw. der frühe
+  // max_tokens-Return), erreichen diese Stelle also nie. "retryUsed" ist
+  // PRO callClaude()-Aufruf (Turn) gültig – genau EIN In-Turn-Retry.
+  let retryUsed = false;
+  result.retryWith = async (diagnosis) => {
+    if (retryUsed) throw new Error("In-Turn-Retry bereits verbraucht");
+    retryUsed = true;
+    // Zweite, unabhängige Sanitisierungs-Schicht (wie verify.js#sanitizeDiagFragment/
+    // ops.js#sanitizeForWarning): NUL raus, auf DIAG_CLAMP_MAX gekappt. Die
+    // Diagnose kommt entweder aus turn.js#buildTurnDiagnosis (bereits ≤ 800,
+    // bereits fragmentweise sanitisiert) oder aus POINTER_ONLY_RETRY_DIAGNOSIS
+    // (fester, kurzer Text) – dieser Aufruf ist trotzdem die LETZTE Schranke
+    // direkt an der Senke (der String landet als tool_result-content in der
+    // Anthropic-API), unabhängig von der Quelle.
+    const diag = clampDiag(diagnosis);
+    const blocks = finalData.content || [];
+    // (a) Merge-Regel wie in der doPost-Schleife: endet finalConvo bereits
+    // mit einer assistant-Nachricht (pause_turn-Ursprung – die Erstantwort
+    // wurde intern schon einmal fortgesetzt), wird content KONKATENIERT
+    // statt eine zweite assistant-Nachricht in Folge anzuhängen (die
+    // Anthropic-API verlangt strikt alternierende Rollen).
+    const prev = finalConvo[finalConvo.length - 1];
+    const withAssistant = prev && prev.role === "assistant" && Array.isArray(prev.content)
+      ? [...finalConvo.slice(0, -1), { role: "assistant", content: [...prev.content, ...blocks] }]
+      : [...finalConvo, { role: "assistant", content: blocks }];
+    // (b) für JEDEN tool_use-Block der Erstantwort ein tool_result (sonst
+    // lehnt die API mit 400 ab, weil ein tool_use ohne Antwort offen bliebe):
+    // update_notebook -> is_error mit der Diagnose; lookup_wissen -> lokal
+    // ECHT ausgeführt (dieselbe runLookup()-Funktion wie im normalen Pfad,
+    // der Retry darf die bereits gestellte Wissensfrage nicht verschweigen);
+    // ein sonstiger/unbekannter tool_use (kann laut Tool-Schema aktuell nicht
+    // vorkommen, Fallback trotzdem defensiv) -> "nicht ausgeführt".
+    const toolUses = blocks.filter((b) => b.type === "tool_use");
+    let userMsg;
+    if (toolUses.length) {
+      userMsg = {
+        role: "user",
+        content: toolUses.map((c) => c.name === "update_notebook"
+          ? { type: "tool_result", tool_use_id: c.id, is_error: true, content: diag }
+          : { type: "tool_result", tool_use_id: c.id, content: c.name === "lookup_wissen" ? runLookup(c.input) : "nicht ausgeführt" }),
+      };
+    } else {
+      // Kein tool_use in der Erstantwort (Text-Fallback, Modus "none"): kein
+      // tool_result möglich – die Diagnose geht stattdessen als normaler
+      // Text-Turn in die Konversation.
+      userMsg = {
+        role: "user",
+        content: [{
+          type: "text",
+          text: "[PRÜFERGEBNIS – Änderung verworfen, nichts gespeichert: " + diag + "] Antworte erneut mit dem " +
+            "vollständigen JSON (reply, ops, commit) und einer korrigierten Op-Liste.",
+        }],
+      };
+    }
+    const convo = [...withAssistant, userMsg];
+    // textBlocks gehört zur Erstantwort (bereits in result.reply verarbeitet)
+    // – für den Retry-Versuch verwerfen, sonst könnte Prosa der VERWORFENEN
+    // Antwort in die Retry-Antwort durchsickern (dieselbe Begründung wie bei
+    // den search->forced/none-Fallbacks weiter oben).
+    textBlocks.length = 0;
+    let r;
+    try {
+      r = await doPost(finalMode, convo);
+    } catch (e) {
+      console.warn("[retry] " + (e && e.message));
+      return null;
+    }
+    if (!r.data || r.data.error || r.data.stop_reason === "max_tokens") return null;
+    let parsed2 = extractParsed(r.data);
+    if (!parsed2 || typeof parsed2 !== "object") {
+      // (c) einmaliges forced-Nachfassen (wie der bestehende Pfad oben) –
+      // NUR auf r.convo (bewahrt die Retry-Konversation inkl. Prüfergebnis),
+      // NIE erneut doPost("forced") "von vorn" (das würde das Prüfergebnis
+      // verlieren und dem Modell die Verwerfung nicht mehr zeigen). Dieselbe
+      // Absicherung wie im bestehenden Pfad oben (Review-Fund v7.6, 🔴 1):
+      // OHNE echte Websuche (usedSearch bleibt false, auch im Modus "search"
+      // ohne web_search_tool_result-Block) ist ein Textblock ohne
+      // update_notebook ein verworfener Entwurf – sonst würde er sich an die
+      // reply-Antwort des Nachfass-Versuchs anhängen (Test 7a deckt genau
+      // das ab: "kein Tool-Aufruf" darf NICHT vor "Nachgefasst." erscheinen).
+      if (!usedSearch) textBlocks.length = 0;
+      // Review-Fix (Runde 1, 🟡): Spec 9.2/Z. 347 – im Ursprungsmodus "none"
+      // (Text-Fallback, Tools waren serverseitig bereits abgelehnt) darf KEIN
+      // forced-Nachfassen laufen. Ohne diesen Guard würde postOnce(r.convo,
+      // "forced") das update_notebook-Tool erneut deklarieren, das der Server
+      // in diesem Turn schon zweimal (search- und forced-Fallback) abgelehnt
+      // hat – ein sicher vergeblicher, bezahlter Request samt tools_changed-
+      // Signaturwechsel.
+      const tail = r.convo[r.convo.length - 1];
+      if (finalMode !== "none" && tail && tail.role === "user") {
+        try {
+          const n = await postOnce(r.convo, "forced");
+          if (n && !n.error && n.stop_reason !== "max_tokens") { r.data = n; parsed2 = extractParsed(n); }
+        } catch (e) { /* parsed2 bleibt null */ }
+      }
+      if (!parsed2 || typeof parsed2 !== "object") return null;
+    }
+    return finalize(parsed2, { retried: true });
+  };
+
+  return result;
 }

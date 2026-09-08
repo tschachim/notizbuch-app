@@ -445,6 +445,16 @@ Commit; die Dokument-Ansicht zeigt danach `#`-Kapitel-Köpfe über den
 bisherigen `##`-Abschnitten (Optik wie in C13); ALLE vorher vorhandenen
 QA-Testeinträge/Abschnitte sind weiterhin auffindbar (nichts inhaltlich
 verloren) – nur umgruppiert.
+Hinweis (ab v7.55, In-Turn-Retry, DECISIONS #113): Antwortet das Modell auf
+den ersten API-Aufruf NUR mit einem Verweis wie „Vorschlag ist oben
+ausformuliert …“, OHNE dass davor tatsächlich ein Gliederungsvorschlag im
+Chat steht (Selbstverweis-Fehlerfamilie #53/#57, Live-Fund 🔴 im E2E-Lauf zu
+v7.53), fasst die App automatisch EINMAL im selben Turn nach – bestanden
+gilt der Fall AUCH, wenn die konkrete Gliederung erst NACH dieser
+automatischen Nachbesserung im Fließtext erscheint, erkennbar an einem
+dezenten ℹ️-Hinweis „Automatisch nachgebessert: …“ unter der Antwort. Nur
+wenn die Gliederung auch nach der Nachbesserung fehlt bzw. weiterhin nur auf
+„oben“ verweist, gilt der Fall als 🔴.
 
 **C15 [VERBUNDEN][API] Gezielte Kapitel-Zuordnung bei doppeltem
 Abschnittsnamen (v7.14).** Voraussetzung: Zwei `#`-Kapitel mit je einem
@@ -768,7 +778,7 @@ Notizbuch A): „Verschiebe aus dem Abschnitt QA-Test Quelle den Eintrag
 Details.“ (1 API-Aufruf; die Formulierung „in das Unterthema“ soll das
 Modell dazu verleiten, das Ziel als „### Details“ statt eines echten
 `##`-Abschnitts zu adressieren – das löst zuverlässig `wrong_level`
-aus). Bestanden – ZWEI gültige Ausgänge: (a) das Modell erkennt die
+aus). Bestanden – DREI gültige Ausgänge: (a) das Modell erkennt die
 falsche Ebene selbst und adressiert stattdessen einen echten
 `##`-Abschnitt – dann normaler Erfolg: „QA-Test Punkt A“ verschwindet
 aus „QA-Test Quelle“ in A, taucht dafür vollständig in „QA-Test Ziel“
@@ -780,10 +790,21 @@ in A stehen, „QA-Test Ziel“ bleibt vollständig unverändert, UND für A
 erscheint KEIN 💾-Commit-Badge (Ausnahme, kein Finding: enthält A noch
 unverlinkte absolute Windows-Pfade oder unnummerierte Quellen-Fußnoten,
 kann das Self-Healing aus v7.31 trotz zurückgehaltener Op einen Commit
-auslösen – der Eintrag selbst bleibt dabei unverändert erhalten). 🔴 liegt ausschließlich vor, wenn
+auslösen – der Eintrag selbst bleibt dabei unverändert erhalten);
+(c) das Modell adressiert den umschließenden `##`-Abschnitt „QA-Test
+Bereich“ per `append_to_section` und hängt „QA-Test Punkt A“ ans ENDE
+dieses Abschnitts an (v7.55.1, E2E-Finding, kein Bug: der `wrong_level`-
+Schutz greift NUR, wenn direkt ein `###`-heading adressiert wird) – liegt
+das `### Details`-Unterthema wie hier VOR diesem Anhängepunkt, erscheint
+„QA-Test Punkt A“ dadurch sichtbar IM Unterthema „Details“, genau wie
+verlangt: ebenfalls bestanden, solange der Punkt GENAU EINMAL am Ende von
+„QA-Test Bereich“ steht und „QA-Test Quelle“ in A geleert ist/den Punkt
+nicht mehr enthält. 🔴 liegt bei KEINEM der drei Ausgänge in der Wahl des
+Anhängepunkts, sondern AUSSCHLIESSLICH vor, wenn
 „QA-Test Punkt A“ aus A verschwunden/gelöscht ist, OHNE vollständig (und
-genau einmal) in „QA-Test Ziel“ aufzutauchen – der #65-Datenverlust, den
-der Turn-Guard verhindern soll. Beide Notizbücher auf den erwarteten
+genau einmal) in „QA-Test Ziel“ aufzutauchen, oder wenn er dort DOPPELT
+auftaucht – der #65-Datenverlust/das Duplikat, den/das der Turn-Guard
+verhindern soll. Beide Notizbücher auf den erwarteten
 Endzustand prüfen, bevor mit dem nächsten Testfall fortgefahren wird.
 Danach aufräumen: Abschnitt „QA-Test Quelle“ in A löschen (falls noch
 vorhanden), den ggf. entstandenen Eintrag/Abschnitt in „QA-Test Ziel“
@@ -862,18 +883,16 @@ Modell kennt den Ausgang (verworfen bzw. übernommen), ohne die Op zu
 wiederholen. Nach einem Reload sind die Buttons ebenfalls weg (kein
 Finding – rejectedTurn ist bewusst nicht persistiert).
 
-**C34 [VERBUNDEN][API] (nur ab v7.55, In-Turn-Retry – NICHT Teil von
-v7.54, hier nur vorab dokumentiert) Retry korrigiert den Turn.** Setup
-wie C32. Bestanden: (a) eine ℹ️-Meldung „erste Antwort verworfen (…),
-Korrektur im selben Turn übernommen“ erscheint UND „QA-Test Punkt A“
-steht GENAU EINMAL am Ziel (die erste, verworfene Antwort des Modells
-wurde automatisch im selben Turn korrigiert, ohne dass der Nutzer
-eingreifen musste); (b) wie C32(b) – bleibt der zweite Versuch ebenfalls
-ein Verwerfungs-/Atomaritäts-Fall, gilt der LETZTE Versuch mit dem
-v7.54-Verhalten (Pille, Diff, Override); (c) wie C32(c). 🔴 bei
-Zeilenverlust oder -duplikat. Solange nur v7.54 deployt ist: dieser Fall
-ist NICHT lauffähig (kein `retryWith`) – als „übersprungen, wartet auf
-v7.55“ vermerken, kein Finding.
+**C34 [VERBUNDEN][API] (v7.55, In-Turn-Retry) Retry korrigiert den Turn.**
+Setup wie C32. Bestanden: (a) eine ℹ️-Meldung „Automatisch nachgebessert:
+erste Antwort verworfen (…), Korrektur im selben Turn übernommen“
+erscheint UND „QA-Test Punkt A“ steht GENAU EINMAL am Ziel (die erste,
+verworfene Antwort des Modells wurde automatisch im selben Turn korrigiert,
+ohne dass der Nutzer eingreifen musste); (b) wie C32(b) – bleibt der zweite
+Versuch ebenfalls ein Verwerfungs-/Atomaritäts-Fall, gilt der LETZTE
+Versuch mit dem v7.54-Verhalten (Pille, Diff, Override, KEIN
+ℹ️-Nachbesserungs-Hinweis, da der Turn insgesamt verworfen bleibt); (c) wie
+C32(c). 🔴 bei Zeilenverlust oder -duplikat.
 
 ## D. Manuelles Bearbeiten (WYSIWYG)
 
@@ -1981,6 +2000,30 @@ Repos – zu KEINEM Zeitpunkt die vorher gemerkte Zahl des ERSTEN Repos
 (auch nicht kurz aufblitzend). Gilt insbesondere, wenn beide Repos ein
 gleichnamiges Notizbuch haben (z. B. die Wissensbasis/„wissensbasis“,
 die in jedem Repo existiert).
+
+**G1d [VERBUNDEN][API] Nach Wiederherstellung erscheint die Info-Pille,
+Modell antwortet auf dem wiederhergestellten Stand (v7.55.1, DECISIONS
+#113, E2E-Fall C32).** NUR im QA-Notizbuch (Konservativ-Modus) bzw. im
+QA-Repo (QA-Modus) ausführen – Wiederherstellen verändert echte
+Nutzerdaten (schreibt den alten Stand als neuen Commit). Voraussetzung:
+im QA-Notizbuch per Chat ein Kapitel „QA-Test Kapitel Alt“ anlegen
+(1 API-Aufruf), dann die Version in der Historie merken, danach das
+Kapitel per Chat wieder löschen (1 API-Aufruf, neue Version). Historie
+öffnen, die GEMERKTE ältere Version (mit „QA-Test Kapitel Alt“)
+wiederherstellen. Erwartet: SOFORT danach erscheint im Chat eine graue
+Info-Pille (Wiederherstellen-Symbol, KEIN Stift-Symbol – das bleibt der
+„manuell bearbeitet“-Pille vorbehalten) „Notizbuch „<Name>“: Stand vom
+<Datum/Uhrzeit> wiederhergestellt – der aktuelle Dokumentstand ist
+maßgeblich, frühere Chat-Aussagen dazu sind überholt.“ Danach im Chat
+fragen: „Welche Kapitel gibt es in diesem Notizbuch?“ (1 API-Aufruf).
+Erwartet: Antwort nennt „QA-Test Kapitel Alt“ (den wiederhergestellten
+Stand), KEIN Verweis auf eine angebliche vorherige Löschung. 🔴 bei
+einem Fehler direkt nach dem Wiederherstellen (z. B. Rollenfolge-Fehler
+– die History-Merge-Sicherung in `anthropic.js#callClaude` sollte das
+verhindern) ODER wenn das Modell den falschen/gelöschten Stand nennt;
+🟡 wenn die Info-Pille fehlt oder das falsche Symbol zeigt, die Antwort
+trotzdem korrekt ist. Aufräumen: „QA-Test Kapitel Alt“ nach dem Test
+wieder löschen (Chat oder Editor).
 
 **G2 [OFFEN] Markdown kopieren/exportieren.** Kopier- und Download-Knopf
 im Dokumentkopf. Erwartet: kein Fehler; Download liefert eine .md-Datei.
