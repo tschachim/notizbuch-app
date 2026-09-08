@@ -216,6 +216,11 @@ schließen die Liste ohne Auswahl.
 
 ## C. Chat & Dokument
 
+⚠️-Pillen nennen ab v7.53 Kandidaten („Kapitel: …“, „meintest du …“) statt
+stillschweigend zu raten oder anzulegen (siehe DECISIONS #111, Stufe 2 von
+Vorschlag A). ℹ️-Pillen können zusätzlich „ähnlich vorhanden“ oder
+„Titelzeile – als Eingrenzung gewertet“ melden – keine Findings.
+
 **C1 [VERBUNDEN][API] Notiz eintragen.** Im QA-Notizbuch per Chat:
 „Notiere: QA-Testeintrag Alpha am 2026-01-01“. Erwartet:
 Bestätigungsantwort im Chat, Commit-Zeile unter der Antwort, Eintrag
@@ -621,6 +626,9 @@ C26. Nur eine ⚠️-Pille (amber) oder ein tatsächliches „## QA-Test
 KPIs“-Duplikat sind Findings.
 Danach aufräumen: „Lösche das Kapitel QA-Test KPIs.“ (1 API-Aufruf, siehe
 C20).
+Hinweis (v7.53): Nennt der Auftrag ein Kapitel, MUSS das Modell chapter
+setzen – ohne chapter ist ein neuer Abschnitt in Kapitel-Notizbüchern eine
+⚠️ mit Kapitel-Kandidaten.
 
 **C22 [VERBUNDEN][API] „Y als Unterkapitel von Kapitel X“ – korrekte
 Ebenen-Übersetzung (v7.40, Live-Befund).** Voraussetzung: Ein
@@ -711,6 +719,71 @@ replace_section geschickt hat und die Engine umgeleitet hat). 🔴, wenn
 ein „## QA-Test KPIs“ entsteht, ein Stichpunkt/Bild doppelt steht oder
 Turn 2 den Kapitelinhalt verdoppelt/verliert. Aufräumen: „Lösche das
 Kapitel QA-Test KPIs.“
+
+**C27 [VERBUNDEN][API] Mehrdeutiger Abschnittsname ohne Kapitel-Angabe
+wird abgelehnt statt geraten (v7.53).** Voraussetzung: Kapitel „QA-Test
+A“ und „QA-Test B“ mit je einem `## Notizen`-Abschnitt. Auftrag: „Ergänze
+in Notizen den Punkt ‚Mehrdeutig-Test‘.“ (1 API-Aufruf). Bestanden: das
+Modell gibt chapter an/fragt nach (Punkt genau in einer Notizen-Liste,
+keine ⚠️) ODER eine ⚠️-Pille „mehrdeutig“ mit beiden Kapitelnamen und KEINE
+Änderung am Dokument; 🔴 wenn der Punkt still in einer Liste landet ohne
+⚠️ oder in BEIDEN Listen erscheint. Folge-Turn „in QA-Test B“ → landet
+dort. Aufräumen: beide Kapitel löschen.
+
+**C28 [VERBUNDEN][API] Neuer Abschnitt ohne chapter in einem
+Kapitel-Notizbuch (v7.53).** Voraussetzung: ≥2 Kapitel im Notizbuch.
+Auftrag: „Lege einen Abschnitt ‚QA-Test Neu‘ mit dem Punkt ‚x‘ an“ (ohne
+Kapitelnennung, 1 API-Aufruf). Bestanden: Modell wählt/erfragt ein Kapitel
+(Abschnitt entsteht INNERHALB eines Kapitels, eine ℹ️-Pille ist erlaubt)
+ODER eine ⚠️-Pille „chapter angeben“ mit Kapitelliste und keine Änderung;
+🔴 wenn `## QA-Test Neu` still am Dokumentende/im letzten Kapitel ohne
+ℹ️/⚠️ entsteht. Aufräumen: Abschnitt löschen.
+
+**C29 [VERBUNDEN][API] Strukturzeilen im Inhalt werden abgewiesen
+(v7.53).** Voraussetzung: Abschnitt „QA-Test Neu“ existiert (z. B. aus
+C28). Auftrag: „Füge in Abschnitt QA-Test Neu eine Zwischenüberschrift
+‚## Teil 2‘ mit dem Punkt ‚y‘ ein.“ (1 API-Aufruf). Bestanden: eine
+⚠️-Pille „content enthält Kapitel-/Abschnittszeilen“ und Dokument
+unverändert, ODER das Modell legt stattdessen einen eigenen Abschnitt/
+ein `###`-Unterthema an; 🔴 wenn `## Teil 2` mitten im Abschnitt
+entsteht. Aufräumen: Abschnitt(e) löschen.
+
+**C30 [VERBUNDEN][API] (nur mit Teil 3) Cross-Notizbuch-Verschieben mit
+übersprungener Ziel-Op verliert nichts (Cross-Notizbuch-Turn-Guard,
+v7.53 Teil 3).** Voraussetzung: aktives Notizbuch A mit einem Abschnitt
+„QA-Test Quelle“ mit GENAU EINEM Stichpunkt „QA-Test Punkt A“ – bei
+Bedarf per Chat anlegen: „Lege den Abschnitt ‚QA-Test Quelle‘ an mit dem
+Stichpunkt ‚QA-Test Punkt A‘.“ (1 API-Aufruf). Ein ZWEITES QA-Notizbuch
+„QA-Test Ziel“ mit einem `#`-Kapitel „QA-Test Kapitel“, darin ein
+`##`-Abschnitt „QA-Test Bereich“ mit einem bereits bestehenden
+`### Details`-Unterthema (per Editor anlegen, da ein `###`-Unterthema
+selbst kein eigener Chat-Op-Zieltyp ist). Im Chat (im aktiven
+Notizbuch A): „Verschiebe aus dem Abschnitt QA-Test Quelle den Eintrag
+‚QA-Test Punkt A‘ ins Notizbuch QA-Test Ziel, in das Unterthema
+Details.“ (1 API-Aufruf; die Formulierung „in das Unterthema“ soll das
+Modell dazu verleiten, das Ziel als „### Details“ statt eines echten
+`##`-Abschnitts zu adressieren – das löst zuverlässig `wrong_level`
+aus). Bestanden – ZWEI gültige Ausgänge: (a) das Modell erkennt die
+falsche Ebene selbst und adressiert stattdessen einen echten
+`##`-Abschnitt – dann normaler Erfolg: „QA-Test Punkt A“ verschwindet
+aus „QA-Test Quelle“ in A, taucht dafür vollständig in „QA-Test Ziel“
+auf, 💾-Badges für BEIDE Notizbücher; (b) die Ziel-Op scheitert – eine
+⚠️-Pille erscheint, die sinngemäß „zurückgehalten“ nennt (die Quelle
+wurde NICHT gelöscht, weil das Ziel scheiterte) – in diesem Fall MUSS
+„QA-Test Punkt A“ weiterhin GENAU EINMAL im Abschnitt „QA-Test Quelle“
+in A stehen, „QA-Test Ziel“ bleibt vollständig unverändert, UND für A
+erscheint KEIN 💾-Commit-Badge (Ausnahme, kein Finding: enthält A noch
+unverlinkte absolute Windows-Pfade oder unnummerierte Quellen-Fußnoten,
+kann das Self-Healing aus v7.31 trotz zurückgehaltener Op einen Commit
+auslösen – der Eintrag selbst bleibt dabei unverändert erhalten). 🔴 liegt ausschließlich vor, wenn
+„QA-Test Punkt A“ aus A verschwunden/gelöscht ist, OHNE vollständig (und
+genau einmal) in „QA-Test Ziel“ aufzutauchen – der #65-Datenverlust, den
+der Turn-Guard verhindern soll. Beide Notizbücher auf den erwarteten
+Endzustand prüfen, bevor mit dem nächsten Testfall fortgefahren wird.
+Danach aufräumen: Abschnitt „QA-Test Quelle“ in A löschen (falls noch
+vorhanden), den ggf. entstandenen Eintrag/Abschnitt in „QA-Test Ziel“
+wieder entfernen, „QA-Test Ziel“ als Notizbuch löschen (falls eigens für
+diesen Test angelegt).
 
 ## D. Manuelles Bearbeiten (WYSIWYG)
 

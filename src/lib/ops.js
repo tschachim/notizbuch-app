@@ -112,6 +112,49 @@
 /* replace_section als Ausweg für Codeblock-Änderungen. Rein lesender        */
 /* Zusatz-Check (findFenceMaskedEntryMatch, siehe dort) - applyOne() und     */
 /* damit das tatsächliche Anwendungsverhalten bleiben unverändert.           */
+/* v7.53 (Stufe 2 von Vorschlag A "Anlegen und Raten ist nie implizit",      */
+/* Live-Serie: DRITTER Kapitelnamen-Duplikat-Vorfall trotz #106/#109/#110,   */
+/* siehe DECISIONS #111): #106-#110 hatten die Kollisions-Umleitung EINER    */
+/* Datenlage (Kapitel-Freitext ohne eigenen ##-Abschnitt) behoben - alle     */
+/* ÜBRIGEN Anlage-/Rate-Entscheidungen dieser Datei (fehlender Abschnitt     */
+/* OHNE chapter -> stille Anlage im letzten Kapitel/global erster Treffer;   */
+/* ###-Unterthema als heading-Ziel; Titelzeile als Kapitel-Ziel; content mit */
+/* eigener #/##-Zeile) blieben implizites Raten. resolveSectionTarget()      */
+/* wird zu resolveTarget()/resolveChapterTarget() erweitert - EINZIGE        */
+/* Entscheidungsquelle für ALLE zehn Erzeugungs-/Adressierungsstellen        */
+/* dieser Datei (Spiegelprinzip fortgeführt: kein find*()-Aufruf mehr        */
+/* AUSSERHALB des Resolvers in applyOne/explainSkip/explainNote/entryScope/  */
+/* insertEntryIntoSection). NEUE harte Invarianten (Status-Matrix statt      */
+/* "erster Treffer gewinnt"): ambiguous (≥2 gleichnamige ##-Abschnitte OHNE  */
+/* chapter -> Skip mit Kandidaten statt globaler Erst-Treffer-Wahl),         */
+/* wrong_level (heading trifft nur ein ###-Unterthema bzw. chapter trifft    */
+/* nur einen ##-Abschnitt -> Skip mit Korrektur-Hinweis), title (die         */
+/* Notizbuch-Titelzeile ist NIE ein Anlageort - als EINGRENZUNG auf einen    */
+/* bestehenden Vorspann-Abschnitt bleibt sie zulässig, ℹ️ statt Stillschw-   */
+/* eigen), chaptered_doc (ein neuer ##-Abschnitt OHNE chapter in einem       */
+/* Dokument MIT #-Kapiteln -> Skip statt stiller Anlage im letzten Kapitel;  */
+/* flache Dokumente bleiben unverändert), content-Struktur (eine #/##-Zeile  */
+/* im content -> Skip; die EIGENE Überschriftszeile am content-Anfang wird   */
+/* dagegen nicht-destruktiv entfernt und als ℹ️ gemeldet), Did-you-mean OHNE */
+/* Fuzzy-Suche (nur eindeutige Teilstring-Kandidaten, NIE automatisches      */
+/* Löschen/Umbenennen - eine ℹ️-Nachfrage-Aufforderung). WARN_TEXT_MAX von   */
+/* 100 auf 160 angehoben (Kandidatenlisten brauchen mehr Platz). Explizites  */
+/* create:true (Stufe 3 von Vorschlag A) und das Verify-then-Commit-Gate     */
+/* (Vorschlag B) sind BEWUSST NICHT Teil dieses Pakets - siehe DECISIONS.    */
+/* v7.53 Nacharbeit Runde 2 (reviewA.json, fünf 🔵-Reste + Teil 3): kein      */
+/* Verhaltens-Bruch der Status-Matrix, nur Wortlaut-/Kandidaten-Feinschliff  */
+/* - entryScope() normalisiert ein nicht-string chapter-Feld jetzt EINMAL    */
+/* VOR der Verzweigung (beide Pfade skippen identisch statt nur einer),      */
+/* noteForSectionTarget() bekommt eine ℹ️-Note für "heading mit ### trifft   */
+/* einen existierenden ##-Abschnitt" sowie einen fieldName-Parameter         */
+/* (move_entry-Ziel nennt jetzt "to_chapter" statt "chapter"), ein neuer     */
+/* delete_section-Zweig in explainNote() deckt den Titel-Scope ab, ein       */
+/* toter Kandidaten-Fallback in resolveTarget() wurde entfernt. Der          */
+/* Cross-Notizbuch-Turn-Guard (Teil 3 der Spezifikation, DECISIONS #111      */
+/* Entscheidung 5) lebt bewusst in einem EIGENEN, additiven Modul            */
+/* src/lib/turnGuard.js (nicht hier) - er trifft keine Resolver-             */
+/* Entscheidung, sondern plant nur, welche bereits von applyOpsDetailed()    */
+/* gelieferten Ergebnisse App.jsx#send committen darf.                      */
 /* ------------------------------------------------------------------ */
 
 import { computeFenceLineMask, matchFenceBlock } from "./code.jsx";
@@ -136,6 +179,16 @@ const BOUNDARY_RE = /^#{1,2}\s/;
 
 export const normHead = (h) => String(h || "").replace(/^#+\s*/, "").trim().toLowerCase();
 export const dispHead = (h) => String(h || "").replace(/^#+\s*/, "").trim();
+
+// v7.53: Anzahl führender "#" VOR dem ersten Whitespace – anders als
+// dispHead()/normHead() (die die Rauten verschlucken) bleibt hier die
+// ROHE Ebene erhalten, die die neuen Resolver-Invarianten (wrong_level)
+// brauchen: ein chapter-Feld, das explizit "## X" statt "# X" schreibt,
+// meint nachweislich einen Abschnitt, kein Kapitel.
+function rawLevel(field) {
+  const m = /^(#{1,6})\s/.exec(String(field || ""));
+  return m ? m[1].length : 0;
+}
 
 // Sucht den Zeilenbereich [s, e) einer "# "-Kapitelzeile (normHead-tolerant,
 // wie bei Abschnitten – "# Projekte" und "Projekte" treffen dieselbe
@@ -241,30 +294,6 @@ function findAddressableChapter(lines, chapterField) {
   return again ? { range: again, titleBlocked: false } : { range: null, titleBlocked: true };
 }
 
-// range (optional): [from, to) grenzt die Suche auf ein einzelnes Kapitel
-// ein (siehe findChapter oben). Ohne range: globale Suche wie bisher –
-// erster Treffer im gesamten Dokument gewinnt (unverändertes Verhalten für
-// Ops ohne "chapter"-Feld). v7.33 (Finding A, DECISIONS #75): fence-aware –
-// wie findChapter oben maskiert computeFenceLineMask sowohl die HEAD_RE-
-// Start- als auch die BOUNDARY_RE-End-Suche.
-function findSection(lines, heading, range) {
-  const t = normHead(heading);
-  if (!t) return null;
-  const mask = computeFenceLineMask(lines);
-  const from = range ? range[0] : 0;
-  const to = range ? range[1] : lines.length;
-  let s = -1;
-  for (let i = from; i < to; i++) {
-    if (!mask[i] && HEAD_RE.test(lines[i]) && normHead(lines[i]) === t) { s = i; break; }
-  }
-  if (s === -1) return null;
-  let e = to;
-  for (let j = s + 1; j < to; j++) {
-    if (!mask[j] && BOUNDARY_RE.test(lines[j])) { e = j; break; }
-  }
-  return [s, e];
-}
-
 // Sucht die Zeile des ERSTEN "## "-Abschnitts INNERHALB eines Kapitel-
 // Bereichs [s, e) (v7.40, append_to_chapter-Op, siehe DECISIONS #80) – wie
 // von findChapter/findAddressableChapter geliefert. Grenze der KAPITEL-
@@ -282,95 +311,369 @@ function firstSectionInChapter(lines, range) {
   return range[1];
 }
 
-// v7.52 (Live-Vorfall "KPIs"-Duplikat, DECISIONS #106): rein lesender
-// Resolver, der VOR jeder Kapitel-/Abschnitts-Mutation entscheidet, ob ein
-// referenziertes "heading" tatsächlich einen EIGENEN ##-Abschnitt anlegen
-// darf, oder ob es stattdessen ein GLEICHNAMIGES #-Kapitel OHNE eigenen
-// ##-Abschnitt trifft – dort würde "wird angelegt, falls er fehlt" (v7.23,
-// s. o.) sonst ein redundantes "## X" INNERHALB von "# X" erzeugen. Live-
-// Vorfall: das Kapitel "# KPIs" trug seine Einträge als reinen Kapitel-
-// FREITEXT (kein "## KPIs"); das Modell schickte trotzdem
-// {"heading":"## KPIs","chapter":"# KPIs"} und die Engine legte
-// klaglos einen zweiten, redundanten "## KPIs"-Abschnitt an (applied:true,
-// KEINE Warn-Pille – der Nutzer bemerkte das Duplikat nur zufällig).
-// applyOne UND explainSkip/explainNote nutzen AUSSCHLIESSLICH dieses
-// Ergebnis für die Kollisions-Entscheidung (Grundprinzip der Datei, siehe
-// Kopfkommentar) – KEIN zweiter, potenziell abweichender Entscheidungspfad.
-// Mutiert "lines" NIE.
-//
-// Rückgabe:
-//  disp           - dispHead(heading)
-//  chapterField    - das rohe "chapter"-Feld (leer, wenn nicht gesetzt/nur
-//                     Whitespace) – wie überall in dieser Datei
-//  chapterRange    - Bereich von "chapter", falls gesetzt UND gefunden
-//                     (OHNE Titelzeilen-Ausnahme – Altverhalten von
-//                     findChapter, siehe dessen Kommentar)
-//  chapterMissing  - chapterField gesetzt, aber chapterRange null
-//  chapterIsTitle  - chapterRange gefunden UND ist die Notizbuch-Titelzeile
-//  sectionRange    - der GENAU adressierte "## heading"-Abschnitt: bei
-//                     gesetztem, GEFUNDENEM chapterRange auf dieses Kapitel
-//                     eingegrenzt; ohne chapter (bzw. wenn chapterRange
-//                     null WEIL kein chapter angegeben war) global gesucht
-//                     – wie die bisherige Suche. Bei chapterMissing (siehe
-//                     unten) IMMER null (Review-Fix 🟡, Runde 1, siehe
-//                     Kommentar unten) – KEINE globale Suche, da ein noch
-//                     anzulegendes Kapitel per Definition keinen eigenen
-//                     Abschnitt haben kann.
-//  collision       - 'chapter' | null – nur gesetzt, wenn sectionRange null
-//                     ist UND "heading" stattdessen ein echtes #-Kapitel
-//                     (kein ##-Duplikat!) trifft
-//  collisionRange  - das getroffene Kapitel (null, wenn es bei einer
-//                     Kollision selbst erst NEU angelegt werden müsste)
-//  preambleEmpty   - true, wenn die Kapitel-Präambel des Kollisions-
-//                     Kapitels (bzw. das Kapitel fehlt komplett) noch
-//                     KEINEN Freitext-Inhalt trägt
-export function resolveSectionTarget(lines, { heading, chapter } = {}) {
-  const disp = dispHead(heading);
-  const chapterField = typeof chapter === "string" && chapter.trim() ? chapter : "";
-  const chapterRange = chapterField ? findChapter(lines, chapterField) : null;
-  const chapterMissing = !!chapterField && !chapterRange;
-  const chapterIsTitle = !!chapterRange && chapterRange[0] === titleLineIdx(lines);
-  // v7.52 Review-Nachbesserung (🟡, Runde 1): FEHLT das referenzierte Kapitel
-  // (chapterMissing), darf hier NICHT global gesucht werden – ein frisch
-  // angelegtes, garantiert leeres Kapitel kann per Definition noch KEINEN
-  // eigenen ##-Abschnitt enthalten; ein globaler Treffer wäre zwangsläufig
-  // ein FREMDER, gleichnamiger Abschnitt in einem ANDEREN Kapitel. Vorher
-  // fand findSection() diesen fremden Abschnitt trotzdem (chapterRange war
-  // null -> globale Suche), sectionRange wurde fälschlich NICHT-null, die
-  // Kollisions-Prüfung unten (die nur bei sectionRange===null greift) wurde
-  // dadurch komplett UMGANGEN und applyOne legte anschließend "# X" + "## X"
-  // an (das exakte Live-Anti-Muster). isNewSectionCase() unten profitiert
-  // vom selben Fix und vereinfacht sich entsprechend.
-  const sectionRange = chapterMissing ? null : findSection(lines, disp, chapterRange);
-
-  let collision = null;
-  let collisionRange = null;
-  if (sectionRange === null) {
-    if (!chapterField) {
-      // (i) Kein "chapter" angegeben: trifft "heading" trotzdem ein
-      // ADRESSIERBARES (Titelzeile ausgeschlossen) #-Kapitel gleichen
-      // Namens? Dann ist das gemeinte Ziel dieses Kapitel, nicht ein neuer,
-      // globaler ##-Abschnitt an beliebiger Stelle im Dokument.
-      const r = findAddressableChapter(lines, heading).range;
-      if (r) { collision = "chapter"; collisionRange = r; }
-    } else if (normHead(chapterField) === normHead(disp)) {
-      // (ii) "chapter" wurde EXPLIZIT auf denselben Namen wie "heading"
-      // gesetzt – der eigentliche Live-Vorfall (das Modell schreibt
-      // {"heading":"## KPIs","chapter":"# KPIs"}). Eine gleichnamige
-      // Notizbuch-TITELZEILE bleibt bewusst außen vor (chapterIsTitle –
-      // kein Umleiten in den Dokument-Vorspann, Altverhalten unangetastet).
-      if (chapterMissing) {
-        collision = "chapter"; collisionRange = null;
-      } else if (chapterRange && !chapterIsTitle) {
-        collision = "chapter"; collisionRange = chapterRange;
-      }
+// v7.53 (Stufe 2 von Vorschlag A, DECISIONS #111): EINMAL pro Resolver-
+// Aufruf berechneter, rein lesender Index ALLER Kapitel-/Abschnitts-/
+// Unterthemen-Zeilen (fence-maskiert wie überall in dieser Datei) – die
+// gemeinsame Datengrundlage für resolveChapterTarget()/resolveTarget()
+// unten (Grundprinzip #106/#109 fortgeführt: EIN Bauplan für ALLE
+// Adressierungs-Entscheidungen). "chapters" enthält NIE die Titelzeile
+// (titleIdx wird beim Sammeln übersprungen) – "chaptered" unterscheidet ein
+// Dokument MIT echten #-Kapiteln von einem flachen Dokument (nur Titel +
+// ##-Abschnitte). "preambleRange" ist EXAKT der Bereich, den
+// findChapter(lines, <Titelname>) liefern würde (Titelzeile bis zum ersten
+// echten Kapitel bzw. Dokumentende) – Grundlage der Titel-Scope-Regel
+// (siehe resolveTarget).
+function buildHeadingIndex(lines) {
+  const mask = computeFenceLineMask(lines);
+  const titleIdx = titleLineIdx(lines);
+  const chapters = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (i === titleIdx) continue;
+    if (!mask[i] && CHAPTER_RE.test(lines[i])) {
+      chapters.push({ idx: i, disp: dispHead(lines[i]), norm: normHead(lines[i]) });
     }
-    // (iii) "chapter" gesetzt und ≠ "heading": ein echter ##-Abschnitt
-    // dieses Namens in einem ANDEREN Kapitel ist legitim – keine Kollision.
+  }
+  for (let c = 0; c < chapters.length; c++) {
+    let end = lines.length;
+    for (let j = chapters[c].idx + 1; j < lines.length; j++) {
+      if (!mask[j] && CHAPTER_RE.test(lines[j])) { end = j; break; }
+    }
+    chapters[c].endIdx = end;
+  }
+  const chaptered = chapters.length >= 1;
+  const preambleRange = titleIdx === -1
+    ? null
+    : [titleIdx, chapters.length ? chapters[0].idx : lines.length];
+
+  const ownerOf = (i) => {
+    for (let c = 0; c < chapters.length; c++) {
+      if (i >= chapters[c].idx && i < chapters[c].endIdx) return c;
+    }
+    return -1;
+  };
+
+  const sections = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!mask[i] && HEAD_RE.test(lines[i])) {
+      let end = lines.length;
+      for (let j = i + 1; j < lines.length; j++) {
+        if (!mask[j] && BOUNDARY_RE.test(lines[j])) { end = j; break; }
+      }
+      sections.push({ idx: i, endIdx: end, disp: dispHead(lines[i]), norm: normHead(lines[i]), owner: ownerOf(i) });
+    }
+  }
+  const sectionOf = (i) => {
+    for (let s = 0; s < sections.length; s++) {
+      if (i >= sections[s].idx && i < sections[s].endIdx) return s;
+    }
+    return -1;
+  };
+  const subs = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!mask[i] && /^###\s+/.test(lines[i])) {
+      const sectionIdx = sectionOf(i);
+      subs.push({
+        idx: i, disp: dispHead(lines[i]), norm: normHead(lines[i]), sectionIdx,
+        owner: sectionIdx >= 0 ? sections[sectionIdx].owner : -1,
+      });
+    }
+  }
+  return { titleIdx, chaptered, preambleRange, chapters, sections, subs };
+}
+
+// v7.53: "Did-you-mean"-Kandidaten OHNE Fuzzy-Suche (bewusst, siehe
+// DECISIONS #111) – nur ein normalisierter Teilstring-Vergleich (Emoji/
+// Satzzeichen entfernt), NIE ein editierdistanz-basierter Vorschlag: die
+// Kandidaten dürfen nie etwas "erraten", das nicht klar erkennbar dieselbe
+// Absicht meint. Mindestlänge 3 Zeichen (nach dem Falten) auf BEIDEN Seiten
+// – verhindert Kurzwort-Fehltreffer wie "QA" <-> "QA-Test".
+function foldName(s) {
+  return normHead(s).replace(/[^\p{L}\p{N} ]/gu, "").replace(/\s+/g, " ").trim();
+}
+function similarNames(needle, entries) {
+  const nd = dispHead(needle);
+  if (!nd) return [];
+  const nNorm = normHead(nd);
+  const nFold = foldName(nd);
+  const out = [];
+  const seen = new Set();
+  for (const entry of entries) {
+    const cd = typeof entry === "string" ? entry : entry.disp;
+    if (!cd) continue;
+    if (normHead(cd) === nNorm) continue; // exakter Treffer ist DER Treffer, kein "ähnlich"
+    const cFold = foldName(cd);
+    if (nFold.length < 3 || cFold.length < 3) continue;
+    if (cFold === nFold || cFold.includes(nFold) || nFold.includes(cFold)) {
+      if (!seen.has(cd)) { seen.add(cd); out.push(cd); }
+    }
+    if (out.length >= 3) break;
+  }
+  return out;
+}
+
+// v7.53: gemeinsamer Formatierer für Kandidaten-/Kapitel-Listen – die
+// GESAMTE Liste läuft als EIN Fragment durch sanitizeForWarning() (siehe
+// Aufrufer unten), nicht jeder Name einzeln.
+function listNames(names, max = 3) {
+  if (!names || !names.length) return "";
+  const shown = names.slice(0, max).map((n) => "„" + n + "“");
+  return shown.join(", ") + (names.length > max ? " …" : "");
+}
+// Nacharbeit v7.53 (Review-Finding 🟡 1): die GESAMTE Kapitelliste läuft
+// wie jedes andere Kandidaten-Fragment EINMAL durch sw() – vorher hing
+// chapterListSuffix() listNames() roh an und umging damit Schicht 1 der
+// Prompt-Injection-Abwehr (Klammern/Kappung) für Kapitelnamen.
+function chapterListSuffix(docChapters) {
+  if (!docChapters || !docChapters.length) return "";
+  return " (Kapitel: " + sw(listNames(docChapters, 5)) + ")";
+}
+
+function findSectionOwner(index, disp) {
+  const n = normHead(disp);
+  const sec = index.sections.find((s) => s.norm === n);
+  if (!sec) return null;
+  return { sectionDisp: sec.disp, chapterDisp: sec.owner >= 0 ? index.chapters[sec.owner].disp : null, ownerIdx: sec.owner };
+}
+function findSectionNamesake(index, disp) {
+  const owner = findSectionOwner(index, disp);
+  return owner ? { sectionDisp: owner.sectionDisp, chapterDisp: owner.chapterDisp } : null;
+}
+
+// v7.53 (Stufe 2 von Vorschlag A, DECISIONS #111): einziger Resolver für EIN
+// Kapitel-Adressfeld ("chapter"/"from_chapter"/"to_chapter" bei den
+// ##-Abschnitts-/entry-Ops, "chapter" mit heading-Fallback bei
+// delete_chapter/append_to_chapter). Rein lesend, mutiert "lines" NIE.
+// "opts.heading"/"opts.usedHeadingFallback" decken die beiden Adress-
+// Konflikt-Prüfungen von append_to_chapter/delete_chapter ab (DECISIONS
+// #111, Entscheidung 2): (a) chapter UND heading beide gesetzt, aber
+// NAMENSVERSCHIEDEN -> conflicting_address (nur append_to_chapter, i5); (b)
+// chapter LEER, heading dient als Fallback-Adresse UND trägt selbst eine
+// "##"/"###"-Raute -> conflicting_address (append_to_chapter UND
+// delete_chapter, i4/i5c). Status-Matrix: empty | conflicting_address |
+// found | title | wrong_level | missing.
+export function resolveChapterTarget(lines, field, opts = {}) {
+  const disp = dispHead(field);
+  const level = rawLevel(field);
+  const index = buildHeadingIndex(lines);
+  const docChapters = index.chapters.map((c) => c.disp);
+  const mk = (extra) => ({
+    disp, level, chaptered: index.chaptered, preambleRange: index.preambleRange, docChapters,
+    range: null, titleScope: null, sectionOwner: null, conflictHeading: null, candidates: [], sectionNamesake: null,
+    ...extra,
+  });
+
+  // "usedHeadingFallback" bei LEEREM field kommt in dieser Datei NIE vor:
+  // die Aufrufer (applyOne/explainSkip, delete_chapter/append_to_chapter)
+  // übergeben in diesem Fall bereits "heading" SELBST als "field" (siehe
+  // chapterFieldFor-Nachfolgelogik dort) – die Fallback-Prüfung unten
+  // (Schritt 3, "level >= 2") greift dadurch auf dem regulären disp/level.
+  if (!disp) return mk({ status: "empty" });
+
+  if (opts.opType === "append_to_chapter" && !opts.usedHeadingFallback && opts.heading !== undefined) {
+    const headingDisp = dispHead(opts.heading);
+    if (headingDisp && normHead(headingDisp) !== normHead(disp)) {
+      return mk({ status: "conflicting_address", conflictHeading: headingDisp });
+    }
+  }
+  if (opts.usedHeadingFallback && level >= 2) {
+    return mk({ status: "conflicting_address", sectionOwner: findSectionOwner(index, disp) });
   }
 
-  const preambleEmpty = isPreambleEmpty(lines, collisionRange);
-  return { disp, chapterField, chapterRange, chapterMissing, chapterIsTitle, sectionRange, collision, collisionRange, preambleEmpty };
+  const found = findAddressableChapter(lines, field);
+  if (found.range) return mk({ status: "found", range: found.range });
+  if (found.titleBlocked) return mk({ status: "title", titleScope: index.chaptered ? "preamble" : "flat" });
+  if (level >= 2) {
+    const sectionOwner = findSectionOwner(index, disp);
+    if (sectionOwner) return mk({ status: "wrong_level", sectionOwner });
+  }
+  return mk({ status: "missing", candidates: similarNames(disp, index.chapters), sectionNamesake: findSectionNamesake(index, disp) });
+}
+
+// v7.53 (Stufe 2 von Vorschlag A, DECISIONS #111, Erweiterung von
+// resolveSectionTarget aus v7.52/#106): einziger Resolver für EIN
+// "##"-Zieladressfeld zusammen mit seinem Kapitel-Feld ("heading"+"chapter"
+// bei den Abschnitts-/entry-Ops, "to_heading"+"to_chapter" beim
+// move_entry-Ziel). Rein lesend, mutiert "lines" NIE. "chapterFieldName"
+// wirkt NUR auf spätere Wortlaute, NICHT auf die Auflösung selbst.
+// Status-Matrix: found | missing | collision | ambiguous | title |
+// wrong_level. Siehe DECISIONS #111 für die Begründung jeder Invariante.
+export function resolveTarget(lines, { heading, chapter, chapterFieldName, opType } = {}) {
+  const disp = dispHead(heading);
+  const level = rawLevel(heading);
+  const index = buildHeadingIndex(lines);
+  const docChapters = index.chapters.map((c) => c.disp);
+  const chapterField = typeof chapter === "string" && chapter.trim() ? chapter : "";
+  // Nacharbeit v7.53 (Review-Finding 🟡 3): resolveChapterTarget() bekommt
+  // das BEREINIGTE chapterField, nicht das rohe "chapter" – ein Nicht-String
+  // (Schema-Verletzung, z. B. chapter:42) wäre sonst über dispHead(String(42))
+  // als "missing" durchgerutscht und hätte eine LEERE "# "-Kapitelzeile
+  // angelegt (Struktur-Korruption). HEAD behandelte nicht-string chapter wie
+  // "kein chapter" – das stellen wir hier wieder her.
+  const chapterResult = resolveChapterTarget(lines, chapterField, { fieldName: chapterFieldName || "chapter" });
+
+  const result = {
+    disp, chapterField, level, chapter: chapterResult, docChapters, opType,
+    status: null, scope: null, scopeKind: "none",
+    chapterRange: null, chapterMissing: chapterResult.status === "missing", chapterIsTitle: false,
+    sectionRange: null, sectionMatches: [], distinctOwners: [],
+    collision: null, collisionRange: null, preambleEmpty: true,
+    levelField: null, subOwner: null, needsChapter: false,
+    candidates: [], titleNote: null,
+    titleDisp: index.titleIdx !== -1 ? dispHead(lines[index.titleIdx]) : "",
+  };
+
+  // Schritt 0: Titel-Scope (DECISIONS #111 – Kompromiss aus der Kritik):
+  // die Titelzeile ist NIE ein Anlageort, aber in einem Kapitel-Dokument als
+  // EINGRENZUNG auf den Vorspann für einen EXISTIERENDEN ##-Abschnitt
+  // adressierbar (Template-Inbox); in einem flachen Dokument gilt chapter
+  // als NICHT GESETZT (Byte-Identität zu "ohne chapter", Altverhalten).
+  if (chapterResult.status === "title") {
+    if (!index.chaptered) {
+      result.scope = [0, lines.length];
+      result.scopeKind = "flat_title";
+      result.titleNote = "flat";
+    } else {
+      result.scope = index.preambleRange;
+      result.scopeKind = "preamble";
+      result.titleNote = "preamble";
+      result.chapterIsTitle = true;
+      result.chapterRange = index.preambleRange;
+    }
+  } else if (chapterResult.status === "wrong_level") {
+    result.status = "wrong_level";
+    result.levelField = "chapter";
+    return result;
+  } else if (chapterResult.status === "missing") {
+    result.scope = null;
+    result.scopeKind = "none";
+  } else if (chapterResult.status === "found") {
+    result.scope = chapterResult.range;
+    result.scopeKind = "chapter";
+    result.chapterRange = chapterResult.range;
+  } else {
+    result.scope = [0, lines.length];
+    result.scopeKind = "global";
+  }
+
+  // Schritt 4: Abschnittssuche im Scope – Owner-basierte Mehrdeutigkeit.
+  if (result.scope && chapterResult.status !== "missing") {
+    const n = normHead(disp);
+    const matches = index.sections.filter((s) => s.norm === n && s.idx >= result.scope[0] && s.idx < result.scope[1]);
+    result.sectionMatches = matches.map((m) => ({ range: [m.idx, m.endIdx], owner: m.owner, ownerDisp: m.owner >= 0 ? index.chapters[m.owner].disp : null }));
+    const ownerMap = new Map();
+    for (const m of result.sectionMatches) {
+      if (!ownerMap.has(m.owner)) ownerMap.set(m.owner, { owner: m.owner, label: m.owner === -1 ? "Vorspann" : m.ownerDisp });
+    }
+    result.distinctOwners = Array.from(ownerMap.values());
+    if (matches.length >= 2 && result.distinctOwners.length >= 2 && (chapterResult.status === "empty" || result.scopeKind === "flat_title")) {
+      result.status = "ambiguous";
+      return result;
+    }
+    if (matches.length >= 1) {
+      result.status = "found";
+      result.sectionRange = result.sectionMatches[0].range;
+    }
+  }
+
+  // Schritt 5: Kollision (unverändert zu v7.52/DECISIONS #106, Guard i/ii) –
+  // NICHT während eines Titel-Scopes (Anlage im Vorspann ist NIE erlaubt).
+  if (result.status !== "found" && chapterResult.status !== "title") {
+    let collision = null, collisionRange = null;
+    if (chapterResult.status === "empty") {
+      const r = findAddressableChapter(lines, heading).range;
+      if (r) { collision = "chapter"; collisionRange = r; }
+    } else if (chapterField && normHead(chapterField) === normHead(disp)) {
+      if (chapterResult.status === "missing") { collision = "chapter"; collisionRange = null; }
+      else if (chapterResult.status === "found") { collision = "chapter"; collisionRange = chapterResult.range; }
+    }
+    if (collision) {
+      result.status = "collision";
+      result.collision = collision;
+      result.collisionRange = collisionRange;
+      result.preambleEmpty = isPreambleEmpty(lines, collisionRange);
+      return result;
+    }
+  }
+
+  if (result.status === "found") return result;
+
+  // Schritt 6: wrong_level(heading) – ein ###-Unterthema im Scope trägt
+  // GENAU diesen Namen, ODER heading selbst ist explizit als "###" markiert.
+  const subInScope = result.scope
+    ? index.subs.find((s) => s.norm === normHead(disp) && s.idx >= result.scope[0] && s.idx < result.scope[1])
+    : undefined;
+  if (level >= 3 || subInScope) {
+    result.status = "wrong_level";
+    result.levelField = "heading";
+    if (subInScope) {
+      const sec = index.sections[subInScope.sectionIdx];
+      result.subOwner = sec ? { sectionDisp: sec.disp, chapterDisp: sec.owner >= 0 ? index.chapters[sec.owner].disp : null } : null;
+    }
+    return result;
+  }
+
+  // Schritt 7: Titel-Scope OHNE Treffer -> nie Anlageort.
+  if (result.scopeKind === "preamble") {
+    result.status = "title";
+    return result;
+  }
+
+  // Schritt 8: missing (+ Kandidaten).
+  result.status = "missing";
+  result.needsChapter = chapterResult.status === "empty" && index.chaptered;
+  const scopedSectionNames = (result.scope
+    ? index.sections.filter((s) => s.idx >= result.scope[0] && s.idx < result.scope[1])
+    : index.sections
+  ).map((s) => s.disp);
+  // Nacharbeit v7.53 Runde 2 (Review-Finding 🔵 4): KEIN Fallback mehr auf
+  // Kapitel-Kandidaten hier – der frühere Fallback (bei leeren Abschnitts-
+  // Kandidaten UND chapter.status==='missing' die Kapitel-Kandidaten ins
+  // top-level "candidates"-Feld kopieren) war toter Code: bei chapter.status
+  // ==='missing' ist scope bereits null (Schritt 2 oben), also gibt es per
+  // Definition auch keine sinnvollen Abschnitts-Kandidaten – ALLE Aufrufer
+  // (entryScope, explainSkip, explainNote, noteForSectionTarget) lesen in
+  // genau diesem Fall bereits result.chapter.candidates, nie das top-level
+  // Feld. Der tote Fallback war eine Falle für künftige Aufrufer (genau der
+  // Fehler aus Finding 4/reviewA.json): Kapitel-Kandidaten liegen
+  // AUSSCHLIESSLICH in result.chapter.candidates.
+  result.candidates = similarNames(disp, scopedSectionNames);
+  return result;
+}
+
+// Rückwärtskompatibler Alias (der Resolver hieß bis v7.52 resolveSectionTarget)
+// – identische Rückgabe für Aufrufer, die nur {heading, chapter} übergeben.
+export const resolveSectionTarget = resolveTarget;
+
+// v7.53 (Content-Helfer, DECISIONS #111): entfernt eine FÜHRENDE, mit der
+// eigenen Op-Überschrift normHead-gleiche Überschriftszeile (samt führenden
+// Leerzeilen davor und GENAU einer direkt folgenden Leerzeile danach) aus
+// content – nicht-destruktive Normalisierung, WEIL Modelle die eigene
+// Zielüberschrift reflexartig im content wiederholen (siehe c2/N-C2). Bleibt
+// nach dem Strip nur Whitespace übrig, entscheidet der Aufrufer über einen
+// Skip (R-C2EMPTY) statt eines stillen Leerens (Kritik 🟡, Nutzerfehler
+// vermuten statt bewusstes Leeren).
+function normalizeOwnHeading(contentLines, ownDisp, ownLevel) {
+  let start = 0;
+  while (start < contentLines.length && contentLines[start].trim() === "") start++;
+  if (start >= contentLines.length) return { lines: contentLines, stripped: null };
+  const m = /^(#{1,6})\s+(.*)$/.exec(contentLines[start]);
+  if (!m || m[1].length !== ownLevel || normHead(m[2]) !== normHead(ownDisp)) {
+    return { lines: contentLines, stripped: null };
+  }
+  let end = start + 1;
+  if (end < contentLines.length && contentLines[end].trim() === "") end++;
+  return { lines: contentLines.slice(end), stripped: contentLines[start] };
+}
+
+// v7.53: erste #/##-Zeile AUSSERHALB eines geschlossenen Fence-Blocks
+// innerhalb von content (###-Unterthemen sind ausdrücklich ERLAUBT – die
+// Prüfung nutzt BOUNDARY_RE, das NUR "#" und "##" matcht).
+function findStructureLine(contentLines) {
+  const mask = computeFenceLineMask(contentLines);
+  for (let i = 0; i < contentLines.length; i++) {
+    if (!mask[i] && BOUNDARY_RE.test(contentLines[i])) return i;
+  }
+  return -1;
 }
 
 // Kapitel-PRÄAMBEL (siehe firstSectionInChapter oben) OHNE jeden Freitext-
@@ -452,53 +755,74 @@ function padEnd(lines) {
 // eingerücktes/umgebrochenes "entry" trotzdem den exakten Zeileninhalt trifft.
 const norm = (s) => String(s || "").trim().replace(/\s+/g, " ");
 
-// Bestimmt den Such-BEREICH [s, e) für delete_entry/move_entry (Quelle bzw.
-// alleiniger Scope) – DIESELBE Adressierungs-Logik wie bei den ##-Abschnitts-
-// Ops, aber rein LESEND (legt NIE etwas an, anders als append_to_section/
-// append_to_chapter mit fehlendem chapter): "heading" gesetzt -> exakt dieser
-// Abschnitt (optional zusätzlich per "chapter" auf EIN Kapitel eingegrenzt,
-// wie findSection(..., range) es auch bei den bestehenden Ops tut); NUR
-// "chapter" gesetzt -> das GESAMTE Kapitel (Kopfzeile-Bereich inkl. Präambel
-// und aller ##-Abschnitte, wie findChapter es liefert); beides leer -> das
-// gesamte Dokument. "notFound" unterscheidet "chapter" (die Kapitel-
-// Eingrenzung existiert nicht – Suche kann gar nicht erst laufen) von
-// "heading" (der Abschnitt selbst wurde im an sich vorhandenen Scope nicht
-// gefunden) – explainSkip() unten braucht das für zwei unterschiedliche
-// Meldungen. Von applyOne UND explainSkip genutzt (kein zweiter
-// Entscheidungspfad, Grundprinzip dieser Datei).
-// v7.52 (Live-Vorfall "KPIs"-Duplikat, DECISIONS #106): findet "heading"
-// KEINEN ##-Abschnitt, aber "heading" ist (chapter leer ODER === heading)
-// ein GLEICHNAMIGES #-Kapitel OHNE eigenen ##-Abschnitt, wird DORT gesucht
-// statt die Op überzuspringen – dieselbe Umleitungs-Entscheidung wie
-// resolveSectionTarget() für die ##-Abschnitts-Ops (append_to_section/
-// replace_section/delete_section), hier für delete_entry/move_entry/
-// replace_entry. "redirected:true" macht diese Umleitung für explainNote()
-// sichtbar (ℹ️-Note statt eines stillen Verhaltenswechsels).
-function entryScope(lines, headingField, chapterField) {
+// v7.53 (Stufe 2 von Vorschlag A, DECISIONS #111): entryScope() trifft KEINE
+// eigene find*()-Entscheidung mehr (Spiegelprinzip, Leitplanke 1) – "heading"
+// gesetzt läuft über resolveTarget(), NUR "chapter" gesetzt über
+// resolveChapterTarget(). "fieldNames" (optional, Default heading/chapter)
+// wirkt nur auf spätere Wortlaute (from_heading/from_chapter bei
+// move_entry-Quelle). "notFound" unterscheidet jetzt SECHS Fälle (vorher
+// zwei): 'chapter' (Kapitel-Eingrenzung existiert nicht), 'chapter_level'
+// (chapter trifft nur einen ##-Abschnitt), 'heading' (Abschnitt fehlt
+// komplett), 'heading_ambiguous' (≥2 Owner ohne chapter), 'heading_level'
+// (heading trifft nur ein ###-Unterthema bzw. ist selbst "###"),
+// 'heading_title' (Vorspann-Eingrenzung ohne Treffer).
+function entryScope(lines, headingField, chapterField, fieldNames = {}) {
   const headingDisp = dispHead(headingField);
   const chapterDisp = dispHead(chapterField);
+  const chapterFieldName = fieldNames.chapter || "chapter";
+  // Nacharbeit v7.53 Runde 2 (Review-Finding 🔵 1, reviewA.json): ein
+  // NICHT-string chapter-Feld (Schema-Verletzung, z. B. chapter:42) verhielt
+  // sich bisher je nach heading-Pfad UNTERSCHIEDLICH – MIT heading sah
+  // resolveTarget() das rohe Feld gar nicht (dessen eigener typeof-Guard
+  // reicht "" statt des Rohwerts an resolveChapterTarget() weiter), die Op
+  // lief also so, als wäre GAR KEIN chapter gesetzt (bei delete_entry ein
+  // stiller, ungewollter Löschtreffer); OHNE heading landete das Feld roh in
+  // resolveChapterTarget(), dispHead(42) ergab "42" -> "Kapitel „42“ nicht
+  // gefunden". HEAD (v7.52.2) skippte in BEIDEN Fällen identisch. Eine
+  // EINMALIGE, strikte Normalisierung VOR jeder Verzweigung stellt das
+  // wieder her: "nie raten" gilt auch für Schema-Verletzungen, beide Pfade
+  // sehen jetzt denselben Skip mit demselben Wortlaut.
+  if (chapterField != null && typeof chapterField !== "string") {
+    return {
+      range: null, notFound: "chapter",
+      resolved: resolveChapterTarget(lines, String(chapterField), { fieldName: chapterFieldName }),
+    };
+  }
   if (headingDisp) {
-    let chRange = null;
-    if (chapterDisp) {
-      chRange = findChapter(lines, chapterField);
-      if (!chRange) return { range: null, notFound: "chapter" };
+    const target = resolveTarget(lines, { heading: headingField, chapter: chapterField, chapterFieldName, opType: "entry" });
+    if (target.status === "found") {
+      return { range: target.sectionRange, notFound: null, redirected: false, resolved: target, titleNote: target.titleNote };
     }
-    const sec = findSection(lines, headingDisp, chRange);
-    if (!sec) {
-      if (!chapterDisp || normHead(chapterField) === normHead(headingField)) {
-        const { range } = findAddressableChapter(lines, headingField);
-        if (range) return { range, notFound: null, redirected: true };
-      }
-      return { range: null, notFound: "heading" };
+    if (target.status === "collision") {
+      // Nacharbeit v7.53 (Review-Finding 🔵 9): collisionRange===null bedeutet
+      // Guard (ii) – "chapter" fehlt UND heading==chapter-Name; das GESUCHTE
+      // Kapitel ist es, das nicht existiert (nicht der Abschnitt) – Wortlaut-
+      // Regression gegenüber v7.52.2 (dort meldete Kapitel-Nicht-Fund über
+      // den chapterMissing-Zweig, nicht "Abschnitt nicht gefunden").
+      if (target.collisionRange === null) return { range: null, notFound: target.chapter.status === "missing" ? "chapter" : "heading", resolved: target };
+      return { range: target.collisionRange, notFound: null, redirected: true, resolved: target };
     }
-    return { range: sec, notFound: null };
+    if (target.status === "ambiguous") return { range: null, notFound: "heading_ambiguous", resolved: target };
+    if (target.status === "wrong_level") {
+      return { range: null, notFound: target.levelField === "chapter" ? "chapter_level" : "heading_level", resolved: target };
+    }
+    if (target.status === "title") return { range: null, notFound: "heading_title", resolved: target };
+    if (target.chapter.status === "missing") return { range: null, notFound: "chapter", resolved: target };
+    return { range: null, notFound: "heading", resolved: target };
   }
   if (chapterDisp) {
-    const chRange = findChapter(lines, chapterField);
-    if (!chRange) return { range: null, notFound: "chapter" };
-    return { range: chRange, notFound: null };
+    const chapterResult = resolveChapterTarget(lines, chapterField, { fieldName: chapterFieldName });
+    if (chapterResult.status === "found") {
+      return { range: chapterResult.range, notFound: null, redirected: false, resolved: chapterResult };
+    }
+    if (chapterResult.status === "title") {
+      const range = chapterResult.titleScope === "preamble" ? chapterResult.preambleRange : [0, lines.length];
+      return { range, notFound: null, redirected: false, resolved: chapterResult, titleNote: chapterResult.titleScope };
+    }
+    if (chapterResult.status === "wrong_level") return { range: null, notFound: "chapter_level", resolved: chapterResult };
+    return { range: null, notFound: "chapter", resolved: chapterResult };
   }
-  return { range: [0, lines.length], notFound: null };
+  return { range: [0, lines.length], notFound: null, redirected: false };
 }
 
 // Findet die Zeilen INNERHALB von range, die als "entry" gelten könnten
@@ -667,81 +991,42 @@ function insertIntoChapterPreamble(lines, range, contentLines) {
   lines.splice(at, 0, ...contentLines);
 }
 
-// Ziel-Einfügung für move_entry MIT gesetztem "to_heading" (v7.50) –
-// append_to_section-Semantik (v7.23-konsistent): der Ziel-Abschnitt wird
-// angelegt, falls er fehlt, ein zusätzlich gesetztes Ziel-Kapitel ebenso;
-// Einfüge-Position ist wie bei append_to_section das Abschnittsende
-// (Leerzeilen davor werden übersprungen). Eigenständige, kleine Funktion
-// statt eines dritten Aufrufs des applyOne-internen op.chapter/op.heading-
-// Blocks weiter unten, weil move_entry KEIN "op.content" hat, sondern einen
-// bereits fertigen Zeilen-Block (den bewegten Eintrag) einfügt – nutzt aber
-// dieselben Such-Helfer (findChapter/findSection/padEnd) wie jener Block, um
-// NICHT vom geprüften Anlage-Verhalten abzuweichen. Mutiert "lines" direkt
-// (push/splice), wie die übrigen Op-Zweige dieser Datei.
-// v7.52 (Live-Vorfall "KPIs"-Duplikat, DECISIONS #106): der Aufrufer (siehe
-// applyOne, move_entry-Zweig) entscheidet VORAB rein lesend per
-// resolveSectionTarget(), ob "headingDisp" (ggf. mit "chapterField") ein
-// GLEICHNAMIGES #-Kapitel OHNE eigenen ##-Abschnitt trifft, und reicht das
-// Ergebnis als "collision" durch – dann wandert der Eintrag in dessen
-// Kapitel-Freitext (insertEntryIntoChapterPreamble) statt einen redundanten
-// "## X"-Abschnitt INNERHALB von "# X" anzulegen.
-// v7.52.1 (Review-Finding 1, Spiegelprinzip-Drift, DECISIONS #109): "collision"
-// wird bewusst NICHT mehr HIER per eigenem resolveSectionTarget-Aufruf
-// ermittelt (wie bis v7.52) – "lines" ist an dieser Stelle bereits das um die
-// Quellzeile BEREINIGTE Array (applyOne führt meLines.splice() VOR diesem
-// Aufruf aus), während explainNote() dieselbe Kollisions-Frage auf dem
-// UNMUTIERTEN "before"-Text beantwortet. Beide konnten dadurch bei einem
-// Dokument OHNE Titelzeile, dessen verschobene Zeile die erste nicht-leere
-// Zeile war, zu UNTERSCHIEDLICHEN Ergebnissen kommen: das Entfernen der
-// Quellzeile ließ die folgende "# X"-Zeile per Konvention (siehe
-// titleLineIdx) zur neuen Titelzeile werden, findAddressableChapter() hielt
-// sie deshalb für unadressierbar und lieferte KEINE Kollision – "## X"
-// landete klaglos UNTER "# X", während die note weiterhin "Kapitel-Freitext"
-// behauptete. Der Aufrufer berechnet "collision" jetzt GARANTIERT auf
-// demselben Zeilenstand wie explainNote (siehe dort).
-// "collisionRange" (nur bei collision:true relevant, sonst ignoriert) ist AUS
-// DEMSELBEN GRUND ebenfalls vom Aufrufer VORAB (auf dem unmutierten Stand)
-// ermittelt und um die anschließende Quell-Entfernung index-verschoben
-// durchgereicht – ein zweiter, HIER laufender findAddressableChapter()-Aufruf
-// (wie ursprünglich in insertEntryIntoChapterPreamble) hätte auf dem bereits
-// bereinigten "lines" DENSELBEN Titelzeilen-Fehlschluss gezogen (empirisch
-// bei der Fix-Verifikation aufgefallen: eine testbare Datenlage erzeugte
-// dadurch ein zweites "# X" STATT der erwarteten Präambel-Einfügung in das
-// BESTEHENDE Kapitel – kein bloßes "per Name neu suchen" reicht hier, weil
-// die Titelzeilen-Eigenschaft selbst vom (nicht mehr vorhandenen) Kontext
-// abhängt). "collisionRange" ist null, wenn das Kollisions-Kapitel selbst
-// erst neu angelegt werden muss (siehe resolveSectionTarget) – dann bleibt
-// die Namens-basierte Neuanlage in insertEntryIntoChapterPreamble() unten
-// unverändert richtig (ein NOCH NICHT existierendes Kapitel kann durch die
-// Quell-Mutation nicht fälschlich zur Titelzeile werden).
-function insertEntryIntoSection(lines, headingDisp, chapterField, blockLines, collision, collisionRange) {
-  if (collision) {
-    insertEntryIntoChapterPreamble(lines, chapterField || headingDisp, blockLines, collisionRange);
+// v7.53 (Stufe 2 von Vorschlag A, DECISIONS #111): KEINE eigene Suche mehr
+// (Spiegelprinzip, Leitplanke 1) – "target" ist das VOR jeder Mutation vom
+// Aufrufer (move_entry-Zweig in applyOne) berechnete resolveTarget()-
+// Ergebnis, "shiftRange" verschiebt dessen Range-Felder auf den bereits um
+// die Quelle bereinigten Zeilenstand (Fortführung von DECISIONS #109 –
+// vorher lief hier bei einer Kollision eine ZWEITE, positionsabhängige
+// findAddressableChapter()-Suche auf dem bereits mutierten Array, die bei
+// einer verschobenen Titelzeile zu einem ANDEREN Ergebnis kommen konnte als
+// der VOR der Mutation ermittelte Zustand).
+function insertEntryIntoSection(lines, target, blockLines, shiftRange) {
+  if (target.status === "collision") {
+    insertEntryIntoChapterPreamble(lines, target.chapterField || target.disp, blockLines, shiftRange(target.collisionRange));
     return;
   }
-  let range = null;
-  if (chapterField) {
-    range = findChapter(lines, chapterField);
-    if (!range) {
-      padEnd(lines);
-      const chapterLineIdx = lines.length;
-      lines.push("# " + dispHead(chapterField), "");
-      range = [chapterLineIdx, lines.length];
-    }
-  }
-  const b = findSection(lines, headingDisp, range);
-  if (!b) {
-    if (range) {
-      lines.splice(range[1], 0, "## " + headingDisp, "", ...blockLines, "");
-    } else {
-      padEnd(lines);
-      lines.push("## " + headingDisp, "", ...blockLines, "");
-    }
+  if (target.status === "found") {
+    const r = shiftRange(target.sectionRange);
+    let at = r[1];
+    while (at > r[0] + 1 && lines[at - 1].trim() === "") at--;
+    lines.splice(at, 0, ...blockLines);
     return;
   }
-  let at = b[1];
-  while (at > b[0] + 1 && lines[at - 1].trim() === "") at--;
-  lines.splice(at, 0, ...blockLines);
+  // status === "missing" (needsChapter/ambiguous/title/wrong_level hat der
+  // Aufrufer bereits VOR der Quell-Mutation per return abgefangen).
+  if (target.chapter.status === "missing") {
+    padEnd(lines);
+    lines.push("# " + dispHead(target.chapterField), "");
+    lines.push("## " + target.disp, "", ...blockLines, "");
+    return;
+  }
+  if (target.chapterRange) {
+    const r = shiftRange(target.chapterRange);
+    lines.splice(r[1], 0, "## " + target.disp, "", ...blockLines, "");
+    return;
+  }
+  padEnd(lines);
+  lines.push("## " + target.disp, "", ...blockLines, "");
 }
 
 // Ziel-Einfügung für move_entry mit NUR gesetztem "to_chapter" (v7.50) –
@@ -754,13 +1039,7 @@ function insertEntryIntoSection(lines, headingDisp, chapterField, blockLines, co
 // Parameter "range" ist PFLICHT (kein optionaler Fallback mehr, Review-
 // Nachbesserung 🔵 2) – Range kommt IMMER vom Aufrufer, VOR der Quell-Mutation
 // ermittelt (siehe collision-Aufruf in insertEntryIntoSection oben sowie der
-// reine to_chapter-Zweig in applyOne). Ein hier NEU laufender, positions-
-// abhängiger findAddressableChapter()-Aufruf auf dem bereits um die Quellzeile
-// bereinigten Array wäre GEFÄHRLICH (Titelzeilen-Ausschluss per titleLineIdx,
-// siehe dort, könnte je nach entfernter Quellzeile zu einem ANDEREN Ergebnis
-// kommen als der Aufrufer VOR der Quell-Entfernung ermittelt hat – dieselbe
-// Fehlerfamilie wie beim collisionRange-Fix oben) – deshalb bewusst KEIN
-// Fallback mehr, beide bestehenden Aufrufer übergeben "range" ausnahmslos.
+// reine to_chapter-Zweig in applyOne).
 function insertEntryIntoChapterPreamble(lines, chapterField, blockLines, range) {
   const chapterDisp = dispHead(chapterField);
   if (!range) {
@@ -771,6 +1050,10 @@ function insertEntryIntoChapterPreamble(lines, chapterField, blockLines, range) 
   insertIntoChapterPreamble(lines, range, blockLines);
 }
 
+// v7.53 (Stufe 2 von Vorschlag A, DECISIONS #111): applyOne() entscheidet
+// AUSSCHLIESSLICH über resolveTarget()/resolveChapterTarget()/entryScope()
+// (Spiegelprinzip, Leitplanke 1) – kein direkter findSection/findChapter/
+// findAddressableChapter-Aufruf mehr in dieser Funktion.
 function applyOne(text, op) {
   if (!op || typeof op !== "object") return text;
 
@@ -780,210 +1063,109 @@ function applyOne(text, op) {
       : text;
   }
 
-  // v7.32 (delete_chapter-Op, Live-Befund): eigener, VOR der Abschnitts-
-  // Adressierung unten liegender Zweig – delete_chapter adressiert über
-  // "chapter" (mit "heading"-Fallback, siehe chapterFieldFor), NICHT über
-  // "heading" wie die drei ##-Abschnitts-Ops. Müsste dieser Zweig NACH der
-  // "const disp = dispHead(op.heading)"-Zeile unten stehen, würde ein
-  // delete_chapter OHNE heading-Feld (der Normalfall) dort bereits als
-  // No-op abgefangen, bevor "chapter" überhaupt geprüft wird.
   if (op.type === "delete_chapter") {
-    const chapterField = chapterFieldFor(op);
-    const chapterDisp = dispHead(chapterField);
-    if (!chapterDisp) return text; // weder chapter noch heading gesetzt
+    const hasChapter = typeof op.chapter === "string" && op.chapter.trim();
+    const fieldValue = hasChapter ? op.chapter : (typeof op.heading === "string" ? op.heading : "");
     const chLines = text.split("\n");
-    // TITELZEILEN-SCHUTZ (Pflicht, siehe DECISIONS #74 und
-    // markdown.jsx#parseTree): die Notizbuch-Titelzeile ("# " + Name, per
-    // Konvention IMMER die erste Zeile) ist NIE ein Kapitel – ein
-    // delete_chapter auf den Notizbuchnamen darf sie nicht treffen, sonst
-    // reißt es Titel + kompletten Vorspann bis zum ersten ECHTEN Kapitel
-    // mit. findAddressableChapter() setzt die Suche NACH einer zuerst
-    // getroffenen Titelzeile fort (Review-Fix 🟡, v7.32.1) – ein REGULÄRES
-    // Kapitel mit demselben Namen wie der Notizbuch-Titel (z. B. Titel
-    // "# Projekte" UND ein echtes "# Projekte"-Kapitel weiter unten) bleibt
-    // dadurch löschbar, statt wegen des ERSTEN Treffers (der Titelzeile)
-    // dauerhaft blockiert zu sein. Erkennung über POSITION, NICHT über
-    // Namensvergleich – ein Dokument OHNE führende "# "-Zeile hat keine
-    // Titel-Ausnahme, dort ist auch die erste "# "-Zeile ein normales,
-    // löschbares Kapitel.
-    const { range } = findAddressableChapter(chLines, chapterField);
-    if (!range) return text; // nicht gefunden ODER nur als Titelzeile getroffen
-    chLines.splice(range[0], range[1] - range[0]);
+    const chapterResult = resolveChapterTarget(chLines, fieldValue, { opType: "delete_chapter", usedHeadingFallback: !hasChapter });
+    if (chapterResult.status !== "found") return text;
+    chLines.splice(chapterResult.range[0], chapterResult.range[1] - chapterResult.range[0]);
     return tidy(chLines);
   }
 
-  // v7.40 (append_to_chapter-Op, Live-Befund "Kapitel-Duplikat" – siehe
-  // DECISIONS #80): eigener Zweig, ebenfalls VOR der "heading"-Adressierung
-  // unten platziert (append_to_chapter adressiert wie delete_chapter über
-  // "chapter"/chapterFieldFor, hat i. d. R. KEIN eigenes op.heading – ein
-  // Zweig NACH der "const disp = dispHead(op.heading)"-Zeile würde das ohne
-  // heading sofort als No-op abfangen, bevor "chapter" geprüft wird).
-  // Hängt content als KAPITEL-FREITEXT direkt unter die #-Kapitelzeile an,
-  // VOR dem ersten ##-Abschnitt – die einzige bisherige Möglichkeit war ein
-  // ##-Abschnitt (append_to_section), was das Modell reflexartig zum
-  // Kapitelnamen duplizieren ließ ("# KPIs" mit redundantem "## KPIs"
-  // darin). Fehlt das Kapitel (auch: nur Titelzeile getroffen, siehe
-  // findAddressableChapter), wird es analog zu append_to_section/
-  // replace_section (v7.23) am Dokumentende neu angelegt – zwei
-  // aufeinanderfolgende Ops auf dasselbe neue Kapitel landen dadurch im
-  // SELBEN Kapitel (Ops laufen sequenziell auf dem Zwischenstand, siehe
-  // applyOpsDetailed).
   if (op.type === "append_to_chapter") {
-    const chapterField = chapterFieldFor(op);
-    const chapterDisp = dispHead(chapterField);
-    if (!chapterDisp) return text; // weder chapter noch heading gesetzt
-    const content =
-      typeof op.content === "string" ? op.content.replace(/^\n+|\n+$/g, "") : "";
+    const hasChapter = typeof op.chapter === "string" && op.chapter.trim();
+    const fieldValue = hasChapter ? op.chapter : op.heading;
+    const chLines0 = text.split("\n");
+    const chapterResult = resolveChapterTarget(chLines0, fieldValue, {
+      opType: "append_to_chapter", usedHeadingFallback: !hasChapter, heading: hasChapter ? op.heading : undefined,
+    });
+    if (chapterResult.status === "empty" || chapterResult.status === "conflicting_address") return text;
+    let content = typeof op.content === "string" ? op.content.replace(/^\n+|\n+$/g, "") : "";
     if (!content) return text;
+    const norm1 = normalizeOwnHeading(content.split("\n"), chapterResult.disp, 1);
+    if (norm1.stripped !== null) {
+      if (!norm1.lines.join("\n").trim()) return text; // R-C2EMPTY-CH
+      content = norm1.lines.join("\n");
+    }
+    if (findStructureLine(content.split("\n")) !== -1) return text; // R-CONTENT
+    if (chapterResult.status === "title" || chapterResult.status === "wrong_level") return text;
     const chLines = text.split("\n");
-    const { range } = findAddressableChapter(chLines, chapterField);
-    if (!range) {
-      // Kapitel nicht vorhanden (ODER nur als Titelzeile getroffen) -> neu
-      // anlegen, konsistent zum v7.23-Verhalten von append_to_section/
-      // replace_section mit fehlendem chapter.
-      padEnd(chLines);
-      chLines.push("# " + chapterDisp, "", ...content.split("\n"));
+    if (chapterResult.status === "found") {
+      insertIntoChapterPreamble(chLines, chapterResult.range, content.split("\n"));
       return tidy(chLines);
     }
-    // Einfüge-Position: direkt VOR dem ersten ##-Abschnitt des Kapitels
-    // (bzw. am Kapitelende, falls keiner existiert) – NACH evtl.
-    // vorhandenem Präambel-Freitext (v7.52: ausgelagert in
-    // insertIntoChapterPreamble() – DIESELBE Funktion nutzt jetzt auch die
-    // v7.52-Kollisions-Umleitung von append_to_section/replace_section
-    // unten, siehe dortiger Kommentar).
-    insertIntoChapterPreamble(chLines, range, content.split("\n"));
+    padEnd(chLines);
+    chLines.push("# " + dispHead(chapterResult.disp), "", ...content.split("\n"));
     return tidy(chLines);
   }
 
-  // v7.50 (delete_entry-Op, Live-Vorfall bison.box – siehe DECISIONS #103):
-  // eigener Zweig, VOR der "heading"-Adressierung unten platziert – "heading"
-  // ist bei delete_entry OPTIONAL (nur eine von drei möglichen Scope-
-  // Eingrenzungen, siehe entryScope), ein Zweig NACH der "const disp ="-Zeile
-  // würde eine Op OHNE heading (z. B. nur mit "chapter" oder ganz ohne
-  // Eingrenzung) sofort fälschlich als No-op abfangen. Löscht GENAU EINE
-  // Zeile (plus deren stärker eingerückte Kinderzeilen) – NIEMALS einen
-  // ganzen Abschnitt/Kapitel wie delete_section/delete_chapter.
   if (op.type === "delete_entry") {
     const entryText = typeof op.entry === "string" ? op.entry : "";
-    if (!norm(entryText)) return text; // leerer/fehlender entry -> Skip
+    if (!norm(entryText)) return text;
     const deLines = text.split("\n");
-    const { range, notFound } = entryScope(deLines, op.heading, op.chapter);
-    if (notFound) return text; // Abschnitt/Kapitel nicht gefunden -> Skip
+    const { range, notFound } = entryScope(deLines, op.heading, op.chapter, { heading: "heading", chapter: "chapter" });
+    if (notFound) return text;
     const hits = findEntryLines(deLines, range, entryText);
-    // 0 ODER ≥2 Treffer -> Skip (Sicherheitsgarantie: NIE mehr als einen
-    // Eintrag anfassen, siehe Kopfkommentar der Datei).
     if (hits.length !== 1) return text;
     const [s, e] = entryBlockRange(deLines, hits[0]);
     deLines.splice(s, e - s);
     return tidy(deLines);
   }
 
-  // v7.50 (move_entry-Op, Live-Vorfall bison.box – siehe DECISIONS #103):
-  // ATOMARER Umzug EINES Eintrags innerhalb EINES Notizbuchs. Alle Prüfungen
-  // (Quelle gefunden, Eintrag eindeutig gefunden, mindestens ein Ziel-Feld
-  // gesetzt) laufen auf der LOKALEN Kopie "meLines" VOR jeder Änderung daran
-  // – jeder vorzeitige "return text" liefert dadurch GARANTIERT den
-  // byte-identischen Ausgangstext zurück (Atomaritäts-Garantie: es entsteht
-  // NIE ein Zwischenzustand "Eintrag ist aus der Quelle weg, aber im Ziel
-  // nicht angekommen", der genau der Live-Vorfall war, siehe DECISIONS #103).
   if (op.type === "move_entry") {
     const entryText = typeof op.entry === "string" ? op.entry : "";
     if (!norm(entryText)) return text;
     const toHeadingDisp = dispHead(op.to_heading);
     const toChapterDisp = dispHead(op.to_chapter);
-    if (!toHeadingDisp && !toChapterDisp) return text; // mind. EIN Ziel-Feld ist Pflicht
+    if (!toHeadingDisp && !toChapterDisp) return text;
     const meLines = text.split("\n");
-    const { range, notFound } = entryScope(meLines, op.from_heading, op.from_chapter);
+    const { range, notFound } = entryScope(meLines, op.from_heading, op.from_chapter, { heading: "from_heading", chapter: "from_chapter" });
     if (notFound) return text;
     const hits = findEntryLines(meLines, range, entryText);
     if (hits.length !== 1) return text;
-    // v7.52.1 (Review-Finding 1, Spiegelprinzip-Drift, DECISIONS #109): die
-    // Ziel-ADRESSIERUNG (Kollisions-Entscheidung für to_heading BZW. die
-    // Kapitel-Range für ein reines to_chapter-Ziel) wird HIER, VOR dem
-    // meLines.splice() der Quelle weiter unten, auf demselben Zeilenstand
-    // ermittelt wie explainNote() (dort: "before", der komplett UNMUTIERTE
-    // Ausgangstext) – sonst könnte das Entfernen der Quellzeile (z. B. wenn
-    // sie die einzige nicht-leere Zeile VOR dem Ziel-Kapitel war) dessen
-    // Titelzeilen-Position verschieben (siehe titleLineIdx) und ein ZWEITER,
-    // ERST NACH der Mutation laufender Aufruf zu einem ANDEREN Ergebnis
-    // kommen als beim explainNote-Aufruf auf "before" – Grundprinzip dieser
-    // Datei (EIN Entscheidungspfad für Anwendung UND Erklärung) verletzt,
-    // siehe insertEntryIntoSection-Kommentar oben für das konkrete Beispiel.
-    const targetResolved = toHeadingDisp
-      ? resolveSectionTarget(meLines, { heading: op.to_heading, chapter: toChapterDisp ? op.to_chapter : null })
-      : null;
-    const toChapterOnlyRange = (!toHeadingDisp && toChapterDisp)
-      ? findAddressableChapter(meLines, op.to_chapter).range
-      : null;
-    // ALLE Prüfungen bestanden – ab hier wird "meLines" tatsächlich mutiert.
+
+    // v7.53: Ziel-Auflösung VOR jeder Mutation (Fortführung DECISIONS #109) –
+    // ALLE Prüfungen UND ALLE Ziel-Ranges stehen fest, bevor meLines.splice
+    // läuft (Atomaritäts-Garantie DECISIONS #103 bleibt gewahrt).
+    let target = null, chapterTarget = null;
+    if (toHeadingDisp) {
+      target = resolveTarget(meLines, { heading: op.to_heading, chapter: toChapterDisp ? op.to_chapter : null, chapterFieldName: "to_chapter", opType: "write" });
+      if (target.status === "title" || target.status === "wrong_level" || target.status === "ambiguous") return text;
+      if (target.status === "missing" && target.needsChapter) return text;
+    } else {
+      chapterTarget = resolveChapterTarget(meLines, op.to_chapter, { fieldName: "to_chapter" });
+      if (chapterTarget.status === "title" || chapterTarget.status === "wrong_level") return text;
+    }
+
     const [s, e] = entryBlockRange(meLines, hits[0]);
     const block = dedentBlock(meLines.slice(s, e));
     meLines.splice(s, e - s);
-    // Die oben (VOR der Mutation) ermittelten Ziel-Ranges verweisen noch auf
-    // Indizes des UNMUTIERTEN Arrays – für die tatsächliche Einfügung unten
-    // (die auf "meLines" NACH der Quell-Entfernung arbeitet) müssen sie um
-    // die Länge des entfernten Quell-Blocks nachgeführt werden. Eine echte
-    // Struktur-/Kapitelzeile kann NIE innerhalb von [s, e) liegen – eine
-    // #/##-Zeile steht immer in Spalte 0 und beendet den Block über die
-    // Einrückungsregel in entryBlockRange (indentOf ≤ baseIndent), siehe
-    // dort (Review-Nachbesserung 🔵 3, DECISIONS #109: der Abbruch kommt NICHT
-    // von BOUNDARY_RE, entryBlockRange nutzt es gar nicht) – die beiden
-    // Bereiche überlappen also nie, ein Range liegt IMMER GANZ vor ODER GANZ
-    // ab dem entfernten Block.
     const shiftIdx = (i) => (i >= e ? i - (e - s) : i);
     const shiftRange = (r) => (r ? [shiftIdx(r[0]), shiftIdx(r[1])] : r);
-    // Ziel-Einfügung IMMER auf dem bereits um die Quelle bereinigten Array
-    // (Quelle==Ziel verschiebt den Eintrag dadurch korrekt ans Zielende,
-    // statt ihn zu duplizieren) – die Ziel-ADRESSIERUNG selbst kommt dabei
-    // GARANTIERT aus den oben (VOR der Mutation) berechneten, jetzt nur noch
-    // index-verschobenen Ranges, NIE aus einer zweiten Suche auf dem bereits
-    // mutierten Array (siehe Kommentare oben).
+
     if (toHeadingDisp) {
-      const collision = !!(targetResolved && targetResolved.collision);
-      insertEntryIntoSection(
-        meLines, toHeadingDisp, toChapterDisp ? op.to_chapter : null, block,
-        collision, collision ? shiftRange(targetResolved.collisionRange) : undefined
-      );
+      insertEntryIntoSection(meLines, target, block, shiftRange);
     } else {
-      insertEntryIntoChapterPreamble(meLines, op.to_chapter, block, shiftRange(toChapterOnlyRange));
+      const chRange = chapterTarget.status === "found" ? shiftRange(chapterTarget.range) : null;
+      insertEntryIntoChapterPreamble(meLines, op.to_chapter, block, chRange);
     }
     return tidy(meLines);
   }
 
-  // v7.52 (replace_entry-Op, Live-Vorfall "KPIs"-Duplikat Turn 2 – siehe
-  // DECISIONS #106): eigener Zweig, VOR der "heading"-Adressierung unten
-  // platziert (dieselbe Begründung wie bei delete_entry/move_entry – "entry"
-  // ist Pflicht, "heading" nur eine von mehreren optionalen Scope-
-  // Eingrenzungen, siehe entryScope). Ersetzt den TEXT einer bereits
-  // gefundenen Eintragszeile (samt ihrer Kinderzeilen, siehe
-  // entryBlockRange) DURCH neuen content, OHNE die Zeile zu verschieben oder
-  // umzustrukturieren. Live-Vorfall: das Modell wollte NUR eine bereits
-  // bestehende Kapitel-Freitext-Zeile ändern ("Offener Punkt:
-  // KPI-Definition klären" um einen Klammer-Zusatz ergänzen) – dafür gab es
-  // bisher KEINE Op (replace_section hätte den GESAMTEN Kapitel-Freitext
-  // ersetzt bzw. wäre in die v7.52-Kollisions-Umleitung gelaufen, siehe
-  // resolveSectionTarget/explainSkip unten).
   if (op.type === "replace_entry") {
     const entryText = typeof op.entry === "string" ? op.entry : "";
-    if (!norm(entryText)) return text; // leerer/fehlender entry -> Skip
+    if (!norm(entryText)) return text;
     const content = typeof op.content === "string" ? op.content.replace(/^\n+|\n+$/g, "") : "";
-    if (!content) return text; // leerer content -> Skip (zum Löschen delete_entry nutzen)
+    if (!content) return text;
     const reLines = text.split("\n");
-    const { range, notFound } = entryScope(reLines, op.heading, op.chapter);
-    if (notFound) return text; // Abschnitt/Kapitel nicht gefunden -> Skip
+    const { range, notFound } = entryScope(reLines, op.heading, op.chapter, { heading: "heading", chapter: "chapter" });
+    if (notFound) return text;
     const hits = findEntryLines(reLines, range, entryText);
-    if (hits.length !== 1) return text; // 0 ODER ≥2 Treffer -> Skip (wie delete_entry/move_entry)
+    if (hits.length !== 1) return text;
     const [s, e] = entryBlockRange(reLines, hits[0]);
-    // Einrückung der TREFFERZEILE bleibt erhalten (content ersetzt nur den
-    // TEXT, nicht die Position im Baum) – Leerzeilen im content bleiben
-    // Leerzeilen (kein angehängter Trailing-Whitespace).
     const indent = reLines[hits[0]].match(/^\s*/)[0];
     const newLines = content.split("\n").map((l) => (l.trim() === "" ? "" : indent + l));
-    // Struktur-Schutz (wie überall in dieser Datei, siehe BOUNDARY_RE-Filter
-    // in findEntryLines): der ERSETZTE Text darf selbst KEINE #/##-Zeile
-    // enthalten – sonst könnte replace_entry eine echte Kapitel-/
-    // Abschnittsgrenze einschmuggeln (dieselbe Gefahrenklasse wie die
-    // Struktur-Injektion aus v7.50.2/DECISIONS #104 bei dedentBlock).
     const mask = computeFenceLineMask(newLines);
     for (let i = 0; i < newLines.length; i++) {
       if (!mask[i] && BOUNDARY_RE.test(newLines[i])) return text;
@@ -992,120 +1174,68 @@ function applyOne(text, op) {
     return tidy(reLines);
   }
 
-  const disp = dispHead(op.heading);
-  if (!disp) return text;
-  const lines = text.split("\n");
-  const content =
-    typeof op.content === "string" ? op.content.replace(/^\n+|\n+$/g, "") : "";
+  if (op.type === "append_to_section" || op.type === "replace_section" || op.type === "delete_section") {
+    const disp = dispHead(op.heading);
+    if (!disp) return text;
+    const lines = text.split("\n");
+    const isWrite = op.type !== "delete_section";
+    let content = typeof op.content === "string" ? op.content.replace(/^\n+|\n+$/g, "") : "";
+    if (op.type === "append_to_section" && !content) return text;
+    if (isWrite && content) {
+      const norm1 = normalizeOwnHeading(content.split("\n"), disp, 2);
+      if (norm1.stripped !== null) {
+        if (!norm1.lines.join("\n").trim()) return text; // R-C2EMPTY
+        content = norm1.lines.join("\n");
+      }
+      if (findStructureLine(content.split("\n")) !== -1) return text; // R-CONTENT
+    }
 
-  // v7.52 (Live-Vorfall "KPIs"-Duplikat, DECISIONS #106): BEVOR die
-  // bisherige Kapitel-/Abschnitts-Suche/-Anlage (unverändert weiter unten)
-  // läuft, klärt resolveSectionTarget() rein lesend, ob "heading" (ggf.
-  // zusammen mit "chapter") tatsächlich ein GLEICHNAMIGES #-Kapitel OHNE
-  // eigenen ##-Abschnitt trifft – sonst würde "wird angelegt, falls er
-  // fehlt" (v7.23, s. u.) stur ein redundantes "## X" INNERHALB von "# X"
-  // erzeugen (genau der Live-Vorfall: {"heading":"## KPIs","chapter":"#
-  // KPIs"} bei einem Kapitel, dessen Inhalt bereits als REINER
-  // Kapitel-Freitext dastand). OHNE Kollision bleibt das gesamte Verhalten
-  // ab hier BYTE-IDENTISCH zu vor v7.52 (siehe Tests) – der komplette
-  // bestehende Anlage-/Such-Block unten ist UNVERÄNDERT.
-  const resolved = resolveSectionTarget(lines, { heading: op.heading, chapter: op.chapter });
+    const target = resolveTarget(lines, { heading: op.heading, chapter: op.chapter, chapterFieldName: "chapter", opType: isWrite ? "write" : "delete" });
 
-  if (resolved.collision) {
-    if (op.type === "delete_section") return text; // s. explainSkip: Hinweis auf delete_chapter
-    if (op.type === "append_to_section" || op.type === "replace_section") {
+    if (target.status === "collision") {
+      if (!isWrite) return text;
       if (!content) return text;
-      // replace_section ersetzt NIEMALS bereits vorhandenen Kapitel-
-      // Freitext (impliziter Datenverlust ohne jede Bestätigung wäre die
-      // Folge) – nur eine LEERE Präambel (oder ein noch fehlendes Kapitel)
-      // darf befüllt werden. append_to_section hängt dagegen wie gewohnt an.
-      if (op.type === "replace_section" && !resolved.preambleEmpty) return text;
-      if (resolved.collisionRange === null) {
-        // Kapitel selbst fehlt komplett (chapter === heading, aber (noch)
-        // kein "# X" im Dokument) -> exakt wie append_to_chapter bei
-        // fehlendem Kapitel: neu am Dokumentende anlegen, content als
-        // Freitext (KEIN "## X" darin).
+      if (op.type === "replace_section" && !target.preambleEmpty) return text;
+      if (target.collisionRange === null) {
         padEnd(lines);
-        lines.push("# " + dispHead(resolved.chapterField), "", ...content.split("\n"));
+        lines.push("# " + dispHead(target.chapterField), "", ...content.split("\n"));
       } else {
-        insertIntoChapterPreamble(lines, resolved.collisionRange, content.split("\n"));
+        insertIntoChapterPreamble(lines, target.collisionRange, content.split("\n"));
       }
       return tidy(lines);
     }
-    return text;
-  }
+    if (target.status === "ambiguous" || target.status === "wrong_level" || target.status === "title") return text;
 
-  // -- Ab hier: Verhalten VOR v7.52, UNVERÄNDERT (siehe Kommentare unten). --
+    if (!isWrite) {
+      if (target.status !== "found") return text;
+      lines.splice(target.sectionRange[0], target.sectionRange[1] - target.sectionRange[0]);
+      return tidy(lines);
+    }
 
-  // Optionales "chapter"-Feld (v7.14): grenzt die Suche auf den Zeilenbereich
-  // EINES Kapitels ein – für mehrdeutige Abschnittsnamen (derselbe ##-Titel
-  // kommt in mehreren Kapiteln vor) oder eine gezielte Kapitel-Zuordnung.
-  // Ohne "chapter"-Feld verhält sich applyOne exakt wie vor v7.14 (globale
-  // Suche, erster Treffer gewinnt).
-  //
-  // v7.23 (Verschiebe-Auftrag, Live-Befund – siehe DECISIONS): Fehlt das
-  // referenzierte Kapitel, wird es für append_to_section/replace_section
-  // jetzt selbst NEU ANGELEGT (Konsistenz zur bestehenden Praxis, fehlende
-  // ABSCHNITTE anzulegen – siehe die replace_section/append_to_section-
-  // Zweige unten) statt die Op stillschweigend zu überspringen. Grund:
-  // "Verschiebe Abschnitt X in Notizbuch Y als NEUES Kapitel Z" hatte bisher
-  // KEINEN gezielten Op-Weg – ein rewrite des kompletten Ziel-Notizbuchs nur
-  // für ein neues Kapitel ist unverhältnismäßig, und der v7.14-Skip führte
-  // dazu, dass die Quelle bereits gelöscht war, während das Ziel (mangels
-  // Kapitel) NICHTS bekam – der Inhalt hing zwischenzeitlich in keinem
-  // Notizbuch. delete_section bleibt bewusst beim alten Skip (Ambiguitäts-/
-  // Sicherheits-Schutz: nichts löschen, was man nicht sicher adressiert –
-  // dafür gibt es keinen "lösch das doch einfach an beliebiger Stelle"-
-  // Ersatz). Kapitel+Abschnitt landen an dieser Stelle IMMER am
-  // Dokumentende (tidy-konform mit Leerzeilen) – zwei aufeinanderfolgende
-  // Ops mit demselben NEUEN chapter landen dadurch im SELBEN Kapitel: die
-  // erste Op legt es an, die zweite findet es über findChapter bereits vor
-  // (Ops laufen sequenziell auf dem jeweiligen Zwischenstand, siehe
-  // applyOpsDetailed).
-  let range = null;
-  if (typeof op.chapter === "string" && op.chapter.trim()) {
-    range = findChapter(lines, op.chapter);
-    if (!range) {
-      if (op.type === "delete_section") return text; // v7.14-Skip bleibt NUR hier
-      const chapterDisp = dispHead(op.chapter);
-      if (!chapterDisp) return text; // Randfall: chapter nach Bereinigung leer (z. B. nur "#"/"##")
+    if (target.status === "missing" && target.needsChapter) return text;
+
+    const buildBlock = () => ["## " + disp, "", ...(content ? content.split("\n") : []), ""];
+    if (target.status === "found") {
+      if (op.type === "replace_section") {
+        lines.splice(target.sectionRange[0], target.sectionRange[1] - target.sectionRange[0], ...buildBlock());
+      } else {
+        let at = target.sectionRange[1];
+        while (at > target.sectionRange[0] + 1 && lines[at - 1].trim() === "") at--;
+        lines.splice(at, 0, ...content.split("\n"));
+      }
+      return tidy(lines);
+    }
+    // status === "missing" -> Anlage (v7.23-Muster, byte-identisch)
+    if (target.chapter.status === "missing") {
       padEnd(lines);
-      const chapterLineIdx = lines.length;
-      lines.push("# " + chapterDisp, "");
-      range = [chapterLineIdx, lines.length]; // frisches Kapitel = letztes im Dokument, e === Dokumentende
+      lines.push("# " + dispHead(target.chapterField), "");
+      lines.push(...buildBlock());
+    } else if (target.chapterRange) {
+      lines.splice(target.chapterRange[1], 0, ...buildBlock());
+    } else {
+      padEnd(lines);
+      lines.push(...buildBlock());
     }
-  }
-
-  const b = findSection(lines, disp, range);
-
-  if (op.type === "delete_section") {
-    if (!b) return text;
-    lines.splice(b[0], b[1] - b[0]);
-    return tidy(lines);
-  }
-
-  if (op.type === "replace_section") {
-    const block = ["## " + disp, "", ...(content ? content.split("\n") : []), ""];
-    if (b) lines.splice(b[0], b[1] - b[0], ...block);
-    else if (range) lines.splice(range[1], 0, ...block); // neu, aber INNERHALB des Kapitels
-    else { padEnd(lines); lines.push(...block); }
-    return tidy(lines);
-  }
-
-  if (op.type === "append_to_section") {
-    if (!content) return text;
-    if (!b) {
-      if (range) {
-        lines.splice(range[1], 0, "## " + disp, "", ...content.split("\n"), "");
-      } else {
-        padEnd(lines);
-        lines.push("## " + disp, "", ...content.split("\n"), "");
-      }
-      return tidy(lines);
-    }
-    let at = b[1];
-    while (at > b[0] + 1 && lines[at - 1].trim() === "") at--;
-    lines.splice(at, 0, ...content.split("\n"));
     return tidy(lines);
   }
 
@@ -1138,10 +1268,14 @@ const OP_TYPES = [
 // Säubert HIER an der Quelle: Nullbytes raus, Whitespace-Folgen (inkl.
 // Zeilenumbrüche) zu einem Leerzeichen, eckige Klammern zu runden
 // (entschärft "]"/"[SYSTEM-HINWEIS:" strukturell), auf ~100 Zeichen gekappt.
-// Schicht 2 ("Senke") sitzt zusätzlich in lib/anthropic.js#callClaude, damit
-// AUCH eine künftige, hier vergessene Warn-Quelle den Rahmen nie brechen
-// kann – zwei unabhängige Schichten, siehe DECISIONS.
-const WARN_TEXT_MAX = 100;
+// v7.53 (DECISIONS #111, Entscheidung 3): auf 160 Zeichen angehoben (NUR in
+// dieser Datei) – Kandidatenlisten ("meintest du „A“, „B“, „C“?") brauchen
+// mehr Platz als ein einzelner Name; memory.js/App.jsx kappen weiterhin bei
+// 100 (unabhängige, unveränderte Konstanten). Schicht 2 ("Senke") sitzt
+// zusätzlich in lib/anthropic.js#callClaude, damit AUCH eine künftige, hier
+// vergessene Warn-Quelle den Rahmen nie brechen kann – zwei unabhängige
+// Schichten, siehe DECISIONS.
+const WARN_TEXT_MAX = 160;
 function sanitizeForWarning(s) {
   const noNulStr = String(s || "").split(String.fromCharCode(0)).join("");
   const collapsed = noNulStr.replace(/\s+/g, " ").trim();
@@ -1149,86 +1283,247 @@ function sanitizeForWarning(s) {
   return bracketsSafe.length > WARN_TEXT_MAX ? bracketsSafe.slice(0, WARN_TEXT_MAX) + "…" : bracketsSafe;
 }
 
+const sw = sanitizeForWarning;
+
+// v7.53: Wortlaut-Bausteine für explainSkip()/explainNote() – NUR Text-
+// Formatierung, KEINE Entscheidungslogik (die steckt ausschließlich im
+// Resolver, siehe Leitplanke 1 oben). Owner-Liste für R-AMB: Vorspann-
+// Treffer als eigenständiges "Vorspann (F:"# Titel")"-Fragment (das ist der
+// konkrete Ausweg, mit dem der Vorspann-Abschnitt im Folge-Turn per
+// Titel-Scope adressierbar ist – keine Skip-Schleife), Kapitel-Treffer
+// gebündelt als "Kapitel „A“, „B“".
+function ownersLabel(distinctOwners, fieldName, titleDisp) {
+  const parts = [];
+  const chapterNames = [];
+  for (const o of distinctOwners) {
+    // Nacharbeit v7.53 (Review-Finding 🔵 8): ein Dokument OHNE Titelzeile
+    // (beginnt direkt mit "##"/"#") hat keinen adressierbaren Vorspann-Namen
+    // – "chapter:\"# \"" wäre ein leeres, nicht auflösbares Ziel und würde
+    // in eine Skip-Schleife führen. Ohne Titelzeile bleibt der Vorspann nur
+    // per Editor erreichbar, das sagt der Hinweis explizit.
+    if (o.owner === -1) parts.push(titleDisp ? 'Vorspann (' + fieldName + ':"# ' + titleDisp + '")' : 'Vorspann (ohne Titelzeile – nur per Editor adressierbar)');
+    else chapterNames.push(o.label);
+  }
+  if (chapterNames.length) parts.push('Kapitel ' + chapterNames.map((n) => '„' + n + '“').join(", "));
+  return parts.join(", ");
+}
+function reasonAmbiguous(target, fieldName, entryFieldName) {
+  const ownersStr = sw(ownersLabel(target.distinctOwners, fieldName, target.titleDisp));
+  let reason = 'Abschnitt „' + sw(target.disp) + '“ mehrdeutig (' + target.sectionMatches.length + ' Treffer: ' + ownersStr + ') – ' + fieldName + ' angeben';
+  if (entryFieldName) reason += ' oder ' + entryFieldName + ' weglassen (entry muss dann im ganzen Notizbuch eindeutig sein)';
+  return reason;
+}
+function reasonNeedsChapter(target, fieldName) {
+  const suffix = chapterListSuffix(target.docChapters);
+  if (target.candidates.length) {
+    return 'Abschnitt „' + sw(target.disp) + '“ nicht gefunden – meintest du ' + sw(listNames(target.candidates)) +
+      '? Sonst für einen neuen Abschnitt ' + fieldName + ' angeben' + suffix;
+  }
+  return 'Abschnitt „' + sw(target.disp) + '“ nicht gefunden – Notizbuch hat Kapitel: für einen neuen Abschnitt ' + fieldName + ' angeben' + suffix;
+}
+function reasonSectionNotFoundDelete(target) {
+  let reason = 'Abschnitt „' + sw(target.disp) + '“ nicht gefunden';
+  if (target.candidates.length) reason += ' – meintest du ' + sw(listNames(target.candidates)) + '?';
+  return reason;
+}
+function reasonChapterNotFoundDelete(chapterDisp, candidates) {
+  let reason = 'Kapitel „' + sw(chapterDisp) + '“ nicht gefunden – Op übersprungen';
+  if (candidates && candidates.length) reason += ' (meintest du ' + sw(listNames(candidates)) + '?)';
+  return reason;
+}
+function reasonWrongLevelHeadingSub(target) {
+  const s = sw(target.subOwner.sectionDisp);
+  const chapterPart = target.subOwner.chapterDisp ? ', chapter:"# ' + sw(target.subOwner.chapterDisp) + '"' : '';
+  return '„' + sw(target.disp) + '“ ist ein ###-Unterthema in Abschnitt „' + s +
+    '“ – zum Anhängen append_to_section mit heading:"## ' + s + '"' + chapterPart +
+    ' (landet am Abschnittsende), zum Ändern replace_section mit dem kompletten Inhalt inkl. ###-Unterthemen';
+}
+function reasonWrongLevel3(disp) {
+  return 'heading „' + sw(disp) + '“ ist als ###-Unterthema adressiert – Unterthemen gehören in den content eines ##-Abschnitts (append_to_section/replace_section mit heading:"## …")';
+}
+// Nacharbeit v7.53 (Review-Finding 🔵 10): dritter Fall neben "subOwner
+// bekannt" (### liegt in einem ##-Abschnitt) und "level>=3" (die Op hat
+// selbst ### geschrieben) – ein ###-Treffer DIREKT unter einem #-Kapitel
+// OHNE umschließenden ##-Abschnitt (subOwner bleibt null, weil sectionIdx
+// -1 ist) darf nicht fälschlich den level>=3-Wortlaut bekommen, wenn die Op
+// selbst "##" (level 2) adressiert hat.
+function wrongLevelHeadingReason(target) {
+  if (target.subOwner) return reasonWrongLevelHeadingSub(target);
+  if (target.level >= 3) return reasonWrongLevel3(target.disp);
+  return '„' + sw(target.disp) + '“ existiert nur als ###-Unterthema direkt im Kapitel-Freitext – per append_to_chapter/replace_entry ändern';
+}
+function reasonTitleCreate(target, fieldName) {
+  const suffix = chapterListSuffix(target.docChapters);
+  return fieldName + ' „' + sw(target.titleDisp) + '“ ist die Notizbuch-Titelzeile – im Vorspann vor dem ersten Kapitel wird kein Abschnitt angelegt; ein echtes Kapitel angeben' + suffix;
+}
+function reasonTitleNotFoundDelete(target, fieldName) {
+  const suffix = chapterListSuffix(target.docChapters);
+  return 'Abschnitt „' + sw(target.disp) + '“ im Vorspann (' + fieldName + ' „' + sw(target.titleDisp) + '“ = Titelzeile) nicht gefunden – Kapitel angeben' + suffix;
+}
+function reasonTitleChapter(chapterResult, isFlat, moveVariant) {
+  if (!isFlat) {
+    const suffix = chapterListSuffix(chapterResult.docChapters);
+    return '„' + sw(chapterResult.disp) + '“ ist die Notizbuch-Titelzeile, kein Kapitel – ein echtes Kapitel angeben' + suffix;
+  }
+  const alt = moveVariant ? 'to_heading:"## …"' : 'append_to_section mit heading:"## …" nutzen';
+  return '„' + sw(chapterResult.disp) + '“ ist die Notizbuch-Titelzeile, kein Kapitel – das Notizbuch hat keine Kapitel: ' + alt + ' oder ein neues Kapitel mit anderem Namen angeben';
+}
+function reasonChapterWrongLevel(sectionOwner, opSuffix, fieldName) {
+  const chapterPart = sectionOwner.chapterDisp ? ' in Kapitel „' + sw(sectionOwner.chapterDisp) + '“' : '';
+  return (fieldName || "chapter") + ' „' + sw(sectionOwner.sectionDisp) + '“ ist ein ##-Abschnitt' + chapterPart + ', kein Kapitel – ' + opSuffix;
+}
+function reasonContent(lineText) {
+  return 'content enthält Kapitel-/Abschnittszeilen („' + sw(lineText) + '“) – nur Inhalt ohne #/##-Zeilen senden; neue Abschnitte per eigener Op (###-Unterthemen sind erlaubt)';
+}
+function reasonC2Empty(kind, disp) {
+  if (kind === "replace") {
+    return 'content besteht nur aus der eigenen Überschriftszeile „## ' + sw(disp) + '“ – Abschnittsinhalt fehlt; Inhalt ohne Überschriftszeile senden (zum Leeren content:"")';
+  }
+  if (kind === "chapter") {
+    return 'content besteht nur aus der Überschriftszeile „# ' + sw(disp) + '“ – Inhalt ohne Überschriftszeile senden';
+  }
+  return 'content besteht nur aus der Überschriftszeile „## ' + sw(disp) + '“ – Inhalt ohne Überschriftszeile senden';
+}
+function reasonDelCh(disp) {
+  return 'heading „' + sw(disp) + '“ adressiert einen ##-Abschnitt – delete_section mit heading:"## ' + sw(disp) + '" oder delete_chapter mit chapter:"# …"';
+}
+function reasonConfl(chapterDisp, headingDisp) {
+  return 'widersprüchliche Adressierung (chapter „' + sw(chapterDisp) + '“ UND heading „' + sw(headingDisp) +
+    '“) – für einen ##-Abschnitt append_to_section mit heading:"## ' + sw(headingDisp) + '", chapter:"# ' + sw(chapterDisp) +
+    '"; für Kapitel-Freitext heading weglassen';
+}
+function reasonConflH(disp) {
+  return 'heading „' + sw(disp) + '“ adressiert einen ##-Abschnitt – append_to_section mit heading:"## ' + sw(disp) + '" nutzen; append_to_chapter braucht chapter:"# …"';
+}
+// Nacharbeit v7.53 (Review-Finding 🟡 6): "fieldName" (Default "chapter")
+// steuert BEIDE Stellen, an denen das Adressfeld im Wortlaut auftaucht –
+// den Präfix ("chapter „…“ ist ein ##-Abschnitt" vs. "from_chapter „…“ …")
+// UND das Korrektur-Rezept (", chapter:\"# K\"" vs. ", from_chapter:\"# K\""
+// bzw. ", to_chapter:\"# K\""). move_entry kennt kein Feld "chapter" – ohne
+// den Parameter schlug der Skip-Grund dem Modell ein Feld vor, das die Op
+// gar nicht besitzt, und die Ambiguität wiederholte sich im Folge-Turn.
+function wrongLevelReasonFor(chapterResult, opSuffixBuilder, fieldName) {
+  const s = chapterResult.sectionOwner;
+  const fn = fieldName || "chapter";
+  const chapterPart = s.chapterDisp ? ', ' + fn + ':"# ' + sw(s.chapterDisp) + '"' : '';
+  return reasonChapterWrongLevel(s, opSuffixBuilder(sw(s.sectionDisp), chapterPart), fn);
+}
+
+// v7.53 Nacharbeit Runde 3 (Review-Fund 🔵 6): benannte Konstante für den
+// EINEN Wortlaut, der einen bewussten No-op meldet (Op wäre inhaltlich
+// identisch mit dem Bestand, applyOne() hat also nichts geändert) – NICHT
+// mit einem echten Skip wegen einer verletzten Invariante zu verwechseln.
+// turnGuard.js#planCrossNotebookHold muss genau diesen Fall bei
+// TARGET_WRITE-Ops (append_to_section/replace_section/append_to_chapter)
+// von den echten Auslösern ausnehmen (sonst: Modell sendet nach einem
+// SHA-Konflikt dieselbe – jetzt bereits vorhandene – Ziel-Op erneut, der
+// dadurch entstehende No-op-Skip würde die Quell-Löschung in JEDER anderen
+// Notizbuch-Gruppe unnötig zurückhalten, eine Wiederholungsschleife). Nur an
+// den DREI Stellen verwendet, die diesen Text für eine TARGET_WRITE-Op
+// erzeugen (append_to_chapter unten, sowie die zwei Stellen im
+// gemeinsamen append_to_section/replace_section/delete_section-Block weiter
+// unten) – die übrigen Vorkommen (delete_chapter/delete_entry/replace_entry/
+// move_entry/delete_section) bleiben bewusst UNVERÄNDERT als eigener
+// String: sie betreffen keine TARGET_WRITE-Op und sind für den Guard
+// irrelevant, eine gemeinsame Konstante böte dort keinen echten Vorteil.
+export const DELIBERATE_NOOP_REASON = "keine inhaltliche Änderung";
+
 // Erklärt NACHTRÄGLICH – nur wenn applyOpsDetailed() bereits per Vorher/
 // Nachher-Textvergleich festgestellt hat, dass eine Op NICHTS verändert hat
 // – WARUM. Dupliziert bewusst NUR die REIN LESENDEN Entscheidungen aus
 // applyOne() (kein zweiter Schreibpfad, kein Risiko einer abweichenden
-// Textausgabe zwischen Anwendung und Erklärung): welcher Op-Typ, ob Kapitel/
-// Abschnitt gefunden wurden, ob content leer ist. Reihenfolge der Prüfungen
-// spiegelt exakt applyOne() (Kapitel-Filter vor Abschnitts-Suche usw.).
+// Textausgabe zwischen Anwendung und Erklärung) – v7.53: AUSSCHLIESSLICH
+// über resolveTarget()/resolveChapterTarget()/entryScope() (Spiegelprinzip).
 function explainSkip(text, op) {
   if (!op || typeof op !== "object" || !OP_TYPES.includes(op.type)) {
     return "unbekannter Op-Typ" + (op && typeof op === "object" && op.type ? " „" + sanitizeForWarning(op.type) + "“" : "");
   }
   if (op.type === "rewrite") {
-    // v7.21.1 (Review-Fix 🔵): NICHT pauschal "leerer content" – ein
-    // rewrite mit NICHT-leerem, aber zufällig textidentischem Inhalt (siehe
-    // applyOne: dann bleibt der Text unverändert) ist kein Leer-content-
-    // Fall, sondern derselbe generische Fallback wie bei replace_section.
     const content = typeof op.content === "string" ? op.content.trim() : "";
     return content ? "keine inhaltliche Änderung" : "leerer content";
   }
-  // v7.32 (delete_chapter-Op): eigener Zweig, spiegelt applyOne exakt (siehe
-  // dort, inkl. findAddressableChapter/Review-Fix 🟡 v7.32.1) – Prüfreihenfolge:
-  // chapterField leer -> Kapitel gar nicht gefunden -> nur als Titelzeile
-  // getroffen (kein weiteres gleichnamiges Kapitel) -> (sonst: applied wäre
-  // true, landet nie hier).
+
   if (op.type === "delete_chapter") {
-    const chapterField = chapterFieldFor(op);
-    const chapterDisp = dispHead(chapterField);
+    const hasChapter = typeof op.chapter === "string" && op.chapter.trim();
+    const fieldValue = hasChapter ? op.chapter : (typeof op.heading === "string" ? op.heading : "");
+    const chapterDisp = dispHead(fieldValue);
     if (!chapterDisp) return "fehlende Kapitel-Überschrift";
     const lines = text.split("\n");
-    const { range, titleBlocked } = findAddressableChapter(lines, chapterField);
-    if (!range) {
-      if (titleBlocked) {
-        return "„" + sanitizeForWarning(chapterDisp) + "“ ist die Notizbuch-Titelzeile, kein Kapitel";
-      }
-      return "Kapitel „" + sanitizeForWarning(chapterDisp) + "“ nicht gefunden – Op übersprungen";
+    const chapterResult = resolveChapterTarget(lines, fieldValue, { opType: "delete_chapter", usedHeadingFallback: !hasChapter });
+    if (chapterResult.status === "conflicting_address") return reasonDelCh(chapterResult.disp);
+    if (chapterResult.status === "title") {
+      return "„" + sanitizeForWarning(chapterResult.disp) + "“ ist die Notizbuch-Titelzeile, kein Kapitel";
     }
-    // Gefunden (ggf. NACH der Titelzeile, siehe findAddressableChapter) ->
-    // applyOne hätte gelöscht (applied wäre true) - dieser Zweig wird unter
-    // normalen Umständen nie erreicht.
+    if (chapterResult.status === "wrong_level") {
+      return wrongLevelReasonFor(chapterResult, (s, cp) => 'delete_section mit heading:"## ' + s + '"' + cp + ' oder chapter angeben');
+    }
+    if (chapterResult.status === "missing") {
+      return reasonChapterNotFoundDelete(chapterDisp, chapterResult.candidates);
+    }
     return "keine inhaltliche Änderung";
   }
-  // v7.40 (append_to_chapter-Op, DECISIONS #80): eigener Zweig, spiegelt
-  // applyOne exakt (NUR lesende Prüfungen) – Prüfreihenfolge: chapterField
-  // leer -> content leer -> (sonst: applied wäre true, landet praktisch nie
-  // hier, da ein gefundenes ODER neu angelegtes Kapitel IMMER etwas
-  // einfügt). Anders als delete_chapter braucht dieser Zweig KEINE
-  // titleBlocked-Fallunterscheidung: findAddressableChapter() liefert bei
-  // "nicht gefunden" UND "nur Titelzeile getroffen" gleichermaßen
-  // range===null, applyOne behandelt BEIDE Fälle identisch (Kapitel neu
-  // anlegen statt Skip).
+
   if (op.type === "append_to_chapter") {
-    const chapterField = chapterFieldFor(op);
-    const chapterDisp = dispHead(chapterField);
-    if (!chapterDisp) return "fehlende Kapitel-Überschrift";
-    const content = typeof op.content === "string" ? op.content.replace(/^\n+|\n+$/g, "") : "";
+    const hasChapter = typeof op.chapter === "string" && op.chapter.trim();
+    const fieldValue = hasChapter ? op.chapter : op.heading;
+    const lines = text.split("\n");
+    const chapterResult = resolveChapterTarget(lines, fieldValue, {
+      opType: "append_to_chapter", usedHeadingFallback: !hasChapter, heading: hasChapter ? op.heading : undefined,
+    });
+    if (chapterResult.status === "empty") return "fehlende Kapitel-Überschrift";
+    if (chapterResult.status === "conflicting_address") {
+      return chapterResult.conflictHeading ? reasonConfl(chapterResult.disp, chapterResult.conflictHeading) : reasonConflH(chapterResult.disp);
+    }
+    let content = typeof op.content === "string" ? op.content.replace(/^\n+|\n+$/g, "") : "";
     if (!content) return "leerer content";
-    return "keine inhaltliche Änderung";
+    const norm1 = normalizeOwnHeading(content.split("\n"), chapterResult.disp, 1);
+    if (norm1.stripped !== null) {
+      if (!norm1.lines.join("\n").trim()) return reasonC2Empty("chapter", chapterResult.disp);
+      content = norm1.lines.join("\n");
+    }
+    const structIdx = findStructureLine(content.split("\n"));
+    if (structIdx !== -1) return reasonContent(content.split("\n")[structIdx]);
+    if (chapterResult.status === "title") return reasonTitleChapter(chapterResult, !chapterResult.chaptered, false);
+    if (chapterResult.status === "wrong_level") {
+      return wrongLevelReasonFor(chapterResult, (s, cp) => 'append_to_section mit heading:"## ' + s + '"' + cp);
+    }
+    return DELIBERATE_NOOP_REASON;
   }
-  // v7.50 (delete_entry-Op, DECISIONS #103): eigener Zweig, spiegelt applyOne
-  // exakt (NUR lesende Prüfungen, dieselbe entryScope()/findEntryLines()-
-  // Logik) – Prüfreihenfolge: leerer entry -> Scope (Abschnitt/Kapitel) nicht
-  // gefunden -> Eintrag nicht gefunden/mehrdeutig -> (sonst: applied wäre
-  // true, landet praktisch nie hier).
-  if (op.type === "delete_entry") {
+
+  if (op.type === "delete_entry" || op.type === "replace_entry") {
+    const isReplace = op.type === "replace_entry";
     const entryText = typeof op.entry === "string" ? op.entry : "";
     const entryDisp = norm(entryText);
     if (!entryDisp) return "leerer entry";
-    const lines = text.split("\n");
-    const { range, notFound } = entryScope(lines, op.heading, op.chapter);
-    if (notFound === "chapter") {
-      return "Kapitel „" + sanitizeForWarning(dispHead(op.chapter)) + "“ nicht gefunden – Op übersprungen";
+    if (isReplace) {
+      const content = typeof op.content === "string" ? op.content.replace(/^\n+|\n+$/g, "") : "";
+      if (!content) return "leerer content – zum Löschen delete_entry nutzen";
     }
+    const lines = text.split("\n");
+    const { range, notFound, resolved } = entryScope(lines, op.heading, op.chapter, { heading: "heading", chapter: "chapter" });
+    // Nacharbeit v7.53 (Review-Finding 🟡 4): bei notFound==="chapter" ist
+    // "resolved" (falls heading gesetzt war) ein resolveTarget()-Ergebnis –
+    // dessen TOP-LEVEL "candidates" sind ##-ABSCHNITTS-Kandidaten (Schritt 8,
+    // Suchbereich = alle Abschnitte, weil scope null ist), nicht die
+    // Kapitel-Kandidaten aus resolved.chapter.candidates. War nur "chapter"
+    // gesetzt, IST "resolved" bereits das resolveChapterTarget()-Ergebnis
+    // selbst (kein .chapter-Unterobjekt) – dort sind "candidates" korrekt.
+    const chCand = resolved ? (resolved.chapter ? resolved.chapter.candidates : resolved.candidates) : [];
+    if (notFound === "chapter") return reasonChapterNotFoundDelete(dispHead(op.chapter), chCand || []);
+    if (notFound === "chapter_level") return wrongLevelReasonFor(resolved.chapter || resolved, (s, cp) => 'heading:"## ' + s + '"' + cp + ' nutzen');
+    if (notFound === "heading_ambiguous") return reasonAmbiguous(resolved, "chapter", "heading");
+    if (notFound === "heading_level") {
+      if (resolved.levelField === "chapter") return wrongLevelReasonFor(resolved.chapter, (s, cp) => 'heading:"## ' + s + '"' + cp + ' nutzen');
+      return wrongLevelHeadingReason(resolved);
+    }
+    if (notFound === "heading_title") return reasonTitleNotFoundDelete(resolved, "chapter");
     if (notFound === "heading") {
-      return "Abschnitt „" + sanitizeForWarning(dispHead(op.heading)) + "“ nicht gefunden";
+      let reason = "Abschnitt „" + sanitizeForWarning(dispHead(op.heading)) + "“ nicht gefunden";
+      if (resolved && resolved.candidates && resolved.candidates.length) reason += " – meintest du " + sanitizeForWarning(listNames(resolved.candidates)) + "?";
+      return reason;
     }
     const hits = findEntryLines(lines, range, entryText);
     if (hits.length === 0) {
-      // v7.52.2 (Review-Finding 2, DECISIONS #110): steht der gesuchte Text
-      // NUR in einem Codeblock, ist das der eigentliche Grund für die 0
-      // Treffer – siehe findFenceMaskedEntryMatch-Kommentar oben.
       if (findFenceMaskedEntryMatch(lines, range, entryText)) {
         return "Eintrag „" + sanitizeForWarning(entryDisp) +
           "“ steht in einem Codeblock – Codezeilen sind keine Einträge; den Abschnitt samt Codeblock per replace_section ändern";
@@ -1239,12 +1534,18 @@ function explainSkip(text, op) {
       return "Eintrag „" + sanitizeForWarning(entryDisp) + "“ mehrdeutig (" + hits.length +
         " Treffer) – exakteren Wortlaut oder heading/chapter angeben";
     }
+    if (isReplace) {
+      const indent = lines[hits[0]].match(/^\s*/)[0];
+      const content = typeof op.content === "string" ? op.content.replace(/^\n+|\n+$/g, "") : "";
+      const newLines = content.split("\n").map((l) => (l.trim() === "" ? "" : indent + l));
+      const mask = computeFenceLineMask(newLines);
+      for (let i = 0; i < newLines.length; i++) {
+        if (!mask[i] && BOUNDARY_RE.test(newLines[i])) return "content enthält Kapitel-/Abschnittszeilen – nur Eintragstext erlaubt";
+      }
+    }
     return "keine inhaltliche Änderung";
   }
-  // v7.50 (move_entry-Op, DECISIONS #103): eigener Zweig, spiegelt applyOne
-  // exakt – Prüfreihenfolge: leerer entry -> fehlendes Ziel (weder to_heading
-  // noch to_chapter) -> Quell-Scope nicht gefunden -> Eintrag nicht
-  // gefunden/mehrdeutig -> (sonst: applied wäre true).
+
   if (op.type === "move_entry") {
     const entryText = typeof op.entry === "string" ? op.entry : "";
     const entryDisp = norm(entryText);
@@ -1253,17 +1554,24 @@ function explainSkip(text, op) {
     const toChapterDisp = dispHead(op.to_chapter);
     if (!toHeadingDisp && !toChapterDisp) return "fehlendes Ziel – to_heading oder to_chapter angeben";
     const lines = text.split("\n");
-    const { range, notFound } = entryScope(lines, op.from_heading, op.from_chapter);
-    if (notFound === "chapter") {
-      return "Kapitel „" + sanitizeForWarning(dispHead(op.from_chapter)) + "“ nicht gefunden – Op übersprungen";
+    const { range, notFound, resolved } = entryScope(lines, op.from_heading, op.from_chapter, { heading: "from_heading", chapter: "from_chapter" });
+    // Nacharbeit v7.53 (Review-Finding 🟡 4, s. delete_entry/replace_entry oben).
+    const fromChCand = resolved ? (resolved.chapter ? resolved.chapter.candidates : resolved.candidates) : [];
+    if (notFound === "chapter") return reasonChapterNotFoundDelete(dispHead(op.from_chapter), fromChCand || []);
+    if (notFound === "chapter_level") return wrongLevelReasonFor(resolved.chapter || resolved, (s, cp) => 'from_heading:"## ' + s + '"' + cp + ' nutzen', "from_chapter");
+    if (notFound === "heading_ambiguous") return reasonAmbiguous(resolved, "from_chapter", "from_heading");
+    if (notFound === "heading_level") {
+      if (resolved.levelField === "chapter") return wrongLevelReasonFor(resolved.chapter, (s, cp) => 'from_heading:"## ' + s + '"' + cp + ' nutzen', "from_chapter");
+      return wrongLevelHeadingReason(resolved);
     }
+    if (notFound === "heading_title") return reasonTitleNotFoundDelete(resolved, "from_chapter");
     if (notFound === "heading") {
-      return "Abschnitt „" + sanitizeForWarning(dispHead(op.from_heading)) + "“ nicht gefunden";
+      let reason = "Abschnitt „" + sanitizeForWarning(dispHead(op.from_heading)) + "“ nicht gefunden";
+      if (resolved && resolved.candidates && resolved.candidates.length) reason += " – meintest du " + sanitizeForWarning(listNames(resolved.candidates)) + "?";
+      return reason;
     }
     const hits = findEntryLines(lines, range, entryText);
     if (hits.length === 0) {
-      // v7.52.2 (Review-Finding 2, DECISIONS #110): siehe delete_entry-Zweig
-      // oben – dieselbe Codeblock-Erkennung, hier auf dem QUELL-Bereich.
       if (findFenceMaskedEntryMatch(lines, range, entryText)) {
         return "Eintrag „" + sanitizeForWarning(entryDisp) +
           "“ steht in einem Codeblock – Codezeilen sind keine Einträge; den Abschnitt samt Codeblock per replace_section ändern";
@@ -1274,261 +1582,284 @@ function explainSkip(text, op) {
       return "Eintrag „" + sanitizeForWarning(entryDisp) + "“ mehrdeutig (" + hits.length +
         " Treffer) – exakteren Wortlaut oder heading/chapter angeben";
     }
-    return "keine inhaltliche Änderung";
-  }
-  // v7.52 (replace_entry-Op, DECISIONS #106): eigener Zweig, spiegelt
-  // applyOne exakt (dieselbe entryScope()/findEntryLines()-Logik wie
-  // delete_entry/move_entry) – Prüfreihenfolge: leerer entry -> leerer
-  // content -> Scope nicht gefunden -> Eintrag nicht gefunden/mehrdeutig ->
-  // Struktur-Schutz (der ERSETZTE Text selbst enthält eine #/##-Zeile) ->
-  // (sonst: applied wäre true).
-  if (op.type === "replace_entry") {
-    const entryText = typeof op.entry === "string" ? op.entry : "";
-    const entryDisp = norm(entryText);
-    if (!entryDisp) return "leerer entry";
-    const content = typeof op.content === "string" ? op.content.replace(/^\n+|\n+$/g, "") : "";
-    if (!content) return "leerer content – zum Löschen delete_entry nutzen";
-    const lines = text.split("\n");
-    const { range, notFound } = entryScope(lines, op.heading, op.chapter);
-    if (notFound === "chapter") {
-      return "Kapitel „" + sanitizeForWarning(dispHead(op.chapter)) + "“ nicht gefunden – Op übersprungen";
-    }
-    if (notFound === "heading") {
-      return "Abschnitt „" + sanitizeForWarning(dispHead(op.heading)) + "“ nicht gefunden";
-    }
-    const hits = findEntryLines(lines, range, entryText);
-    if (hits.length === 0) {
-      // v7.52.2 (Review-Finding 2, DECISIONS #110): siehe delete_entry-Zweig
-      // oben – dieselbe Codeblock-Erkennung.
-      if (findFenceMaskedEntryMatch(lines, range, entryText)) {
-        return "Eintrag „" + sanitizeForWarning(entryDisp) +
-          "“ steht in einem Codeblock – Codezeilen sind keine Einträge; den Abschnitt samt Codeblock per replace_section ändern";
+    if (toHeadingDisp) {
+      const target = resolveTarget(lines, { heading: op.to_heading, chapter: toChapterDisp ? op.to_chapter : null, chapterFieldName: "to_chapter", opType: "write" });
+      if (target.status === "title") return reasonTitleCreate(target, "to_chapter");
+      if (target.status === "wrong_level") {
+        if (target.levelField === "chapter") return wrongLevelReasonFor(target.chapter, (s, cp) => 'to_heading:"## ' + s + '"' + cp + ' nutzen', "to_chapter");
+        return wrongLevelHeadingReason(target);
       }
-      return "Eintrag „" + sanitizeForWarning(entryDisp) + "“ nicht gefunden";
-    }
-    if (hits.length > 1) {
-      return "Eintrag „" + sanitizeForWarning(entryDisp) + "“ mehrdeutig (" + hits.length +
-        " Treffer) – exakteren Wortlaut oder heading/chapter angeben";
-    }
-    const hitLine = lines[hits[0]];
-    const indent = hitLine.match(/^\s*/)[0];
-    const newLines = content.split("\n").map((l) => (l.trim() === "" ? "" : indent + l));
-    const mask = computeFenceLineMask(newLines);
-    for (let i = 0; i < newLines.length; i++) {
-      if (!mask[i] && BOUNDARY_RE.test(newLines[i])) {
-        return "content enthält Kapitel-/Abschnittszeilen – nur Eintragstext erlaubt";
-      }
+      if (target.status === "ambiguous") return reasonAmbiguous(target, "to_chapter", null);
+      if (target.status === "missing" && target.needsChapter) return reasonNeedsChapter(target, "to_chapter");
+    } else {
+      const chapterTarget = resolveChapterTarget(lines, op.to_chapter, { fieldName: "to_chapter" });
+      if (chapterTarget.status === "title") return reasonTitleChapter(chapterTarget, !chapterTarget.chaptered, true);
+      if (chapterTarget.status === "wrong_level") return wrongLevelReasonFor(chapterTarget, (s, cp) => 'to_heading:"## ' + s + '"' + cp + ' nutzen', "to_chapter");
     }
     return "keine inhaltliche Änderung";
   }
+
   // v7.43 (Live-Befund, siehe DECISIONS #87): Meldung um eine konkrete
   // Handlungsanweisung ergänzt (statt nur "fehlende Abschnitts-
   // Überschrift") – landet über buildOpsWarning (App.jsx) im nächsten Turn
   // als SYSTEM-HINWEIS in der Historie und soll dem Modell direkt sagen,
-  // WAS zu tun ist (heading nachreichen), statt nur DASS etwas fehlte. Der
-  // Live-Fall: das Modell schickte replace_section OHNE heading (wollte
-  // einen Abschnitt per HTML-Reinkopie in eine Tabelle umwandeln), reply
-  // kündigte die Änderung bereits an – die Op wurde trotzdem ERSATZLOS
-  // verworfen, ohne dass die ursprüngliche Meldung einen Ausweg nannte.
+  // WAS zu tun ist (heading nachreichen), statt nur DASS etwas fehlte.
+  const isWrite = op.type === "append_to_section" || op.type === "replace_section";
   const disp = dispHead(op.heading);
   if (!disp) return "fehlende Abschnitts-Überschrift – heading mit der exakten ##-Zeile angeben";
   const lines = text.split("\n");
+  let content = typeof op.content === "string" ? op.content.replace(/^\n+|\n+$/g, "") : "";
+  if (op.type === "append_to_section" && !content) return "leerer content";
+  if (isWrite && content) {
+    const norm1 = normalizeOwnHeading(content.split("\n"), disp, 2);
+    if (norm1.stripped !== null) {
+      if (!norm1.lines.join("\n").trim()) return reasonC2Empty(op.type === "replace_section" ? "replace" : "append", disp);
+      content = norm1.lines.join("\n");
+    }
+    const structIdx = findStructureLine(content.split("\n"));
+    if (structIdx !== -1) return reasonContent(content.split("\n")[structIdx]);
+  }
+  const target = resolveTarget(lines, { heading: op.heading, chapter: op.chapter, chapterFieldName: "chapter", opType: isWrite ? "write" : "delete" });
 
-  // v7.52 (Live-Vorfall "KPIs"-Duplikat, DECISIONS #106): spiegelt applyOne
-  // exakt (siehe dortiger Kommentar) – dieselbe Kollisions-Entscheidung via
-  // resolveSectionTarget(), VOR der alten Kapitel-/Abschnitts-Suche unten.
-  const resolved = resolveSectionTarget(lines, { heading: op.heading, chapter: op.chapter });
-  if (resolved.collision) {
-    if (op.type === "delete_section") {
-      // Review-Fix 🟡 (Runde 2): der delete_chapter-Verweis ist nur zutreffend,
-      // wenn das kollidierende #-Kapitel TATSÄCHLICH existiert (collisionRange
-      // gesetzt). Bei chapterMissing (chapter==heading, aber BEIDE fehlen,
-      // s. resolveSectionTarget Fall ii) gibt es kein Kapitel, auf das
-      // delete_chapter zeigen könnte – dann fällt die Prüfung bewusst durch
-      // in die alte Kapitel-Suche unten, die den korrekten "nicht gefunden"-
-      // Text liefert (Live-Befund, Review-Runde 2).
-      if (resolved.collisionRange) {
+  if (target.status === "collision") {
+    if (!isWrite) {
+      if (target.collisionRange) {
         return "„" + sanitizeForWarning(disp) + "“ ist ein #-Kapitel ohne gleichnamigen ##-Abschnitt – zum Löschen des Kapitels delete_chapter nutzen";
       }
-    } else {
-      const collisionContent = typeof op.content === "string" ? op.content.replace(/^\n+|\n+$/g, "") : "";
-      if (!collisionContent) return "leerer content";
-      if (op.type === "replace_section" && !resolved.preambleEmpty) {
-        return "„" + sanitizeForWarning(disp) + "“ ist ein #-Kapitel ohne gleichnamigen ##-Abschnitt – Kapitel-Freitext nicht ersetzt (kein ##-Duplikat angelegt); Eintrag ändern: replace_entry, Eintrag löschen: delete_entry, anhängen: append_to_chapter";
-      }
-      return "keine inhaltliche Änderung";
+      return reasonChapterNotFoundDelete(disp, []);
     }
-  }
-
-  let range = null;
-  if (typeof op.chapter === "string" && op.chapter.trim()) {
-    range = findChapter(lines, op.chapter);
-    if (!range) {
-      // v7.23: "Kapitel nicht gefunden" ist als SKIP-Grund nur noch für
-      // delete_section korrekt – append_to_section/replace_section legen
-      // ein fehlendes Kapitel inzwischen selbst an (siehe applyOne) und
-      // landen bei einem fehlenden Kapitel deshalb so gut wie NIE mehr hier
-      // (applied wird dabei true). Die zwei verbleibenden, seltenen
-      // Sonderfälle unten deckt applyOne ebenfalls als echten No-op ab.
-      if (op.type === "delete_section") {
-        return "Kapitel „" + sanitizeForWarning(dispHead(op.chapter)) + "“ nicht gefunden – Op übersprungen";
-      }
-      if (!dispHead(op.chapter)) return "fehlende Kapitel-Überschrift";
-      // Sonst (append_to_section, ggf. mit leerem content – replace_section
-      // erreicht diesen Zweig praktisch nie, weil es bei fehlendem Kapitel
-      // IMMER etwas anlegt): range bleibt bewusst null, die folgende
-      // Abschnitts-Suche läuft dadurch GLOBAL statt kapitel-eingegrenzt –
-      // für die reine Erklärung hier unschädlich, weil append_to_section
-      // den einzig verbleibenden Skip-Grund (leerer content) unten
-      // UNABHÄNGIG von b/range prüft.
-    }
-  }
-  const b = findSection(lines, disp, range);
-  if (op.type === "delete_section" && !b) return "Abschnitt „" + sanitizeForWarning(disp) + "“ nicht gefunden";
-  if (op.type === "append_to_section") {
-    const content = typeof op.content === "string" ? op.content.replace(/^\n+|\n+$/g, "") : "";
     if (!content) return "leerer content";
+    if (op.type === "replace_section" && !target.preambleEmpty) {
+      return "„" + sanitizeForWarning(disp) + "“ ist ein #-Kapitel ohne gleichnamigen ##-Abschnitt – Kapitel-Freitext nicht ersetzt (kein ##-Duplikat angelegt); Eintrag ändern: replace_entry, Eintrag löschen: delete_entry, anhängen: append_to_chapter";
+    }
+    return DELIBERATE_NOOP_REASON;
   }
-  // replace_section legt bei fehlendem Abschnitt IMMER neu an (siehe
-  // applyOne) – landet hier also nur, wenn der neue Inhalt zufällig
-  // textidentisch mit dem vorherigen Stand war (kein Fehlerfall).
-  return "keine inhaltliche Änderung";
+  // Nacharbeit v7.53 (Review-Finding 🟡 5): dieser Zweig deckt AUSSCHLIESSLICH
+  // append_to_section/replace_section/delete_section ab (delete_entry/
+  // replace_entry/move_entry werden weiter oben in eigenen Blöcken
+  // behandelt) – keine dieser drei Ops hat ein "entry"-Feld, der
+  // "oder heading weglassen"-Zusatz war für delete_section deshalb falsch.
+  if (target.status === "ambiguous") return reasonAmbiguous(target, "chapter", null);
+  if (target.status === "title") return isWrite ? reasonTitleCreate(target, "chapter") : reasonTitleNotFoundDelete(target, "chapter");
+  if (target.status === "wrong_level") {
+    if (target.levelField === "chapter") {
+      const opName = isWrite ? "append_to_section" : "delete_section";
+      return wrongLevelReasonFor(target.chapter, (s, cp) => opName + ' mit heading:"## ' + s + '"' + cp + ' nutzen');
+    }
+    return wrongLevelHeadingReason(target);
+  }
+  if (!isWrite) {
+    if (target.status === "found") return "keine inhaltliche Änderung";
+    if (target.chapter.status === "missing") return reasonChapterNotFoundDelete(dispHead(op.chapter), target.chapter.candidates);
+    return reasonSectionNotFoundDelete(target);
+  }
+  if (target.status === "missing" && target.needsChapter) return reasonNeedsChapter(target, "chapter");
+  return DELIBERATE_NOOP_REASON;
 }
 
-// v7.52 (ℹ️-Notes, DECISIONS #106): rein lesend wie explainSkip – anders als
-// dort aber NUR relevant, wenn eine Op TATSÄCHLICH etwas verändert hat
-// (applyOpsDetailed ruft sie nur bei applied:true auf, siehe dort). Meldet
-// implizite Kapitel-/Abschnitts-Anlagen sowie die v7.52-Umleitung in einen
-// Kapitel-Freitext (siehe resolveSectionTarget/entryScope) – ohne diese
-// Sichtbarkeit war GENAU das der Live-Vorfall: eine Op lief "erfolgreich"
-// (applied:true, KEINE ⚠️-Warn-Pille), erzeugte dabei aber ein stilles
-// Kapitelnamen-Duplikat. Arbeitet auf "before" (dem Text VOR applyOne),
-// NICHT auf dem bereits mutierten Ergebnis – dieselbe Read-Only-Garantie
-// wie explainSkip; beeinflusst applyOne/den Ergebnistext NIE.
+// v7.53: gemeinsamer Note-Baustein für append_to_section/replace_section,
+// delete_section UND move_entry-Ziel (to_heading) – beschreibt Kollisions-
+// Umleitung (v7.52-Wortlaute, unverändert), Neuanlage (inkl. Did-you-mean/
+// i10-Namensvetter), den Titel-Scope-Treffer (N-TITLE-SCOPE/N-TITLE-FLAT)
+// und den ###-auf-##-Treffer (siehe unten). Nacharbeit v7.53 Runde 2
+// (Review-Finding 🔵 3a): "fieldName" (Default "chapter") macht die beiden
+// Titel-Sätze feldkorrekt – move_entry-Ziel ruft mit "to_chapter" auf, sonst
+// hätte die Note ein Feld genannt, das die Op gar nicht besitzt (move_entry
+// kennt kein "chapter").
+function noteForSectionTarget(target, entryMode, fieldName = "chapter") {
+  if (target.status === "collision") {
+    if (target.collisionRange === null) {
+      return entryMode
+        ? 'Kapitel „' + sw(target.disp) + '“ neu angelegt, Eintrag als Kapitel-Freitext (kein ##-Duplikat)'
+        : 'Kapitel „' + sw(target.disp) + '“ neu angelegt, content als Kapitel-Freitext (kein ##-Duplikat)';
+    }
+    if (entryMode) {
+      return 'Eintrag in Kapitel-Freitext „' + sw(target.disp) + '“ eingefügt (kein ##-Abschnitt „' + sw(target.disp) + '“)';
+    }
+    return 'in Kapitel-Freitext „' + sw(target.disp) +
+      '“ eingefügt – kein ##-Abschnitt „' + sw(target.disp) +
+      '“ vorhanden, Kapitelnamen-Duplikat vermieden (für einen echten ##-Abschnitt dieses Namens in einem anderen Kapitel chapter:"# …" angeben)';
+  }
+  const parts = [];
+  if (target.titleNote === "preamble" && target.status === "found") {
+    parts.push(fieldName + ' „' + sw(target.titleDisp) + '“ ist die Titelzeile – als Eingrenzung auf den Vorspann (vor dem ersten Kapitel) gewertet');
+  }
+  if (target.titleNote === "flat") {
+    parts.push(fieldName + ' „' + sw(target.titleDisp) + '“ ist die Titelzeile – ignoriert (Notizbuch ohne Kapitel)');
+  }
+  // Nacharbeit v7.53 Runde 2 (Review-Finding 🔵 2): ein heading mit "###"
+  // (rawLevel>=3), das einen GLEICHNAMIGEN ##-Abschnitt trifft, läuft laut
+  // Resolver-Reihenfolge (1.5 Schritt 4 VOR Schritt 6) als normaler "found"-
+  // Treffer durch applyOne – der Prompt verspricht aber "ein heading mit ###
+  // wird abgelehnt". Bewusst die Note-Variante statt einer Prompt-Änderung
+  // (Orchestrator-Entscheidung): die Op wirkt korrekt (landet im richtigen
+  // ##-Abschnitt), das Modell soll nur künftig "## …" statt "### …" senden.
+  if (target.status === "found" && target.level >= 3) {
+    parts.push('heading „### ' + sw(target.disp) + '“ als ##-Abschnitt „' + sw(target.disp) + '“ gewertet – heading mit "## …" senden');
+  }
+  if (target.status === "missing") {
+    let note;
+    if (target.chapter.status === "missing") {
+      note = 'Kapitel „' + sw(dispHead(target.chapterField)) + '“ und Abschnitt „' + sw(target.disp) + '“ neu angelegt';
+      if (target.chapter.candidates.length) {
+        note += ' – ähnlich vorhanden: ' + sw(listNames(target.chapter.candidates)) + '; falls das gemeint war, im reply nachfragen (Korrektur: delete_chapter „' +
+          sw(target.chapter.disp) + '“ + erneut mit heading:"## ' + sw(target.disp) + '", chapter:"# ' + sw(target.chapter.candidates[0]) + '")';
+      } else if (target.chapter.sectionNamesake) {
+        const sn = target.chapter.sectionNamesake;
+        note += ' – ähnlich vorhanden: ##-Abschnitt „' + sw(sn.sectionDisp) + '“' +
+          (sn.chapterDisp ? ' in Kapitel „' + sw(sn.chapterDisp) + '“' : '') +
+          '; falls das gemeint war, im reply nachfragen (Korrektur: delete_chapter „' + sw(target.chapter.disp) +
+          '“ + erneut mit heading:"## ' + sw(sn.sectionDisp) + '"' + (sn.chapterDisp ? ', chapter:"# ' + sw(sn.chapterDisp) + '"' : '') + ')';
+      }
+    } else if (target.chapterRange && target.scopeKind === "chapter") {
+      note = 'Abschnitt „' + sw(target.disp) + '“ neu angelegt in Kapitel „' + sw(dispHead(target.chapterField)) + '“';
+    } else {
+      note = 'Abschnitt „' + sw(target.disp) + '“ neu angelegt am Dokumentende';
+    }
+    if (target.candidates.length && target.chapter.status !== "missing") {
+      note += ' – ähnlich vorhanden: ' + sw(listNames(target.candidates)) +
+        '; falls das gemeint war, im reply nachfragen (Korrektur: delete_section „' + sw(target.candidates[0]) +
+        '“' + (target.chapterField ? ' chapter:"# ' + sw(dispHead(target.chapterField)) + '"' : '') +
+        ' + erneut mit heading:"## ' + sw(target.candidates[0]) + '")';
+    }
+    parts.push(note);
+  }
+  return parts.length ? parts.join("; ") : undefined;
+}
+
+// v7.52 (ℹ️-Notes, DECISIONS #106), v7.53 auf den Resolver umgestellt
+// (DECISIONS #111): rein lesend wie explainSkip – anders als dort aber NUR
+// relevant, wenn eine Op TATSÄCHLICH etwas verändert hat (applyOpsDetailed
+// ruft sie nur bei applied:true auf, siehe dort). Arbeitet auf "before" (dem
+// Text VOR applyOne), NICHT auf dem bereits mutierten Ergebnis – dieselbe
+// Read-Only-Garantie wie explainSkip; beeinflusst applyOne/den Ergebnistext
+// NIE.
 function explainNote(before, op) {
   if (!op || typeof op !== "object") return undefined;
   const lines = before.split("\n");
 
   if (op.type === "append_to_section" || op.type === "replace_section") {
-    const resolved = resolveSectionTarget(lines, { heading: op.heading, chapter: op.chapter });
-    if (resolved.collision) {
-      if (resolved.collisionRange === null) {
-        return 'Kapitel „' + sanitizeForWarning(resolved.disp) + '“ neu angelegt, content als Kapitel-Freitext (kein ##-Duplikat)';
-      }
-      return 'in Kapitel-Freitext „' + sanitizeForWarning(resolved.disp) +
-        '“ eingefügt – kein ##-Abschnitt „' + sanitizeForWarning(resolved.disp) +
-        '“ vorhanden, Kapitelnamen-Duplikat vermieden (für einen echten ##-Abschnitt dieses Namens in einem anderen Kapitel chapter:"# …" angeben)';
+    const parts = [];
+    const disp = dispHead(op.heading);
+    const content = typeof op.content === "string" ? op.content.replace(/^\n+|\n+$/g, "") : "";
+    const norm1 = normalizeOwnHeading(content.split("\n"), disp, 2);
+    if (norm1.stripped !== null) {
+      parts.push('erste content-Zeile „' + sw(norm1.stripped.trim()) + '“ (eigene Überschrift) entfernt – content ohne Überschriftszeile senden');
     }
-    if (isNewSectionCase(resolved)) return newSectionNote(lines, resolved);
-    return undefined;
+    const target = resolveTarget(lines, { heading: op.heading, chapter: op.chapter, chapterFieldName: "chapter", opType: "write" });
+    const n = noteForSectionTarget(target);
+    if (n) parts.push(n);
+    return parts.length ? parts.join("; ") : undefined;
   }
 
   if (op.type === "append_to_chapter") {
-    const chapterField = chapterFieldFor(op);
-    const { range } = findAddressableChapter(lines, chapterField);
-    if (!range) return 'Kapitel „' + sanitizeForWarning(dispHead(chapterField)) + '“ neu angelegt';
-    return undefined;
+    const hasChapter = typeof op.chapter === "string" && op.chapter.trim();
+    const fieldValue = hasChapter ? op.chapter : op.heading;
+    const chapterResult = resolveChapterTarget(lines, fieldValue, { opType: "append_to_chapter", usedHeadingFallback: !hasChapter, heading: hasChapter ? op.heading : undefined });
+    const parts = [];
+    const content = typeof op.content === "string" ? op.content.replace(/^\n+|\n+$/g, "") : "";
+    const norm1 = normalizeOwnHeading(content.split("\n"), chapterResult.disp, 1);
+    if (norm1.stripped !== null) {
+      parts.push('erste content-Zeile „' + sw(norm1.stripped.trim()) + '“ (eigene Überschrift) entfernt – content ohne Überschriftszeile senden');
+    }
+    if (chapterResult.status === "missing") {
+      let note = 'Kapitel „' + sw(chapterResult.disp) + '“ neu angelegt';
+      if (chapterResult.candidates.length) {
+        note += ' – ähnlich vorhanden: ' + sw(listNames(chapterResult.candidates)) +
+          '; falls das gemeint war, im reply nachfragen (Korrektur: delete_chapter „' + sw(chapterResult.disp) +
+          '“ + erneut mit chapter:"# ' + sw(chapterResult.candidates[0]) + '")';
+      }
+      parts.push(note);
+    }
+    return parts.length ? parts.join("; ") : undefined;
   }
 
   if (op.type === "move_entry") {
     const parts = [];
-    const { redirected } = entryScope(lines, op.from_heading, op.from_chapter);
-    if (redirected) {
-      // Review-Fix 🔵 (Runde 2): entryScope liefert bei einer Umleitung das
-      // GESAMTE Kapitel (inkl. aller ##-Unterabschnitte) als Suchbereich, nicht
-      // nur die Präambel – der Text "im Kapitel-Freitext gesucht" war bei einem
-      // Treffer in einem ##-Unterabschnitt irreführend. "im gesamten Kapitel"
-      // beschreibt den TATSÄCHLICHEN Suchbereich korrekt.
-      parts.push('Quelle „' + sanitizeForWarning(dispHead(op.from_heading)) +
-        '“ ist ein #-Kapitel ohne ##-Abschnitt – Eintrag im gesamten Kapitel gesucht');
+    const src = entryScope(lines, op.from_heading, op.from_chapter, { heading: "from_heading", chapter: "from_chapter" });
+    if (src.redirected) {
+      parts.push('Quelle „' + sw(dispHead(op.from_heading)) + '“ ist ein #-Kapitel ohne ##-Abschnitt – Eintrag im gesamten Kapitel gesucht');
+    }
+    if (src.titleNote === "preamble") {
+      const tIdx = titleLineIdx(lines);
+      parts.push('from_chapter „' + sw(tIdx !== -1 ? dispHead(lines[tIdx]) : "") + '“ ist die Titelzeile – als Eingrenzung auf den Vorspann (vor dem ersten Kapitel) gewertet');
+    }
+    // Nacharbeit v7.53 Runde 2 (Review-Finding 🔵 3b): dieselbe ℹ️-Note wie
+    // bei "preamble" oben, aber für ein FLACHES Dokument (chapter==Titel gilt
+    // dort als NICHT gesetzt, ignoriert statt eingegrenzt) – fehlte bisher,
+    // die Op wirkte korrekt, aber unerklärt.
+    if (src.titleNote === "flat") {
+      const tIdx = titleLineIdx(lines);
+      parts.push('from_chapter „' + sw(tIdx !== -1 ? dispHead(lines[tIdx]) : "") + '“ ist die Titelzeile – ignoriert (Notizbuch ohne Kapitel)');
     }
     const toHeadingDisp = dispHead(op.to_heading);
     const toChapterDisp = dispHead(op.to_chapter);
     if (toHeadingDisp) {
-      // v7.52.1 (Review-Nachbesserung 🔵 4, DECISIONS #109): "chapter" wie in
-      // applyOne (dort ca. Z. 878) NUR durchreichen, wenn toChapterDisp
-      // NICHT-LEER ist – ein op.to_chapter, das nach dispHead() leer wird
-      // (z. B. nur "#" ohne Namen), darf resolveSectionTarget NICHT als
-      // gesetztes chapterField erreichen (chapterField dort prüft nur
-      // trim(), nicht dispHead() – "#" gilt dort fälschlich als "gesetzt",
-      // aber ungefunden -> chapterMissing:true -> irreführende "Kapitel
-      // neu angelegt"-Note). Vorher wich diese Zeile von applyOne ab (dort
-      // bereits korrekt "toChapterDisp ? op.to_chapter : null") - beide
-      // MÜSSEN denselben Resolver-Input sehen (Grundprinzip dieser Datei).
-      const resolved = resolveSectionTarget(lines, { heading: op.to_heading, chapter: toChapterDisp ? op.to_chapter : null });
-      if (resolved.collision) {
-        // Review-Fix 🔵 (Runde 2): analog zu append_to_section/replace_section
-        // (siehe oben) den Sonderfall "Kapitel existierte noch gar nicht"
-        // (collisionRange===null) explizit als Neuanlage kennzeichnen, statt
-        // ihn wie eine reine Umleitung in ein BESTEHENDES Kapitel klingen zu
-        // lassen.
-        parts.push(resolved.collisionRange === null
-          ? 'Kapitel „' + sanitizeForWarning(resolved.disp) + '“ neu angelegt, Eintrag als Kapitel-Freitext (kein ##-Duplikat)'
-          : 'Eintrag in Kapitel-Freitext „' + sanitizeForWarning(resolved.disp) +
-            '“ eingefügt (kein ##-Abschnitt „' + sanitizeForWarning(resolved.disp) + '“)');
-      } else if (isNewSectionCase(resolved)) {
-        parts.push(newSectionNote(lines, resolved));
-      }
+      // Nacharbeit v7.53 Runde 2 (Review-Finding 🔵 3a): "to_chapter" statt
+      // des Default-Feldnamens "chapter" – move_entry kennt kein Feld
+      // "chapter".
+      const target = resolveTarget(lines, { heading: op.to_heading, chapter: toChapterDisp ? op.to_chapter : null, chapterFieldName: "to_chapter", opType: "write" });
+      const n = noteForSectionTarget(target, true, "to_chapter");
+      if (n) parts.push(n);
     } else if (toChapterDisp) {
-      const { range } = findAddressableChapter(lines, op.to_chapter);
-      if (!range) parts.push('Kapitel „' + sanitizeForWarning(toChapterDisp) + '“ neu angelegt');
+      const chapterTarget = resolveChapterTarget(lines, op.to_chapter, { fieldName: "to_chapter" });
+      if (chapterTarget.status === "missing") {
+        let note = 'Kapitel „' + sw(chapterTarget.disp) + '“ neu angelegt';
+        // Nacharbeit v7.53 Runde 2 (Review-Finding 🔵 3d): N-DYM bekommt auch
+        // hier das Korrektur-Rezept (vorher nur die reine Nachfrage-
+        // Aufforderung ohne konkreten Folge-Turn-Vorschlag, siehe Spec 4/
+        // N-DYM). "to_chapter" statt "chapter" im Rezept, move_entry kennt
+        // das Feld "chapter" nicht.
+        if (chapterTarget.candidates.length) {
+          note += ' – ähnlich vorhanden: ' + sw(listNames(chapterTarget.candidates)) +
+            '; falls das gemeint war, im reply nachfragen (Korrektur: delete_chapter „' + sw(chapterTarget.disp) +
+            '“ + erneut mit to_chapter:"# ' + sw(chapterTarget.candidates[0]) + '")';
+        }
+        parts.push(note);
+      }
     }
     return parts.length ? parts.join("; ") : undefined;
   }
 
   if (op.type === "delete_entry" || op.type === "replace_entry") {
-    const { redirected } = entryScope(lines, op.heading, op.chapter);
-    if (redirected) {
-      // Review-Fix 🔵 (Runde 2, siehe move_entry-Zweig oben): "im gesamten
-      // Kapitel" statt "im Kapitel-Freitext" – entryScope durchsucht bei einer
-      // Umleitung das komplette Kapitel inkl. aller ##-Unterabschnitte.
-      return '„' + sanitizeForWarning(dispHead(op.heading)) + '“ ist ein #-Kapitel ohne ##-Abschnitt – Eintrag im gesamten Kapitel gefunden';
+    const scope = entryScope(lines, op.heading, op.chapter, { heading: "heading", chapter: "chapter" });
+    const parts = [];
+    if (scope.redirected) {
+      parts.push('„' + sw(dispHead(op.heading)) + '“ ist ein #-Kapitel ohne ##-Abschnitt – Eintrag im gesamten Kapitel gefunden');
     }
-    return undefined;
+    if (scope.titleNote === "preamble") {
+      parts.push('chapter „' + sw(dispHead(op.chapter)) + '“ ist die Titelzeile – als Eingrenzung auf den Vorspann (vor dem ersten Kapitel) gewertet');
+    }
+    // Nacharbeit v7.53 Runde 2 (Review-Finding 🔵 3b): FLACHES Dokument,
+    // chapter==Titel gilt dort als NICHT gesetzt (ignoriert) – fehlte
+    // bisher als eigener Zweig, siehe move_entry-Quelle oben.
+    if (scope.titleNote === "flat") {
+      parts.push('chapter „' + sw(dispHead(op.chapter)) + '“ ist die Titelzeile – ignoriert (Notizbuch ohne Kapitel)');
+    }
+    return parts.length ? parts.join("; ") : undefined;
+  }
+
+  // Nacharbeit v7.53 Runde 2 (Review-Finding 🔵 3c): delete_section bekam
+  // bisher GAR KEINE Note – weder für einen Vorspann-Treffer (Titel-Scope)
+  // noch für einen ###-auf-##-Treffer (siehe noteForSectionTarget oben).
+  // delete_section legt nie etwas an (target.status ist bei applied:true
+  // IMMER "found", siehe applyOne), noteForSectionTarget() liefert hier also
+  // automatisch NUR die Titel-/###-Teile, nie einen Anlage-Text.
+  if (op.type === "delete_section") {
+    const target = resolveTarget(lines, { heading: op.heading, chapter: op.chapter, chapterFieldName: "chapter", opType: "delete" });
+    return noteForSectionTarget(target);
   }
 
   return undefined;
 }
 
-// Gate für explainNote() oben: wurde ein ##-Abschnitt neu angelegt (statt
-// eines bereits vorhandenen ergänzt/ersetzt)? Seit dem Review-Fix in
-// resolveSectionTarget (🟡, Runde 1) liefert dieses bei chapterMissing IMMER
-// sectionRange===null (keine globale Suche mehr) – "resolved.sectionRange
-// === null" allein deckt daher BEIDE Fälle ab (fehlendes Kapitel UND
-// fehlender Abschnitt in einem vorhandenen Kapitel); der frühere
-// chapterMissing-Sonderfall (globaler Treffer hätte sectionRange sonst
-// irreführend NICHT-null gemacht) entfällt damit.
-function isNewSectionCase(resolved) {
-  return resolved.sectionRange === null;
-}
-
-// Gemeinsamer Baustein für explainNote() oben (append_to_section/
-// replace_section OHNE Kollision, aber mit fehlendem Abschnitt; move_entry
-// mit to_heading analog) – beschreibt, WO ein fehlender ##-Abschnitt neu
-// entsteht (im gefundenen Kapitel, in einem neu angelegten Kapitel, oder
-// global am Dokumentende – dort ggf. mit Warnung, wenn das faktisch
-// INNERHALB des letzten bestehenden Kapitels landet, siehe applyOne).
-function newSectionNote(lines, resolved) {
-  if (resolved.chapterMissing) {
-    return 'Kapitel „' + sanitizeForWarning(dispHead(resolved.chapterField)) + '“ und Abschnitt „' +
-      sanitizeForWarning(resolved.disp) + '“ neu angelegt';
-  }
-  if (resolved.chapterRange) {
-    return 'Abschnitt „' + sanitizeForWarning(resolved.disp) + '“ neu angelegt in Kapitel „' +
-      sanitizeForWarning(dispHead(resolved.chapterField)) + '“';
-  }
-  let note = 'Abschnitt „' + sanitizeForWarning(resolved.disp) + '“ neu angelegt am Dokumentende';
-  const tIdx = titleLineIdx(lines);
-  const mask = computeFenceLineMask(lines);
-  let lastChapterDisp = null;
-  for (let i = tIdx + 1; i < lines.length; i++) {
-    if (!mask[i] && CHAPTER_RE.test(lines[i])) lastChapterDisp = dispHead(lines[i]);
-  }
-  if (lastChapterDisp !== null) {
-    note += ' (innerhalb von Kapitel „' + sanitizeForWarning(lastChapterDisp) + '“, dem letzten Kapitel – ggf. chapter angeben)';
-  }
-  return note;
-}
+// v7.53 Nacharbeit Runde 3 (Review-Fund 🟡 2): Obergrenze der pro Turn
+// angewendeten Ops als benannte Konstante statt einer eingestreuten "20" –
+// turnGuard.js#planTurn muss dieselbe Kappung auf die UNGEKAPPTE g.ops-Liste
+// anwenden, BEVOR er zurückgehaltene Indizes herausfiltert (sonst rutschen
+// nie bewertete Ops jenseits dieser Grenze unbewertet durch den Guard nach,
+// siehe dortiger Kommentar).
+export const MAX_OPS = 20;
 
 // Wendet ops WIE applyOps an, liefert aber zusätzlich pro Op ein Ergebnis
 // { index, type, heading?, applied, reason? } – reason ist nur bei
@@ -1537,7 +1868,7 @@ function newSectionNote(lines, resolved) {
 export function applyOpsDetailed(docText, ops) {
   let text = docText;
   const results = [];
-  const list = (ops || []).slice(0, 20);
+  const list = (ops || []).slice(0, MAX_OPS);
   for (let index = 0; index < list.length; index++) {
     const op = list[index];
     const type = op && typeof op === "object" ? op.type : undefined;

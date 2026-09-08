@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 
 import { applyOpsDetailed, dispHead, PLACEHOLDER_LINE, stripInboxPlaceholder } from "./lib/ops.js";
+import { planTurn } from "./lib/turnGuard.js";
 import { resolveMetaForDisplay, applyMetaResult, metaAfterError, bumpMetaCount, isStaleResponse } from "./lib/meta.js";
 import { applyMemoryOps, applyMemoryOpsDetailed } from "./lib/memory.js";
 import { diffLines, contextize } from "./lib/diff.js";
@@ -1628,23 +1629,83 @@ export default function NotizbuchApp() {
           groups.get(target.id).push(op);
         }
 
-        const changed = []; // { id, name, ops }
-        let conflict = false;
-        for (const [nbId, ops] of groups) {
-          const before = docCache.current[nbId] || "";
+        // v7.53 Teil 3 (Cross-Notizbuch-Turn-Guard, DECISIONS #111
+        // Entscheidung 5): v7.53 (Stufe 2) macht Ziel-Ops auch MIT korrekt
+        // gesetztem chapter in bestimmten Fällen (wrong_level/title/
+        // R-CONTENT/ambiguous …) zu einem Skip – ohne Guard würde eine
+        // BEREITS erfolgreiche Quell-Löschung in Notizbuch X trotzdem
+        // committet, obwohl die zugehörige Ziel-Op in Notizbuch Y an einer
+        // dieser Invarianten scheitert (#65-Muster: Inhalt landet nur noch
+        // in der Git-Historie). Drei Phasen statt der bisherigen einen
+        // Schleife:
+        // (1) applyOpsDetailed je Gruppe REIN auf dem docCache-Stand
+        //     ("before"), noch KEIN Commit – Ergebnis ist der Plan-Eingabe
+        //     für Phase 2.
+        // (2) turnGuard.js#planTurn ermittelt ÜBER ALLE Gruppen hinweg, ob
+        //     irgendwo eine Ziel-Op (append_to_section/replace_section/
+        //     append_to_chapter) gescheitert ist – dann werden in JEDER
+        //     ANDEREN Gruppe die potenziell destruktiven Ops (delete_section/
+        //     delete_entry/delete_chapter/replace_section) zurückgehalten
+        //     UND je ein eigener ⚠️-notApplied-Eintrag ("zurückgehalten – …")
+        //     erzeugt.
+        // (3) NUR Gruppen mit einem tatsächlichen Hold wenden applyOpsDetailed
+        //     ERNEUT an – mit der gefilterten Op-Liste. Commit-Basis ist
+        //     dabei ab v7.53 Nacharbeit Runde 3 (Review-Fund 🟡 1) NICHT der
+        //     Phase-1-Snapshot "before", sondern der LIVE-Cache-Stand
+        //     ("base" = docCache.current[g.nbId] zum Zeitpunkt DIESER
+        //     Gruppen-Iteration): zwischen den Commit-Awaits der vorherigen
+        //     Gruppen dieser Schleife kann toggleTask() (Checkboxen sind
+        //     während busy nicht gesperrt) bereits synchron in
+        //     docCache.current[activeNb] geschrieben haben – ein Commit auf
+        //     dem veralteten Snapshot würde ein zwischenzeitlich gesetztes
+        //     Häkchen unbemerkt überschreiben. Weicht "base" vom Phase-1-
+        //     "before" ab, wird ebenfalls neu angewendet (auch OHNE Hold);
+        //     für die ERSTE Gruppe ist vor dem ersten await noch nichts
+        //     passiert, "base" ist dort also IMMER identisch zu "before".
+        //     notes/infos/der Commit-Text stammen ab hier IMMER aus diesem
+        //     finalen Ergebnis; ohne Hold UND ohne zwischenzeitliche Änderung
+        //     ist finalOps === die ursprüngliche Op-Liste, Phase 1 IST
+        //     bereits Phase 3 (keine unnötige zweite Anwendung). Die
+        //     bestehende Reihenfolge (Ziel-Gruppe vor Quell-Gruppe, Map-
+        //     Einfügereihenfolge) UND der SHA-Konflikt-Pfad bleiben
+        //     unverändert – dieselbe "groups"-Map wird nur einmal in ein
+        //     Array überführt und danach wie bisher der Reihe nach
+        //     verarbeitet. rewrite wird vom Guard bewusst NIE zurückgehalten
+        //     (siehe turnGuard.js) – ein offenes Restrisiko bis Vorschlag B.
+        const groupList = Array.from(groups, ([nbId, ops]) => {
           const nb = notebooksRef.current.find((n) => n.id === nbId);
+          const before = docCache.current[nbId] || "";
           // v7.21: applyOpsDetailed statt applyOps – liefert zusätzlich pro
           // Op einen Grund, falls sie NICHTS verändert hat (unbekannter Typ,
           // Abschnitt/Kapitel nicht gefunden, leerer content). Text-Ausgabe
           // ist BYTE-IDENTISCH zu applyOps (reiner Wrapper, siehe ops.js).
-          const detailed = applyOpsDetailed(before, ops);
+          return { nbId, name: nb ? nb.name : nbId, ops, before, detailed: applyOpsDetailed(before, ops) };
+        });
+        const turnPlan = planTurn(
+          groupList.map((g) => ({ nbId: g.nbId, name: g.name, ops: g.ops, results: g.detailed.results }))
+        );
+
+        const changed = []; // { id, name, ops }
+        let conflict = false;
+        for (const g of groupList) {
+          const finalOps = turnPlan.filteredOps.get(g.nbId) || g.ops;
+          // v7.53 Nacharbeit Runde 3 (Review-Fund 🟡 1): "base" ist der
+          // LIVE-Cache-Stand JETZT, nicht der Phase-1-Snapshot "g.before"
+          // (siehe Kommentar im Drei-Phasen-Block oben) – für die erste
+          // Gruppe ist base === g.before immer wahr (noch kein await
+          // durchlaufen), ab der zweiten Gruppe kann sich das durch einen
+          // zwischenzeitlichen toggleTask()-Schreibzugriff unterscheiden.
+          const base = docCache.current[g.nbId] || "";
+          const detailed = (turnPlan.holds.has(g.nbId) || base !== g.before)
+            ? applyOpsDetailed(base, finalOps)
+            : g.detailed;
           for (const r of detailed.results) {
-            if (!r.applied) notApplied.push({ type: r.type, heading: r.heading, notebook: nb ? nb.name : nbId, reason: r.reason });
+            if (!r.applied) notApplied.push({ type: r.type, heading: r.heading, notebook: g.name, reason: r.reason });
             // v7.52 (ℹ️-Kanal, DECISIONS #106): r.note ist NUR bei
             // applied:true gesetzt (siehe ops.js#applyOpsDetailed) – der
             // else-Zweig hier ist also implizit auf "applied:true UND
             // note vorhanden" beschränkt.
-            else if (r.note) infos.push({ type: r.type, heading: r.heading, notebook: nb ? nb.name : nbId, reason: r.note });
+            else if (r.note) infos.push({ type: r.type, heading: r.heading, notebook: g.name, reason: r.note });
           }
           // Nach dem Anwenden dokumentweit durchnummerieren: neue Quellen-
           // Fußnoten kommen als [0](url)-Platzhalter aus den ops.
@@ -1661,18 +1722,30 @@ export default function NotizbuchApp() {
           // siehe DECISIONS). linkifyFilePaths wirft laut eigenem Vertrag
           // nie und ist idempotent (siehe filelinks.js).
           const applied = linkifyFilePaths(renumberCitations(detailed.text));
-          if (applied === before) continue;
+          // v7.53 Nacharbeit Runde 3 (Review-Fund 🟡 1): Vergleich gegen
+          // "base" (Live-Cache), NICHT gegen den Phase-1-Snapshot "g.before"
+          // – "detailed" wurde oben ja bereits auf "base" berechnet, sobald
+          // die beiden auseinanderliefen.
+          if (applied === base) continue;
           // v7.22 (Review-Fund 🟡): Anlage-Platzhalter erst NACH einer
           // bereits feststehenden echten Änderung entfernen (siehe "applied
-          // === before"-Ausstieg oben) – ein reiner Platzhalter-Wegfall OHNE
+          // === base"-Ausstieg oben) – ein reiner Platzhalter-Wegfall OHNE
           // jede sonstige Änderung wird NIE für sich allein committet (kein
           // ungefragter Commit). stripInboxPlaceholder ist idempotent, kostet
           // bei fehlendem Platzhalter also nichts.
           const toCommit = stripInboxPlaceholder(applied);
-          const ok = await commitDocNb(cfg, nbId, toCommit, res.commit || "Aktualisierung");
+          const ok = await commitDocNb(cfg, g.nbId, toCommit, res.commit || "Aktualisierung");
           if (!ok) { conflict = true; break; }
-          changed.push({ id: nbId, name: nb ? nb.name : nbId, ops });
+          changed.push({ id: g.nbId, name: g.name, ops: finalOps });
         }
+        // v7.53 Nacharbeit Runde 3 (Review-Fund 🔵 7): ERST NACH der
+        // obigen Ergebnis-Schleife pushen – die auslösende Ziel-Op (ihr
+        // eigener notApplied-Eintrag aus "detailed.results" IHRER eigenen
+        // Gruppe, s. o.) steht dadurch VOR den "zurückgehalten"-Verweisen
+        // auf sie in der ⚠️-Pille (Auslöser zuerst, siehe describeOpItems/
+        // buildOpsWarning – reine Anzeigereihenfolge, keine Logikänderung
+        // an turnPlan.notApplied selbst).
+        for (const na of turnPlan.notApplied) notApplied.push(na);
         // v7.21: Das Modell kündigte per commit-Feld eine Änderung an, aber
         // KEIN Notizbuch wurde tatsächlich verändert (alle Ops in dieser
         // Gruppe waren wirkungslos) – genau der Live-Befund ("mehrfach als
@@ -3071,7 +3144,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.52.2</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.53</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"

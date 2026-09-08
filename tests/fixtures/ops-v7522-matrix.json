@@ -1,0 +1,1114 @@
+[
+  {
+    "id": "append-existing-flat",
+    "fixture": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n",
+    "ops": [
+      {
+        "type": "append_to_section",
+        "heading": "## Inbox",
+        "content": "- neuer Eintrag"
+      }
+    ],
+    "text": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n- neuer Eintrag\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_section",
+        "heading": "Inbox",
+        "applied": true
+      }
+    ]
+  },
+  {
+    "id": "append-missing-flat-doc-end",
+    "fixture": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n",
+    "ops": [
+      {
+        "type": "append_to_section",
+        "heading": "## Termine",
+        "content": "- 2026-07-15 Zahnarzt"
+      }
+    ],
+    "text": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n\n## Termine\n\n- 2026-07-15 Zahnarzt\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_section",
+        "heading": "Termine",
+        "applied": true,
+        "note": "Abschnitt „Termine“ neu angelegt am Dokumentende"
+      }
+    ]
+  },
+  {
+    "id": "append-case-insensitive",
+    "fixture": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n",
+    "ops": [
+      {
+        "type": "append_to_section",
+        "heading": "### INBOX",
+        "content": "- x"
+      }
+    ],
+    "text": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n- x\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_section",
+        "heading": "INBOX",
+        "applied": true
+      }
+    ]
+  },
+  {
+    "id": "append-empty-content-noop",
+    "fixture": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n",
+    "ops": [
+      {
+        "type": "append_to_section",
+        "heading": "## Inbox",
+        "content": ""
+      }
+    ],
+    "text": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_section",
+        "heading": "Inbox",
+        "applied": false,
+        "reason": "leerer content"
+      }
+    ]
+  },
+  {
+    "id": "replace-existing",
+    "fixture": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n",
+    "ops": [
+      {
+        "type": "replace_section",
+        "heading": "## Aufgaben",
+        "content": "### Haushalt\n\n- [ ] Müll"
+      }
+    ],
+    "text": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n\n## Aufgaben\n\n### Haushalt\n\n- [ ] Müll\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "replace_section",
+        "heading": "Aufgaben",
+        "applied": true
+      }
+    ]
+  },
+  {
+    "id": "replace-missing-flat",
+    "fixture": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n",
+    "ops": [
+      {
+        "type": "replace_section",
+        "heading": "## Neu",
+        "content": "- Inhalt"
+      }
+    ],
+    "text": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n\n## Neu\n\n- Inhalt\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "replace_section",
+        "heading": "Neu",
+        "applied": true,
+        "note": "Abschnitt „Neu“ neu angelegt am Dokumentende"
+      }
+    ]
+  },
+  {
+    "id": "delete-existing",
+    "fixture": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n",
+    "ops": [
+      {
+        "type": "delete_section",
+        "heading": "## Inbox"
+      }
+    ],
+    "text": "# Wissensbasis\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "delete_section",
+        "heading": "Inbox",
+        "applied": true
+      }
+    ]
+  },
+  {
+    "id": "delete-missing-noop",
+    "fixture": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n",
+    "ops": [
+      {
+        "type": "delete_section",
+        "heading": "## Gibtsnicht"
+      }
+    ],
+    "text": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "delete_section",
+        "heading": "Gibtsnicht",
+        "applied": false,
+        "reason": "Abschnitt „Gibtsnicht“ nicht gefunden"
+      }
+    ]
+  },
+  {
+    "id": "chapter-scoped-append",
+    "fixture": "# Wissensbasis\n\n# Kapitel A\n\n## Eins\n\n- alt\n\n# Kapitel B\n\n## Zwei\n\n- b\n",
+    "ops": [
+      {
+        "type": "append_to_section",
+        "heading": "## Eins",
+        "content": "- ergänzt"
+      }
+    ],
+    "text": "# Wissensbasis\n\n# Kapitel A\n\n## Eins\n\n- alt\n- ergänzt\n\n# Kapitel B\n\n## Zwei\n\n- b\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_section",
+        "heading": "Eins",
+        "applied": true
+      }
+    ]
+  },
+  {
+    "id": "chapter-scoped-replace-boundary",
+    "fixture": "# Wissensbasis\n\n# Kapitel A\n\n## Eins\n\n- alt\n\n# Kapitel B\n\n## Zwei\n\n- b\n",
+    "ops": [
+      {
+        "type": "replace_section",
+        "heading": "## Eins",
+        "content": "- neu"
+      }
+    ],
+    "text": "# Wissensbasis\n\n# Kapitel A\n\n## Eins\n\n- neu\n\n# Kapitel B\n\n## Zwei\n\n- b\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "replace_section",
+        "heading": "Eins",
+        "applied": true
+      }
+    ]
+  },
+  {
+    "id": "chapter-scoped-delete-boundary",
+    "fixture": "# Wissensbasis\n\n# Kapitel A\n\n## Eins\n\n- alt\n\n# Kapitel B\n\n## Zwei\n\n- b\n",
+    "ops": [
+      {
+        "type": "delete_section",
+        "heading": "## Eins"
+      }
+    ],
+    "text": "# Wissensbasis\n\n# Kapitel A\n\n# Kapitel B\n\n## Zwei\n\n- b\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "delete_section",
+        "heading": "Eins",
+        "applied": true
+      }
+    ]
+  },
+  {
+    "id": "dup-with-chapter-b",
+    "fixture": "# Wissensbasis\n\n# Kapitel A\n\n## Notizen\n\n- A-Notiz\n\n# Kapitel B\n\n## Notizen\n\n- B-Notiz\n",
+    "ops": [
+      {
+        "type": "append_to_section",
+        "heading": "## Notizen",
+        "content": "- neu",
+        "chapter": "Kapitel B"
+      }
+    ],
+    "text": "# Wissensbasis\n\n# Kapitel A\n\n## Notizen\n\n- A-Notiz\n\n# Kapitel B\n\n## Notizen\n\n- B-Notiz\n- neu\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_section",
+        "heading": "Notizen",
+        "applied": true
+      }
+    ]
+  },
+  {
+    "id": "dup-chapter-missing-create",
+    "fixture": "# Wissensbasis\n\n# Kapitel A\n\n## Notizen\n\n- A-Notiz\n\n# Kapitel B\n\n## Notizen\n\n- B-Notiz\n",
+    "ops": [
+      {
+        "type": "append_to_section",
+        "heading": "## Notizen",
+        "content": "- verloren",
+        "chapter": "Kapitel X"
+      }
+    ],
+    "text": "# Wissensbasis\n\n# Kapitel A\n\n## Notizen\n\n- A-Notiz\n\n# Kapitel B\n\n## Notizen\n\n- B-Notiz\n\n# Kapitel X\n\n## Notizen\n\n- verloren\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_section",
+        "heading": "Notizen",
+        "applied": true,
+        "note": "Kapitel „Kapitel X“ und Abschnitt „Notizen“ neu angelegt"
+      }
+    ]
+  },
+  {
+    "id": "dup-replace-delete-scoped",
+    "fixture": "# Wissensbasis\n\n# Kapitel A\n\n## Notizen\n\n- A-Notiz\n\n# Kapitel B\n\n## Notizen\n\n- B-Notiz\n",
+    "ops": [
+      {
+        "type": "replace_section",
+        "heading": "## Notizen",
+        "content": "- ersetzt",
+        "chapter": "Kapitel A"
+      }
+    ],
+    "text": "# Wissensbasis\n\n# Kapitel A\n\n## Notizen\n\n- ersetzt\n\n# Kapitel B\n\n## Notizen\n\n- B-Notiz\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "replace_section",
+        "heading": "Notizen",
+        "applied": true
+      }
+    ]
+  },
+  {
+    "id": "dup-new-section-with-chapter",
+    "fixture": "# Wissensbasis\n\n# Kapitel A\n\n## Notizen\n\n- A-Notiz\n\n# Kapitel B\n\n## Notizen\n\n- B-Notiz\n",
+    "ops": [
+      {
+        "type": "append_to_section",
+        "heading": "## Neu",
+        "content": "- x",
+        "chapter": "Kapitel A"
+      }
+    ],
+    "text": "# Wissensbasis\n\n# Kapitel A\n\n## Notizen\n\n- A-Notiz\n\n## Neu\n\n- x\n\n# Kapitel B\n\n## Notizen\n\n- B-Notiz\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_section",
+        "heading": "Neu",
+        "applied": true,
+        "note": "Abschnitt „Neu“ neu angelegt in Kapitel „Kapitel A“"
+      }
+    ]
+  },
+  {
+    "id": "chapter-auto-create-doc-end",
+    "fixture": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n",
+    "ops": [
+      {
+        "type": "append_to_section",
+        "heading": "## Notizen",
+        "content": "- neu",
+        "chapter": "AI Codex development"
+      }
+    ],
+    "text": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n\n# AI Codex development\n\n## Notizen\n\n- neu\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_section",
+        "heading": "Notizen",
+        "applied": true,
+        "note": "Kapitel „AI Codex development“ und Abschnitt „Notizen“ neu angelegt"
+      }
+    ]
+  },
+  {
+    "id": "two-new-sections-same-new-chapter",
+    "fixture": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n",
+    "ops": [
+      {
+        "type": "append_to_section",
+        "heading": "## Erste",
+        "content": "- a",
+        "chapter": "Neues Kapitel"
+      },
+      {
+        "type": "append_to_section",
+        "heading": "## Zweite",
+        "content": "- b",
+        "chapter": "Neues Kapitel"
+      }
+    ],
+    "text": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n\n# Neues Kapitel\n\n## Erste\n\n- a\n\n## Zweite\n\n- b\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_section",
+        "heading": "Erste",
+        "applied": true,
+        "note": "Kapitel „Neues Kapitel“ und Abschnitt „Erste“ neu angelegt"
+      },
+      {
+        "index": 1,
+        "type": "append_to_section",
+        "heading": "Zweite",
+        "applied": true,
+        "note": "Abschnitt „Zweite“ neu angelegt in Kapitel „Neues Kapitel“"
+      }
+    ]
+  },
+  {
+    "id": "collision-append-chapter-eq-heading",
+    "fixture": "# Notizbuch\n\n# KPIs\n\n- KPI A\n- [ ] Offener Punkt: KPI-Definition klären\n\n![Screenshot](img.png)\n\n# Sonstiges\n\n## Ideen\n\n- x\n",
+    "ops": [
+      {
+        "type": "append_to_section",
+        "heading": "## KPIs",
+        "chapter": "# KPIs",
+        "content": "- [ ] zwei KPIs in Gruppe Bewertung, Namen korrigieren\n![neu](s.png)"
+      }
+    ],
+    "text": "# Notizbuch\n\n# KPIs\n\n- KPI A\n- [ ] Offener Punkt: KPI-Definition klären\n\n![Screenshot](img.png)\n- [ ] zwei KPIs in Gruppe Bewertung, Namen korrigieren\n![neu](s.png)\n\n# Sonstiges\n\n## Ideen\n\n- x\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_section",
+        "heading": "KPIs",
+        "applied": true,
+        "note": "in Kapitel-Freitext „KPIs“ eingefügt – kein ##-Abschnitt „KPIs“ vorhanden, Kapitelnamen-Duplikat vermieden (für einen echten ##-Abschnitt dieses Namens in einem anderen Kapitel chapter:\"# …\" angeben)"
+      }
+    ]
+  },
+  {
+    "id": "collision-append-to-chapter-equiv",
+    "fixture": "# Notizbuch\n\n# KPIs\n\n- KPI A\n- [ ] Offener Punkt: KPI-Definition klären\n\n![Screenshot](img.png)\n\n# Sonstiges\n\n## Ideen\n\n- x\n",
+    "ops": [
+      {
+        "type": "append_to_chapter",
+        "chapter": "# KPIs",
+        "content": "- [ ] zwei KPIs in Gruppe Bewertung, Namen korrigieren\n![neu](s.png)"
+      }
+    ],
+    "text": "# Notizbuch\n\n# KPIs\n\n- KPI A\n- [ ] Offener Punkt: KPI-Definition klären\n\n![Screenshot](img.png)\n- [ ] zwei KPIs in Gruppe Bewertung, Namen korrigieren\n![neu](s.png)\n\n# Sonstiges\n\n## Ideen\n\n- x\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_chapter",
+        "heading": "KPIs",
+        "applied": true
+      }
+    ]
+  },
+  {
+    "id": "collision-replace-rejected",
+    "fixture": "# Notizbuch\n\n# KPIs\n\n- KPI A\n- [ ] Offener Punkt: KPI-Definition klären\n\n![Screenshot](img.png)\n\n# Sonstiges\n\n## Ideen\n\n- x\n",
+    "ops": [
+      {
+        "type": "replace_section",
+        "heading": "## KPIs",
+        "chapter": "# KPIs",
+        "content": "- KPI A\n- [ ] Offener Punkt: KPI-Definition klären (40220/40230)\n\n![Screenshot](img.png)"
+      }
+    ],
+    "text": "# Notizbuch\n\n# KPIs\n\n- KPI A\n- [ ] Offener Punkt: KPI-Definition klären\n\n![Screenshot](img.png)\n\n# Sonstiges\n\n## Ideen\n\n- x\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "replace_section",
+        "heading": "KPIs",
+        "applied": false,
+        "reason": "„KPIs“ ist ein #-Kapitel ohne gleichnamigen ##-Abschnitt – Kapitel-Freitext nicht ersetzt (kein ##-Duplikat angelegt); Eintrag ändern: replace_entry, Eintrag löschen: delete_entry, anhängen: append_to_chapter"
+      }
+    ]
+  },
+  {
+    "id": "collision-chapter-missing-both",
+    "fixture": "# NB\n",
+    "ops": [
+      {
+        "type": "append_to_section",
+        "heading": "## Neu",
+        "chapter": "# Neu",
+        "content": "- x"
+      }
+    ],
+    "text": "# NB\n\n# Neu\n\n- x\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_section",
+        "heading": "Neu",
+        "applied": true,
+        "note": "Kapitel „Neu“ neu angelegt, content als Kapitel-Freitext (kein ##-Duplikat)"
+      }
+    ]
+  },
+  {
+    "id": "collision-empty-content-noop",
+    "fixture": "# Notizbuch\n\n# KPIs\n\n- KPI A\n- [ ] Offener Punkt: KPI-Definition klären\n\n![Screenshot](img.png)\n\n# Sonstiges\n\n## Ideen\n\n- x\n",
+    "ops": [
+      {
+        "type": "replace_section",
+        "heading": "## KPIs",
+        "chapter": "# KPIs",
+        "content": ""
+      }
+    ],
+    "text": "# Notizbuch\n\n# KPIs\n\n- KPI A\n- [ ] Offener Punkt: KPI-Definition klären\n\n![Screenshot](img.png)\n\n# Sonstiges\n\n## Ideen\n\n- x\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "replace_section",
+        "heading": "KPIs",
+        "applied": false,
+        "reason": "leerer content"
+      }
+    ]
+  },
+  {
+    "id": "legit-different-chapter-name",
+    "fixture": "# NB\n\n# Projekte\n\n- bestehender Freitext\n\n# Ideen\n\n## Sammlung\n\n- y\n",
+    "ops": [
+      {
+        "type": "append_to_section",
+        "heading": "## Projekte",
+        "chapter": "# Ideen",
+        "content": "- z"
+      }
+    ],
+    "text": "# NB\n\n# Projekte\n\n- bestehender Freitext\n\n# Ideen\n\n## Sammlung\n\n- y\n\n## Projekte\n\n- z\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_section",
+        "heading": "Projekte",
+        "applied": true,
+        "note": "Abschnitt „Projekte“ neu angelegt in Kapitel „Ideen“"
+      }
+    ]
+  },
+  {
+    "id": "no-chapter-hits-namesake-chapter",
+    "fixture": "# NB\n\n# Projekte\n\n- bestehender Freitext\n\n# Ideen\n\n## Sammlung\n\n- y\n",
+    "ops": [
+      {
+        "type": "append_to_section",
+        "heading": "## Projekte",
+        "content": "- z"
+      }
+    ],
+    "text": "# NB\n\n# Projekte\n\n- bestehender Freitext\n- z\n\n# Ideen\n\n## Sammlung\n\n- y\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_section",
+        "heading": "Projekte",
+        "applied": true,
+        "note": "in Kapitel-Freitext „Projekte“ eingefügt – kein ##-Abschnitt „Projekte“ vorhanden, Kapitelnamen-Duplikat vermieden (für einen echten ##-Abschnitt dieses Namens in einem anderen Kapitel chapter:\"# …\" angeben)"
+      }
+    ]
+  },
+  {
+    "id": "title-heading-eq-title-flat",
+    "fixture": "# KPIs\n\n## Ideen\n\n- y\n",
+    "ops": [
+      {
+        "type": "append_to_section",
+        "heading": "## KPIs",
+        "content": "- neu"
+      }
+    ],
+    "text": "# KPIs\n\n## Ideen\n\n- y\n\n## KPIs\n\n- neu\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_section",
+        "heading": "KPIs",
+        "applied": true,
+        "note": "Abschnitt „KPIs“ neu angelegt am Dokumentende"
+      }
+    ]
+  },
+  {
+    "id": "title-heading-eq-title-flat-with-chapter",
+    "fixture": "# KPIs\n\n## Ideen\n\n- y\n",
+    "ops": [
+      {
+        "type": "append_to_section",
+        "heading": "## KPIs",
+        "chapter": "# KPIs",
+        "content": "- neu"
+      }
+    ],
+    "text": "# KPIs\n\n## Ideen\n\n- y\n\n## KPIs\n\n- neu\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_section",
+        "heading": "KPIs",
+        "applied": true,
+        "note": "Abschnitt „KPIs“ neu angelegt in Kapitel „KPIs“"
+      }
+    ]
+  },
+  {
+    "id": "title-and-real-chapter-same-name",
+    "fixture": "# Projekte\n\n## Existierend\n\n- x\n\n# Projekte\n\n## Eins\n\n- alt\n",
+    "ops": [
+      {
+        "type": "append_to_section",
+        "heading": "## Projekte",
+        "content": "- neu"
+      }
+    ],
+    "text": "# Projekte\n\n## Existierend\n\n- x\n\n# Projekte\n- neu\n\n## Eins\n\n- alt\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_section",
+        "heading": "Projekte",
+        "applied": true,
+        "note": "in Kapitel-Freitext „Projekte“ eingefügt – kein ##-Abschnitt „Projekte“ vorhanden, Kapitelnamen-Duplikat vermieden (für einen echten ##-Abschnitt dieses Namens in einem anderen Kapitel chapter:\"# …\" angeben)"
+      }
+    ]
+  },
+  {
+    "id": "delete-chapter-duplicate-reject",
+    "fixture": "# NB\n\n# KPIs\n\nFreitext.\n",
+    "ops": [
+      {
+        "type": "delete_section",
+        "heading": "## KPIs"
+      }
+    ],
+    "text": "# NB\n\n# KPIs\n\nFreitext.\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "delete_section",
+        "heading": "KPIs",
+        "applied": false,
+        "reason": "„KPIs“ ist ein #-Kapitel ohne gleichnamigen ##-Abschnitt – zum Löschen des Kapitels delete_chapter nutzen"
+      }
+    ]
+  },
+  {
+    "id": "delete-generic-missing",
+    "fixture": "# NB\n\n# KPIs\n\nFreitext.\n",
+    "ops": [
+      {
+        "type": "delete_section",
+        "heading": "## Gibtsnicht"
+      }
+    ],
+    "text": "# NB\n\n# KPIs\n\nFreitext.\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "delete_section",
+        "heading": "Gibtsnicht",
+        "applied": false,
+        "reason": "Abschnitt „Gibtsnicht“ nicht gefunden"
+      }
+    ]
+  },
+  {
+    "id": "move-entry-target-collision-with-chapter",
+    "fixture": "# NB\n\n## Inbox\n\n- Marge prüfen\n\n# KPIs\n\nUmsatz +5 % im Q2.\n",
+    "ops": [
+      {
+        "type": "move_entry",
+        "entry": "Marge",
+        "from_heading": "## Inbox",
+        "to_heading": "## KPIs",
+        "to_chapter": "# KPIs"
+      }
+    ],
+    "text": "# NB\n\n## Inbox\n\n# KPIs\n\nUmsatz +5 % im Q2.\n- Marge prüfen\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "move_entry",
+        "heading": "Marge",
+        "applied": true,
+        "note": "Eintrag in Kapitel-Freitext „KPIs“ eingefügt (kein ##-Abschnitt „KPIs“)"
+      }
+    ]
+  },
+  {
+    "id": "move-entry-target-collision-without-chapter",
+    "fixture": "# NB\n\n## Inbox\n\n- Marge prüfen\n\n# KPIs\n\nUmsatz +5 % im Q2.\n",
+    "ops": [
+      {
+        "type": "move_entry",
+        "entry": "Marge",
+        "from_heading": "## Inbox",
+        "to_heading": "## KPIs"
+      }
+    ],
+    "text": "# NB\n\n## Inbox\n\n# KPIs\n\nUmsatz +5 % im Q2.\n- Marge prüfen\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "move_entry",
+        "heading": "Marge",
+        "applied": true,
+        "note": "Eintrag in Kapitel-Freitext „KPIs“ eingefügt (kein ##-Abschnitt „KPIs“)"
+      }
+    ]
+  },
+  {
+    "id": "move-entry-source-redirect",
+    "fixture": "# NB\n\n# KPIs\n\n- [ ] Offener Punkt\n\n## Erledigt\n\n- y\n",
+    "ops": [
+      {
+        "type": "move_entry",
+        "entry": "Offener Punkt",
+        "from_heading": "## KPIs",
+        "to_heading": "## Erledigt"
+      }
+    ],
+    "text": "# NB\n\n# KPIs\n\n## Erledigt\n\n- y\n- [ ] Offener Punkt\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "move_entry",
+        "heading": "Offener Punkt",
+        "applied": true,
+        "note": "Quelle „KPIs“ ist ein #-Kapitel ohne ##-Abschnitt – Eintrag im gesamten Kapitel gesucht"
+      }
+    ]
+  },
+  {
+    "id": "move-entry-title-drift-guard-a",
+    "fixture": "- lose Zeile\n\n# Kap\n\n- k\n",
+    "ops": [
+      {
+        "type": "move_entry",
+        "entry": "lose Zeile",
+        "to_heading": "## Kap"
+      }
+    ],
+    "text": "# Kap\n\n- k\n- lose Zeile\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "move_entry",
+        "heading": "lose Zeile",
+        "applied": true,
+        "note": "Eintrag in Kapitel-Freitext „Kap“ eingefügt (kein ##-Abschnitt „Kap“)"
+      }
+    ]
+  },
+  {
+    "id": "move-entry-title-drift-guard-b",
+    "fixture": "- lose Zeile\n\n# Kap\n\n- k\n",
+    "ops": [
+      {
+        "type": "move_entry",
+        "entry": "lose Zeile",
+        "to_heading": "## Kap",
+        "to_chapter": "# Kap"
+      }
+    ],
+    "text": "# Kap\n\n- k\n- lose Zeile\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "move_entry",
+        "heading": "lose Zeile",
+        "applied": true,
+        "note": "Eintrag in Kapitel-Freitext „Kap“ eingefügt (kein ##-Abschnitt „Kap“)"
+      }
+    ]
+  },
+  {
+    "id": "move-entry-title-drift-guard-c",
+    "fixture": "- lose Zeile\n\n# Kap\n\n- k\n",
+    "ops": [
+      {
+        "type": "move_entry",
+        "entry": "lose Zeile",
+        "to_chapter": "# Kap"
+      }
+    ],
+    "text": "# Kap\n\n- k\n- lose Zeile\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "move_entry",
+        "heading": "lose Zeile",
+        "applied": true
+      }
+    ]
+  },
+  {
+    "id": "move-entry-target-before-source",
+    "fixture": "# NB\n\n# Kap\n\n- k\n\n## S\n\n- x\n\n# Later\n\n- src\n",
+    "ops": [
+      {
+        "type": "move_entry",
+        "entry": "src",
+        "to_chapter": "# Kap"
+      }
+    ],
+    "text": "# NB\n\n# Kap\n\n- k\n- src\n\n## S\n\n- x\n\n# Later\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "move_entry",
+        "heading": "src",
+        "applied": true
+      }
+    ]
+  },
+  {
+    "id": "move-entry-source-in-target-preamble",
+    "fixture": "# NB\n\n# Kap\n\n- src\n- k\n\n## S\n\n- x\n",
+    "ops": [
+      {
+        "type": "move_entry",
+        "entry": "src",
+        "to_heading": "## Kap"
+      }
+    ],
+    "text": "# NB\n\n# Kap\n\n- k\n- src\n\n## S\n\n- x\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "move_entry",
+        "heading": "src",
+        "applied": true,
+        "note": "Eintrag in Kapitel-Freitext „Kap“ eingefügt (kein ##-Abschnitt „Kap“)"
+      }
+    ]
+  },
+  {
+    "id": "move-entry-block-ends-exactly-at-range",
+    "fixture": "# NB\n\n# Kap\n\n- k\n- src\n# Z\n",
+    "ops": [
+      {
+        "type": "move_entry",
+        "entry": "src",
+        "to_heading": "## Kap",
+        "to_chapter": "# Kap"
+      }
+    ],
+    "text": "# NB\n\n# Kap\n\n- k\n- src\n\n# Z\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "move_entry",
+        "heading": "src",
+        "applied": true,
+        "note": "Eintrag in Kapitel-Freitext „Kap“ eingefügt (kein ##-Abschnitt „Kap“)"
+      }
+    ]
+  },
+  {
+    "id": "append-to-chapter-found",
+    "fixture": "# Wissensbasis\n\n# Kapitel A\n\n## Eins\n\n- alt\n\n# Kapitel B\n\n## Zwei\n\n- b\n",
+    "ops": [
+      {
+        "type": "append_to_chapter",
+        "chapter": "# Kapitel A",
+        "content": "- neu"
+      }
+    ],
+    "text": "# Wissensbasis\n\n# Kapitel A\n- neu\n\n## Eins\n\n- alt\n\n# Kapitel B\n\n## Zwei\n\n- b\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_chapter",
+        "heading": "Kapitel A",
+        "applied": true
+      }
+    ]
+  },
+  {
+    "id": "append-to-chapter-missing-create",
+    "fixture": "# NB\n\n## Bestehend\n\n- vorhanden\n",
+    "ops": [
+      {
+        "type": "append_to_chapter",
+        "chapter": "# X",
+        "content": "- a"
+      }
+    ],
+    "text": "# NB\n\n## Bestehend\n\n- vorhanden\n\n# X\n\n- a\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_chapter",
+        "heading": "X",
+        "applied": true,
+        "note": "Kapitel „X“ neu angelegt"
+      }
+    ]
+  },
+  {
+    "id": "append-to-chapter-heading-fallback",
+    "fixture": "# Wissensbasis\n\n# Kapitel A\n\n## Eins\n\n- alt\n\n# Kapitel B\n\n## Zwei\n\n- b\n",
+    "ops": [
+      {
+        "type": "append_to_chapter",
+        "heading": "Kapitel A",
+        "content": "- neu"
+      }
+    ],
+    "text": "# Wissensbasis\n\n# Kapitel A\n- neu\n\n## Eins\n\n- alt\n\n# Kapitel B\n\n## Zwei\n\n- b\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_chapter",
+        "heading": "Kapitel A",
+        "applied": true
+      }
+    ]
+  },
+  {
+    "id": "delete-chapter-basic",
+    "fixture": "# NB\n\n# Weg\n\n## X\n\n- y\n\n# Bleibt\n\n- z\n",
+    "ops": [
+      {
+        "type": "delete_chapter",
+        "chapter": "# Weg"
+      }
+    ],
+    "text": "# NB\n\n# Bleibt\n\n- z\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "delete_chapter",
+        "heading": "Weg",
+        "applied": true
+      }
+    ]
+  },
+  {
+    "id": "delete-chapter-title-blocked",
+    "fixture": "# Projekte\n\n## X\n\n- y\n",
+    "ops": [
+      {
+        "type": "delete_chapter",
+        "chapter": "# Projekte"
+      }
+    ],
+    "text": "# Projekte\n\n## X\n\n- y\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "delete_chapter",
+        "heading": "Projekte",
+        "applied": false,
+        "reason": "„Projekte“ ist die Notizbuch-Titelzeile, kein Kapitel"
+      }
+    ]
+  },
+  {
+    "id": "delete-entry-exact",
+    "fixture": "# NB\n\n## Inbox\n\n- [ ] Erster Eintrag\n- [ ] Zweiter Eintrag mit Text\n\n## Aufgaben\n\n- [ ] Andere Aufgabe\n",
+    "ops": [
+      {
+        "type": "delete_entry",
+        "entry": "- [ ] Erster Eintrag"
+      }
+    ],
+    "text": "# NB\n\n## Inbox\n\n- [ ] Zweiter Eintrag mit Text\n\n## Aufgaben\n\n- [ ] Andere Aufgabe\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "delete_entry",
+        "heading": "- [ ] Erster Eintrag",
+        "applied": true
+      }
+    ]
+  },
+  {
+    "id": "replace-entry-exact",
+    "fixture": "# NB\n\n## Inbox\n\n- [ ] Erster Eintrag\n- [ ] Zweiter Eintrag mit Text\n\n## Aufgaben\n\n- [ ] Andere Aufgabe\n",
+    "ops": [
+      {
+        "type": "replace_entry",
+        "entry": "- [ ] Erster Eintrag",
+        "content": "- [x] Erster Eintrag erledigt"
+      }
+    ],
+    "text": "# NB\n\n## Inbox\n\n- [x] Erster Eintrag erledigt\n- [ ] Zweiter Eintrag mit Text\n\n## Aufgaben\n\n- [ ] Andere Aufgabe\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "replace_entry",
+        "heading": "- [ ] Erster Eintrag",
+        "applied": true
+      }
+    ]
+  },
+  {
+    "id": "rewrite-nonempty",
+    "fixture": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n",
+    "ops": [
+      {
+        "type": "rewrite",
+        "content": "# Neu\n\n## A\n\n- x"
+      }
+    ],
+    "text": "# Neu\n\n## A\n\n- x\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "rewrite",
+        "applied": true
+      }
+    ]
+  },
+  {
+    "id": "rewrite-empty-noop",
+    "fixture": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n",
+    "ops": [
+      {
+        "type": "rewrite",
+        "content": "   "
+      }
+    ],
+    "text": "# Wissensbasis\n\n## Inbox\n\n- alter Eintrag\n\n## Aufgaben\n\n- [ ] offen\n- [x] erledigt\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "rewrite",
+        "applied": false,
+        "reason": "leerer content"
+      }
+    ]
+  },
+  {
+    "id": "flat-fixture-append-missing",
+    "fixture": "# Notizbuch\n\n## Inbox\n\n## Aufgaben\n",
+    "ops": [
+      {
+        "type": "append_to_section",
+        "heading": "## Termine",
+        "content": "- x"
+      }
+    ],
+    "text": "# Notizbuch\n\n## Inbox\n\n## Aufgaben\n\n## Termine\n\n- x\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_section",
+        "heading": "Termine",
+        "applied": true,
+        "note": "Abschnitt „Termine“ neu angelegt am Dokumentende"
+      }
+    ]
+  },
+  {
+    "id": "flat-fixture-dup-first-hit",
+    "fixture": "# NB\n\n## Inbox\n\n- a\n\n## Inbox\n\n- b\n",
+    "ops": [
+      {
+        "type": "append_to_section",
+        "heading": "## Inbox",
+        "content": "- c"
+      }
+    ],
+    "text": "# NB\n\n## Inbox\n\n- a\n- c\n\n## Inbox\n\n- b\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_section",
+        "heading": "Inbox",
+        "applied": true
+      }
+    ]
+  },
+  {
+    "id": "title-fixture-collision-real-chapter",
+    "fixture": "# Projekte\n\n## Existierend\n\n- x\n\n# Projekte\n\n## Eins\n\n- alt\n",
+    "ops": [
+      {
+        "type": "append_to_section",
+        "heading": "## Projekte",
+        "content": "- neu"
+      }
+    ],
+    "text": "# Projekte\n\n## Existierend\n\n- x\n\n# Projekte\n- neu\n\n## Eins\n\n- alt\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_section",
+        "heading": "Projekte",
+        "applied": true,
+        "note": "in Kapitel-Freitext „Projekte“ eingefügt – kein ##-Abschnitt „Projekte“ vorhanden, Kapitelnamen-Duplikat vermieden (für einen echten ##-Abschnitt dieses Namens in einem anderen Kapitel chapter:\"# …\" angeben)"
+      }
+    ]
+  },
+  {
+    "id": "title-fixture-append-to-chapter-real",
+    "fixture": "# Projekte\n\n## Existierend\n\n- x\n\n# Projekte\n\n## Eins\n\n- alt\n",
+    "ops": [
+      {
+        "type": "append_to_chapter",
+        "chapter": "# Projekte",
+        "content": "- neu"
+      }
+    ],
+    "text": "# Projekte\n\n## Existierend\n\n- x\n\n# Projekte\n- neu\n\n## Eins\n\n- alt\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_chapter",
+        "heading": "Projekte",
+        "applied": true
+      }
+    ]
+  },
+  {
+    "id": "ch-fixture-append-existing-alpha",
+    "fixture": "# Notizbuch\n\n## Inbox\n\n- Inbox-Eintrag Vorspann\n\n# Projekte\n\n## Alpha\n\n- Punkt A\n\n### Unterthema\n\n- Detail U1\n\n## Inbox\n\n- Inbox-Eintrag Projekte\n\n# KPIs\n\n- [ ] Offener Punkt: Kennzahl prüfen\n- Umsatz 2026\n\n![Screenshot](img.png)\n\n# Ideen\n\n## Sammlung\n\n- Idee 1\n\n## Inbox\n\n- Inbox-Eintrag Ideen\n",
+    "ops": [
+      {
+        "type": "append_to_section",
+        "heading": "## Alpha",
+        "chapter": "# Projekte",
+        "content": "- x"
+      }
+    ],
+    "text": "# Notizbuch\n\n## Inbox\n\n- Inbox-Eintrag Vorspann\n\n# Projekte\n\n## Alpha\n\n- Punkt A\n\n### Unterthema\n\n- Detail U1\n- x\n\n## Inbox\n\n- Inbox-Eintrag Projekte\n\n# KPIs\n\n- [ ] Offener Punkt: Kennzahl prüfen\n- Umsatz 2026\n\n![Screenshot](img.png)\n\n# Ideen\n\n## Sammlung\n\n- Idee 1\n\n## Inbox\n\n- Inbox-Eintrag Ideen\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "append_to_section",
+        "heading": "Alpha",
+        "applied": true
+      }
+    ]
+  },
+  {
+    "id": "ch-fixture-delete-entry-with-chapter",
+    "fixture": "# Notizbuch\n\n## Inbox\n\n- Inbox-Eintrag Vorspann\n\n# Projekte\n\n## Alpha\n\n- Punkt A\n\n### Unterthema\n\n- Detail U1\n\n## Inbox\n\n- Inbox-Eintrag Projekte\n\n# KPIs\n\n- [ ] Offener Punkt: Kennzahl prüfen\n- Umsatz 2026\n\n![Screenshot](img.png)\n\n# Ideen\n\n## Sammlung\n\n- Idee 1\n\n## Inbox\n\n- Inbox-Eintrag Ideen\n",
+    "ops": [
+      {
+        "type": "delete_entry",
+        "entry": "Punkt A",
+        "heading": "## Alpha",
+        "chapter": "# Projekte"
+      }
+    ],
+    "text": "# Notizbuch\n\n## Inbox\n\n- Inbox-Eintrag Vorspann\n\n# Projekte\n\n## Alpha\n\n### Unterthema\n\n- Detail U1\n\n## Inbox\n\n- Inbox-Eintrag Projekte\n\n# KPIs\n\n- [ ] Offener Punkt: Kennzahl prüfen\n- Umsatz 2026\n\n![Screenshot](img.png)\n\n# Ideen\n\n## Sammlung\n\n- Idee 1\n\n## Inbox\n\n- Inbox-Eintrag Ideen\n",
+    "results": [
+      {
+        "index": 0,
+        "type": "delete_entry",
+        "heading": "Punkt A",
+        "applied": true
+      }
+    ]
+  }
+]

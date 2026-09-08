@@ -535,7 +535,11 @@ describe("buildSystem", () => {
       expect(sys).toContain('"chapter"');
       expect(sys).toContain("# Projekte");
       expect(sys).toMatch(/mehrdeutigen Abschnittsnamen/);
-      expect(sys).toContain("wird es bei append_to_section/replace_section automatisch am Dokumentende angelegt");
+      // v7.53 (DECISIONS #111): "automatisch am Dokumentende angelegt" (ohne
+      // weitere Bedingung) hätte dem Modell weiterhin implizite Anlage OHNE
+      // chapter suggeriert – die Anlage passiert jetzt NUR noch zusammen mit
+      // dem Abschnitt (chapter angegeben bzw. Notizbuch ohne Kapitel).
+      expect(sys).toContain("wird es bei append_to_section/replace_section zusammen mit dem Abschnitt am Dokumentende angelegt (ℹ️-Hinweis)");
       expect(sys).toContain("ohne rewrite");
       expect(sys).toContain("Bei delete_section bleibt ein fehlendes Kapitel dagegen ein sicherer Skip OHNE Anlegen");
     });
@@ -551,13 +555,41 @@ describe("buildSystem", () => {
       expect(sys).toContain("für ein EINZELNES neues Kapitel genügt stattdessen append_to_section/replace_section mit \"chapter\"");
     });
 
-    it("NOTEBOOK_TOOL-Schema enthält die chapter-Property mit aktualisierter Auto-Anlage-Beschreibung (v7.23)", () => {
+    it("NOTEBOOK_TOOL-Schema enthält die chapter-Property mit aktualisierter Auto-Anlage-Beschreibung (v7.23, Wortlaut seit v7.53 DECISIONS #111)", () => {
       const props = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties;
       expect(props.chapter).toBeDefined();
       expect(props.chapter.type).toBe("string");
       expect(props.chapter.description).toMatch(/Kapitel/);
-      expect(props.chapter.description).toMatch(/automatisch am Dokumentende NEU ANGELEGT/);
+      expect(props.chapter.description).toMatch(/zusammen mit dem Abschnitt am Dokumentende NEU ANGELEGT \(ℹ️\)/);
       expect(props.chapter.description).toMatch(/delete_section.*sicherer Skip/);
+    });
+
+    // v7.53 (DECISIONS #111): CHAPTER-PFLICHT ist die zentrale neue Regel,
+    // ohne die das Modell die restlichen Invarianten (ambiguous/needsChapter)
+    // nicht einordnen kann – Position: nach "Kein Kapitelnamen-Duplikat",
+    // vor "Kapitel-Sprachgebrauch".
+    it("CHAPTER-PFLICHT-Regel steht zwischen Kapitelnamen-Duplikat-Regel und Kapitel-Sprachgebrauch (v7.53, DECISIONS #111)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("CHAPTER-PFLICHT: In Notizbüchern mit #-Kapiteln gibst du");
+      expect(sys).toContain("Ohne chapter lehnt die Engine mehrdeutige Abschnittsnamen und JEDEN neuen Abschnitt ab (⚠️ nennt die Kapitel-Kandidaten)");
+      expect(sys).toContain("Nur in Notizbüchern OHNE Kapitel darf chapter fehlen");
+      const dupAt = sys.indexOf("Kein Kapitelnamen-Duplikat");
+      const chapterPflichtAt = sys.indexOf("CHAPTER-PFLICHT:");
+      const sprachAt = sys.indexOf("Kapitel-Sprachgebrauch (ebenen-unabhängig)");
+      expect(chapterPflichtAt).toBeGreaterThan(dupAt);
+      expect(sprachAt).toBeGreaterThan(chapterPflichtAt);
+    });
+
+    it("Ohne-chapter-Feld gilt ein mehrdeutiger Abschnittsname als abgelehnt statt geraten (v7.53, DECISIONS #111)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("gilt ein Abschnittsname, der in mehreren Kapiteln (oder im Vorspann vor dem ersten Kapitel UND in einem Kapitel) vorkommt, als mehrdeutig – ⚠️ mit Kandidaten statt Raten");
+      expect(sys).toContain('den Vorspann-Abschnitt (z. B. die Standard-Inbox) grenzt du mit chapter:"# <Notizbuchname>" ein (ℹ️), dort wird aber NIE etwas Neues angelegt');
+    });
+
+    it("chapter/heading-Ebenenregeln: 'chapter' ist nie ein ##-Abschnitt, ### ist nie ein heading-Ziel (v7.53, DECISIONS #111)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain('"chapter" nennt IMMER eine "# …"-Kapitelzeile, nie einen ##-Abschnitt (⚠️)');
+      expect(sys).toContain("Ein ###-Unterthema ist NIE ein heading-Ziel (⚠️)");
     });
   });
 
@@ -580,11 +612,16 @@ describe("buildSystem", () => {
       );
     });
 
-    it("Ops-Listen-Intro nennt delete_chapter als Ausnahme zur optionalen chapter-Eingrenzung", () => {
+    // Nacharbeit v7.53 (Review-Finding 🔵 13): "chapter" ist seit der
+    // CHAPTER-PFLICHT-Regel (siehe Test weiter unten) KEIN optionales Feld
+    // mehr, sobald das Notizbuch #-Kapitel hat – die Intro-Zeile darf dem
+    // nicht widersprechen.
+    it("Ops-Listen-Intro nennt delete_chapter als Ausnahme zur chapter-Eingrenzung UND verweist auf die CHAPTER-PFLICHT (kein 'optional' mehr)", () => {
       const sys = buildSystem(nbs, "Wissensbasis", null);
       expect(sys).toContain(
-        'optionales Feld "chapter" grenzt append_to_section/replace_section/delete_section auf EIN #-Kapitel ein – bei delete_chapter ist "chapter" dagegen das PFLICHT-Adressfeld des zu löschenden Kapitels selbst'
+        'Feld "chapter" (Pflicht in Notizbüchern mit #-Kapiteln, siehe CHAPTER-PFLICHT) grenzt append_to_section/replace_section/delete_section auf EIN #-Kapitel ein – bei delete_chapter ist "chapter" dagegen das PFLICHT-Adressfeld des zu löschenden Kapitels selbst'
       );
+      expect(sys).not.toContain('optionales Feld "chapter"');
     });
 
     it("NOTEBOOK_TOOL-Schema: type-enum enthält delete_chapter mit erklärender Beschreibung", () => {
@@ -631,7 +668,18 @@ describe("buildSystem", () => {
       expect(sys).toContain('{"type":"append_to_chapter","chapter":"# Kapitel","content":"- Stichpunkt"}');
       expect(sys).toContain("hängt content als KAPITEL-FREITEXT direkt unter die");
       expect(sys).toContain("VOR dem ersten ##-Abschnitt");
-      expect(sys).toContain("wird es wie bei append_to_section/replace_section automatisch am Dokumentende angelegt");
+      // v7.53 (DECISIONS #111): Wortlaut umgestellt (kein Verweis mehr auf
+      // append_to_section/replace_section-Anlage, stattdessen eigenständig
+      // + explizite Titelzeilen-Ablehnung).
+      expect(sys).toContain("Existiert das Kapitel noch nicht, wird es am Dokumentende angelegt (ℹ️-Hinweis)");
+      expect(sys).toContain("append_to_chapter auf den Notizbuchnamen wird abgelehnt (⚠️)");
+    });
+
+    // v7.53 (DECISIONS #111): ein zusätzlich gesetztes heading mit ANDEREM
+    // Namen als chapter ist eine widersprüchliche Adressierung (R-CONFL).
+    it("append_to_chapter: ein heading mit ANDEREM Namen als chapter wird als widersprüchliche Adressierung abgelehnt (v7.53)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("ein zusätzlich gesetztes heading mit ANDEREM Namen ist eine widersprüchliche Adressierung und wird abgelehnt (⚠️; dann append_to_section mit heading + chapter)");
     });
 
     it("Ops-Listen-Intro nennt append_to_chapter (mit delete_chapter) als Ausnahme, die #-Kapitel statt ##-Abschnitte adressiert", () => {
@@ -849,8 +897,13 @@ describe("buildSystem", () => {
       const sys = buildSystem(nbs, "Wissensbasis", null);
       const block = sys.slice(sys.indexOf("OPS-ZUVERLÄSSIGKEIT"), sys.indexOf("REINE FRAGEN"));
       expect(block).toContain("Überführen-Muster");
-      expect(block).toContain("Verschiebe-Regel");
-      expect(block.indexOf("Überführen-Muster")).toBeLessThan(block.indexOf("Verschiebe-Regel"));
+      // v7.53 (DECISIONS #111): die neue CHAPTER-PFLICHT-Regel (weiter oben
+      // im Prompt, VOR dem OPS-ZUVERLÄSSIGKEIT-Block) erwähnt "Verschiebe-
+      // Regel" bereits als Klammer-Verweis – die eigentliche Bullet-Zeile
+      // beginnt darum bewusst mit dem Bindestrich-Präfix "- Verschiebe-
+      // Regel:", um sie von diesem Verweis zu unterscheiden.
+      expect(block).toContain("- Verschiebe-Regel:");
+      expect(block.indexOf("Überführen-Muster")).toBeLessThan(block.indexOf("- Verschiebe-Regel:"));
     });
   });
 
@@ -1258,10 +1311,14 @@ describe("buildSystem", () => {
         "AUSSER der Name ist bereits ein #-Kapitel ohne gleichnamigen ##-Abschnitt: dann landet content als " +
         "Kapitel-Freitext in diesem Kapitel (ℹ️-Hinweis), ein Kapitelnamen-Duplikat entsteht nie"
       );
+      // v7.53 (DECISIONS #111): "wird zwar angelegt" (ohne Bedingung) hätte
+      // weiterhin implizite Anlage OHNE chapter suggeriert – die Anlage
+      // passiert seit v7.53 NUR NOCH mit chapter bzw. in einem Notizbuch
+      // ohne Kapitel.
       expect(sys).toContain(
-        "gedacht für EXISTIERENDE ##-Abschnitte (ein fehlender Abschnitt wird zwar angelegt, siehe chapter-Zeile – " +
-        "aber NIE als Kapitelnamen-Duplikat); ist der Name ein #-Kapitel mit Freitext, wird die Op ABGELEHNT " +
-        "(⚠️, Freitext wird nie blind ersetzt) – eine Zeile ändern: replace_entry"
+        "gedacht für EXISTIERENDE ##-Abschnitte (ein fehlender Abschnitt wird nur mit \"chapter\" bzw. in einem " +
+        "Notizbuch ohne Kapitel angelegt, siehe chapter-Zeile – NIE als Kapitelnamen-Duplikat); ist der Name ein " +
+        "#-Kapitel mit Freitext, wird die Op ABGELEHNT (⚠️, Freitext wird nie blind ersetzt) – eine Zeile ändern: replace_entry"
       );
       expect(sys).toContain(
         "Ein append_to_section, dessen heading nur als #-Kapitel existiert, wird automatisch hierher umgeleitet (ℹ️-Hinweis)"
@@ -1333,9 +1390,83 @@ describe("buildSystem", () => {
       expect(sys).toContain("Kapitel-Freitext per append_to_chapter, bestehende Zeile per replace_entry");
     });
 
-    it("move_entry-Zielzeile nennt die Kollisions-Ausnahme bei einem #-Kapitel-heading", () => {
+    it("move_entry-Zielzeile nennt die Kollisions-Ausnahme bei einem #-Kapitel-heading, jetzt mit CHAPTER-PFLICHT-Zusatz (v7.53)", () => {
       const sys = buildSystem(nbs, "Wissensbasis", null);
-      expect(sys).toContain('wird bei Bedarf angelegt (außer to_heading ist ein #-Kapitel: dann Kapitel-Freitext)');
+      expect(sys).toContain('wird bei Bedarf angelegt – in einem Notizbuch mit Kapiteln NUR zusammen mit "to_chapter" (außer to_heading ist ein #-Kapitel: dann Kapitel-Freitext)');
+      expect(sys).toContain("Ein from_heading, das in mehreren Kapiteln vorkommt, ist ohne from_chapter mehrdeutig (⚠️); to_chapter ist nie die Notizbuch-Titelzeile (⚠️)");
+    });
+
+    // v7.53 (DECISIONS #111): T4/T6/T7 – delete_chapter-##-Fallback und
+    // Mehrdeutigkeits-Hinweise bei delete_entry/replace_entry.
+    it("delete_chapter lehnt ein heading mit ## ab (R-DELCH, v7.53)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain('"chapter" nennt IMMER die "# …"-Kapitelzeile – ein heading mit "##" wird abgelehnt (⚠️: für einen Abschnitt delete_section mit heading + chapter)');
+    });
+
+    it("delete_entry/replace_entry nennen die Mehrdeutigkeits-Regel für ein heading ohne chapter (v7.53)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      const hint = 'Ein heading, das in mehreren Kapiteln (oder Vorspann UND Kapitel) vorkommt, ist ohne "chapter" mehrdeutig (⚠️) – dann chapter angeben oder heading weglassen.';
+      expect(sys.split(hint).length - 1).toBe(1);
+      expect(sys).toContain('ein heading, das in mehreren Kapiteln (oder Vorspann UND Kapitel) vorkommt, ist ohne "chapter" mehrdeutig (⚠️) – dann chapter angeben oder heading weglassen');
+    });
+
+    // v7.53 (DECISIONS #111): T11/T12 – ⚠️-Regel nennt jetzt explizit
+    // Kandidaten-Übernahme, ℹ️-Regel nennt eine Nachfrage-Aufforderung statt
+    // eigenmächtigem Löschen/Umbenennen.
+    it("⚠️-Regel verlangt die Übernahme von Kandidaten/Feldnamen im Korrektur-Turn statt eines Ausweichens auf rewrite (v7.53)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain('Nennt die ⚠️ Kandidaten („Kapitel: …“, „meintest du …“) oder ein konkretes Feld (chapter/to_chapter/from_chapter/heading), übernimm GENAU diese Angabe im Korrektur-Turn; weiche NIE auf rewrite aus.');
+    });
+
+    it("ℹ️-Regel verlangt eine Nachfrage statt eigenmächtigem Löschen bei einem ähnlich benannten Fund (v7.53)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain('frage den Nutzer im reply, ob dieser gemeint war – lösche nichts eigenmächtig');
+      expect(sys).toContain('Eine ℹ️ „Titelzeile – als Eingrenzung gewertet“ bedeutet: der Vorspann-Abschnitt wurde getroffen, nichts Neues entstand.');
+    });
+
+    // v7.53 Teil 3 (DECISIONS #111, Entscheidung 5 – UMGESETZT): T13
+    // "Variante A" – Verschiebe-Regel verweist auf CHAPTER-PFLICHT und
+    // beschreibt jetzt den Cross-Notizbuch-Turn-Guard (src/lib/turnGuard.js):
+    // scheitert die Ziel-Op, hält die App die zugehörige Quell-Löschung
+    // automatisch zurück (statt des vorherigen "Variante B ohne Guard"-
+    // Wortlauts, der den Datenverlust nur nachträglich per Folge-Turn
+    // reparieren ließ).
+    it("Verschiebe-Regel verweist auf CHAPTER-PFLICHT UND beschreibt den Cross-Notizbuch-Turn-Guard für Ziel-Ops in einem anderen Notizbuch (v7.53 Teil 3)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain('Bei Ziel-Ops in einem ANDEREN Notizbuch IMMER chapter/to_chapter angeben (siehe CHAPTER-PFLICHT)');
+      expect(sys).toContain('Wird die Ziel-Op übersprungen, hält die App die Quell-Löschung zurück – dann Ziel-Op korrigieren und beide erneut senden');
+      expect(sys).not.toContain('steht der Inhalt nur noch in der Versionshistorie');
+    });
+
+    // v7.53 Nacharbeit Runde 3 (Review-Fund 🔵 5): der alte Wortlaut nannte
+    // eine exakte ⚠️-Wortlaut-Alternative ("zurückgehalten" statt
+    // "übersprungen"), die es so nicht als eigene Meldung gibt – tatsächlich
+    // beginnt der GESAMTE notApplied-Grund mit "zurückgehalten" (siehe
+    // turnGuard.js#holdReason), der neue Satz beschreibt das präziser.
+    it("Verschiebe-Regel beschreibt die ⚠️-Meldung als 'beginnt mit zurückgehalten' statt einer festen Alternative zu 'übersprungen' (v7.53 Nacharbeit Runde 3, Review-Fund 🔵 5)", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain('du erkennst das an einer ⚠️-Meldung, die mit "zurückgehalten" beginnt (sie nennt die übersprungene Ziel-Op samt Grund)');
+      expect(sys).not.toContain('du erkennst das an einer ⚠️-Meldung "zurückgehalten" statt "übersprungen"');
+    });
+
+    // v7.53 (DECISIONS #111): S1/S2/S6 – Schema-Beschreibungen für
+    // heading/content/type spiegeln dieselben Invarianten.
+    it("NOTEBOOK_TOOL-Schema: heading-Beschreibung lehnt ### ab und nennt Mehrdeutigkeit ohne chapter (v7.53)", () => {
+      const props = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties;
+      expect(props.heading.description).toContain("Ein heading mit ### wird abgelehnt");
+      expect(props.heading.description).toMatch(/Ohne 'chapter' ist ein Name, der in mehreren Kapiteln vorkommt, mehrdeutig/);
+    });
+
+    it("NOTEBOOK_TOOL-Schema: content-Beschreibung verbietet #/##-Zeilen bei append_to_section/replace_section/append_to_chapter (v7.53)", () => {
+      const props = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties;
+      expect(props.content.description).toContain("KEINE #/##-Zeilen");
+      expect(props.content.description).toContain("content enthält Kapitel-/Abschnittszeilen");
+    });
+
+    it("NOTEBOOK_TOOL-Schema: type-Beschreibung nennt den ##-Fallback-Hinweis für delete_chapter und die widersprüchliche Adressierung für append_to_chapter (v7.53)", () => {
+      const typeProp = NOTEBOOK_TOOL.input_schema.properties.ops.items.properties.type;
+      expect(typeProp.description).toMatch(/adressiert über 'chapter', NICHT über 'heading' \(ein heading mit ## wird abgelehnt\)/);
+      expect(typeProp.description).toMatch(/widersprüchliche Adressierung/);
     });
 
     it("NOTEBOOK_TOOL-Schema: type-enum enthält replace_entry mit erklärender Beschreibung", () => {

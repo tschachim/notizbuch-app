@@ -11445,3 +11445,618 @@ aus `referenz-app.jsx` übernommen.
        Coverage-Reports: der `text`-Reporter blendet 100-%-Dateien aus,
        bestätigt über den `json-summary`-Reporter separat geprüft, kein
        Fehler).
+
+111. **v7.53, Stufe 2 von Vorschlag A ("Anlegen und Raten ist nie
+     implizit"): gemeinsamer Ziel-Resolver und harte Struktur-Invarianten –
+     supersedet die impliziten Anlage-/Rate-Entscheidungen aus #65
+     (Auto-Anlage ohne `chapter` in Kapitel-Dokumenten), #80
+     (`append_to_chapter` legt bei Titelzeile ein zweites Kapitel an) und
+     #103 (`move_entry`-Ziel "wird angelegt, falls es fehlt" ohne
+     `chapter`); #106 Entscheidung 4 (`chapterIsTitle`) wird präzisiert.**
+     - **Anlass:** DRITTER Kapitelnamen-Duplikat-Vorfall trotz #106–#110
+       (v7.52/v7.52.1/v7.52.2 hatten NUR die eine Datenlage "Kapitel-
+       Freitext ohne eigenen `##`-Abschnitt" behoben) plus drei
+       Reproduktionsläufe gegen die echte Engine mit über 30 weiteren
+       Rate-/Anlage-Pfaden (u. a. mehrdeutige Abschnittsnamen ohne
+       `chapter`, `###`-Unterthemen als `heading`-Ziel, die Notizbuch-
+       Titelzeile als `chapter`-Ziel, `content` mit eigener `#`/`##`-Zeile,
+       ein `##`-Fallback bei `delete_chapter`). Der Nutzer beschloss nach
+       diesem dritten Vorfall die Roadmap A → B: zuerst (A) die Engine so
+       strikt machen, dass Anlegen und Raten NIE implizit passieren, dann
+       (B) ein Verify-then-Commit-Gate. v7.52 war Stufe 1 (Kollisions-
+       Resolver für EINE Datenlage), dieser Eintrag ist Stufe 2 (EIN
+       Resolver für ALLE Anlage-/Adressierungsstellen). Eine adversariale
+       Kritik an der ersten Spezifikationsfassung deckte zusätzlich eine
+       Vorspann-Skip-Schleife, eine Übertreibung bei flachen Dokumenten,
+       eine Kollision mit der #65-Leitplanke (i10) und ein Cross-Notizbuch-
+       Datenverlust-Risiko auf – alle vier flossen als Korrekturen in die
+       finale Spezifikation ein (siehe Entscheidungen unten).
+     - **Entscheidung 1 – EIN gemeinsamer, rein lesender Resolver
+       (`resolveChapterTarget()`/`resolveTarget()` in `src/lib/ops.js`,
+       `resolveSectionTarget` bleibt als Alias exportiert) als EINZIGE
+       Entscheidungsquelle für ALLE zehn Erzeugungs-/Adressierungsstellen.**
+       `applyOne`/`explainSkip`/`explainNote`/`entryScope`/
+       `insertEntryIntoSection` rufen `findSection`/`findChapter`/
+       `findAddressableChapter` nirgends mehr direkt auf (Spiegelprinzip
+       dieser Datei fortgeführt, grep-verifiziert im Bericht des
+       Teil-1-Entwicklers) – die alte, nur-lesende `findSection()`-
+       Hilfsfunktion wurde als toter Code entfernt.
+     - **Entscheidung 2 – neue harte Invarianten statt "erster Treffer
+       gewinnt"/stiller Anlage, je mit Begründung:**
+       - *ambiguous* (Repro i2/i3/e4): ≥2 gleichnamige `##`-Abschnitte in
+         VERSCHIEDENEN Owner-Bereichen (Vorspann/Kapitel A/Kapitel B) OHNE
+         `chapter` sind ein Skip mit Kandidatenliste statt einer stillen
+         globalen Erst-Treffer-Wahl – Treffer INNERHALB desselben Owners
+         bleiben unverändert "erster Treffer gewinnt" (byte-identisch zu
+         v7.52.2).
+       - *wrong_level* (Repro b1–b3/i6/i10b): `heading` trifft nur ein
+         `###`-Unterthema, oder `chapter`/`heading` adressiert EXPLIZIT
+         (führende Raute) einen `##`-Abschnitt – Skip mit Korrektur-
+         Hinweis statt falscher Ebene. Bewusste Ausnahme (Repro i10, siehe
+         Restrisiken): `chapter` OHNE führende `##`-Raute, das nur als
+         `##`-Abschnitt existiert, bleibt eine gültige Kapitel-Neuanlage
+         MIT `##`-Ähnlichkeits-Hinweis – die #65-Leitplanke ("ein Ziel MIT
+         angegebenem `chapter` scheitert nie mangels Kapitel") hat hier
+         Vorrang vor der strengeren Lesart aus der ersten Kritikrunde.
+       - *title* (Repro f2–f4): die Notizbuch-Titelzeile ist NIE ein
+         Anlageort (schließt die in #106 Entscheidung 4 offen gelassene
+         `chapterIsTitle`-Lücke: Titel UND ein echtes gleichnamiges
+         Kapitel treffen jetzt konsistent überall das ECHTE Kapitel).
+         Kompromiss aus der Kritikrunde (Vorspann-Skip-Schleife): als
+         EINGRENZUNG auf einen bereits EXISTIERENDEN Vorspann-Abschnitt
+         (z. B. die Standard-Inbox jedes neu angelegten Notizbuchs) bleibt
+         `chapter:"# <Titel>"` gültig und wird per ℹ️ bestätigt – sonst
+         hätte eine `##`-Mehrdeutigkeitsmeldung, die genau diesen Weg als
+         Ausweg nennt, in eine Endlosschleife geführt. Im FLACHEN Dokument
+         (keine echten Kapitel) gilt `chapter == Titel` dagegen als NICHT
+         gesetzt (byte-identisch zur Op ohne `chapter`) statt strenger als
+         zuvor abgelehnt zu werden – zweite Korrektur aus der Kritikrunde.
+       - *needsChapter/chaptered_doc* (Repro a/f1/d2): ein NEUER
+         `##`-Abschnitt OHNE `chapter` in einem Dokument mit mindestens
+         einem echten `#`-Kapitel ist ein Skip mit Kapitelliste statt
+         stiller Anlage im zufällig LETZTEN Kapitel (der Nebenbefund aus
+         #106). Flache Dokumente (kein echtes Kapitel) bleiben unverändert
+         erlaubt; ein Ziel MIT angegebenem `chapter` scheitert weiterhin
+         NIE mangels Kapitel (#65-Leitplanke, Pflicht-Regressionstest).
+       - *content-Struktur* (Repro c1/c3/c4): eine `#`-/`##`-Zeile in
+         Spalte 0 außerhalb von Fences im `content` von
+         `append_to_section`/`replace_section`/`append_to_chapter`/
+         `replace_entry` ist ein Skip ("content enthält Kapitel-/
+         Abschnittszeilen") statt einer stillen Struktur-Injektion.
+         Nicht-destruktive Ausnahme (Repro c2, dritte Korrektur aus der
+         Kritikrunde): beginnt `content` mit der EIGENEN Überschriftszeile
+         der Op, wird nur diese Zeile entfernt und per ℹ️ gemeldet; bleibt
+         danach NICHTS übrig, ist das ein Skip (Modellfehler) statt einer
+         stillen Leerung – `content:""` OHNE Überschriftszeile bleibt der
+         einzige Weg, einen Abschnitt bewusst zu leeren.
+       - *delete_chapter-`##`-Fallback* (Repro i4): ein `heading`-Fallback-
+         Wert, der mit `##` beginnt, adressiert erkennbar einen Abschnitt
+         – Skip mit Verweis auf `delete_section`.
+       - *append_to_chapter-Adresskonflikt* (Repro i5): `chapter` UND
+         `heading` mit UNTERSCHIEDLICHEM Namen (oder nur `heading` mit
+         `##`-Raute) sind eine widersprüchliche Adressierung – Skip. Bei
+         GLEICHEM Namen (redundante Varianz) wird `heading` weiterhin
+         ignoriert, byte-identisch zu v7.52.2 (kein Skip für eine
+         harmlose Redundanz).
+       - *Did-you-mean ohne Fuzzy-Suche* (Repro g1/g2/g4/i10): eine neue
+         Kapitel-/Abschnittsanlage, deren Name einem VORHANDENEN Namen
+         nach Teilstring-Vergleich ähnelt (Emoji/Satzzeichen-Varianten wie
+         "KPIs" ↔ "📊 KPIs 2026:"), wird weiterhin angelegt (kein
+         automatisches Umbiegen/Löschen), bekommt aber eine ℹ️-Kandidaten-
+         Meldung als NACHFRAGE-Aufforderung ("falls das gemeint war, im
+         reply nachfragen") – bewusst KEIN Lösch-Rezept als direkte
+         Handlungsanweisung (vierte Korrektur aus der Kritikrunde): das
+         Modell soll den Nutzer fragen, nicht eigenmächtig etwas löschen.
+     - **Entscheidung 3 – Sichtbarkeit unverändert über den bestehenden
+       ℹ️/⚠️-Kanal (#106 Entscheidung 6), `WARN_TEXT_MAX` von 100 auf 160
+       angehoben (NUR `src/lib/ops.js` – `App.jsx#WARN_LABEL_MAX` und
+       `memory.js` bleiben bei 100, da beide unabhängige, kürzere Labels
+       kappen, nicht den `reason`/`note`-Fließtext).** Kandidatenlisten
+       brauchen mehr Platz als die bisherigen kurzen Meldungen; Meldungen
+       bleiben zweischichtig sanitisiert (`sanitizeForWarning` in `ops.js`,
+       `sanitizeWarnLabel` in `App.jsx`, `[SYSTEM-HINWEIS: …]`-Rahmen in
+       `anthropic.js#callClaude`).
+     - **Entscheidung 4 – Prompt/Schema (`src/lib/anthropic.js`) spiegeln
+       die neuen Invarianten, sonst produziert das Modell dieselbe jetzt
+       abgelehnte Op wieder und wieder (Skip-Schleife statt Korrektur).**
+       Neue CHAPTER-PFLICHT-Regel (`chapter`/`from_chapter`/`to_chapter`
+       IMMER angeben, sobald das Notizbuch `#`-Kapitel hat – Position nach
+       "Kein Kapitelnamen-Duplikat", vor "Kapitel-Sprachgebrauch"); die
+       sieben "wird automatisch am Dokumentende angelegt"-Passagen (Ops-
+       Liste UND `NOTEBOOK_TOOL`-Schema: `chapter`, `to_heading`,
+       `to_chapter`, `append_to_chapter`) auf "NUR zusammen mit `chapter`
+       bzw. in einem Notizbuch ohne Kapitel" umgestellt; neue Sätze zu
+       Mehrdeutigkeit ohne `chapter` (`delete_entry`/`replace_entry`/
+       `move_entry`), zur `###`-Ablehnung als `heading`-Ziel, zur
+       Struktur-Ablehnung im `content`, zur Titelzeilen-Ablehnung bei
+       `append_to_chapter`/`to_chapter` und zum `##`-Fallback-Skip bei
+       `delete_chapter`; die ⚠️-Regel verlangt jetzt explizit die
+       Übernahme genannter Kandidaten/Feldnamen im Korrektur-Turn (statt
+       eines Ausweichens auf `rewrite`), die ℹ️-Regel verlangt bei einem
+       "ähnlich vorhanden"-Fund eine Nachfrage statt eigenmächtigen
+       Löschens. Die Verschiebe-Regel verweist jetzt auf CHAPTER-PFLICHT
+       und beschreibt den Umgang mit einer ⚠️ an einer Ziel-Op in einem
+       ANDEREN Notizbuch (T13 Variante A, siehe Entscheidung 5).
+       Alle betroffenen Pins in `tests/anthropic.test.js` wurden
+       nachgezogen (geänderte Wortlaute umgeschrieben, nicht gelöscht) und
+       um gezielte neue Vertragstests für jede der o. g. Ergänzungen
+       erweitert.
+     - **Entscheidung 5 – Cross-Notizbuch-Turn-Guard (Teil 3 der
+       Spezifikation, `src/lib/turnGuard.js`) ist UMGESETZT (Nacharbeit
+       Runde 2, siehe unten).** Mit den neuen Invarianten werden auch
+       Ziel-Ops MIT korrekt gesetztem `chapter` in bestimmten Fällen zu
+       Skips (`wrong_level`/`title`/content-Struktur/`ambiguous`) –
+       committete `App.jsx#send` bisher eine bereits erfolgreich
+       angewendete Quell-Löschung in Notizbuch X, während die zugehörige
+       Ziel-Op in Notizbuch Y an einer dieser neuen Invarianten scheitert,
+       landete der Inhalt NIRGENDS mehr im aktuellen Dokumentstand (nur
+       noch in der Git-Historie) – dasselbe #65-Muster, das die
+       Verschiebe-Regel eigentlich verhindern soll. Der Guard schließt das:
+       scheitert (`applied:false`) irgendwo im selben Turn eine
+       `TARGET_WRITE`-Op (`append_to_section`/`replace_section`/
+       `append_to_chapter`), werden in JEDER ANDEREN Notizbuch-Gruppe des
+       Turns alle `SOURCE_DESTRUCTIVE`-Ops (`delete_section`/
+       `delete_entry`/`delete_chapter`/`replace_section`) zurückgehalten
+       (Typ-basiert, unabhängig vom eigenen Ergebnis der zurückgehaltenen
+       Op) – `App.jsx#send` wendet dafür `applyOpsDetailed` in drei Phasen
+       an (1: rein je Gruppe auf dem docCache-Stand, 2:
+       `turnGuard.js#planTurn` plant die Holds + notApplied-Einträge über
+       ALLE Gruppen hinweg, 3: betroffene Gruppen erneut mit der
+       gefilterten Op-Liste auf dem LIVE-Cache-Stand `base`, nicht dem
+       Phase-1-Snapshot – siehe Nacharbeit Runde 3) – Reihenfolge
+       (Ziel-Gruppe vor Quell-Gruppe, Map-Einfügereihenfolge) und der
+       SHA-Konflikt-Pfad bleiben dabei unverändert. Der Prompt (T13
+       "Variante A", Verschiebe-Regel) nennt den Guard jetzt explizit: "wird
+       die Ziel-Op übersprungen, hält die App die Quell-Löschung zurück –
+       dann Ziel-Op korrigieren und beide erneut senden". **Verbleibendes,
+       bewusst NICHT geschlossenes Restrisiko: `rewrite` wird vom Guard NIE
+       zurückgehalten** (kein `TARGET_WRITE`/`SOURCE_DESTRUCTIVE`-Mitglied –
+       ein rewrite-Verlust-Guard bräuchte einen Vorher/Nachher-Diff, um
+       "destruktiv" zu erkennen, das ist eine größere Änderung und bleibt
+       bis Vorschlag B offen, siehe Restrisiken unten).
+     - **Bewusste Restrisiken (unverändert gegenüber #106 bzw. neu in
+       v7.53):** Cross-Notizbuch-Datenverlust bei geskippter Ziel-Op ist mit
+       Teil 3 (Nacharbeit Runde 2, Entscheidung 5) für ALLE
+       `SOURCE_DESTRUCTIVE`-Ops (`delete_section`/`delete_entry`/
+       `delete_chapter`/`replace_section`) geschlossen – **`rewrite` bleibt
+       davon ausdrücklich AUSGENOMMEN und damit weiterhin vollständig
+       ungeschützt vor Datenverlust** (der Guard erkennt nur Op-TYPEN, kein
+       rewrite-Verlust-Guard bräuchte einen inhaltlichen Vorher/Nachher-
+       Diff – vertagt bis Vorschlag B, siehe unten); **NEU benannt
+       (Nacharbeit Runde 3, Review-Fund 🟡 3): Verschieben INNERHALB EINES
+       Notizbuchs bleibt ebenfalls ungeschützt** – `append_to_section`/
+       `replace_section` + `delete_section` im SELBEN Notizbuch (die
+       Ops werden je ZIEL-Notizbuch gruppiert, siehe `App.jsx#send`) laufen
+       in EINER einzigen Gruppe; der Guard braucht mindestens ZWEI Gruppen
+       (`planCrossNotebookHold` bricht bei weniger als zwei Gruppen sofort
+       ab) und hält in der ZIEL-Gruppe selbst NIE etwas zurück (siehe der
+       eigene Test "Y hält NIE seine eigenen Ops zurück" in
+       `tests/turnGuard.test.js`) – scheitert die Ziel-Op an einer der
+       neuen Invarianten INNERHALB dieser einen Gruppe, wird die
+       nachfolgende `delete_section` trotzdem committet. GESCHÜTZT bleibt
+       nur `move_entry` (atomare Einzel-Op, kein zweischrittiges
+       Verschieben mit eigener Ziel- und Quell-Op). Vertagt bis Vorschlag B
+       (Zwei-Phasen-Turn mit Verify-Gate); ein gleichnamiger
+       `##`-Abschnitt in einem ANDEREN Kapitel wird bei `missing` weiterhin
+       im genannten `chapter` neu angelegt statt den bestehenden zu
+       verwenden (i1, ℹ️ macht es sichtbar); zwei gleichnamige `#`-Kapitel
+       im selben Dokument: weiterhin der erste Treffer gewinnt (i9,
+       unverändert seit v7.23); Vorspann-Abschnitte sind über Ops nicht
+       mehr NEU anlegbar, nur per Editor (bewusste Verschärfung, siehe
+       *title* oben); ein Skip (auch ein zurückgehaltener) kostet
+       grundsätzlich einen Folge-Turn (vollständig behoben erst mit
+       Vorschlag B, dem Verify-then-Commit-Gate); verwaiste Bild-Uploads bei
+       einem Skip (bestehendes, unverändertes Restrisiko seit früheren
+       Versionen); der `##`-Vollkopie-Weg von `replace_section` bleibt eine
+       "vertraue der Vollkopie"-Risikoklasse (deshalb nennt R-WL zuerst den
+       `append_to_section`-Weg, bevor `replace_section` als Alternative
+       genannt wird).
+     - **Vertagt (bewusst NICHT in v7.53):** explizites `create:true`-Flag
+       (Stufe 3 von Vorschlag A – erst NACH Vorschlag B sinnvoll, da ein
+       Verify-Schritt die Trefferquote einer expliziten Anlage-Absicht
+       erst braucht), das Verify-then-Commit-Gate selbst (Vorschlag B),
+       ein Replay-Korpus echter Live-Vorfälle als dauerhaftes
+       Regressionsnetz, ein `rewrite`-Verlust-Guard (siehe Restrisiken
+       oben – der Cross-Notizbuch-Turn-Guard selbst ist NICHT mehr vertagt,
+       siehe Entscheidung 5/Nacharbeit Runde 2 unten).
+     - **Zwei ECHTE Fehler im eigenen v7.53-Neucode gefunden und VOR
+       Auslieferung behoben (Teil 1, `src/lib/ops.js`):** (1) KRITISCH –
+       `explainSkip()` griff bei `delete_entry`/`replace_entry`/
+       `move_entry`-Quelle im `chapter_level`-Fall auf
+       `resolved.chapter.sectionOwner` zu; ist bei einer Op NUR `chapter`
+       (kein `heading`) gesetzt, das selbst einen `##`-Abschnitt
+       adressiert, ist `resolved` an dieser Stelle aber das ROHE
+       `resolveChapterTarget()`-Ergebnis OHNE verschachteltes
+       `.chapter`-Feld – ein `TypeError` hätte die App zum Absturz
+       gebracht, sobald das Modell eine solche Op schickt. Gefixt durch
+       `resolved.chapter || resolved`, durch zwei gezielte neue Tests
+       dauerhaft abgesichert. (2) totes Code-Fundstück: die alte,
+       find-basierte Hilfsfunktion `findSection()` war nach dem
+       Resolver-Umbau nirgends mehr aufgerufen (grep-bestätigt) und wurde
+       entfernt.
+     - **Tests:** `tests/ops.resolver.test.js` (neu) – Byte-Identitäts-
+       Matrix gegen eine aus `HEAD:src/lib/ops.js` (v7.52.2) generierte,
+       committete JSON-Fixture (`tests/fixtures/ops-v7522-matrix.json`,
+       Generator-Skript bewusst NICHT committet, Ablauf im Testkopf
+       dokumentiert – vermeidet einen Import-Bruch durch eine zweite
+       `ops.js`-Kopie im Testbaum) plus ein Tabellen-Test über mehrere
+       Fixtures (Kapitel-Dokument, flaches Dokument, Titel==Kapitel-
+       Dokument, Emoji-Namen) mit Resolver-Status-Assertion, Wrapper-
+       Äquivalenz (`applyOps === applyOpsDetailed().text`), Byte-Identität
+       bei jedem Skip und einem Drift-Wächter (jedes `applied:false`
+       liefert einen `reason` ≠ "keine inhaltliche Änderung", außer drei
+       bewusst deklarierten Ausnahmen). Bestehende Pins in
+       `tests/ops.test.js`, deren Verhalten sich ändert ("erster Treffer
+       gewinnt" global, Titelzeile → zweites Kapitel, Kappungslänge),
+       wurden mit Verweis auf diesen Eintrag UMGESCHRIEBEN statt gelöscht.
+       `tests/anthropic.test.js` bekam neue Vertragstests für CHAPTER-
+       PFLICHT, die Kandidaten-/Nachfrage-Regeln, alle sieben geänderten
+       "automatisch angelegt"-Passagen und die neuen Schema-Beschreibungen
+       (Abschnitt 4 dieses Eintrags). **Gesamt (`npm run test:coverage`
+       nach Teil 1 + Teil 2):** 2187 Tests grün, Coverage auf `src/lib`
+       92 % Statements / 87.54 % Branches / 90.66 % Funktionen / 94.55 %
+       Zeilen – weiterhin deutlich über dem 60 %-Gate (unverändert
+       gegenüber v7.52.2, da Teil 2 nur Prompt-/Schema-Text und den
+       Versions-String ändert, keine neue `src/lib`-Logik). Version:
+       Header `src/App.jsx` auf `v7.53`.
+     - **Nacharbeit Runde 1 (vor dem ersten Commit von v7.53, Code-Review
+       gegen den o. g. Stand): sieben 🟡- und drei 🔵-Findings behoben,
+       alle rein lokal in den Wortlaut-/Kandidaten-Bausteinen, KEINE
+       Änderung an der Resolver-Statuslogik selbst.**
+       - 🟡 `chapterListSuffix()` hängte die Kapitelliste UNGESANITIZED an
+         (`listNames()` ohne `sw()`) – umging Schicht 1 der Prompt-
+         Injection-Abwehr für Kapitelnamen (Schicht 2 in
+         `anthropic.js#callClaude` fing es weiterhin ab) UND die 160er-
+         Kappung griff nicht (5 lange Kapitelnamen ergaben 472 statt <160
+         Zeichen). Fix: die GESAMTE Kapitelliste läuft jetzt wie jedes
+         andere Kandidaten-Fragment einmal durch `sw()`.
+       - 🟡 zugehöriger Test war Pro-forma (schickte `append_to_section`
+         OHNE `content` – die Op scheiterte bereits an "leerer content",
+         die Kapitelliste wurde nie gebaut). Ersetzt durch echte R-NEEDCH-
+         und R-AMB-Sonden mit einem Kapitelnamen, der eckige Klammern
+         enthält, plus einer 5×langer-Namen-Kappungssonde.
+       - 🟡 `resolveTarget()` reichte das ROHE `chapter`-Feld statt des
+         bereits bereinigten `chapterField` an `resolveChapterTarget()`
+         weiter – ein nicht-string `chapter` (Schema-Verletzung, z. B.
+         `chapter:42`) wurde zu `dispHead("42")` → `missing` → eine LEERE
+         `"# "`-Kapitelzeile wurde angelegt (Struktur-Korruption). Fix:
+         `chapterField` statt `chapter` übergeben; verhält sich jetzt
+         wieder wie "kein chapter" (byte-identisch zu v7.52.2).
+       - 🟡 `delete_entry`/`replace_entry`/`move_entry`-Quelle schlugen bei
+         fehlendem Kapitel den FALSCHEN Kandidaten-Typ vor: `resolved`
+         ist bei gesetztem `heading` ein `resolveTarget()`-Ergebnis, dessen
+         TOP-LEVEL `candidates` ##-Abschnitts-Kandidaten sind (Suchbereich
+         = alle Abschnitte, weil `scope` null ist) – die korrekten
+         Kapitel-Kandidaten liegen in `resolved.chapter.candidates`. Fix:
+         `resolved.chapter ? resolved.chapter.candidates : resolved.candidates`
+         an beiden betroffenen Stellen.
+       - 🟡 R-AMB nannte bei `delete_section` fälschlich den entry-Ausweg
+         "oder heading weglassen" – `delete_section` hat kein `entry`-Feld.
+         Fix: der gemeinsame Skip-Zweig für
+         `append_to_section`/`replace_section`/`delete_section` übergibt
+         jetzt IMMER `null` als `entryFieldName` (dieser Zweig deckt nie
+         eine entry-Op ab, die haben eigene, frühere Skip-Zweige).
+       - 🟡 R-CHWL nannte bei `move_entry` immer `chapter` als
+         Korrekturfeld, obwohl `move_entry` nur `from_chapter`/
+         `to_chapter` kennt – das Modell hätte im Folge-Turn dieselbe
+         Ambiguität wiederholt. Fix: `wrongLevelReasonFor()`/
+         `reasonChapterWrongLevel()` bekommen einen `fieldName`-Parameter,
+         der an allen `move_entry`-Aufrufstellen `from_chapter`/
+         `to_chapter` statt des Default `chapter` setzt.
+       - 🟡 Testlücken aus Spec 5.2 nachgezogen (u. a. `move_entry`
+         `to_heading` ohne `to_chapter` im Kapitel-Dokument, `FIX_TITLE`
+         End-zu-Ende für `append_to_chapter`, `c5`-Fence-Ausnahme).
+       - 🔵 `ownersLabel()` schlug bei einem Dokument OHNE Titelzeile ein
+         nicht adressierbares `chapter:"# "` als Ausweg vor (leerer Titel-
+         Name) – Fix: expliziter Hinweis "nur per Editor adressierbar".
+       - 🔵 `entryScope()` meldete bei Guard-(ii)-Kollision mit
+         `collisionRange===null` und fehlendem `chapter` fälschlich
+         "Abschnitt nicht gefunden" statt "Kapitel nicht gefunden"
+         (Wortlaut-Regression gegenüber v7.52.2). Fix: unterscheidet jetzt
+         über `target.chapter.status`.
+       - 🔵 ein `###`-Treffer DIREKT unter einem `#`-Kapitel ohne
+         umschließenden `##`-Abschnitt (kein `subOwner`) bekam den für
+         `rawLevel>=3` gedachten Wortlaut, obwohl die Op selbst `##`
+         adressiert hatte. Fix: neuer dritter Wortlaut-Zweig
+         (`wrongLevelHeadingReason()`, ersetzt vier duplizierte
+         Inline-Ternaries) für genau diesen Fall.
+       - **Bewusst NICHT behoben (Restrisiko/Deviation):** 🔵-Findings zu
+         Titelfeld-Namen bei `move_entry`-Notes (N-TITLE-SCOPE/-FLAT nennt
+         noch `chapter` statt `to_chapter`/`from_chapter`) und zur
+         fehlenden N-TITLE-FLAT-Note für entry-Ops im flachen Dokument
+         sind reine Kosmetik ohne Fehlverhalten (die Op wirkt korrekt,
+         nur die erklärende Note ist unpräzise) – bei laufendem
+         Zeitbudget zurückgestellt für einen möglichen Folgeauftrag.
+       - **Tests:** `tests/ops.resolver.test.js` um eine neue Describe-
+         Gruppe "Nacharbeit v7.53 Runde 1" (10 gezielte Regressionstests
+         für die sechs 🟡- und drei 🔵-Fixes) sowie drei weitere End-zu-
+         Ende-Tests für offene Spec-5.2-Lücken erweitert; die vorherige
+         Pro-forma-Sonde ersetzt. `tests/ops.test.js`: irreführender
+         Testname der Drift-Wächter-Ausnahme korrigiert (verweist jetzt
+         auf die zwei anderen deklarierten Ausnahmen). `tests/anthropic.test.js`:
+         Pin für die Ops-Listen-Intro nachgezogen (kein "optionales Feld
+         chapter" mehr, Verweis auf CHAPTER-PFLICHT). **Gesamt nach
+         Nacharbeit Runde 1:** 2204 Tests grün, Coverage auf `src/lib`
+         weiterhin deutlich über dem 60 %-Gate (Gesamt-Repo 92.18 %
+         Statements / 87.84 % Branches / 90.9 % Funktionen / 94.6 %
+         Zeilen). Version bleibt `v7.53` (v7.53 wurde vor dieser
+         Nacharbeit noch nicht committet/released).
+     - **Nacharbeit Runde 2 (Abschluss-Review `reviewA.json`, Verdict
+       "freigabe" mit fünf 🔵-Restfindings, PLUS Teil 3 der Spezifikation
+       – Orchestrator-Auftrag: Turn-Guard umsetzen, Version bleibt
+       `v7.53`):**
+       - **A) Cross-Notizbuch-Turn-Guard umgesetzt** – siehe Entscheidung 5
+         oben für das WARUM/die Regel. Neues, additives Modul
+         `src/lib/turnGuard.js`: `planCrossNotebookHold(groups)` (reiner
+         Plan, `Map<nbId, {held: Set<index>, because}>`) und der darauf
+         aufbauende, ebenfalls reine Helfer `planTurn(groups)` (liefert
+         zusätzlich die gefilterten Op-Listen je Gruppe UND die fertigen
+         notApplied-Einträge, inkl. `holdReason()` für den verbindlichen
+         Wortlaut – App.jsx muss den Satz nicht selbst zusammenbauen).
+         `App.jsx#send` wurde von EINER Schleife auf DREI Phasen
+         umgestellt (Kommentar direkt im Code): (1) `applyOpsDetailed` je
+         Gruppe rein auf dem docCache-Stand, (2) `planTurn` über alle
+         Gruppen, (3) nur Gruppen MIT Hold wenden `applyOpsDetailed`
+         erneut mit der gefilterten Op-Liste auf demselben
+         Ausgangsstand an (Gruppen ohne Hold sparen sich den zweiten
+         Lauf – Phase 1 IST dort bereits Phase 3); die
+         Notizbuch-Reihenfolge (Ziel vor Quelle, Map-Einfügereihenfolge)
+         und der SHA-Konflikt-Pfad blieben dabei unangetastet (dieselbe
+         `groups`-Map wird nur einmal in ein Array überführt). Prompt:
+         die Verschiebe-Regel (T13, `src/lib/anthropic.js`) nennt den
+         Guard jetzt wörtlich ("Wird die Ziel-Op übersprungen, hält die
+         App die Quell-Löschung zurück – dann Ziel-Op korrigieren und
+         beide erneut senden") statt der bisherigen Bitte, den Verlust im
+         Folge-Turn manuell zu rekonstruieren. `docs/TESTFAELLE.md` C30
+         (neu, [VERBUNDEN][API], nur mit Teil 3 sinnvoll testbar).
+         Restrisiko unverändert benannt: `rewrite` wird vom Guard NIE
+         zurückgehalten (siehe Entscheidung 5/Restrisiken oben) –
+         bewusst vertagt bis Vorschlag B (ein rewrite-Verlust-Guard
+         bräuchte einen inhaltlichen Vorher/Nachher-Diff statt einer
+         reinen Typ-Prüfung).
+       - **B) Fünf 🔵-Restfindings aus `reviewA.json` behoben (alle in
+         `src/lib/ops.js`, rein lokale Wortlaut-/Kandidaten-Fixes, KEINE
+         Änderung an der Resolver-Statuslogik selbst):**
+         1. `entryScope()` behandelte ein NICHT-string `chapter`-Feld
+            (Schema-Verletzung, z. B. `chapter:42`) je nach `heading`-Pfad
+            UNTERSCHIEDLICH – MIT `heading` lief das kaputte Feld
+            unbemerkt durch `resolveTarget()`s eigenen typeof-Guard (wie
+            "kein chapter"), die Op wurde also angewendet (`delete_entry`
+            hätte gelöscht); OHNE `heading` landete es roh in
+            `resolveChapterTarget()` und ergab korrekt "Kapitel „42“
+            nicht gefunden". HEAD (v7.52.2) skippte in BEIDEN Fällen
+            identisch. Fix: einmalige, strikte Normalisierung am Anfang
+            von `entryScope()`, VOR jeder Verzweigung – beide Pfade
+            skippen jetzt mit demselben Wortlaut.
+         2. `heading` mit `###` (rawLevel≥3), das einen gleichnamigen
+            `##`-Abschnitt trifft, lief bisher STILL als `found` durch
+            (Resolver-Reihenfolge: Abschnittssuche vor Ebenen-Prüfung),
+            obwohl der Prompt "ein heading mit ### wird abgelehnt"
+            verspricht. Fix (Variante Note, Prompt-Satz bewusst
+            UNVERÄNDERT – Orchestrator-Entscheidung): `noteForSectionTarget()`
+            meldet jetzt eine ℹ️-Note ("heading „### X“ als ##-Abschnitt
+            „X“ gewertet – heading mit \"## …\" senden"), die Op wirkt
+            weiterhin korrekt.
+         3. Titel-Notes waren an drei Stellen unpräzise (bereits als
+            Restrisiko in Runde 1 dokumentiert, jetzt behoben):
+            (a) `noteForSectionTarget()` bekam einen `fieldName`-Parameter
+            (Default `"chapter"`) – `move_entry`-Ziel ruft jetzt mit
+            `"to_chapter"` auf, statt fälschlich `"chapter"` zu nennen
+            (ein Feld, das `move_entry` gar nicht besitzt);
+            (b) N-TITLE-FLAT (flaches Dokument, `chapter`==Titelzeile
+            gilt als ignoriert) fehlte für `delete_entry`/`replace_entry`
+            und die `move_entry`-Quelle – beide Zweige in `explainNote()`
+            bekamen den fehlenden `"flat"`-Fall ergänzt (analog zum
+            bereits vorhandenen `"preamble"`-Fall direkt daneben);
+            (c) `delete_section` bekam bisher GAR KEINE Note (weder für
+            einen Vorspann-Treffer noch für den neuen ###-Fall aus Fix 2)
+            – neuer eigener Zweig in `explainNote()`, der
+            `noteForSectionTarget()` aufruft (liefert dort automatisch
+            NUR die Titel-/###-Teile, weil `delete_section` per
+            `applyOne`-Vertrag nie `status:"missing"` mit `applied:true`
+            erreichen kann); zusätzlich bekam die N-DYM-Note von
+            `move_entry` NUR-`to_chapter` das fehlende Korrektur-Rezept
+            ("Korrektur: delete_chapter „C“ + erneut mit
+            to_chapter:\"# D\"") analog zu den bereits vorhandenen
+            N-DYM-Rezepten der anderen Ops.
+         4. Toter Kandidaten-Fallback in `resolveTarget()` entfernt (bei
+            leeren Abschnitts-Kandidaten UND `chapter.status==='missing'`
+            wurden bisher die Kapitel-Kandidaten ins TOP-LEVEL
+            `candidates`-Feld kopiert – strukturell tot, weil `scope` bei
+            `chapter.status==='missing'` bereits `null` ist und KEIN
+            Aufrufer dieses Feld in diesem Fall liest, alle nutzen
+            `result.chapter.candidates`; die Vermischung war eine Falle
+            für künftige Aufrufer, genau der Fehlertyp aus Fix 1).
+         5. Fehlende Pins ergänzt: `move_entry`-Ziel `ambiguous` (Quelle
+            unangetastet, R-AMB mit `to_chapter`), i1 (gleichnamiger
+            Abschnitt in einem anderen Kapitel, bewusstes Restrisiko),
+            i7 (Abschnittsname nur im Codeblock → Anlage, fence-aware),
+            i9 (zwei gleichnamige Kapitel → erster Treffer gewinnt), g4
+            als Ende-zu-Ende-Pin (Did-you-mean-Korrektur-Rezept für
+            `append_to_section`); plus die drei geforderten Kommentare
+            "gilt nur für Notizbücher ohne Kapitel (v7.53)" an den
+            entsprechenden `tests/ops.test.js`-Stellen (flache
+            Test-Fixtures, deren Anlage-auf-Fehlend-Verhalten in einem
+            Kapitel-Dokument OHNE `chapter` stattdessen ein R-NEEDCH-Skip
+            wäre).
+       - **Kein echter Bestandsfehler beim Testschreiben gefunden** (anders
+         als Teil 1) – alle fünf 🔵-Findings waren bereits vom Review als
+         "kein Fehlverhalten" eingestuft (Schema-Verletzung, Note-Kosmetik,
+         toter Code, fehlende Zusatz-Pins); die Entwickler-Umsetzung deckt
+         sich mit den im Review vorgeschlagenen Fixes.
+       - **Tests:** `tests/ops.resolver.test.js` um eine neue Describe-
+         Gruppe "Nacharbeit v7.53 Runde 2" erweitert (ein Test pro
+         nummeriertem 🔵-Fix plus die fünf fehlenden Pins aus Fix 5, u. a.
+         mit `resolveTarget()`-Direktaufrufen für Fix 4). Neu:
+         `tests/turnGuard.test.js` (22 Tests) – reine Plan-Logik
+         (`planCrossNotebookHold`: Randfälle, gezielte Halte-Regel inkl.
+         "nicht die eigene Gruppe"/"keine Appends"/"rewrite nie", mehrere
+         gleichzeitige Auslöser, drei Notizbücher; `holdReason`: Wortlaut
+         PLUS Sanitisierung mit Klammer-/`[SYSTEM-HINWEIS:`-Payload in
+         ALLEN vier eingebetteten Feldern, 160er-Kappung) UND drei
+         End-zu-Ende-Tests, die `planTurn` mit ECHTEN
+         `applyOpsDetailed()`-Läufen auf zwei Dokumenten kombinieren
+         (Ziel-Skip wegen R-CONTENT bzw. wrong_level → Quelle
+         nachweislich byte-identisch zum Ausgangsdokument; Kontrollfall
+         mit erfolgreicher Ziel-Op → Quelle wird wie gewohnt gelöscht).
+         `tests/anthropic.test.js`: T13-Pin auf den neuen Wortlaut
+         umgestellt (`toContain` statt des alten "Versionshistorie"-Satzes,
+         zusätzlich `not.toContain` auf den alten Wortlaut). **Gesamt nach
+         Nacharbeit Runde 2:** 2242 Tests grün (38 neu: 22 in
+         `tests/turnGuard.test.js`, 16 in der neuen Describe-Gruppe in
+         `tests/ops.resolver.test.js`), Coverage Gesamt-Repo 92.37 %
+         Statements / 88.2 % Branches / 91.09 % Funktionen / 94.76 %
+         Zeilen (`turnGuard.js` isoliert: 100 % Statements/Funktionen/
+         Zeilen, 97.67 % Branches – ein einzelner, bewusst nicht
+         eigens getesteter Defensiv-Fallback `g.results[idx] || {}` bleibt
+         praktisch unerreichbar, weil `planCrossNotebookHold()` einen
+         Index nur dann in `held` aufnimmt, wenn an genau dieser Stelle
+         bereits ein wahrer `results`-Eintrag stand). Version bleibt
+         `v7.53`.
+     - **Nacharbeit Runde 3 (Code-Review gegen den Stand von Nacharbeit
+       Runde 2: drei 🟡- und sechs 🔵-Findings behoben, KEINE Änderung an
+       der Resolver-Statuslogik selbst):**
+       1. 🟡 **Commit-Basis des Drei-Phasen-Blocks (`App.jsx#send`) war der
+          Phase-1-Snapshot `g.before` statt des LIVE-Cache-Stands.**
+          Zwischen den `await commitDocNb(...)`-Aufrufen der vorherigen
+          Gruppen dieser Schleife kann `toggleTask()` (Checkboxen sind
+          während `busy` NICHT gesperrt) bereits synchron in
+          `docCache.current[activeNb]` geschrieben haben – ein Commit auf
+          dem veralteten Snapshot hätte ein zwischenzeitlich gesetztes
+          Häkchen unbemerkt überschrieben. Fix: neue Variable `base =
+          docCache.current[g.nbId] || ""` je Gruppen-Iteration, erneute
+          Anwendung (`applyOpsDetailed(base, finalOps)`) sowohl bei einem
+          Hold ALS AUCH wenn `base !== g.before`; der Committed-/Skip-
+          Vergleich (`applied === base` statt `=== g.before`) folgt
+          konsequent. Für die ERSTE Gruppe ist `base === g.before` immer
+          wahr (vor dem ersten `await` in dieser Schleife ist noch nichts
+          passiert) – kein Verhaltensunterschied ggü. vorher in diesem
+          Fall.
+       2. 🟡 **Guard-Lücke bei mehr als 20 Ops:** `ops.js#applyOpsDetailed`
+          kappt auf 20 Ops (`.slice(0, 20)`), `turnGuard.js#planTurn`
+          filterte bisher aber die UNGEKAPPTE `g.ops`-Liste – das
+          Entfernen eines gehaltenen Index < 20 rückte Ops JENSEITS von
+          Index 19 (nie von Phase 1 bewertet, auch potenziell destruktive)
+          in den neuen Kappungsbereich nach, die dann in Phase 3
+          UNGEPRÜFT committet wurden. Fix: `ops.js` exportiert jetzt
+          `MAX_OPS = 20` (ersetzt die eingestreute Zahl an ihrer einzigen
+          Stelle, `applyOpsDetailed`), `turnGuard.js#planTurn` kappt die
+          Op-Liste JEDER Gruppe selbst auf `MAX_OPS`, BEVOR gehaltene
+          Indizes herausgefiltert werden – `.slice()` läuft dabei NUR,
+          wenn tatsächlich gekappt werden muss (sonst dieselbe Referenz
+          wie vorher, erhält die bestehenden `toBe()`-Referenz-Pins in
+          `tests/turnGuard.test.js` unverändert). Neuer End-zu-Ende-Test
+          (21 Ops: Index 0 `delete_entry` gefunden, Index 1–19 harmlose
+          `append_to_section`, Index 20 `delete_section` jenseits der
+          Grenze) belegt: `filteredOps` für die Quelle hat Länge 19 OHNE
+          die `delete_section`, `applyOpsDetailed(source, filtered).text`
+          enthält `"## Abschnitt"` weiterhin.
+       3. 🟡 **Neues, bewusst NICHT geschlossenes Restrisiko benannt:
+          Verschieben INNERHALB eines Notizbuchs bleibt ungeschützt.**
+          `append_to_section`/`replace_section` + `delete_section` im
+          SELBEN Notizbuch laufen in EINER Gruppe (Ops werden je
+          ZIEL-Notizbuch gruppiert) – der Guard braucht mindestens ZWEI
+          Gruppen und hält in der ZIEL-Gruppe selbst NIE etwas zurück;
+          scheitert die Ziel-Op an einer der neuen Invarianten INNERHALB
+          dieser einen Gruppe, wird die nachfolgende `delete_section`
+          trotzdem committet. GESCHÜTZT bleibt nur `move_entry` (atomare
+          Einzel-Op). Vertagt bis Vorschlag B (Zwei-Phasen-Turn mit
+          Verify-Gate) – als Text jetzt explizit in den Restrisiken oben
+          verankert, KEIN Code-Fix in dieser Runde (der Guard bräuchte
+          dafür eine grundsätzlich andere, INTRA-Gruppen-fähige Analyse,
+          das ist der Kern von Vorschlag B).
+       4. 🔵 Wortlaut-Verweis in Entscheidung 4 präzisiert: "(Variante OHNE
+          Turn-Guard, siehe Entscheidung 5)" → "(T13 Variante A, siehe
+          Entscheidung 5)" (der Guard war zu diesem Zeitpunkt der
+          Nacharbeit ja bereits umgesetzt, der alte Verweis beschrieb den
+          VORHERIGEN Prompt-Stand).
+       5. 🔵 **Prompt-Satz (T13, `src/lib/anthropic.js`) versprach eine
+          exakte ⚠️-Wortlaut-Alternative, die es so nicht gibt.** "du
+          erkennst das an einer ⚠️-Meldung "zurückgehalten" statt
+          "übersprungen"" klang nach zwei GLEICHWERTIGEN, austauschbaren
+          Meldungstexten – tatsächlich BEGINNT der gesamte
+          `notApplied`-Grund mit "zurückgehalten" (siehe
+          `turnGuard.js#holdReason`) und nennt danach die übersprungene
+          Ziel-Op samt Grund. Fix: "…du erkennst das an einer
+          ⚠️-Meldung, die mit "zurückgehalten" beginnt (sie nennt die
+          übersprungene Ziel-Op samt Grund)." Neuer Pin in
+          `tests/anthropic.test.js` (`toContain` auf den neuen Satz,
+          `not.toContain` auf den alten).
+       6. 🔵 **Der bewusste No-op (`replace_section` textidentisch, reason
+          `"keine inhaltliche Änderung"`) konnte selbst ein Auslöser des
+          Guards sein.** Sendet das Modell nach einem SHA-Konflikt
+          dieselbe – jetzt bereits vorhandene – Ziel-Op erneut, ist das
+          Ergebnis ein harmloser No-op-Skip (`applied:false`, aber KEINE
+          verletzte Invariante); ohne Ausnahme hätte dieser Skip trotzdem
+          die Quell-Löschung in JEDER ANDEREN Notizbuch-Gruppe
+          zurückgehalten – eine Wiederholungsschleife, weil der Nutzer
+          jeden Folge-Turn erneut senden müsste, ohne dass sich am
+          eigentlichen Problem etwas ändert. Fix: `ops.js` exportiert
+          `DELIBERATE_NOOP_REASON = "keine inhaltliche Änderung"`, an den
+          DREI Stellen verwendet, die diesen Text für eine TARGET_WRITE-Op
+          (`append_to_chapter` sowie zwei Stellen im gemeinsamen
+          `append_to_section`/`replace_section`/`delete_section`-Block)
+          erzeugen – die übrigen fünf Vorkommen (`delete_chapter`/
+          `delete_entry`/`replace_entry`/`move_entry`/`delete_section`)
+          bleiben bewusst als eigener String stehen, sie betreffen keine
+          TARGET_WRITE-Op und sind für den Guard irrelevant.
+          `turnGuard.js#planCrossNotebookHold` schließt den Trigger-Check
+          jetzt um `r.reason !== DELIBERATE_NOOP_REASON`. Zwei neue Pins
+          (reine Plan-Logik UND ein End-zu-Ende-Lauf mit echtem
+          `applyOpsDetailed` auf einem textidentischen `replace_section`).
+       7. 🔵 **Reihenfolge der ⚠️-Pille:** `turnPlan.notApplied` wurde
+          bisher VOR der Ergebnis-Schleife gepusht – die
+          "zurückgehalten"-Verweise auf eine Ziel-Op standen dadurch VOR
+          dem eigenen notApplied-Eintrag dieser Ziel-Op (Auslöser zuletzt
+          statt zuerst). Fix: der Push läuft jetzt NACH der gesamten
+          `for (const g of groupList)`-Schleife – reine
+          Anzeigereihenfolge in `describeOpItems()`/`buildOpsWarning()`,
+          keine Änderung an `turnPlan.notApplied` selbst.
+       8. 🔵 **Gegenprobe zu einem bestehenden Test ergänzt:** der Test
+          "keine Note bei delete_entry (### trifft ## Abschnitt)" bewies
+          bisher nur den Fall `applied:false` (Eintrag existiert gar
+          nicht) – das lässt offen, ob die fehlende Note wirklich am
+          Op-Typ liegt oder nur eine Nebenwirkung des ohnehin
+          scheiternden Skips ist (ein `applied:false`-Ergebnis hat laut
+          Vertrag NIE ein `note`-Feld). Neuer Test mit einem TATSÄCHLICH
+          existierenden Eintrag (`applied:true`) bestätigt: `note` bleibt
+          AUCH bei Erfolg `undefined`.
+       9. 🔵 **Zwei Pins in `tests/turnGuard.test.js` ergänzt/gefixt:**
+          (a) eine gehaltene Op, die selbst schon `applied:false` war
+          (eigener, unabhängiger Skip-Grund), bekommt trotzdem den
+          "zurückgehalten"-Grund – belegt, dass das Halten TYP-basiert
+          ist, nicht Ergebnis-basiert (der eigene Skip-Grund taucht im
+          `notApplied`-Eintrag NICHT mehr auf, er wird überschrieben,
+          nicht angehängt); (b) `holdReason()` mit `reason: undefined`
+          erzeugte bisher eine leere "()"-Klammer ("übersprungen ()") –
+          ECHTER (kleiner) Wortlaut-Fehler, hier beim Testschreiben
+          gefunden und behoben: `turnGuard.js#holdReason` setzt jetzt
+          `"ohne Grund"` als Fallback, wenn `reason` leer/nicht gesetzt
+          ist. Der bestehende "because:undefined"-Pin wurde auf den neuen
+          Wortlaut umgestellt, ein zusätzlicher, gezielter Pin belegt
+          NUR den Fallback (der alte Test deckte mehrere leere Felder
+          gleichzeitig ab und bewies den Fallback dadurch nicht
+          eindeutig).
+       - **Ein ECHTER, kleiner Wortlaut-Fehler beim Testschreiben
+         gefunden und behoben** (Fund 9b oben): `holdReason()` erzeugte
+         bei fehlendem `reason` eine leere Klammer ("übersprungen ()")
+         statt eines lesbaren Fallback-Texts – kein Datenverlust, aber
+         eine irreführende ⚠️-Meldung ohne jeden Aussagewert für das
+         Modell/den Nutzer. Alle anderen acht Findings waren bereits vom
+         Review als konkrete Fixes vorgegeben.
+       - **Tests:** `tests/turnGuard.test.js` um sechs neue Tests
+         erweitert (End-zu-Ende-Test für Fund 2, Fund 6 Plan-Logik-Pin,
+         Fund 6 End-zu-Ende-Pin, Fund 9a Typ-basiert-Pin, Fund 9b
+         Fallback-Pin, `because:undefined`-Pin auf neuen Wortlaut
+         umgestellt); `tests/anthropic.test.js` um einen Pin für Fund 5
+         erweitert; `tests/ops.resolver.test.js` um die Gegenprobe aus
+         Fund 8 erweitert. **Gesamt nach Nacharbeit Runde 3:** 2249 Tests
+         grün (7 neu: 5 in `tests/turnGuard.test.js`, 1 in
+         `tests/anthropic.test.js`, 1 in `tests/ops.resolver.test.js`),
+         Coverage Gesamt-Repo 92.38 % Statements / 88.23 % Branches /
+         91.09 % Funktionen / 94.77 % Zeilen (`turnGuard.js` isoliert:
+         weiterhin 100 % Statements/Funktionen/Zeilen, 97.91 % Branches –
+         derselbe einzelne, bewusst nicht eigens getestete
+         Defensiv-Fallback `g.results[idx] || {}` wie in Nacharbeit
+         Runde 2, unverändert praktisch unerreichbar). Version bleibt
+         `v7.53` (weiterhin uncommittet).
