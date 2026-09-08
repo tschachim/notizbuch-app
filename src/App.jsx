@@ -7,7 +7,14 @@ import {
 } from "lucide-react";
 
 import { applyOpsDetailed, dispHead, PLACEHOLDER_LINE, stripInboxPlaceholder } from "./lib/ops.js";
-import { planTurn } from "./lib/turnGuard.js";
+// v7.54 (Verify-then-Commit-Gate, Turn-Atomarität, DECISIONS #112): die
+// gesamte Entscheidungslogik (Phase 1-4, Verwerfungsregel, Override-Ops) lebt
+// in src/lib/turn.js/verify.js (reine Funktionen, siehe dortige Kopf-
+// kommentare) - App.jsx ruft sie nur noch auf und kümmert sich um I/O
+// (Commit/Rendering), siehe send()/commitPlannedGroups()/applyRejectedTurn()
+// unten.
+import { evaluateTurn, buildRejectWarning, overrideOpsFor, DESTRUCTIVE_OP_TYPES } from "./lib/turn.js";
+import { verifyTurn, sanitizeDiagFragment } from "./lib/verify.js";
 import { resolveMetaForDisplay, applyMetaResult, metaAfterError, bumpMetaCount, isStaleResponse } from "./lib/meta.js";
 import { applyMemoryOps, applyMemoryOpsDetailed } from "./lib/memory.js";
 import { diffLines, contextize } from "./lib/diff.js";
@@ -360,6 +367,189 @@ export function buildOpsInfo(items) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Override-Wortlaute (v7.54, Verify-then-Commit-Gate, DECISIONS #112)  */
+/* Reine Builder-Funktionen (wie buildOpsWarning/buildOpsInfo oben) für  */
+/* den Override-Knopf/die Override-Pille eines verworfenen Turns – die   */
+/* Entscheidungslogik selbst (rejected/reasons/finalOps) liegt in         */
+/* turn.js#evaluateTurn/overrideOpsFor, hier nur noch die Textbausteine   */
+/* für die UI (I/O-Schicht, Leitplanke 0.5). Exportiert für               */
+/* tests/appOps.test.js ("Pillen-Komposition v7.54").                    */
+/* ------------------------------------------------------------------ */
+
+// Kompakte Zusammenfassung je Gruppe ("«NB» (V2, V3)") für die
+// Override-Pille (Spec 4.5 "«Kurzform»") – bewusst NUR Name+Codes, nicht der
+// volle Diagnosetext (den kennt der Nutzer bereits aus der Verwerfungs-Pille
+// direkt darüber, kein Doppel-Feedback).
+export function overrideKurzform(plan) {
+  return (plan && Array.isArray(plan.reasons) ? plan.reasons : [])
+    .map((r) => sanitizeDiagFragment(r.name) + " (" + (r.codes || []).join(", ") + ")")
+    .join("; ");
+}
+
+// Label des Override-Knopfs (Spec 5.4/TURN-REGELN 5): hard-Gründe nennen die
+// Anzahl gelöschter Zeilen (0 → ohne Klammerzusatz), rein atomic-Gründe
+// bekommen den entschärften "Ohne Lösch-/Ersetz-Ops"-Wortlaut (K-🟡7 –
+// EIGENE ENTSCHEIDUNGEN: Override bei atomic NICHT deaktiviert, sondern
+// gefiltert), gemischte Turns nennen beides.
+//
+// Nacharbeit Runde 3 (🟡, hard+atomic in DERSELBEN Gruppe): "atomicReasons"
+// erfasst jetzt auch hard-Gründe mit gesetztem atomic-Flag (turn.js#
+// evaluateTurn berechnet (A) seit der Nacharbeit VOR dem hard-Kurzschluss) -
+// eine solche Gruppe bekommt automatisch die gemischte Beschriftung, weil
+// overrideOpsFor() bei ihr ebenfalls alle Lösch-/Ersetz-Ops herausfiltert.
+// Für die Zeilenzahl N zählt in diesem Fall NICHT die volle g.lostLines
+// (die bezieht sich auf die UNGEFILTERTEN finalOps), sondern der Verlust
+// NACH dem Filter (dieselbe Ops-Auswahl wie turn.js#overrideOpsFor, hier
+// lokal statt über das Plan-weite overrideOpsFor(plan) berechnet - das
+// würde bei den in tests/appOps.test.js verwendeten Minimal-Fixtures ohne
+// volle PlannedGroup-Form (kein "finalOps"/"before") werfen). Fehlen die
+// dafür nötigen Felder (Minimal-Fixture ohne echtes evaluateTurn-Ergebnis),
+// bleibt der Fallback auf g.lostLines.
+export function overrideButtonLabel(plan) {
+  const reasons = plan && Array.isArray(plan.reasons) ? plan.reasons : [];
+  if (!reasons.length) return "Trotzdem übernehmen";
+  const hardReasons = reasons.filter((r) => r.kind === "hard");
+  const atomicReasons = reasons.filter((r) => r.kind === "atomic" || r.atomic);
+  const lostFor = (r) => {
+    const g = (plan.groups || []).find((gr) => gr.nbId === r.nbId);
+    if (!g) return 0;
+    if (r.atomic && typeof g.before === "string" && Array.isArray(g.finalOps)) {
+      const overrideOps = g.finalOps.filter((o) => !(o && DESTRUCTIVE_OP_TYPES.has(o.type)));
+      const text = applyOpsDetailed(g.before, overrideOps).text;
+      return verifyTurn(g.before, text, overrideOps).stats.lostLines;
+    }
+    return g.lostLines || 0;
+  };
+  const n = hardReasons.reduce((s, r) => s + lostFor(r), 0);
+  if (hardReasons.length && atomicReasons.length) {
+    const names = atomicReasons.map((r) => sanitizeDiagFragment(r.name)).join(", ");
+    // Nacharbeit Runde 4 (🔵 Finding F): bei N=0 (z. B. weil der einzige
+    // Verlust aus der herausgefilterten Lösch-Op stammt, siehe Probe C in
+    // tests/appOps.test.js) KEINEN "löscht 0 Zeilen"-Zusatz zeigen - analog
+    // zum reinen hard-Zweig unten, der bei N=0 ebenfalls ohne
+    // Klammerzusatz bleibt.
+    const lossPart = n > 0 ? ", löscht " + n + " Zeilen" : "";
+    return "Trotzdem übernehmen (ohne Lösch-Ops in „" + names + "“" + lossPart + ")";
+  }
+  if (hardReasons.length) {
+    return n > 0 ? "Trotzdem übernehmen (löscht " + n + " Zeilen)" : "Trotzdem übernehmen";
+  }
+  return "Ohne Lösch-/Ersetz-Ops übernehmen";
+}
+
+// Pillentext NACH einem erfolgreichen Override (Spec 4.5/TURN-REGELN 6/7):
+// "conflict" = die Basisprüfung (docCache !== before) hat mitten in der
+// Commit-Schleife zugeschlagen (K-🟡6) – dann zählt NUR, was tatsächlich in
+// "savedNames" committet wurde, der Rest bleibt "nicht gespeichert" (kein
+// "ganz oder gar nicht"-Anspruch mehr, da bereits ein Teil-Commit lief).
+// "nothingSaved" (Nacharbeit Runde 1, 🟡 2): der Override lief OHNE Konflikt
+// durch, aber die verbleibenden (nicht heraus gefilterten) Ops haben nach
+// Anwendung keinen Unterschied zum Ausgangstext ergeben (z. B. ein
+// atomic-Grund, dessen einzige verbleibende Ziel-Op weiterhin an einem
+// Skip-Grund scheitert, siehe K-🟡2) – ohne diesen Fall würde die Pille
+// "übernommen" suggerieren, obwohl NICHTS committet wurde (weder Notizbuch
+// noch Gedächtnis).
+//
+// Nacharbeit Runde 4 (🟡 Finding C, Review-Fund): "allAtomic" wird NUR wahr,
+// wenn JEDER Reason kind:"atomic" trägt - eine Gruppe mit kind:"hard" UND
+// gesetztem atomic-Flag (siehe turn.js#evaluateTurn, Nacharbeit Runde 3)
+// machte "allAtomic" damit IMMER false, obwohl overrideOpsFor() für sie
+// GENAUSO alle Lösch-/Ersetz-Ops herausfiltert wie bei einem reinen
+// atomic-Grund. Die Pille zeigte trotzdem den REINEN "trotz Prüfhinweis
+// übernommen"-Wortlaut, OHNE den Hinweis, dass Lösch-/Ersetz-Ops in dieser
+// Gruppe gar nicht mitgelaufen sind - der Text geht als SYSTEM-HINWEIS in
+// die Modell-History (anthropic.js#sanitizeWarningForHistory) und hätte das
+// Modell glauben lassen können, die Löschung sei vollzogen worden, obwohl
+// delete_entry/delete_section/replace_*/rewrite herausgefiltert wurden.
+// Fix: "anyAtomic" erkennt zusätzlich hard+atomic-Reasons; ist der Plan
+// GEMISCHT (nicht allAtomic, aber mindestens ein atomic-Anteil), nennt ein
+// zusätzlicher Halbsatz die betroffenen Notizbücher ("ohne Lösch-/Ersetz-Ops
+// in «NB»") - exakt wie overrideButtonLabel() es fürs Knopf-Label bereits
+// tut. Nacharbeit Runde 5 (🟡 N2, Review-Fund): der Filter hieß hier bisher
+// "r.atomic && r.kind === 'hard'" (matcht NUR die Runde-3-Kombination
+// hard+atomic in DERSELBEN Gruppe) statt wie bei "atomicReasons" oben
+// "r.kind === 'atomic' || r.atomic" - bei ZWEI GETRENNTEN Notizbüchern
+// (eines rein hard, eines rein atomic, siehe overrideButtonLabel-Test
+// "gemischt (hard + atomic in verschiedenen Notizbüchern)") lieferte der
+// alte Filter eine LEERE Namensliste ("... in ): NB A (V3-R); NB B (A)"),
+// weil der reine atomic-Grund kein "kind==='hard'" trägt. Fix: dieselbe
+// Bedingung wie "atomicReasons" - reine kind:"atomic"-Gründe brauchen den
+// Zusatz zwar nicht (siehe allAtomic-Zweig, der bei EINEM einzigen
+// hard+reinen-atomic-Mix aber trotzdem NICHT allAtomic ist), tragen aber
+// korrekt den betroffenen Notizbuch-Namen bei.
+export function buildOverrideWarning(plan, opts = {}) {
+  const kurzform = overrideKurzform(plan);
+  if (opts.conflict) {
+    const saved = (opts.savedNames || []).map((n) => "„" + sanitizeDiagFragment(n) + "“").join(", ");
+    const unsaved = (opts.unsavedNames || []).map((n) => "„" + sanitizeDiagFragment(n) + "“").join(", ");
+    return "⚠️ Teilweise übernommen (" + saved + ") – " + unsaved +
+      " nicht gespeichert; nur den fehlenden Teil neu erfassen, nicht alles erneut senden";
+  }
+  const reasons = plan && Array.isArray(plan.reasons) ? plan.reasons : [];
+  const allAtomic = reasons.length > 0 && reasons.every((r) => r.kind === "atomic");
+  const anyAtomic = reasons.some((r) => r.kind === "atomic" || r.atomic);
+  const mixedNote = !allAtomic && anyAtomic
+    ? " – ohne Lösch-/Ersetz-Ops in " +
+      reasons.filter((r) => r.kind === "atomic" || r.atomic).map((r) => "„" + sanitizeDiagFragment(r.name) + "“").join(", ")
+    : "";
+  if (opts.nothingSaved) {
+    const prefix = allAtomic
+      ? "⚠️ Ohne Lösch-/Ersetz-Ops übernommen (Nutzer-Entscheidung)"
+      : "⚠️ Änderung trotz Prüfhinweis übernommen (Nutzer-Entscheidung" + mixedNote + ")";
+    return prefix + " – die verbleibenden Ops haben nicht gewirkt, nichts gespeichert: " + kurzform;
+  }
+  return allAtomic
+    ? "⚠️ Teil ohne Lösch-/Ersetz-Ops übernommen (Nutzer-Entscheidung): " + kurzform
+    : "⚠️ Änderung trotz Prüfhinweis übernommen (Nutzer-Entscheidung" + mixedNote + "): " + kurzform;
+}
+
+/* ------------------------------------------------------------------ */
+/* DiffRows (v7.54): aus dem Historie-Panel extrahiert (vorher inline,   */
+/* Z. 3760-3775 in v7.53) - wird jetzt ZWEI Stellen geteilt: dem          */
+/* Historie-Panel (Vorgänger-Commit vs. Commit) UND der neuen             */
+/* Override-Diff-Vorschau eines verworfenen Turns (Phase-1-Snapshot vs.   */
+/* dem Text, den der Override committen würde, siehe overrideTextFor      */
+/* unten). diffLines() liefert bei Gleichheit/Fehler null - dann          */
+/* schlichtes <pre> statt einer leeren Diff-Liste.                        */
+/* ------------------------------------------------------------------ */
+// Override-Vorschau/-Commit-Eingabe (v7.54, Spec 4.4/5.4/5.5, K-🟡6/7): EIN
+// gemeinsamer Helfer für BEIDE Stellen, die "was würde der Override
+// committen" brauchen - die Diff-Vorschau (Rendering unten, oldText=before/
+// newText=text) UND applyRejectedTurn() (die "groups" für
+// commitPlannedGroups) - dieselbe Berechnung an zwei Stellen zu duplizieren
+// hätte bedeutet, dass Vorschau und tatsächlicher Commit bei einer künftigen
+// Änderung leise auseinanderlaufen könnten (die Spezifikation verlangt
+// ausdrücklich "Vorschau == Commit"). Reine Funktion (turn.js#overrideOpsFor
+// + ops.js#applyOpsDetailed, beide bereits importiert), kein React-Zustand.
+function buildOverrideGroups(plan) {
+  const map = overrideOpsFor(plan);
+  return (plan && Array.isArray(plan.groups) ? plan.groups : []).map((g) => {
+    const finalOps = map.get(g.nbId) || g.finalOps;
+    const detailed = applyOpsDetailed(g.before, finalOps);
+    return { nbId: g.nbId, name: g.name, before: g.before, finalOps, text: detailed.text, results: detailed.results };
+  });
+}
+
+function DiffRows({ oldText, newText }) {
+  const d = diffLines(oldText, newText);
+  if (!d) return <pre className="font-mono text-xs text-slate-600 whitespace-pre-wrap">{newText}</pre>;
+  return contextize(d).map((row, i) => {
+    if (row.t === "gap") return <div key={i} className="font-mono text-xs text-slate-300 px-1">···</div>;
+    if (row.t === "info") return <div key={i} className="font-mono text-xs text-slate-400 px-1">{row.l}</div>;
+    const cls =
+      row.t === "a" ? "bg-emerald-50 text-emerald-800"
+      : row.t === "d" ? "bg-rose-50 text-rose-700"
+      : "text-slate-400";
+    const sign = row.t === "a" ? "+ " : row.t === "d" ? "− " : "  ";
+    return (
+      <div key={i} className={"font-mono text-xs whitespace-pre-wrap px-1 " + cls}>
+        {sign}{row.l}
+      </div>
+    );
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /* Notizbuch-Dropdown (v7.2, Nutzerwunsch)                             */
 /* Ersetzt das native <select> im Header: natives select kann keine    */
 /* Icons in den Optionen zeigen. Trigger-Button + aufklappende Liste   */
@@ -588,6 +778,58 @@ export default function NotizbuchApp() {
   const [inputExpanded, setInputExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [busyLabel, setBusyLabel] = useState("strukturiert …");
+  // v7.54 (Verify-then-Commit-Gate, DECISIONS #112): der zuletzt verworfene
+  // Turn (falls einer offen ist) - { id, plan, memoryOps, commitMsg,
+  // snapshot: Map<nbId, before> }. NICHT in serializeState (rein lokaler,
+  // nicht-persistierter React-State, siehe Spec 5.4/GEÄNDERTE PINS): nur die
+  // zugehörige Assistent-Nachricht trägt den harmlosen "rejectedTurnId"-
+  // Marker (Feld in chat[], wandert wie commit/warning nach state.json,
+  // steuert aber ohne den lokalen State keine Buttons mehr - nach einem
+  // Reload sind Diff/Override-Knöpfe also automatisch weg, siehe C33).
+  // "snapshot" hält den Phase-1-"before"-Text je betroffenem Notizbuch für
+  // die Invalidierungs-Prüfung im Remote-Refresh (K-🟡6, siehe dort) und für
+  // die Basisprüfung im Override (docCache.current[nbId] === before).
+  const [rejectedTurn, setRejectedTurnState] = useState(null);
+  // Zwei Stufen (Spec 5.4/TURN-REGELN 5): "diffShown" ist der aktuelle
+  // Sichtbarkeits-Toggle des "Diff ansehen"-Knopfs, "diffOpened" merkt sich
+  // (für die Dauer DIESES rejectedTurn), ob die Diff-Ansicht schon MINDESTENS
+  // einmal geöffnet wurde - der Override-Knopf bleibt bis dahin disabled
+  // (K-🟡7: Nutzer soll erst sehen, was er übernimmt), bleibt aber aktiv,
+  // wenn die Diff-Ansicht danach wieder zugeklappt wird.
+  const [rejectedDiffShown, setRejectedDiffShown] = useState(false);
+  const [rejectedDiffOpened, setRejectedDiffOpened] = useState(false);
+  const rejectedTurnRef = useRef(null); // Stale-Closure-Schutz (siehe unten)
+  // Setzt/leert rejectedTurn UND setzt die beiden Diff-Toggles synchron
+  // zurück - jeder Aufrufer (send()-Start, Invalidierungspunkte, ein neu
+  // gesetzter Turn) soll NIE vergessen können, die Toggles mitzuräumen.
+  const setRejectedTurn = useCallback((val) => {
+    rejectedTurnRef.current = val;
+    setRejectedTurnState(val);
+    setRejectedDiffShown(false);
+    setRejectedDiffOpened(false);
+  }, []);
+  // v7.54 Nacharbeit Runde 1 (🔵 5): buildOverrideGroups(plan) wendet je
+  // Gruppe applyOpsDetailed() an (plus diffLines() beim Rendern) - ohne
+  // Memoisierung liefe das bei geöffneter Diff-Ansicht bei JEDEM Render neu
+  // (z. B. jedem Tastendruck im Eingabefeld), spürbar bei einem großen
+  // rewrite-Dokument. applyRejectedTurn() ruft buildOverrideGroups() separat
+  // (einmalig pro Klick, kein Render-Hot-Path) - Vorschau und Commit bleiben
+  // trotzdem IDENTISCH, weil beide auf demselben "rejectedTurn.plan" beruhen
+  // (Grundgarantie unverändert, siehe buildOverrideGroups-Kopfkommentar).
+  const overrideGroups = useMemo(
+    () => (rejectedTurn ? buildOverrideGroups(rejectedTurn.plan) : []),
+    [rejectedTurn]
+  );
+  // Nacharbeit Runde 5 (🔵 N4, Review-Fund): derselbe Grund wie beim
+  // "overrideGroups"-Memo oben - overrideButtonLabel() ruft für jede
+  // atomic-Gruppe applyOpsDetailed() UND verifyTurn() auf (siehe dortiger
+  // "lostFor"-Kommentar), im Render-Pfad des Override-Knopf-Labels lief das
+  // bisher OHNE Memo bei JEDEM Render neu (z. B. jedem Tastendruck im
+  // Eingabefeld, solange ein verworfener Turn angezeigt wird).
+  const overrideLabel = useMemo(
+    () => (rejectedTurn ? overrideButtonLabel(rejectedTurn.plan) : ""),
+    [rejectedTurn]
+  );
   const [view, setView] = useState("chat");
   const [notesDirty, setNotesDirty] = useState(false);
   const [chatDirty, setChatDirty] = useState(false);
@@ -1212,6 +1454,102 @@ export default function NotizbuchApp() {
     }
   }, []);
 
+  /* ---------- Notizbuch-Gruppen eines NICHT verworfenen Turns committen ---------- */
+  // v7.54 (Verify-then-Commit-Gate, DECISIONS #112, Spec 5.3): Auslagerung des
+  // bisherigen Ergebnis-Teils der Drei-Phasen-Schleife (v7.53 Z. 1690-1740) -
+  // die Entscheidung, WAS committet wird ("finalOps"/"text" je Gruppe),
+  // steht bereits in "groups" (turn.js#evaluateTurn-Ergebnis bzw. die per
+  // overrideOpsFor() gefilterte Override-Variante, siehe applyRejectedTurn
+  // unten); diese Funktion kümmert sich NUR noch um das I/O (Commit) je
+  // Gruppe, den Live-Cache-Race-Schutz (v7.53 Nacharbeit Runde 3) UND die
+  // Basisprüfung des Overrides (K-🟡6).
+  //
+  // "groups": PlannedGroup[] mit { nbId, name, before, finalOps, text,
+  // results }. "opts.requireIdenticalBase" (Override-Pfad, Spec 5.3/K-🟡6):
+  // NUR committen, wenn der Live-Cache-Stand exakt dem Phase-1-"before"
+  // entspricht - KEIN Re-Apply, KEIN Re-Gate (die Diff-Vorschau muss exakt
+  // dem entsprechen, was committet wird). Im Normalpfad dagegen wird bei
+  // einer Abweichung (toggleTask-Race) NEU angewendet und per verifyTurn()
+  // gegengeprüft - eine Hard-Invariante auf dem NEUEN Zwischenstand bricht
+  // die Schleife ab (Konflikt-Banner), statt eine potenziell destruktive
+  // Überraschung zu committen.
+  //
+  // Rückgabe { changed, conflict, notApplied2, infos2 }: "notApplied2"/
+  // "infos2" sind IMMER frisch aus den TATSÄCHLICH committeten (bzw. beim
+  // No-op unveränderten) Ergebnissen dieser Funktion gebildet - anders als
+  // plan.notApplied/plan.infos (die auf dem Phase-1-"before" beruhen und nur
+  // für die Verwerfungs-Pille/den Override-Kurzform-Text gebraucht werden,
+  // siehe evaluateTurn/turn.js) spiegeln sie den tatsächlichen Commit wider.
+  const commitPlannedGroups = useCallback(async (cfg, groups, commitMsg, opts = {}) => {
+    const requireIdenticalBase = !!opts.requireIdenticalBase;
+    const changed = []; // { id, name, ops }
+    const notApplied2 = [];
+    const infos2 = [];
+    let conflict = false;
+    for (const g of groups) {
+      const base = docCache.current[g.nbId] || "";
+      let text = g.text;
+      let results = g.results;
+      if (base !== g.before) {
+        if (requireIdenticalBase) {
+          // Override-Pfad (K-🟡6): die Vorschau (DiffRows) beruhte auf
+          // "g.before" - ein inzwischen abweichender Live-Cache-Stand darf
+          // NIE blind überschrieben werden (kein Re-Apply/Re-Gate).
+          setBanner({
+            kind: "warn",
+            text: "Notizbuch „" + g.name + "“ hat sich seit dem Prüfhinweis geändert – bitte erneut senden.",
+          });
+          conflict = true;
+          break;
+        }
+        // Normalpfad (v7.53 Nacharbeit Runde 3, Review-Fund 🟡 1): erneut
+        // anwenden UND gegen den NEUEN Zwischenstand verifizieren - ein
+        // zwischenzeitlicher toggleTask()-Schreibzugriff darf weder ein
+        // frisch gesetztes Häkchen stillschweigend überschreiben noch (neu
+        // in v7.54) eine Hard-Invariante auf dem neuen Stand auslösen.
+        //
+        // Nacharbeit Runde 5 (🔵 N5, Review-Fund): der bisherige direkte
+        // applyOpsDetailed()+verifyTurn()-Aufruf prüfte NUR v.hard, NICHT die
+        // Atomaritätsregel (A, evaluateTurn#reasons) - ein Skip UND eine
+        // gewirkte destruktive Op IN DERSELBEN Gruppe auf dem NEUEN
+        // Zwischenstand (das #65-Muster) hätte auf diesem speziellen
+        // Re-Apply-Race-Pfad unbemerkt durchrutschen können, obwohl derselbe
+        // Fall im Normalpfad (Phase 4 in evaluateTurn) längst erkannt wird.
+        // Fix: evaluateTurn() für die EINZELNE Gruppe wiederverwenden statt
+        // die Prüfung zu duplizieren - bei WENIGER ALS 2 Gruppen ist
+        // planTurn() (turnGuard.js#planCrossNotebookHold) ohnehin ein No-op
+        // ("leere Map bei <2 Gruppen ... wenn nirgends eine TARGET_WRITE-Op
+        // scheitert", siehe dortiger Kommentar) - "text"/"results" bleiben
+        // dadurch IDENTISCH zum bisherigen einfachen applyOpsDetailed-Aufruf,
+        // "rejected" deckt jetzt zusätzlich (A) mit ab.
+        const singlePlan = evaluateTurn([{ nbId: g.nbId, name: g.name, ops: g.finalOps, before: base }]);
+        if (singlePlan.rejected) {
+          setBanner({
+            kind: "warn",
+            text: "Notizbuch „" + g.name + "“ hat sich während des Speicherns geändert – Änderung nicht gespeichert, bitte erneut senden.",
+          });
+          conflict = true;
+          break;
+        }
+        text = singlePlan.groups[0].text;
+        results = singlePlan.groups[0].results;
+      }
+      for (const r of results) {
+        if (!r.applied) notApplied2.push({ type: r.type, heading: r.heading, notebook: g.name, reason: r.reason });
+        else if (r.note) infos2.push({ type: r.type, heading: r.heading, notebook: g.name, reason: r.note });
+      }
+      // Wie v7.53 (Z. 1710-1724): dokumentweite Selbstheilung NACH dem
+      // Anwenden, VOR dem Commit.
+      const applied = linkifyFilePaths(renumberCitations(text));
+      if (applied === base) continue;
+      const toCommit = stripInboxPlaceholder(applied);
+      const ok = await commitDocNb(cfg, g.nbId, toCommit, commitMsg);
+      if (!ok) { conflict = true; break; } // commitDocNb hat bereits ein Banner gesetzt
+      changed.push({ id: g.nbId, name: g.name, ops: g.finalOps });
+    }
+    return { changed, conflict, notApplied2, infos2 };
+  }, [commitDocNb]);
+
   /* ---------- Bilder nachladen (aus dem Daten-Repo) ---------- */
   useEffect(() => {
     if (!loaded || !connected) return;
@@ -1325,6 +1663,18 @@ export default function NotizbuchApp() {
           if (en.sha && en.sha === cur) continue; // Blob-SHA unverändert
           const f = await ghGetFile(cfg, en.path);
           if (!f || f.sha === cur) continue;
+          // v7.54 (DECISIONS #112, Spec 5.4, K-🟡6): nur invalidieren, wenn
+          // DIESES Notizbuch überhaupt Teil des offenen verworfenen Turns
+          // ist UND sich sein Text seit dem Phase-1-Snapshot TATSÄCHLICH
+          // geändert hat - ein Refresh anderer, unbeteiligter Notizbücher
+          // soll die Diff-/Override-Vorschau nicht unnötig wegräumen.
+          if (
+            rejectedTurnRef.current &&
+            rejectedTurnRef.current.snapshot.has(en.id) &&
+            f.text !== rejectedTurnRef.current.snapshot.get(en.id)
+          ) {
+            setRejectedTurn(null);
+          }
           docShas.current[en.id] = f.sha;
           docCache.current[en.id] = f.text;
           const name = nameFromDoc(f.text, en.id);
@@ -1507,6 +1857,12 @@ export default function NotizbuchApp() {
     if ((!text && !pendingImg && !pendingFile) || busy || archiving) return;
     if (!connected || !settingsRef.current) { setShowSettings(true); return; }
     const cfg = settingsRef.current;
+    // v7.54 (Verify-then-Commit-Gate, DECISIONS #112, Spec 5.1 Schritt 1):
+    // ein neuer Turn beginnt IMMER ohne einen noch offenen verworfenen Turn -
+    // der Nutzer hat mit dem Senden effektiv weitergemacht, statt Diff
+    // anzusehen/zu übernehmen (die Pille selbst bleibt als Historie stehen,
+    // nur die Buttons verschwinden, siehe rejectedTurnId-Rendering unten).
+    if (rejectedTurnRef.current) setRejectedTurn(null);
 
     const img = pendingImg;
     const pf = pendingFile;
@@ -1585,23 +1941,38 @@ export default function NotizbuchApp() {
       // (Kollisions-Umleitung/implizite Anlage, siehe applyOpsDetailed
       // weiter unten) – gleiche Item-Form wie notApplied, damit
       // sanitizeWarnLabel/describeOpItems (buildOpsInfo) unverändert greift.
-      // NUR Notizbuch-Ops (die Ergebnis-Schleife weiter unten) füllen diese
-      // Liste – memory_*-Ops haben kein note-Feld (applyMemoryOpsDetailed
-      // liefert das nicht, siehe lib/memory.js).
+      // NUR Notizbuch-Ops füllen diese Liste – memory_*-Ops haben kein
+      // note-Feld (applyMemoryOpsDetailed liefert das nicht, lib/memory.js).
       const infos = [];
 
       // Ops splitten (v7.16): memory_* wirken auf das globale, notizbuch-
       // übergreifende Gedächtnis (eigene Datei/eigener Commit, siehe
       // commitMemory) – UNABHÄNGIG von einem etwaigen SHA-Konflikt beim
-      // Notizbuch weiter unten (anderes Ziel, anderer Commit). Reihenfolge
-      // bleibt je Gruppe erhalten (siehe splitOps).
+      // Notizbuch (anderes Ziel, anderer Commit). Reihenfolge bleibt je
+      // Gruppe erhalten (siehe splitOps).
+      // v7.54 (Verify-then-Commit-Gate, DECISIONS #112 E4, Spec 5.2): DER
+      // commitMemory-AUFRUF WANDERT VON HIER (v7.53: sofort nach splitOps,
+      // Z. 1593-1603) NACH UNTEN, HINTER die Notizbuch-Entscheidung - ein
+      // verworfener Turn (siehe evaluateTurn/plan.rejected unten) soll das
+      // Gedächtnis NICHT halb wandern lassen (Überführen-Muster: memory_*
+      // UND die zugehörige Notizbuch-Op stehen im selben ops-Array, sollen
+      // also auch gemeinsam scheitern oder gemeinsam gelingen). Erhalten
+      // bleibt: bei SHA-Konflikt UND bei reinen Skips läuft commitMemory
+      // trotzdem (C19 unverändert, siehe unten).
       const { memoryOps, notebookOps } = splitOps(res.ops);
-      if (memoryOps.length) {
-        const memResult = await commitMemory(cfg, memoryOps);
-        memoryUpdated = memResult.committed;
-        for (const na of memResult.notApplied) notApplied.push(na);
-      }
 
+      // v7.54 (Verify-then-Commit-Gate, DECISIONS #112, Spec 5.1 Schritt 4):
+      // evaluateTurn() (src/lib/turn.js) übernimmt die komplette v7.53
+      // Drei-Phasen-Logik (Phase 1 applyOpsDetailed je Gruppe, Phase 2
+      // turnGuard.js#planTurn UNVERÄNDERT als Teilregel, Phase 3 Neu-
+      // Anwendung der gefilterten Ops nach einem Hold) UND ergänzt Phase 4
+      // (verifyTurn je Gruppe, src/lib/verify.js) sowie die Verwerfungs-
+      // Entscheidung (4.3, TURN-REGELN 1) - reine, ohne React/GitHub-API
+      // testbare Logik (tests/turn.test.js/tests/verify.test.js/
+      // tests/replay.test.js). App.jsx liefert nur noch den REINEN
+      // Phase-1-Snapshot je Ziel-Notizbuch ("before" = docCache.current[nbId]
+      // JETZT, vor jedem Commit dieses Turns).
+      let plan = null;
       if (notebookOps.length) {
         // Auto-Titel-Auflösung (v7.12 Teil B, Auftrag "automatische
         // Titel-Ermittlung überall"): NUR das neue op.content-Fragment läuft
@@ -1629,221 +2000,170 @@ export default function NotizbuchApp() {
           groups.get(target.id).push(op);
         }
 
-        // v7.53 Teil 3 (Cross-Notizbuch-Turn-Guard, DECISIONS #111
-        // Entscheidung 5): v7.53 (Stufe 2) macht Ziel-Ops auch MIT korrekt
-        // gesetztem chapter in bestimmten Fällen (wrong_level/title/
-        // R-CONTENT/ambiguous …) zu einem Skip – ohne Guard würde eine
-        // BEREITS erfolgreiche Quell-Löschung in Notizbuch X trotzdem
-        // committet, obwohl die zugehörige Ziel-Op in Notizbuch Y an einer
-        // dieser Invarianten scheitert (#65-Muster: Inhalt landet nur noch
-        // in der Git-Historie). Drei Phasen statt der bisherigen einen
-        // Schleife:
-        // (1) applyOpsDetailed je Gruppe REIN auf dem docCache-Stand
-        //     ("before"), noch KEIN Commit – Ergebnis ist der Plan-Eingabe
-        //     für Phase 2.
-        // (2) turnGuard.js#planTurn ermittelt ÜBER ALLE Gruppen hinweg, ob
-        //     irgendwo eine Ziel-Op (append_to_section/replace_section/
-        //     append_to_chapter) gescheitert ist – dann werden in JEDER
-        //     ANDEREN Gruppe die potenziell destruktiven Ops (delete_section/
-        //     delete_entry/delete_chapter/replace_section) zurückgehalten
-        //     UND je ein eigener ⚠️-notApplied-Eintrag ("zurückgehalten – …")
-        //     erzeugt.
-        // (3) NUR Gruppen mit einem tatsächlichen Hold wenden applyOpsDetailed
-        //     ERNEUT an – mit der gefilterten Op-Liste. Commit-Basis ist
-        //     dabei ab v7.53 Nacharbeit Runde 3 (Review-Fund 🟡 1) NICHT der
-        //     Phase-1-Snapshot "before", sondern der LIVE-Cache-Stand
-        //     ("base" = docCache.current[g.nbId] zum Zeitpunkt DIESER
-        //     Gruppen-Iteration): zwischen den Commit-Awaits der vorherigen
-        //     Gruppen dieser Schleife kann toggleTask() (Checkboxen sind
-        //     während busy nicht gesperrt) bereits synchron in
-        //     docCache.current[activeNb] geschrieben haben – ein Commit auf
-        //     dem veralteten Snapshot würde ein zwischenzeitlich gesetztes
-        //     Häkchen unbemerkt überschreiben. Weicht "base" vom Phase-1-
-        //     "before" ab, wird ebenfalls neu angewendet (auch OHNE Hold);
-        //     für die ERSTE Gruppe ist vor dem ersten await noch nichts
-        //     passiert, "base" ist dort also IMMER identisch zu "before".
-        //     notes/infos/der Commit-Text stammen ab hier IMMER aus diesem
-        //     finalen Ergebnis; ohne Hold UND ohne zwischenzeitliche Änderung
-        //     ist finalOps === die ursprüngliche Op-Liste, Phase 1 IST
-        //     bereits Phase 3 (keine unnötige zweite Anwendung). Die
-        //     bestehende Reihenfolge (Ziel-Gruppe vor Quell-Gruppe, Map-
-        //     Einfügereihenfolge) UND der SHA-Konflikt-Pfad bleiben
-        //     unverändert – dieselbe "groups"-Map wird nur einmal in ein
-        //     Array überführt und danach wie bisher der Reihe nach
-        //     verarbeitet. rewrite wird vom Guard bewusst NIE zurückgehalten
-        //     (siehe turnGuard.js) – ein offenes Restrisiko bis Vorschlag B.
-        const groupList = Array.from(groups, ([nbId, ops]) => {
+        const groupsInput = Array.from(groups, ([nbId, ops]) => {
           const nb = notebooksRef.current.find((n) => n.id === nbId);
-          const before = docCache.current[nbId] || "";
-          // v7.21: applyOpsDetailed statt applyOps – liefert zusätzlich pro
-          // Op einen Grund, falls sie NICHTS verändert hat (unbekannter Typ,
-          // Abschnitt/Kapitel nicht gefunden, leerer content). Text-Ausgabe
-          // ist BYTE-IDENTISCH zu applyOps (reiner Wrapper, siehe ops.js).
-          return { nbId, name: nb ? nb.name : nbId, ops, before, detailed: applyOpsDetailed(before, ops) };
+          return { nbId, name: nb ? nb.name : nbId, ops, before: docCache.current[nbId] || "" };
         });
-        const turnPlan = planTurn(
-          groupList.map((g) => ({ nbId: g.nbId, name: g.name, ops: g.ops, results: g.detailed.results }))
-        );
+        plan = evaluateTurn(groupsInput);
+      }
 
-        const changed = []; // { id, name, ops }
-        let conflict = false;
-        for (const g of groupList) {
-          const finalOps = turnPlan.filteredOps.get(g.nbId) || g.ops;
-          // v7.53 Nacharbeit Runde 3 (Review-Fund 🟡 1): "base" ist der
-          // LIVE-Cache-Stand JETZT, nicht der Phase-1-Snapshot "g.before"
-          // (siehe Kommentar im Drei-Phasen-Block oben) – für die erste
-          // Gruppe ist base === g.before immer wahr (noch kein await
-          // durchlaufen), ab der zweiten Gruppe kann sich das durch einen
-          // zwischenzeitlichen toggleTask()-Schreibzugriff unterscheiden.
-          const base = docCache.current[g.nbId] || "";
-          const detailed = (turnPlan.holds.has(g.nbId) || base !== g.before)
-            ? applyOpsDetailed(base, finalOps)
-            : g.detailed;
-          for (const r of detailed.results) {
-            if (!r.applied) notApplied.push({ type: r.type, heading: r.heading, notebook: g.name, reason: r.reason });
-            // v7.52 (ℹ️-Kanal, DECISIONS #106): r.note ist NUR bei
-            // applied:true gesetzt (siehe ops.js#applyOpsDetailed) – der
-            // else-Zweig hier ist also implizit auf "applied:true UND
-            // note vorhanden" beschränkt.
-            else if (r.note) infos.push({ type: r.type, heading: r.heading, notebook: g.name, reason: r.note });
-          }
-          // Nach dem Anwenden dokumentweit durchnummerieren: neue Quellen-
-          // Fußnoten kommen als [0](url)-Platzhalter aus den ops.
-          // linkifyFilePaths (v7.31) läuft NACH renumberCitations (unkritisch:
-          // CITE_LINK_RE/renumberCitations bleiben strikt http(s)-only,
-          // siehe markdown.jsx – ein file:-Link kann dort nie ins Spiel
-          // kommen) und VOR dem Commit weiter unten. Wie renumberCitations
-          // wirkt es auf das GESAMTE Dokument, nicht nur den neuen op-
-          // Ausschnitt (anders als resolveProviderLinkTitles oben) – ein
-          // bereits im Bestand vorhandener, noch nicht verlinkter absoluter
-          // Pfad wird also bei JEDEM Chat-Turn mit-verlinkt, der irgendeine
-          // Op für dieses Notizbuch anwendet (self-healing, gleiche
-          // Philosophie wie resolveProviderLinkTitles im Editor-Pfad unten,
-          // siehe DECISIONS). linkifyFilePaths wirft laut eigenem Vertrag
-          // nie und ist idempotent (siehe filelinks.js).
-          const applied = linkifyFilePaths(renumberCitations(detailed.text));
-          // v7.53 Nacharbeit Runde 3 (Review-Fund 🟡 1): Vergleich gegen
-          // "base" (Live-Cache), NICHT gegen den Phase-1-Snapshot "g.before"
-          // – "detailed" wurde oben ja bereits auf "base" berechnet, sobald
-          // die beiden auseinanderliefen.
-          if (applied === base) continue;
-          // v7.22 (Review-Fund 🟡): Anlage-Platzhalter erst NACH einer
-          // bereits feststehenden echten Änderung entfernen (siehe "applied
-          // === base"-Ausstieg oben) – ein reiner Platzhalter-Wegfall OHNE
-          // jede sonstige Änderung wird NIE für sich allein committet (kein
-          // ungefragter Commit). stripInboxPlaceholder ist idempotent, kostet
-          // bei fehlendem Platzhalter also nichts.
-          const toCommit = stripInboxPlaceholder(applied);
-          const ok = await commitDocNb(cfg, g.nbId, toCommit, res.commit || "Aktualisierung");
-          if (!ok) { conflict = true; break; }
-          changed.push({ id: g.nbId, name: g.name, ops: finalOps });
-        }
-        // v7.53 Nacharbeit Runde 3 (Review-Fund 🔵 7): ERST NACH der
-        // obigen Ergebnis-Schleife pushen – die auslösende Ziel-Op (ihr
-        // eigener notApplied-Eintrag aus "detailed.results" IHRER eigenen
-        // Gruppe, s. o.) steht dadurch VOR den "zurückgehalten"-Verweisen
-        // auf sie in der ⚠️-Pille (Auslöser zuerst, siehe describeOpItems/
-        // buildOpsWarning – reine Anzeigereihenfolge, keine Logikänderung
-        // an turnPlan.notApplied selbst).
-        for (const na of turnPlan.notApplied) notApplied.push(na);
-        // v7.21: Das Modell kündigte per commit-Feld eine Änderung an, aber
-        // KEIN Notizbuch wurde tatsächlich verändert (alle Ops in dieser
-        // Gruppe waren wirkungslos) – genau der Live-Befund ("mehrfach als
-        // erledigt angekündigt, nichts passiert"). NUR relevant außerhalb
-        // eines SHA-Konflikts (der hat seine eigene, bereits aussagekräftige
-        // Fehlermeldung, siehe unten).
-        if (!conflict && res.commit && !changed.length) {
-          notApplied.push({ reason: "Commit angekündigt, aber keine Änderung wirksam geworden" });
-        }
-        if (conflict) {
-          // SHA-Konflikt. Achtung: vorherige Notizbücher der Schleife können
-          // bereits committet sein – Teilerfolg ehrlich abbilden, damit ein
-          // erneutes Senden keine Dubletten erzeugt.
-          if (changed.some((c) => c.id === activeNbRef.current)) {
-            setDoc(docCache.current[activeNbRef.current]);
-          }
-          if (!changed.length) {
-            setInput((prev) => (prev.trim() ? prev : text));
-            if (img) setPendingImg((prev) => prev || img);
-          }
-          const saved = changed.map((c) => c.name);
-          const aMsg = {
-            role: "assistant",
-            error: true,
-            ts: Date.now(),
-            // Ein bereits erfolgreich geschriebenes Gedächtnis bleibt gültig,
-            // auch wenn der Notizbuch-Teil dieses Turns konfliktet – beide
-            // Ziele sind unabhängige Dateien/Commits (siehe oben).
-            memory: memoryUpdated || undefined,
-            // v7.21: bereits gesammelte notApplied-Funde (z. B. aus den
-            // Gedächtnis-Ops oder aus VOR dem Konflikt erfolgreich
-            // durchlaufenen Notizbuch-Gruppen) bleiben auch im Konflikt-Fall
-            // sichtbar – teilweiser Erfolg soll ehrlich abgebildet werden.
-            warning: buildOpsWarning(notApplied) || undefined,
-            // v7.52 (ℹ️-Kanal, DECISIONS #106): wie bei warning oben bleibt
-            // ein bereits vor dem Konflikt gesammelter Hinweis sichtbar –
-            // bewusst akzeptierter Historie-Verlust wie bei warning (diese
-            // Nachricht trägt error:true und wird beim nächsten Turn aus der
-            // an das Modell gesendeten History gefiltert, siehe
-            // lib/anthropic.js#callClaude), der NUTZER sieht ihn trotzdem.
-            opsInfo: buildOpsInfo(infos) || undefined,
-            text: saved.length
-              ? "Teilweise gespeichert (" + saved.join(", ") + "). Ein weiteres Notizbuch wurde " +
-                "parallel geändert und NICHT gespeichert – bitte nur den fehlenden Teil neu erfassen " +
-                "(nicht die ganze Nachricht erneut senden, sonst entstehen Dubletten)."
-              : "Ein Notizbuch wurde zwischenzeitlich auf einem anderen Gerät geändert – " +
-                "ich habe den neuen Stand geladen und nichts überschrieben. " +
-                "Deine Nachricht steht wieder im Eingabefeld, bitte einfach noch einmal senden.",
-          };
-          setChat([...chatWithUser, aMsg].slice(-80));
-          return;
-        }
+      // 4.3/TURN-REGELN 1 (Verwerfungsregel): (H) irgendeine Gruppe mit
+      // verify.hard.length>0, oder (A) zugleich ein Skip (nach Guard-Filter)
+      // + eine applied:true-Op + ein destruktiver Typ in derselben Gruppe -
+      // der GESAMTE Turn (ALLE Notizbuch-Gruppen UND memory_*-Ops) wird dann
+      // verworfen: kein Notizbuch-Commit, kein Gedächtnis-Commit, KEINE
+      // infos/createdInfos/softInfos-Pille (die würde einen bereits
+      // verworfenen Turn beschönigen, Leitplanke 0.2 "kein Doppel-
+      // Feedback") - stattdessen die Verwerfungs-Pille (4.5) mit Diff-/
+      // Override-Buttons (Rendering unter der Pille, siehe unten).
+      if (plan && plan.rejected) {
+        const ts = Date.now();
+        const aMsg = {
+          role: "assistant",
+          text: res.reply,
+          ts,
+          warning: buildRejectWarning(plan, buildOpsWarning(plan.notApplied)),
+          sources: res.sources && res.sources.length ? res.sources : undefined,
+          // v7.54: Marker für die Diff-/Override-Buttons UNTER dieser
+          // Nachricht (an den nicht-persistierten rejectedTurn-State
+          // gekoppelt, siehe Rendering unten) - wandert als harmloses Feld
+          // nach state.json wie commit/warning, steuert dort aber nichts
+          // mehr (nach einem Reload sind die Buttons automatisch weg, C33).
+          rejectedTurnId: ts,
+        };
+        setChat([...chatWithUser, aMsg].slice(-80));
+        setRejectedTurn({
+          id: ts,
+          plan,
+          memoryOps,
+          commitMsg: res.commit || "Aktualisierung",
+          // Phase-1-Snapshot je betroffenem Notizbuch – Basis für die
+          // Override-Basisprüfung (5.3/K-🟡6) UND die Remote-Refresh-
+          // Invalidierung (5.4, siehe oben).
+          snapshot: new Map(plan.groups.map((g) => [g.nbId, g.before])),
+        });
+        return;
+      }
 
-        if (changed.length) {
-          const msg = res.commit || "Aktualisierung";
-          commit = changed.length === 1 && changed[0].id === activeNbRef.current
-            ? msg
-            : changed.map((c) => c.name).join(", ") + " · " + msg;
+      const groupResult = plan
+        ? await commitPlannedGroups(cfg, plan.groups, res.commit || "Aktualisierung", { requireIdenticalBase: false })
+        : { changed: [], conflict: false, notApplied2: [], infos2: [] };
+      const changed = groupResult.changed; // { id, name, ops }[]
+      for (const na of groupResult.notApplied2) notApplied.push(na);
+      for (const inf of groupResult.infos2) infos.push(inf);
+      // v7.53 Nacharbeit Runde 3 (Review-Fund 🔵 7, unverändert in v7.54):
+      // ERST NACH den Notizbuch-Ergebnissen anhängen – die auslösende
+      // Ziel-Op steht dadurch VOR den "zurückgehalten"-Verweisen auf sie in
+      // der ⚠️-Pille (reine Anzeigereihenfolge).
+      if (plan) for (const na of plan.guard.notApplied || []) notApplied.push(na);
+      // v7.21: Das Modell kündigte per commit-Feld eine Änderung an, aber
+      // KEIN Notizbuch wurde tatsächlich verändert (alle Ops in dieser
+      // Gruppe waren wirkungslos) – genau der Live-Befund ("mehrfach als
+      // erledigt angekündigt, nichts passiert"). NUR relevant außerhalb
+      // eines SHA-Konflikts (der hat seine eigene, bereits aussagekräftige
+      // Fehlermeldung, siehe unten).
+      if (plan && !groupResult.conflict && res.commit && !changed.length) {
+        notApplied.push({ reason: "Commit angekündigt, aber keine Änderung wirksam geworden" });
+      }
 
-          // Betroffene Abschnitte je Notizbuch automatisch aufklappen. v7.50.2
-          // (Nachbesserungs-Finding): move_entry trägt Ziel/Quelle NICHT in
-          // "heading" (das Feld existiert bei move_entry gar nicht), sondern in
-          // "to_heading"/"from_heading" – ein reines o.heading-Mapping lieferte
-          // dafür also IMMER undefined, der Zielabschnitt blieb nach einem
-          // erfolgreichen move_entry eingeklappt. Alle drei Felder einsammeln
-          // (bei den anderen Op-Typen sind to_heading/from_heading schlicht
-          // undefined und fallen über filter(Boolean) heraus, wie bisher).
-          for (const ch of changed) {
-            const touched = ch.ops
-              .flatMap((o) => [o.heading, o.to_heading, o.from_heading])
-              .map((h) => dispHead(h))
-              .filter(Boolean);
-            if (!touched.length) continue;
-            setCollapsedAll((prev) => {
-              const cur = prev[ch.id];
-              if (!cur || !Object.keys(cur).length) return prev;
-              const nc = { ...cur };
-              let hit = false;
-              Object.keys(nc).forEach((k) => {
-                const path = k.slice(2); // "s:" abschneiden
-                if (touched.some((t) => path === t || path.startsWith(t + "/"))) {
-                  delete nc[k];
-                  hit = true;
-                }
-              });
-              return hit ? { ...prev, [ch.id]: nc } : prev;
+      // v7.54 (DECISIONS #112 E4, Spec 5.1 Schritt 6/5.2): commitMemory läuft
+      // JETZT, NACH der Notizbuch-Entscheidung (statt v7.53: davor) - AUCH
+      // bei einem SHA-Konflikt (unabhängige Datei/unabhängiger Commit, wie
+      // v7.53). Gedächtnis-Skips werden deshalb bewusst HINTER die
+      // Notizbuch-/Guard-Skips angehängt (Reihenfolge-Änderung ohne
+      // Test-Pin, siehe GEÄNDERTE PINS in der Spezifikation).
+      if (memoryOps.length) {
+        const memResult = await commitMemory(cfg, memoryOps);
+        memoryUpdated = memResult.committed;
+        for (const na of memResult.notApplied) notApplied.push(na);
+      }
+
+      if (groupResult.conflict) {
+        // SHA-Konflikt (Live-Schreibkonflikt ODER, neu in v7.54, eine
+        // Hard-Invariante auf dem NEU angewendeten Zwischenstand, siehe
+        // commitPlannedGroups). Vorherige Notizbücher der Schleife können
+        // bereits committet sein – Teilerfolg ehrlich abbilden, damit ein
+        // erneutes Senden keine Dubletten erzeugt.
+        if (changed.some((c) => c.id === activeNbRef.current)) {
+          setDoc(docCache.current[activeNbRef.current]);
+        }
+        if (!changed.length) {
+          setInput((prev) => (prev.trim() ? prev : text));
+          if (img) setPendingImg((prev) => prev || img);
+        }
+        const saved = changed.map((c) => c.name);
+        const aMsg = {
+          role: "assistant",
+          error: true,
+          ts: Date.now(),
+          // v7.54 (DECISIONS #112 E4): das Gedächtnis wurde oben BEREITS
+          // (trotz des Konflikts) committet, falls es Ops dafür gab –
+          // unabhängige Datei/unabhängiger Commit wie in v7.53, nur der
+          // Zeitpunkt hat sich verschoben (jetzt NACH statt VOR dem
+          // Notizbuch-Teil).
+          memory: memoryUpdated || undefined,
+          // v7.21: bereits gesammelte notApplied-Funde (z. B. aus den
+          // Gedächtnis-Ops oder aus VOR dem Konflikt erfolgreich
+          // durchlaufenen Notizbuch-Gruppen) bleiben auch im Konflikt-Fall
+          // sichtbar – teilweiser Erfolg soll ehrlich abgebildet werden.
+          warning: buildOpsWarning(notApplied) || undefined,
+          opsInfo: buildOpsInfo(infos) || undefined,
+          text: saved.length
+            ? "Teilweise gespeichert (" + saved.join(", ") + "). Ein weiteres Notizbuch wurde " +
+              "parallel geändert und NICHT gespeichert – bitte nur den fehlenden Teil neu erfassen " +
+              "(nicht die ganze Nachricht erneut senden, sonst entstehen Dubletten)."
+            : "Ein Notizbuch wurde zwischenzeitlich auf einem anderen Gerät geändert – " +
+              "ich habe den neuen Stand geladen und nichts überschrieben. " +
+              "Deine Nachricht steht wieder im Eingabefeld, bitte einfach noch einmal senden.",
+        };
+        setChat([...chatWithUser, aMsg].slice(-80));
+        return;
+      }
+
+      if (changed.length) {
+        const msg = res.commit || "Aktualisierung";
+        commit = changed.length === 1 && changed[0].id === activeNbRef.current
+          ? msg
+          : changed.map((c) => c.name).join(", ") + " · " + msg;
+
+        // Betroffene Abschnitte je Notizbuch automatisch aufklappen. v7.50.2
+        // (Nachbesserungs-Finding): move_entry trägt Ziel/Quelle NICHT in
+        // "heading" (das Feld existiert bei move_entry gar nicht), sondern in
+        // "to_heading"/"from_heading" – ein reines o.heading-Mapping lieferte
+        // dafür also IMMER undefined, der Zielabschnitt blieb nach einem
+        // erfolgreichen move_entry eingeklappt. Alle drei Felder einsammeln
+        // (bei den anderen Op-Typen sind to_heading/from_heading schlicht
+        // undefined und fallen über filter(Boolean) heraus, wie bisher).
+        for (const ch of changed) {
+          const touched = ch.ops
+            .flatMap((o) => [o.heading, o.to_heading, o.from_heading])
+            .map((h) => dispHead(h))
+            .filter(Boolean);
+          if (!touched.length) continue;
+          setCollapsedAll((prev) => {
+            const cur = prev[ch.id];
+            if (!cur || !Object.keys(cur).length) return prev;
+            const nc = { ...cur };
+            let hit = false;
+            Object.keys(nc).forEach((k) => {
+              const path = k.slice(2); // "s:" abschneiden
+              if (touched.some((t) => path === t || path.startsWith(t + "/"))) {
+                delete nc[k];
+                hit = true;
+              }
             });
-          }
+            return hit ? { ...prev, [ch.id]: nc } : prev;
+          });
+        }
 
-          // Auto-Wechsel (Nutzerwunsch): Landet der Inhalt in einem anderen
-          // Notizbuch und nicht auch im aktiven, dorthin springen.
-          const activeChanged = changed.some((c) => c.id === activeNbRef.current);
-          const others = changed.filter((c) => c.id !== activeNbRef.current);
-          if (others.length && !activeChanged) {
-            switchNotebook(others[0].id);
-          } else if (activeChanged) {
-            setDoc(docCache.current[activeNbRef.current]);
-          }
+        // Auto-Wechsel (Nutzerwunsch): Landet der Inhalt in einem anderen
+        // Notizbuch und nicht auch im aktiven, dorthin springen.
+        const activeChanged = changed.some((c) => c.id === activeNbRef.current);
+        const others = changed.filter((c) => c.id !== activeNbRef.current);
+        if (others.length && !activeChanged) {
+          switchNotebook(others[0].id);
+        } else if (activeChanged) {
+          setDoc(docCache.current[activeNbRef.current]);
         }
       }
 
@@ -1865,10 +2185,16 @@ export default function NotizbuchApp() {
         // lib/anthropic.js#callClaude (History-Mapping hängt sie an den
         // content-String DIESER Assistent-Nachricht an).
         warning: buildOpsWarning(notApplied) || undefined,
-        // v7.52 (ℹ️-Kanal, DECISIONS #106): siehe buildOpsInfo-Kommentar
-        // oben – eigenes Feld m.opsInfo statt m.info (Namenskollision mit
-        // der bestehenden System-Pillen-Nachricht, siehe dort).
-        opsInfo: buildOpsInfo(infos) || undefined,
+        // v7.52 (ℹ️-Kanal, DECISIONS #106) + v7.54 (Verify-then-Commit-Gate,
+        // DECISIONS #112): infos (Engine-Notes) + createdInfos (rewrite legt
+        // #/##-Zeilen an, Spec 2.3 "created[]") + softInfos (Verify-
+        // Prüfhinweise ℹ️, siehe verify.js) - nur NICHT-verworfene Turns
+        // erreichen diese Stelle überhaupt (siehe plan.rejected-Return oben).
+        opsInfo: buildOpsInfo([
+          ...infos,
+          ...(plan ? plan.createdInfos : []),
+          ...(plan ? plan.softInfos : []),
+        ]) || undefined,
         sources: res.sources && res.sources.length ? res.sources : undefined,
       };
       const finalChat = [...chatWithUser, aMsg].slice(-80);
@@ -1908,10 +2234,149 @@ export default function NotizbuchApp() {
     }
   };
 
+  /* ---------- Override eines verworfenen Turns (v7.54, Spec 5.5) ---------- */
+  // "Trotzdem übernehmen"/"Ohne Lösch-/Ersetz-Ops übernehmen": committet
+  // GENAU den Text, den die Diff-Vorschau zeigt (buildOverrideGroups, s. o.),
+  // NUR wenn der Live-Cache-Stand für JEDE Gruppe noch exakt dem Phase-1-
+  // "before" entspricht (K-🟡6, requireIdenticalBase - kein Re-Apply/
+  // Re-Gate). Mutiert die BESTEHENDE Assistent-Nachricht (kein neuer
+  // Chat-Eintrag - strikt alternierende Rollen, siehe DECISIONS #63 C).
+  const applyRejectedTurn = async () => {
+    const rt = rejectedTurnRef.current;
+    if (!rt || busy) return;
+    if (!connected || !settingsRef.current) { setShowSettings(true); return; }
+    const cfg = settingsRef.current;
+    setBusy(true);
+    try {
+      const groups = buildOverrideGroups(rt.plan);
+      const commitMsg = rt.commitMsg + " (trotz Prüfhinweis übernommen)";
+      const result = await commitPlannedGroups(cfg, groups, commitMsg, { requireIdenticalBase: true });
+      const savedNames = result.changed.map((c) => c.name);
+
+      if (result.conflict && !savedNames.length) {
+        // Basisprüfung (docCache !== before) hat VOR jedem Commit
+        // zugeschlagen - commitPlannedGroups hat bereits den passenden
+        // Banner gesetzt ("seit dem Prüfhinweis geändert – bitte erneut
+        // senden"). Die Pille bleibt UNVERÄNDERT stehen (nichts wurde
+        // committet, der Turn ist weiterhin exakt der verworfene von
+        // vorher) - nur die Buttons verschwinden (rejectedTurnId geleert).
+        setChat((prev) => prev.map((m) => (m.rejectedTurnId === rt.id ? { ...m, rejectedTurnId: undefined } : m)));
+        setRejectedTurn(null);
+        return;
+      }
+
+      const notApplied = [...result.notApplied2];
+      const infos = [...result.infos2];
+      let memoryUpdated = false;
+      // TURN-REGELN 6/7: Gedächtnis NUR ohne Konflikt - eine Teilübernahme
+      // (Konflikt MITTEN in der Schleife) soll das Gedächtnis nicht
+      // mitziehen, der Turn bleibt für den fehlenden Teil erneut sendbar
+      // (bewusst ANDERS als der Normal-Konfliktpfad in send(), der das
+      // Gedächtnis committet - dort war die Notizbuch-Entscheidung positiv,
+      // hier ist der Nutzerwunsch nur teilweise erfüllbar).
+      if (!result.conflict && rt.memoryOps.length) {
+        const memResult = await commitMemory(cfg, rt.memoryOps);
+        memoryUpdated = memResult.committed;
+        for (const na of memResult.notApplied) notApplied.push(na);
+      }
+
+      // Nacharbeit Runde 2 (🔵): commitLabel MUSS vor switchNotebook() weiter
+      // unten berechnet werden - switchNotebook setzt activeNbRef.current
+      // SYNCHRON (siehe dort), danach würde "result.changed[0].id ===
+      // activeNbRef.current" bei genau einer Override-Gruppe in einem ANDEREN
+      // Notizbuch fälschlich wahr, das 💾-Label verlöre den Notizbuchnamen.
+      // send() bestimmt "commit" aus demselben Grund bereits VOR dem
+      // Auto-Wechsel - hier dieselbe Reihenfolge herstellen.
+      const commitLabel = savedNames.length
+        ? (savedNames.length === 1 && result.changed[0].id === activeNbRef.current
+            ? commitMsg
+            : savedNames.join(", ") + " · " + commitMsg)
+        : undefined;
+
+      if (result.changed.length) {
+        // Aufklapp-/Auto-Wechsel-Logik wie im Normalpfad (send()).
+        for (const ch of result.changed) {
+          const touched = ch.ops
+            .flatMap((o) => [o.heading, o.to_heading, o.from_heading])
+            .map((h) => dispHead(h))
+            .filter(Boolean);
+          if (!touched.length) continue;
+          setCollapsedAll((prev) => {
+            const cur = prev[ch.id];
+            if (!cur || !Object.keys(cur).length) return prev;
+            const nc = { ...cur };
+            let hit = false;
+            Object.keys(nc).forEach((k) => {
+              const path = k.slice(2);
+              if (touched.some((t) => path === t || path.startsWith(t + "/"))) { delete nc[k]; hit = true; }
+            });
+            return hit ? { ...prev, [ch.id]: nc } : prev;
+          });
+        }
+        const activeChanged = result.changed.some((c) => c.id === activeNbRef.current);
+        const others = result.changed.filter((c) => c.id !== activeNbRef.current);
+        if (others.length && !activeChanged) switchNotebook(others[0].id);
+        else if (activeChanged) setDoc(docCache.current[activeNbRef.current]);
+      }
+
+      // Nacharbeit Runde 3 (🔵): "unsavedNames" lief bisher über ALLE
+      // Plan-Gruppen (per Namensgleichheit) statt nur über die, für die es
+      // überhaupt etwas zu speichern gab - eine Gruppe, deren Override-Text
+      // bereits identisch zur Basis ist (commitPlannedGroups: "text === base
+      // -> continue", landet nie in "changed"), zählte trotzdem als "nicht
+      // gespeichert", obwohl für sie nie etwas zu speichern war. "groups"
+      // (siehe oben, buildOverrideGroups-Ergebnis) trägt bereits before/text
+      // je nbId - per Id statt per Namen abgeglichen (mehrere Notizbücher
+      // könnten theoretisch denselben Anzeigenamen tragen).
+      const pending = groups.filter((g) => g.text !== g.before);
+      const savedIds = new Set(result.changed.map((c) => c.id));
+      const unsavedNames = pending.filter((g) => !savedIds.has(g.nbId)).map((g) => g.name);
+      // K-🟡2 (Nacharbeit Runde 1): "nichts gewirkt" ist NICHT dasselbe wie
+      // ein Konflikt (docCache !== before) - hier lief der Commit-Versuch
+      // durch, aber die (ggf. um Lösch-Ops gekürzten) verbleibenden Ops haben
+      // gegenüber "before" keinen Unterschied ergeben (z. B. ein atomic-Grund,
+      // dessen Ziel-Op weiterhin an einem Skip-Grund scheitert) UND kein
+      // Gedächtnis-Eintrag wurde committet - ohne diesen Fall würde die Pille
+      // "übernommen" suggerieren, obwohl NICHTS gespeichert wurde.
+      const nothingSaved = !result.conflict && !result.changed.length && !memoryUpdated;
+      const overrideOpts = result.conflict
+        ? { conflict: true, savedNames, unsavedNames }
+        : (nothingSaved ? { nothingSaved: true } : {});
+      const opsWarning = buildOpsWarning(notApplied);
+      const warning = opsWarning
+        ? buildOverrideWarning(rt.plan, overrideOpts) + "\n" + opsWarning
+        : buildOverrideWarning(rt.plan, overrideOpts);
+
+      // Mutation DERSELBEN Assistent-Nachricht (kein neuer Chat-Eintrag,
+      // siehe Kopfkommentar) - "commit" NUR aus tatsächlich committeten
+      // Gruppen (kein 💾, wenn "changed" leer bleibt).
+      setChat((prev) => prev.map((m) => (m.rejectedTurnId === rt.id ? {
+        ...m,
+        commit: commitLabel,
+        memory: memoryUpdated || undefined,
+        warning,
+        opsInfo: buildOpsInfo([...infos, ...(rt.plan.createdInfos || []), ...(rt.plan.softInfos || [])]) || undefined,
+        rejectedTurnId: undefined,
+      } : m)));
+      setRejectedTurn(null);
+      // Nacharbeit Runde 2 (🔵): NUR bei tatsächlich committeter Gruppe
+      // dirty markieren (wie send(), Z. "if (commit && view === chat)") -
+      // ein Override im nothingSaved-Fall (nichts committet) darf keine
+      // "Notizen geändert"-Anzeige auslösen.
+      if (commitLabel && view === "chat") setNotesDirty(true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   /* ---------- Chat archivieren (Markdown ins Daten-Repo, dann leeren) ---------- */
   const archiveChat = async () => {
     if (busy || archiving || !connected || !settingsRef.current) return;
     const cfg = settingsRef.current;
+    // v7.54 (DECISIONS #112, Spec 5.4): der verworfene Turn (samt Diff-/
+    // Override-Knöpfen) bezieht sich auf konkrete Chat-Nachrichten - nach dem
+    // Archivieren gibt es die Nachricht im sichtbaren Chat nicht mehr.
+    setRejectedTurn(null);
     setArchiving(true);
     try {
       // Frischen Remote-Stand dazuholen: state.json kann Nachrichten anderer
@@ -2358,6 +2823,12 @@ export default function NotizbuchApp() {
     if (!m) return;
     lines[lineIdx] = m[1] + (checked ? "x" : " ") + m[3] + m[4];
     const newText = lines.join("\n");
+    // v7.54 (DECISIONS #112, Spec 5.4): ein Häkchen-Klick ändert den
+    // docCache-Stand DIESES Notizbuchs direkt (synchron, kein await) - die
+    // Diff-/Override-Vorschau eines noch offenen verworfenen Turns würde
+    // sonst einen inzwischen überholten "before"-Stand zeigen bzw. der
+    // Override-Basisprüfung (docCache === before) unnötig ins Leere laufen.
+    if (rejectedTurnRef.current) setRejectedTurn(null);
     docCache.current[nbId] = newText;
     docRef.current = newText;
     if (nbId === activeNbRef.current) setDoc(newText);
@@ -2817,6 +3288,10 @@ export default function NotizbuchApp() {
         ? stripInboxPlaceholder(linkifyFilePaths(renumberCitations(resolvedMd.replace(/\n{3,}/g, "\n\n").trim() + "\n")))
         : INITIAL_DOC;
       if (cleaned !== oldDoc) {
+        // v7.54 (DECISIONS #112, Spec 5.4): VOR dem Commit invalidieren -
+        // die manuelle Bearbeitung überschreibt den Phase-1-"before"-Stand
+        // eines noch offenen verworfenen Turns für DIESES Notizbuch.
+        if (rejectedTurnRef.current) setRejectedTurn(null);
         if (connected && settingsRef.current) {
           const ok = await commitDocNb(settingsRef.current, nbId, cleaned, "Manuelle Bearbeitung");
           conflict = !ok;
@@ -2879,6 +3354,10 @@ export default function NotizbuchApp() {
     const nb = activeNotebook();
     const text = versionCache.current.get(nb.path + "@" + entry.sha);
     if (typeof text !== "string" || text === doc) return;
+    // v7.54 (DECISIONS #112, Spec 5.4): Historie-Restore überschreibt den
+    // Notizbuch-Stand - ein noch offener verworfener Turn für DIESES
+    // Notizbuch bezieht sich dann auf einen bereits ersetzten "before".
+    if (rejectedTurnRef.current) setRejectedTurn(null);
     const ok = await commitDocNb(settingsRef.current, nb.id, text, "Wiederhergestellt: Stand " + fmtStamp(entry.ts));
     if (ok) {
       setDoc(text);
@@ -3144,7 +3623,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.53</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.54</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -3363,6 +3842,61 @@ export default function NotizbuchApp() {
                   <div className="mt-1 inline-flex items-start gap-1.5 max-w-[88%] sm:max-w-md text-xs text-amber-800 bg-amber-50 border border-amber-300 rounded-lg px-2.5 py-1.5 whitespace-pre-wrap break-words">
                     <AlertTriangle size={12} className="shrink-0 mt-0.5" />
                     <span>{m.warning}</span>
+                  </div>
+                )}
+                {/* Diff-/Override-Buttons eines verworfenen Turns (v7.54,
+                    Spec 5.4/TURN-REGELN 5): nur solange rejectedTurn (nicht-
+                    persistierter State) zu DIESER Nachricht passt - nach
+                    Reload/Invalidierung (saveEdit, Historie-Restore,
+                    toggleTask, Remote-Refresh, neuer send()) ist der Marker
+                    m.rejectedTurnId zwar noch da, "rejectedTurn" aber null,
+                    die Buttons verschwinden dann automatisch (die Pille
+                    selbst bleibt als Historie stehen). Override-Knopf ist
+                    disabled, bis "Diff ansehen" mindestens einmal geöffnet
+                    wurde (K-🟡7). */}
+                {rejectedTurn && m.rejectedTurnId === rejectedTurn.id && (
+                  <div className="mt-1 flex flex-col gap-1.5 max-w-[88%] sm:max-w-md">
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => {
+                          setRejectedDiffShown((v) => !v);
+                          setRejectedDiffOpened(true);
+                        }}
+                        className="px-2 py-1 rounded-lg border border-slate-300 bg-white text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                      >
+                        {rejectedDiffShown ? "Diff ausblenden" : "Diff ansehen"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy || !rejectedDiffOpened}
+                        onClick={applyRejectedTurn}
+                        title={!rejectedDiffOpened ? "Erst „Diff ansehen“ öffnen" : undefined}
+                        className="px-2 py-1 rounded-lg border border-amber-300 bg-amber-50 text-xs text-amber-800 hover:bg-amber-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {overrideLabel}
+                      </button>
+                    </div>
+                    {rejectedDiffShown && (
+                      <div className="space-y-2">
+                        {overrideGroups.map((g) => (
+                          <div key={g.nbId} className="bg-slate-50 border border-slate-200 rounded-lg p-2 max-h-48 overflow-y-auto overflow-x-auto">
+                            <div className="text-[11px] font-medium text-slate-500 mb-1">{g.name}</div>
+                            {/* Nacharbeit Runde 3 (🔵): eine atomic-Gruppe, bei der
+                                nach dem Herausfiltern der Lösch-/Ersetz-Ops nur
+                                noch eine weiterhin skippende Ziel-Op übrig bleibt
+                                (nothingSaved-Fall, siehe applyRejectedTurn), hat
+                                g.text === g.before - diffLines() liefert dafür
+                                null, DiffRows würde das GESAMTE Dokument als <pre>
+                                rendern und fälschlich eine Neuanlage suggerieren. */}
+                            {g.text === g.before
+                              ? <div className="text-xs text-slate-400 px-1">(keine Änderung – verbleibende Ops wirken nicht)</div>
+                              : <DiffRows oldText={g.before} newText={g.text} />}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
                 {/* ℹ️-Hinweis-Pille (v7.52, DECISIONS #106): gleiche Optik-
@@ -3756,24 +4290,9 @@ export default function NotizbuchApp() {
                             <div className="font-mono text-xs text-rose-700">{data.error}</div>
                           ) : data.parentText == null ? (
                             <pre className="font-mono text-xs text-slate-600 whitespace-pre-wrap">{data.text}</pre>
-                          ) : (() => {
-                            const d = diffLines(data.parentText, data.text || "");
-                            if (!d) return <pre className="font-mono text-xs text-slate-600 whitespace-pre-wrap">{data.text}</pre>;
-                            return contextize(d).map((row, i) => {
-                              if (row.t === "gap") return <div key={i} className="font-mono text-xs text-slate-300 px-1">···</div>;
-                              if (row.t === "info") return <div key={i} className="font-mono text-xs text-slate-400 px-1">{row.l}</div>;
-                              const cls =
-                                row.t === "a" ? "bg-emerald-50 text-emerald-800"
-                                : row.t === "d" ? "bg-rose-50 text-rose-700"
-                                : "text-slate-400";
-                              const sign = row.t === "a" ? "+ " : row.t === "d" ? "− " : "  ";
-                              return (
-                                <div key={i} className={"font-mono text-xs whitespace-pre-wrap px-1 " + cls}>
-                                  {sign}{row.l}
-                                </div>
-                              );
-                            });
-                          })()}
+                          ) : (
+                            <DiffRows oldText={data.parentText} newText={data.text || ""} />
+                          )}
                         </div>
                         {!isCurrent && data && typeof data.text === "string" && (
                           <button

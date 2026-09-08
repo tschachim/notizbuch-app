@@ -183,6 +183,20 @@ describe("buildSystem", () => {
       .toContain("<cite index=");
   });
 
+  // C3-Nachlauf (v7.54, DECISIONS #112): eine Live-Antwort schrieb den
+  // Zitat-Marker mit runder statt spitzer Klammer und ohne Schluss-Tag -
+  // Modellvarianz (siehe src/lib/citations.jsx). Prompt UND Tool-Schema
+  // stellen seither explizit klar, dass NUR die spitze Klammer gilt und
+  // jedes cite geschlossen werden muss, an beiden Stellen, wo das
+  // cite-Format erklärt wird.
+  it("verlangt explizit spitze statt runder Klammern und ein geschlossenes cite (C3-Nachlauf, v7.54)", () => {
+    const sys = buildSystem(nbs, "Wissensbasis", null);
+    const pin = "AUSSCHLIESSLICH spitze Klammern <cite …>…</cite> – NIE runde Klammern, und jedes cite immer schließen.";
+    expect(sys).toContain(pin);
+    expect(NOTEBOOK_TOOL.input_schema.properties.ops.items.properties.content.description)
+      .toContain(pin);
+  });
+
   // v7.51 (E2E-Befund): eine Live-Antwort lieferte eine gemischtsprachige
   // Commit-Botschaft ("Add section QA-Test Duplikate mit zwei
   // Stichpunkten") – der Prompt verlangte für "commit" bisher keine
@@ -1390,6 +1404,43 @@ describe("buildSystem", () => {
       expect(sys).toContain("Kapitel-Freitext per append_to_chapter, bestehende Zeile per replace_entry");
     });
 
+    // v7.54 (Verify-then-Commit-Gate, Turn-Atomarität, DECISIONS #112,
+    // Spec 6/GEÄNDERTE PINS): neues Bullet DIREKT NACH der ℹ️-Regel (Z. 382)
+    // im OPS-ZUVERLÄSSIGKEIT-Block - erklärt die neue "⚠️ Änderung verworfen
+    // (nichts gespeichert)"-Pille (GESAMTER Turn) UND die beiden Override-
+    // Wortlaute als bereits gespeicherte Nutzerentscheidung. Bestehende Pins
+    // "VOR REINE FRAGEN" (oben) und "ℹ️ nach ⚠️" (Test direkt darüber)
+    // bleiben unverändert gültig, da NACH der ℹ️-Regel eingefügt.
+    it("v7.54: neues Bullet zur 'Änderung verworfen'-Pille steht DIREKT NACH der ℹ️-Regel und VOR REINE FRAGEN", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      const infoAt = sys.indexOf("Erscheint in der Historie eine ℹ️-Meldung, wurde deine Op ANGEWENDET");
+      const rejectAt = sys.indexOf("Erscheint in der Historie eine ⚠️-Meldung, die mit „Änderung verworfen (nichts gespeichert)“ beginnt");
+      const reineFragenAt = sys.indexOf("REINE FRAGEN (WICHTIG)");
+      expect(infoAt).toBeGreaterThan(-1);
+      expect(rejectAt).toBeGreaterThan(infoAt);
+      expect(rejectAt).toBeLessThan(reineFragenAt);
+    });
+
+    it("v7.54: nennt alle Verwerfungs-Codes UND das Atomaritäts-Muster UND verlangt eine VOLLSTÄNDIGE Korrektur-Op-Liste ohne rewrite-Ausweichen", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain("KEINE Op (auch keine memory_*-Op) ist wirksam geworden");
+      expect(sys).toContain("V1 Kapitelnamen-Duplikat, V2 doppelte Zeilen, V3 Zeilenverlust, V4 Struktur aus content, V7 zerrissener Codeblock, V8 rewrite neben anderen Ops");
+      expect(sys).toContain("Turn nicht teilweise übernommen");
+      expect(sys).toContain("Sende im nächsten Turn eine korrigierte, VOLLSTÄNDIGE Op-Liste (Ziel- und Quell-Op zusammen, nie nur die Hälfte) und weiche nie auf rewrite aus");
+    });
+
+    it("v7.54: erklärt BEIDE Override-Wortlaute als bewusst gespeicherte, nicht zu wiederholende Nutzerentscheidung", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain('„trotz Prüfhinweis übernommen“ oder „ohne Lösch-/Ersetz-Ops übernommen“');
+      expect(sys).toContain("hat der Nutzer die (ggf. um Lösch-Ops gekürzte) Änderung bewusst gespeichert – behandle sie als angewendet und wiederhole sie nicht");
+    });
+
+    it("v7.54 Nacharbeit (🟡 2): weist bei einer zusätzlichen 'Nicht angewendet'-Zeile unter der Override-Pille darauf hin, dass DIESER Teil weiterhin wirkungslos ist", () => {
+      const sys = buildSystem(nbs, "Wissensbasis", null);
+      expect(sys).toContain('Steht darunter zusätzlich eine zweite Zeile „Nicht angewendet: …“ oder der Zusatz „haben nicht gewirkt, nichts gespeichert“');
+      expect(sys).toContain("dafür gilt weiterhin die ⚠️-Regel oben (nicht angewendete Ops): korrigiere diesen Teil im nächsten Turn, statt ihn als erledigt zu behandeln");
+    });
+
     it("move_entry-Zielzeile nennt die Kollisions-Ausnahme bei einem #-Kapitel-heading, jetzt mit CHAPTER-PFLICHT-Zusatz (v7.53)", () => {
       const sys = buildSystem(nbs, "Wissensbasis", null);
       expect(sys).toContain('wird bei Bedarf angelegt – in einem Notizbuch mit Kapiteln NUR zusammen mit "to_chapter" (außer to_heading ist ein #-Kapitel: dann Kapitel-Freitext)');
@@ -2183,6 +2234,31 @@ describe("callClaude (fetch gemockt)", () => {
       // Kein roher Zeilenumbruch INNERHALB des Rahmens (die " · "-Trennung
       // ersetzt einen möglichen Umbruch, siehe callClaude#msgs).
       expect(assistantMsg.content.slice(openAt)).not.toContain("\n");
+    });
+
+    // Nacharbeit Runde 2 (🔵, v7.54): pinnt den in DECISIONS #112/Spec 8.4
+    // genannten "Gate-Wächter"-Fall End-zu-End - eine verworfene Turn-Pille
+    // (turn.js#buildRejectWarning) besteht selbst schon aus ZWEI Zeilen
+    // (Verwerfungstext + unveränderter opsWarning-Block, per "\n" verbunden),
+    // BEVOR sie überhaupt in m.warning landet. Der Rahmen darf trotzdem NUR
+    // EINEN SYSTEM-HINWEIS-Marker erzeugen (sanitizeWarningForHistory ersetzt
+    // jeden rohen Zeilenumbruch durch " · ").
+    it("zweizeilige Verwerfungs-Pille (Verwerfung + 'Nicht angewendet') als m.warning: GENAU EIN SYSTEM-HINWEIS-Marker", async () => {
+      respond({ stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] })] });
+      const warning =
+        "⚠️ Änderung verworfen (nichts gespeichert): NB: V3-R – rewrite verliert 40 % der Zeilen (4 von 10)\n" +
+        "⚠️ Nicht angewendet: memory_append (leerer content)";
+      await callClaude("key", "und jetzt?", NB_CTX, [
+        { role: "assistant", ts: 1, text: "Ich habe geprüft, aber nichts gespeichert.", warning },
+      ], "claude-sonnet-5", null, null);
+      const body = JSON.parse(fetch.mock.calls[0][1].body);
+      const assistantMsg = body.messages.find((m) => m.role === "assistant");
+      const markerCount = (assistantMsg.content.match(/\[SYSTEM-HINWEIS:/g) || []).length;
+      expect(markerCount).toBe(1);
+      const openAt = assistantMsg.content.indexOf("[SYSTEM-HINWEIS:");
+      expect(assistantMsg.content.slice(openAt)).not.toContain("\n");
+      expect(assistantMsg.content).toContain("Änderung verworfen (nichts gespeichert): NB: V3-R");
+      expect(assistantMsg.content).toContain("Nicht angewendet: memory_append");
     });
 
     it("weder warning noch opsInfo: kein SYSTEM-HINWEIS-Marker", async () => {

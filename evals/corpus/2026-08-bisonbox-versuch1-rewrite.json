@@ -1,0 +1,18 @@
+{
+  "id": "2026-08-bisonbox-versuch1-rewrite",
+  "source": "DECISIONS #103 Versuch 1: ein Versuch, EINEN Inbox-Eintrag unter ein anderes Kapitel zu verschieben, nutzte rewrite und zerstoerte dabei die komplette Inbox - anonymisiert, Dokument/Bild-ID rekonstruiert aus der DECISIONS-Prosa.",
+  "engineAtIncident": "v7.49",
+  "notebook": "Beispielbuch",
+  "doc": "# Beispielbuch\n\n## Inbox\n\n- [ ] Auswertung weitermachen\n- Idee: Backup-Skript prüfen\n- Termin 2026-08-20 Review\n\n# Projekt Alpha\n\n## Aufgaben\n\n- a1\n![Diagramm](img:ab12cd)\n",
+  "recordedOps": [
+    { "type": "rewrite", "content": "# Beispielbuch\n\n# Projekt Alpha\n\n## Aufgaben\n\n- a1\n- [ ] Auswertung weitermachen\n" }
+  ],
+  "expect": {
+    "outcome": ["rejected"],
+    "hardIfApplied": ["V3"],
+    "rejectKinds": ["hard"],
+    "mustNotContain": [],
+    "mustKeepLines": ["- Idee: Backup-Skript prüfen", "![Diagramm](img:ab12cd)"],
+    "maxCountOf": {}
+  }
+}

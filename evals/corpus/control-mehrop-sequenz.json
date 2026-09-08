@@ -1,0 +1,22 @@
+{
+  "id": "control-mehrop-sequenz",
+  "source": "Kontrollfall (nicht-vakuös, K-🔴1/K-🔴2): fünf Ops in Folge auf dasselbe Notizbuch, jeder Verlust ist inkrementell durch die jeweils VERURSACHENDE Op erklärt - kein unerklärter Rest. Synthetisch konstruiert.",
+  "engineAtIncident": "v7.53",
+  "notebook": "Beispielbuch",
+  "doc": "# Beispielbuch\n\n# A\n\n## Notizen\n\n- x\n\n# B\n\n## Notizen\n\n- y\n\n## X\n\n- Rechnung prüfen\n\n## Y\n\n- [ ] Rechnung prüfen und freigeben\n",
+  "recordedOps": [
+    { "type": "delete_section", "heading": "## Notizen", "chapter": "# A" },
+    { "type": "delete_section", "heading": "## Notizen" },
+    { "type": "delete_entry", "entry": "Rechnung prüfen", "heading": "## Y" },
+    { "type": "append_to_section", "heading": "## Neu", "chapter": "# B", "content": "- n" },
+    { "type": "replace_section", "heading": "## Neu", "chapter": "# B", "content": "- m" }
+  ],
+  "expect": {
+    "outcome": ["commit"],
+    "hardIfApplied": [],
+    "rejectKinds": [],
+    "mustNotContain": [],
+    "mustKeepLines": ["- Rechnung prüfen", "- m"],
+    "maxCountOf": { "- Rechnung prüfen": 1, "- [ ] Rechnung prüfen und freigeben": 0 }
+  }
+}

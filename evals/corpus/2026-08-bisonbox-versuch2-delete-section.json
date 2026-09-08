@@ -1,0 +1,19 @@
+{
+  "id": "2026-08-bisonbox-versuch2-delete-section",
+  "source": "DECISIONS #103 Versuch 2: nach Versuch 1 (rewrite) nutzte ein zweiter Versuch delete_section auf ein falsches Kapitel als Loesch-Schritt - der Eintrag wurde bereits am Ziel angelegt, die Quelle blieb (haette ohne Gate dupliziert) - anonymisiert.",
+  "engineAtIncident": "v7.49",
+  "notebook": "Beispielbuch",
+  "doc": "# Beispielbuch\n\n## Inbox\n\n- [ ] Auswertung weitermachen\n- Idee: Backup-Skript prüfen\n- Termin 2026-08-20 Review\n\n# Projekt Alpha\n\n## Aufgaben\n\n- a1\n![Diagramm](img:ab12cd)\n",
+  "recordedOps": [
+    { "type": "append_to_chapter", "chapter": "# Projekt Alpha", "content": "- [ ] Auswertung weitermachen" },
+    { "type": "delete_section", "heading": "## Inbox", "chapter": "# Nicht vorhanden" }
+  ],
+  "expect": {
+    "outcome": ["rejected"],
+    "hardIfApplied": [],
+    "rejectKinds": ["atomic"],
+    "mustNotContain": [],
+    "mustKeepLines": [],
+    "maxCountOf": { "- [ ] Auswertung weitermachen": 1 }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "id": "2026-09-07-kpis-turn1",
+  "source": "DECISIONS #106 Turn 1, rekonstruiert aus Prosa + repros.json S3b - anonymisiert (Beispielbuch, fiktive Bild-ID).",
+  "engineAtIncident": "v7.51",
+  "notebook": "Beispielbuch",
+  "doc": "# Beispielbuch\n\n## Inbox\n\n- x\n\n# KPIs\n\n- KPI-Formatierung vereinheitlichen\n- [ ] Offener Punkt: KPI-Definition klären\n![Screenshot KPI-Tabelle](img:ab12cd)\n*Übersicht*\n\n# Anderes Kapitel\n\n## Thema\n\n- t\n",
+  "recordedOps": [
+    {
+      "type": "append_to_section",
+      "heading": "## KPIs",
+      "chapter": "# KPIs",
+      "content": "- [ ] zwei KPIs in Gruppe Bewertung, Namen korrigieren"
+    }
+  ],
+  "expect": {
+    "outcome": [
+      "applied_with_note",
+      "commit"
+    ],
+    "hardIfApplied": [],
+    "rejectKinds": [],
+    "mustNotContain": [
+      "\n## KPIs"
+    ],
+    "mustKeepLines": [
+      "![Screenshot KPI-Tabelle](img:ab12cd)"
+    ],
+    "maxCountOf": {
+      "![Screenshot KPI-Tabelle](img:ab12cd)": 1
+    }
+  }
+}

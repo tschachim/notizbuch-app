@@ -1,0 +1,33 @@
+{
+  "id": "2026-07-v740-kpis-duplikat",
+  "source": "DECISIONS #80: append_to_section ohne chapter auf ein Kapitel-Freitext-Kapitel ('## KPIs' als Ziel, obwohl 'KPIs' nur als reines #-Kapitel ohne eigenen ##-Abschnitt existiert) legte frueher ein redundantes '## KPIs' innerhalb von '# KPIs' an - anonymisiert, kein Byte-Abbild des Live-Vorfalls.",
+  "engineAtIncident": "v7.40",
+  "notebook": "Beispielbuch",
+  "doc": "# Beispielbuch\n\n## Inbox\n\n- irgendwas\n\n# KPIs\n\n- Umsatz +5 %\n- Kosten -3 %\n",
+  "recordedOps": [
+    {
+      "type": "append_to_section",
+      "heading": "## KPIs",
+      "content": "- Neuer Kennzahlen-Punkt für die Wochenübersicht"
+    }
+  ],
+  "expect": {
+    "outcome": [
+      "skip",
+      "applied_with_note",
+      "commit"
+    ],
+    "hardIfApplied": [
+      "V1"
+    ],
+    "rejectKinds": [],
+    "mustNotContain": [
+      "\n## KPIs"
+    ],
+    "mustKeepLines": [
+      "- Umsatz +5 %",
+      "- Kosten -3 %"
+    ],
+    "maxCountOf": {}
+  }
+}

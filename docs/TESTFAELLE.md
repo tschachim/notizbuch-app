@@ -220,6 +220,11 @@ schließen die Liste ohne Auswahl.
 stillschweigend zu raten oder anzulegen (siehe DECISIONS #111, Stufe 2 von
 Vorschlag A). ℹ️-Pillen können zusätzlich „ähnlich vorhanden“ oder
 „Titelzeile – als Eingrenzung gewertet“ melden – keine Findings.
+Ab v7.54 (DECISIONS #112, Verify-then-Commit-Gate) gilt zusätzlich: „⚠️
+Änderung verworfen (nichts gespeichert)“ bedeutet, dass der GESAMTE Turn
+(Notizbuch UND Gedächtnis) verworfen wurde – nichts davon ist gespeichert.
+Der Override ist eine bewusste Nutzeraktion und nur nach geöffneter
+Diff-Ansicht möglich (siehe C33).
 
 **C1 [VERBUNDEN][API] Notiz eintragen.** Im QA-Notizbuch per Chat:
 „Notiere: QA-Testeintrag Alpha am 2026-01-01“. Erwartet:
@@ -784,6 +789,91 @@ Danach aufräumen: Abschnitt „QA-Test Quelle“ in A löschen (falls noch
 vorhanden), den ggf. entstandenen Eintrag/Abschnitt in „QA-Test Ziel“
 wieder entfernen, „QA-Test Ziel“ als Notizbuch löschen (falls eigens für
 diesen Test angelegt).
+
+C30-Hinweis (v7.54): Enthält die Ziel-Gruppe neben der übersprungenen
+Ziel-Op eine gewirkte destruktive Op, lautet die Pille „Änderung verworfen“
+statt „zurückgehalten“ – beides bestanden, solange A (die Quelle) unverändert
+bleibt.
+
+**C31 [VERBUNDEN][API] rewrite mit Verlust wird verworfen (v7.54).**
+Voraussetzung: QA-Notizbuch mit ≥ 3 Kapiteln, eines davon mit einem Bild
+(per Editor eingefügt, falls verfügbar). Auftrag: „Schreibe das Notizbuch
+komplett neu (rewrite) und behalte nur das Kapitel QA-Test A.“ (1
+API-Aufruf). Bestanden – ZWEI gültige Ausgänge: (a) das Modell lehnt ab
+oder nutzt stattdessen gezielt delete_chapter für die zu entfernenden
+Kapitel (keine Verwerfungs-Pille nötig, Dokument zeigt danach nur noch
+das gewünschte Kapitel, nichts sonst verloren); (b) das Modell sendet ein
+rewrite, das die anderen Kapitel/das Bild tatsächlich verliert – dann
+erscheint „⚠️ Änderung verworfen (nichts gespeichert): … V3 …“, KEIN
+💾/🧠-Badge, das Dokument bleibt BYTE-IDENTISCH zum Vorherstand (alle
+Kapitel/das Bild weiterhin vorhanden), unter der Pille erscheinen „Diff
+ansehen“ und ein (noch inaktiver) Override-Knopf. 🔴 wenn ein Kapitel
+oder das Bild ohne begleitende Verwerfungs-Pille verschwindet. Hinweis:
+eine reine Titel-Umbenennung per rewrite („nenne das Notizbuch in X
+um“) löst IMMER dieselbe V3-R-Verwerfung aus (Titelzeile gilt als
+verloren) – das ist ERWARTETES Verhalten (kein 🔴), Umbenennen läuft
+über den Editor oder eine gezielte Op-Sequenz statt rewrite.
+
+**C32 [VERBUNDEN][API] Verschieben INNERHALB eines Notizbuchs mit
+gescheiterter Ziel-Op (v7.54).** Wie C30, aber Quelle und Ziel liegen im
+SELBEN Notizbuch (ein Abschnitt „QA-Test Quelle“ mit genau einem
+Stichpunkt „QA-Test Punkt A“ UND, im selben Notizbuch, ein Kapitel mit
+einem `##`-Abschnitt, der ein `### Details`-Unterthema enthält – per
+Editor anlegen). Auftrag: „Verschiebe aus dem Abschnitt QA-Test Quelle
+den Eintrag ‚QA-Test Punkt A‘ in das Unterthema Details.“ (1 API-Aufruf;
+die Formulierung soll das Modell zu einer falschen Ebenen-Adressierung
+verleiten). Bestanden – DREI gültige Ausgänge: (a) das Modell adressiert
+korrekt einen echten `##`-Abschnitt → „QA-Test Punkt A“ erscheint GENAU
+EINMAL am Ziel, verschwindet aus der Quelle, 💾-Badge; (b) move_entry
+scheitert (Skip), ist aber Teil einer Gruppe, in der ZUSÄTZLICH eine
+destruktive Op gewirkt hätte → „⚠️ Änderung verworfen (nichts
+gespeichert) … Turn nicht teilweise übernommen …“, „QA-Test Punkt A“
+bleibt GENAU EINMAL in der Quelle, KEIN 💾; (c) NUR move_entry wurde
+gesendet (nichts sonst gewirkt) → „⚠️ Nicht angewendet (… ###-Unterthema
+…)“ OHNE Verwerfungs-Pille (Überführen-/Skip-Muster, K-🔵10), „QA-Test
+Punkt A“ bleibt GENAU EINMAL in der Quelle. 🔴 wenn der Punkt fehlt,
+doppelt steht oder ohne jede Pille verschwindet.
+
+**C33 [VERBUNDEN][API] Override (v7.54).** Nach C31(b): „Diff ansehen“
+anklicken → Diff-Ansicht (rot/grün) erscheint, Override-Knopf wird aktiv
+(Label nennt „löscht N Zeilen“) → Knopf anklicken. Erwartet: 💾-Badge an
+DERSELBEN Nachricht (kein neuer Chat-Eintrag), Pille wechselt zu „⚠️
+Änderung trotz Prüfhinweis übernommen (Nutzer-Entscheidung): …“, der
+Historie-Eintrag endet auf „(trotz Prüfhinweis übernommen)“; über die
+Historie wieder auf den alten Stand zurückstellen. Nach C32(b): der
+Override-Knopf heißt stattdessen „Ohne Lösch-/Ersetz-Ops übernehmen“ –
+nach dem Klick bleibt „QA-Test Punkt A“ unverändert in der Quelle stehen
+(nichts wird gelöscht). Da move_entry selbst ein DESTRUCTIVE_OP_TYPE ist,
+filtert der Override i. d. R. ALLE verbleibenden Ops heraus (nichts wird
+committet, kein 💾) – erwartete Pille dann: „⚠️ Ohne Lösch-/Ersetz-Ops
+übernommen (Nutzer-Entscheidung) – die verbleibenden Ops haben nicht
+gewirkt, nichts gespeichert: …“ (Nacharbeit Runde 1, 🟡 2 – NICHT mehr
+das ältere „Teil ohne Lösch-/Ersetz-Ops übernommen“, das fälschlich
+einen erfolgreichen Teil-Commit suggeriert hätte). Bleibt AUSNAHMSWEISE
+eine nicht-destruktive Ziel-Op übrig, die weiterhin skippt, zeigt die
+Pille zusätzlich eine zweite Zeile „⚠️ Nicht angewendet: …“ mit dem
+Skip-Grund. 🔴 bei „übernommen“-Wortlaut ohne den „nicht gewirkt,
+nichts gespeichert“-Zusatz, wenn tatsächlich nichts committet wurde.
+Zwischenprobe: vor einem Klick im Editor eine
+Zeile des betroffenen Notizbuchs ändern und speichern → beide Buttons
+verschwinden (die Pille selbst bleibt stehen), erneutes Senden ist dann
+der einzige Weg. Folge-Turn „Was ist mit der Änderung von eben?“ → das
+Modell kennt den Ausgang (verworfen bzw. übernommen), ohne die Op zu
+wiederholen. Nach einem Reload sind die Buttons ebenfalls weg (kein
+Finding – rejectedTurn ist bewusst nicht persistiert).
+
+**C34 [VERBUNDEN][API] (nur ab v7.55, In-Turn-Retry – NICHT Teil von
+v7.54, hier nur vorab dokumentiert) Retry korrigiert den Turn.** Setup
+wie C32. Bestanden: (a) eine ℹ️-Meldung „erste Antwort verworfen (…),
+Korrektur im selben Turn übernommen“ erscheint UND „QA-Test Punkt A“
+steht GENAU EINMAL am Ziel (die erste, verworfene Antwort des Modells
+wurde automatisch im selben Turn korrigiert, ohne dass der Nutzer
+eingreifen musste); (b) wie C32(b) – bleibt der zweite Versuch ebenfalls
+ein Verwerfungs-/Atomaritäts-Fall, gilt der LETZTE Versuch mit dem
+v7.54-Verhalten (Pille, Diff, Override); (c) wie C32(c). 🔴 bei
+Zeilenverlust oder -duplikat. Solange nur v7.54 deployt ist: dieser Fall
+ist NICHT lauffähig (kein `retryWith`) – als „übersprungen, wartet auf
+v7.55“ vermerken, kein Finding.
 
 ## D. Manuelles Bearbeiten (WYSIWYG)
 

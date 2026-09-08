@@ -1,0 +1,19 @@
+{
+  "id": "2026-09-intra-verschieben",
+  "source": "Restrisiko #111 (intra-Notizbuch #65-Muster): Verschieben INNERHALB eines Notizbuchs mit gescheiterter Ziel-Op - synthetisch konstruiert nach dem in DECISIONS #111 offen gelassenen Muster, kein Byte-Abbild eines Live-Vorfalls.",
+  "engineAtIncident": "v7.53",
+  "notebook": "Beispielbuch",
+  "doc": "# Beispielbuch\n\n## Quelle\n\n- Punkt A\n\n# Kapitel\n\n## Bereich\n\n### Details\n\n- d\n",
+  "recordedOps": [
+    { "type": "replace_section", "heading": "### Details", "chapter": "# Kapitel", "content": "- d\n- Punkt A" },
+    { "type": "delete_section", "heading": "## Quelle" }
+  ],
+  "expect": {
+    "outcome": ["rejected"],
+    "hardIfApplied": [],
+    "rejectKinds": ["atomic"],
+    "mustNotContain": [],
+    "mustKeepLines": ["- Punkt A"],
+    "maxCountOf": {}
+  }
+}

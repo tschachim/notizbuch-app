@@ -23,6 +23,20 @@
 /* einordnet (Ziel-Op korrigieren, BEIDE Ops erneut senden) statt wie      */
 /* zuvor eigenständig zu rekonstruieren, was bereits verloren gegangen     */
 /* sein könnte.                                                           */
+/* v7.54 (Verify-then-Commit-Gate, Turn-Atomarität, DECISIONS #112,        */
+/* Vorschlag B Stufe 1): src/lib/verify.js/turn.js bewerten JETZT das      */
+/* Ergebnis (Vorher/Nachher-Vergleich, Turn-Atomarität) EINE Ebene ÜBER    */
+/* der Engine, BEVOR App.jsx committet - ein Turn kann seit v7.54 KOMPLETT */
+/* verworfen werden (nichts gespeichert, auch keine memory_*-Op), wenn ein */
+/* rewrite Kapitel/Bilder verliert, ein Kapitelnamen-Duplikat entstünde    */
+/* oder eine Ziel-Op scheitert, während im SELBEN Notizbuch bereits eine   */
+/* Lösch-/Ersetz-Op gewirkt hätte (das #65-Muster jetzt auch INNERHALB     */
+/* eines Notizbuchs, nicht nur zwischen Notizbüchern wie der bestehende    */
+/* Cross-Notizbuch-Turn-Guard). Neues Prompt-Bullet direkt nach der         */
+/* ℹ️-Regel erklärt dem Modell die neue "⚠️ Änderung verworfen (nichts      */
+/* gespeichert)"-Pille (GESAMTER Turn, nicht nur eine einzelne Op) UND die  */
+/* beiden Override-Wortlaute ("trotz Prüfhinweis"/"ohne Lösch-/Ersetz-      */
+/* Ops übernommen") als bewusste, bereits gespeicherte Nutzerentscheidung.  */
 /* ------------------------------------------------------------------ */
 
 import { stripCiteTags, citeTagsToDocLinks } from "./citations.jsx";
@@ -274,6 +288,7 @@ INTERNET-RECHERCHE:
 - ZITIER-PFLICHT: Markiere JEDE konkrete recherchierte Aussage (Zahlen, Fakten, Empfehlungen) direkt an der Aussage mit <cite index="…">…</cite> – überall: im Antworttext vor dem Tool-Aufruf, in reply und in ops-Inhalten. index = 1-basierte Position des belegenden Suchtreffers, gezählt über ALLE gelieferten Suchergebnisse in Reihenfolge; mehrere Belege kommagetrennt (index="2,5").
   Beispiel-Antworttext: "Morgen wird es <cite index="1">sonnig bei rund 31 °C</cite>, nachts <cite index="3">mild bei 17 °C</cite>."
   Eine Recherche-Antwort ganz ohne cite-Marker ist ein Fehler.
+  AUSSCHLIESSLICH spitze Klammern <cite …>…</cite> – NIE runde Klammern, und jedes cite immer schließen.
 - QUELLEN IM DOKUMENT (PFLICHT): Auch in ops-Inhalten JEDE Aussage aus der Websuche mit <cite index="…">…</cite> markieren – die App wandelt das in nummerierte, klickbare Quellen-Fußnoten um. Beispiel-content: "- <cite index="2">Medium: 56–58 °C Kerntemperatur</cite>". Keine Klartext-Quellen wie „(Quelle: …)“ ins Dokument schreiben.
 - Bestehende Fußnoten-Links der Form [1](https://…) im Dokument sind solche Quellen-Fußnoten: erhalte sie bei Umstrukturierungen unverändert und nimm sie beim Verschieben von Inhalten mit.
 - Absolute Windows-Pfade (z. B. C:\Users\...\Bericht.docx) trägst du als [Dateiname-ohne-Endung](file:///C:/Users/.../Bericht.docx)-Link ein (Vorwärtsslashes, %-Encoding für Leerzeichen/Sonderzeichen); bestehende file:-Links im Dokument lässt du unverändert.
@@ -380,6 +395,7 @@ OPS-ZUVERLÄSSIGKEIT (WICHTIG):
 - EINZELNE Einträge (eine Zeile/ein Stichpunkt, ggf. mit eingerückten Unterpunkten) löschst du AUSSCHLIESSLICH mit delete_entry und verschiebst sie innerhalb eines Notizbuchs AUSSCHLIESSLICH mit move_entry und ÄNDERST sie AUSSCHLIESSLICH mit replace_entry – auch im Kapitel-Freitext – NIEMALS mit delete_section (löscht IMMER den GANZEN Abschnitt!) und NIEMALS durch replace_section-Neuschreiben des Abschnitts. Zwischen ZWEI Notizbüchern: ZUERST append_to_section/append_to_chapter im Ziel, DANN delete_entry in der Quelle (siehe Verschiebe-Regel oben). Zeilen INNERHALB eines \`\`\`-Codeblocks sind KEINE Einträge – delete_entry/replace_entry/move_entry treffen sie nie; Code änderst du per replace_section des ganzen ##-Abschnitts (kompletter Inhalt inkl. des vollständigen Codeblocks).
 - Erscheint in der Historie eine ⚠️-Meldung über nicht angewendete ops, war deine vorige Änderung WIRKUNGSLOS – korrigiere sie im nächsten Turn (richtiger Typ/exakte Abschnitts-Überschrift) statt Erfolg anzunehmen. Nennt die ⚠️ Kandidaten („Kapitel: …“, „meintest du …“) oder ein konkretes Feld (chapter/to_chapter/from_chapter/heading), übernimm GENAU diese Angabe im Korrektur-Turn; weiche NIE auf rewrite aus.
 - Erscheint in der Historie eine ℹ️-Meldung, wurde deine Op ANGEWENDET, aber nicht wörtlich (in Kapitel-Freitext umgeleitet bzw. Abschnitt/Kapitel neu angelegt) – wiederhole sie NICHT (das erzeugt Dubletten); prüfe nur, ob Ort und Ebene gewollt waren, und adressiere künftig direkt: Kapitel-Freitext per append_to_chapter, bestehende Zeile per replace_entry. Nennt die ℹ️ einen ÄHNLICH benannten vorhandenen Eintrag („ähnlich vorhanden: …“), frage den Nutzer im reply, ob dieser gemeint war – lösche nichts eigenmächtig. Eine ℹ️ „Titelzeile – als Eingrenzung gewertet“ bedeutet: der Vorspann-Abschnitt wurde getroffen, nichts Neues entstand.
+- Erscheint in der Historie eine ⚠️-Meldung, die mit „Änderung verworfen (nichts gespeichert)“ beginnt, hat die Prüfung vor dem Speichern die GESAMTE Op-Liste dieses Turns abgelehnt – KEINE Op (auch keine memory_*-Op) ist wirksam geworden. Die Meldung nennt den Grund (V1 Kapitelnamen-Duplikat, V2 doppelte Zeilen, V3 Zeilenverlust, V4 Struktur aus content, V7 zerrissener Codeblock, V8 rewrite neben anderen Ops, oder „Turn nicht teilweise übernommen“: eine Ziel-Op wurde übersprungen, während eine Lösch-/Ersetz-Op gewirkt hätte). Sende im nächsten Turn eine korrigierte, VOLLSTÄNDIGE Op-Liste (Ziel- und Quell-Op zusammen, nie nur die Hälfte) und weiche nie auf rewrite aus. Steht dort „trotz Prüfhinweis übernommen“ oder „ohne Lösch-/Ersetz-Ops übernommen“, hat der Nutzer die (ggf. um Lösch-Ops gekürzte) Änderung bewusst gespeichert – behandle sie als angewendet und wiederhole sie nicht. Steht darunter zusätzlich eine zweite Zeile „Nicht angewendet: …“ oder der Zusatz „haben nicht gewirkt, nichts gespeichert“, ist GENAU der dort genannte Teil trotz Übernahme weiterhin wirkungslos geblieben – dafür gilt weiterhin die ⚠️-Regel oben (nicht angewendete Ops): korrigiere diesen Teil im nächsten Turn, statt ihn als erledigt zu behandeln.
 
 REINE FRAGEN (WICHTIG): Enthält die Nachricht nichts Speicherwürdiges – eine bloße Frage (auch zu Notizbüchern oder Dateianhängen: „Was steht …?“, „Erkläre …“, „Fasse zusammen …“), Smalltalk –, dann gib "ops":[] und "commit":null zurück. Nutze eine solche Antwort NIEMALS, um nebenbei aufzuräumen, Platzhalter zu entfernen oder umzustrukturieren – das Dokument bleibt unangetastet. Die Frage selbst wird dabei im reply VOLLSTÄNDIG und inhaltlich beantwortet (siehe ANTWORTFORMAT) – ein Verweis auf bereits im Notizbuch stehende Inhalte ist nur eine Ergänzung und ersetzt niemals die eigentliche Antwort. (Angehängte BILDER sind davon ausgenommen: sie werden gemäß dem BILDER-Abschnitt immer eingebunden. GEDÄCHTNIS-Ops ("memory_append"/"memory_replace") sind davon EBENFALLS ausgenommen und bei einer reinen Frage ausdrücklich weiter erwünscht, wenn dabei dauerhaft Nützliches über den Nutzer erkennbar wird – Gedächtnispflege ist KEIN Notizbuch-Aufräumen. ALLE Notizbuch-Ops (append_to_section/replace_section/delete_section/delete_chapter/append_to_chapter/delete_entry/replace_entry/move_entry/rewrite) bleiben bei reinen Fragen dagegen unverändert verboten: "ops" darf bei einer reinen Frage also memory_*-Einträge enthalten, aber KEINE Notizbuch-Ops.)`;
 
@@ -484,6 +500,7 @@ export const NOTEBOOK_TOOL = {
                 "Entfällt AUCH bei delete_entry und move_entry (delete_entry adressiert über 'entry'; bei " +
                 "move_entry ist der bewegte Text die gefundene Zeile selbst, kein eigenes Inhaltsfeld nötig). " +
                 'Aussagen aus der Websuche MIT <cite index="…">…</cite> markieren (wird zur Quellen-Fußnote). ' +
+                "AUSSCHLIESSLICH spitze Klammern <cite …>…</cite> – NIE runde Klammern, und jedes cite immer schließen. " +
                 "Bei memory_append/memory_replace ist dies der Gedächtnistext (siehe GEDÄCHTNIS-Abschnitt). " +
                 "Bei append_to_section/replace_section/append_to_chapter KEINE #/##-Zeilen (⚠️ „content enthält " +
                 "Kapitel-/Abschnittszeilen“); eine führende eigene Überschriftszeile wird entfernt (ℹ️), besteht " +

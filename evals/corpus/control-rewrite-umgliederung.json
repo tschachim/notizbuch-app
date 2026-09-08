@@ -1,0 +1,18 @@
+{
+  "id": "control-rewrite-umgliederung",
+  "source": "Kontrollfall (nicht-vakuös, K-🟡5): rewrite darf Kapitel umsortieren/umbenennen und Tippfehler korrigieren, ohne inhaltlichen Verlust - alle Zeilen bleiben erhalten. Synthetisch konstruiert.",
+  "engineAtIncident": "v7.53",
+  "notebook": "Beispielbuch",
+  "doc": "# Beispielbuch\n\n# Projekte\n\n## Aktiv\n\n- Projekt A lauft gut\n- Projekt B ist pausiert\n\n# Ideen\n\n## Sammlung\n\n- Neue App-Idee\n\n# Team\n\n## Mitglieder\n\n- Alice\n- Bob\n",
+  "recordedOps": [
+    { "type": "rewrite", "content": "# Beispielbuch\n\n# Team\n\n## Mitglieder\n\n- Alice\n- Bob\n\n# Projekte\n\n## Aktiv\n\n- Projekt A läuft gut\n- Projekt B ist pausiert\n\n# Ideen & Konzepte\n\n## Sammlung\n\n- Neue App-Idee\n" }
+  ],
+  "expect": {
+    "outcome": ["commit"],
+    "hardIfApplied": [],
+    "rejectKinds": [],
+    "mustNotContain": [],
+    "mustKeepLines": ["- Alice", "- Bob", "- Projekt B ist pausiert", "- Neue App-Idee"],
+    "maxCountOf": {}
+  }
+}

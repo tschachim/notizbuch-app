@@ -12060,3 +12060,1020 @@ aus `referenz-app.jsx` übernommen.
          Defensiv-Fallback `g.results[idx] || {}` wie in Nacharbeit
          Runde 2, unverändert praktisch unerreichbar). Version bleibt
          `v7.53` (weiterhin uncommittet).
+
+112. **v7.54, Vorschlag B Stufe 1: Verify-then-Commit-Gate, Turn-Atomarität,
+     Nutzer-Override, Replay-Korpus – schließt die in #111 vertagten
+     Restrisiken rewrite-Verlust, Verschieben INNERHALB eines Notizbuchs,
+     Replay-Korpus.**
+     - **Anlass:** Roadmap A → B (Nutzerentscheidung nach dem dritten
+       Kapitelnamen-Duplikat-Vorfall, siehe #111). A (v7.52–v7.53) machte die
+       Engine strikt (kein implizites Anlegen/Raten mehr) – zwei
+       Restrisiken blieben laut #111 ausdrücklich offen: (1) ein rewrite
+       ERSETZT das gesamte Dokument; ein "guter" rewrite kann trotzdem
+       stillschweigend ganze Kapitel/Bilder verlieren, ohne dass die Engine
+       das je erkennen könnte (ein Vorher/Nachher-Vergleich ist dafür
+       strukturell nötig, keine Änderung an einer einzelnen Op reicht).
+       (2) Der Cross-Notizbuch-Turn-Guard (#111 Teil 3) erkennt NUR
+       gescheiterte Ziel-Ops ZWISCHEN Notizbüchern – eine gescheiterte
+       Ziel-Op UND eine gewirkte Quell-Löschung IM SELBEN Notizbuch (das
+       #65-Muster INNERHALB eines Notizbuchs) blieb ungeprüft. B fügt
+       deshalb eine Ebene ÜBER der Engine ein: `src/lib/verify.js`
+       vergleicht Vorher/Nachher-Text gegen benannte, kalibrierte
+       Invarianten (V1–V8), `src/lib/turn.js` bewertet die TURN-Atomarität
+       (Skip + gewirkte destruktive Op in derselben Gruppe) und entscheidet,
+       ob der GESAMTE Turn verworfen wird. Eine adversariale Kritikrunde an
+       der Erstfassung deckte zusätzlich mehrere False-Positive-Risiken auf
+       (K-🔴1/🔴2: der erlaubte Verlustbereich muss INKREMENTELL je Op und
+       ENGINE-GLEICH gescopt werden; K-🟡4/🟡5: Einzelzeilen-Wiederholung
+       und rewrite-Umbenennung/-Reflow sind Alltag, dürfen nie hart
+       blockieren) – alle flossen in die finale Spezifikation ein (siehe
+       Entscheidungen unten und die Kennzeichnung „K-🔴/🟡/🔵“ in der
+       Spezifikation).
+     - **E1 – Gate ÜBER der Engine, kein Doppel-Feedback.** `verify.js`/
+       `turn.js` mutieren nie ein Dokument, rufen nur bereits exportierte,
+       rein lesende `ops.js`-Funktionen (`resolveTarget`/
+       `resolveChapterTarget`/`normHead`/`dispHead`/`applyOps`/
+       `DELIBERATE_NOOP_REASON`/`MAX_OPS`) und bewerten AUSSCHLIESSLICH das
+       Ergebnis (Vorher/Nachher-Text, angewendete Ops) – NIE den Skip-Grund
+       selbst (der bleibt exklusiv im unveränderten `buildOpsWarning`-Block,
+       Zeile 2 der Pille). `applyOps(doc,ops) === applyOpsDetailed(doc,ops)
+       .text`, der `results[]`-Vertrag, `DELIBERATE_NOOP_REASON`, `MAX_OPS`
+       und der gesamte Cross-Notizbuch-Turn-Guard (`turnGuard.js#planTurn`)
+       bleiben byte-/semantik-identisch – der Guard läuft weiterhin VOR der
+       Verifikation als Teilregel (Holds erzeugen weiterhin ⚠️
+       „zurückgehalten“ und einen sicheren Teil-Commit, C30 unverändert);
+       die neue Atomaritätsregel bewertet erst das Ergebnis NACH dem
+       Guard-Filter, Hold-Einträge zählen nicht als Skip.
+     - **E2 – Invarianten-Matrix mit benannten Schwellen, inkrementellem
+       Verlust-Rechner und engine-gleichem Scope (Kritikrunde K-🔴1/🔴2).**
+       V1 (hard, Kapitelnamen-Duplikat, auch bei rewrite), V2 Duplikat
+       (H1 Bild im selben/destruktiv, H2 Lauf ≥2 Zeilen im selben
+       Container hard, H3 Lauf in anderem Container bei destruktiver
+       Gruppe hard, sonst soft – Einzelzeilen-Wiederholung/Checklisten-
+       Vorlage bleibt IMMER soft, K-🟡4), V3 Verlust (`computeLoss()`
+       berechnet den erlaubten Verlustbereich INKREMENTELL je Op auf dem
+       jeweiligen Zwischenstand über den byte-identischen `applyOps()`-
+       Wrapper, gescopt wie die Engine selbst – `resolveTarget`/
+       `resolveChapterTarget`-Ranges bzw. eine eigene, rein lesende
+       Entsprechung zu `entryBlockRange`/`findEntryLines` für
+       delete_entry/replace_entry/move_entry, als VEREINIGUNG beider
+       Matching-Stufen – eine echte Obermenge der Engine-Wahl, nie kleiner),
+       V3-R rewrite-Ratio (K-🟡5: `lost`/`ratio` über exakten UND
+       „geändert“-Präfix-Abgleich, `V3_REWRITE_HARD_MIN_LOST`/
+       `V3_CHAPTER_LOSS_RATIO` schützen Kleinst-Dokumente und legitime
+       Kapitel-Umbenennung/Reflow), V4 (hard, entfällt bei rewrite; neue
+       #/##-Zeile ohne Adressfeld), V5 (soft, Namensgleichheit anderer
+       Ebene), V6 (gestrichen – reiner Engine-Skip seit v7.53, kein
+       Doppel-Feedback), V7 Zaun-Parität, V8 (hard, rewrite neben weiteren
+       Ops). Reihenfolge V8/V3/V1/V2/V4/V5/V7, alle gesammelt, kein
+       Kurzschluss. `normHeadV()` kollabiert Whitespace-Läufe auf BEIDEN
+       Vergleichsseiten (Whitelist UND Dokumentzeilen, K-🔵9) – ein
+       doppeltes Leerzeichen im Modelltext löst nie einen Fehlalarm aus.
+       Jede Diagnose-Zeichenkette läuft durch `sanitizeDiagFragment`
+       (NUL raus, Whitespace kollabiert, eckige Klammern entschärft,
+       ≤160 Zeichen) plus Gesamtkappung ≤800 (`buildVerifyDiagnosis`).
+     - **E3 – Atomaritätsregel (H/A) und Guard als Teilregel
+       (`src/lib/turn.js#evaluateTurn`).** `rejected` wenn (H) irgendeine
+       Gruppe `verify.hard.length>0` hat, ODER (A) zugleich in derselben
+       Gruppe: ein Engine-Skip (Grund ≠ `DELIBERATE_NOOP_REASON`, nach
+       Guard-Filter), eine gewirkte Op UND ein destruktiver Typ
+       (`DESTRUCTIVE_OP_TYPES`) in `finalOps`. NICHT verworfen: reine
+       Skip-Gruppen (Überführen-Muster, Gedächtnis läuft normal), Skips
+       ohne destruktiven Typ, Deliberate-No-ops. Bei Verwerfung: kein
+       Notizbuch-Commit, kein Gedächtnis-Commit, `infos`/`createdInfos`/
+       `softInfos` werden NICHT gerendert (kein Doppel-Feedback für einen
+       bereits verworfenen Turn). Die Pille (`buildRejectWarning`) nennt in
+       Zeile 1 bei Grund (A) NUR Typ/Heading, NIE den Skip-Grund erneut
+       (K-🔵7 – der steht ausschließlich in Zeile 2, dem unveränderten
+       `buildOpsWarning`-Block).
+     - **E4 – Gedächtnis-Commit NACH der Notizbuch-Entscheidung.**
+       `commitMemory` lief in v7.16–v7.53 VOR den Notizbuch-Ops (#63 B);
+       ab v7.54 läuft er NACH der Notizbuch-Entscheidung, damit ein
+       verworfener Turn das Gedächtnis nicht halb wandern lässt
+       (Überführen-Muster: memory_* UND die zugehörige Notizbuch-Op stehen
+       im selben `ops`-Array, sollen also gemeinsam scheitern oder gemeinsam
+       gelingen). Erhalten bleibt: bei SHA-Konflikt und bei reinen Skips
+       läuft `commitMemory` trotzdem (C19 unverändert – unabhängige
+       Datei/unabhängiger Commit). `commitMemory` wirft weiterhin nie
+       (fängt intern, Banner) – kein neuer „Notizbuch committet, dann
+       Exception“-Pfad. Kein Unit-Test pinnt die Reihenfolge (nur
+       Kommentare in `App.jsx` und diese Prosa hier supersedet #63 B/#65).
+     - **E5 – Override: nur auf identischer Basis, kein Re-Apply/Re-Gate.**
+       Ein Gate, das Alltagsänderungen blockiert, wird abgeschaltet –
+       deshalb ab B1 ein Override-Knopf unter der Verwerfungs-Pille
+       (`turn.js#overrideOpsFor`): Gruppen mit AUSSCHLIESSLICH `hard`-
+       Gründen behalten `finalOps` unverändert (bewusste Nutzerentscheidung,
+       Label nennt die Anzahl gelöschter Zeilen); Gruppen mit einem
+       `atomic`-Grund verlieren ALLE Ops mit `type ∈ DESTRUCTIVE_OP_TYPES`
+       (dieselbe Filter-Mechanik wie der Guard) – der Override vollzieht
+       damit NIE das #65-/#103-2-Muster (Quelle weg, Ziel nie geschrieben).
+       Bewusst NICHT übernommen: Override bei atomic komplett deaktivieren
+       (K-🟡7-Alternative) – das hätte den Nutzer bei einem bloßen
+       Tippfehler-Skip zum kompletten Neusenden gezwungen, obwohl die
+       gewirkten harmlosen Ops längst nutzbar sind. Der Override-Knopf
+       bleibt disabled, bis die Diff-Vorschau (`DiffRows`, aus dem
+       Historie-Panel extrahiert) mindestens einmal geöffnet wurde;
+       `commitPlannedGroups(..., {requireIdenticalBase:true})` committet
+       NUR, wenn `docCache.current[nbId] === before` für JEDE Gruppe gilt
+       (K-🟡6) – sonst Banner „hat sich seit dem Prüfhinweis geändert“,
+       KEIN Re-Apply, KEIN Re-Gate (die Vorschau muss exakt dem entsprechen,
+       was committet wird). `rejectedTurn` (React-State, NICHT in
+       `serializeState`) wird invalidiert bei: `send()`-Start,
+       `archiveChat`, `saveEdit` (vor dem Commit), `restore`, `toggleTask`
+       UND im Remote-Refresh (nur wenn ein betroffenes Notizbuch
+       TATSÄCHLICH einen anderen Text als der Phase-1-Snapshot hat,
+       Snapshot-Vergleich statt jeder Refresh – hält die Vorschau bei
+       unveränderten Notizbüchern nutzbar). Die Override-Mutation trifft
+       DIESELBE Assistent-Nachricht (kein neuer Chat-Eintrag – strikt
+       alternierende API-Rollen, #63 C); Konflikt MITTEN in der
+       Override-Schleife → „Teilweise übernommen (…) – … nicht gespeichert“,
+       kein Gedächtnis-Commit (Überführen-Muster nicht halb, bewusst anders
+       als der positive Normal-Konfliktpfad).
+     - **E6 – Sanitisierung/Kappung.** `sanitizeDiagFragment` (zweite,
+       unabhängige Schicht wie `ops.js#sanitizeForWarning`/
+       `turnGuard.js#sanitizeGuardText`): NUL raus, Whitespace-Läufe zu
+       einem Leerzeichen, eckige Klammern zu runden (entschärft
+       „]“/„[SYSTEM-HINWEIS:“ strukturell), Fragmente ≤160, Diagnose-
+       Gesamtlänge ≤800 (Kürzungsreihenfolge Outline → Skips →
+       Kopfzeile – „Nächster Schritt“ bleibt IMMER erhalten). Schicht 2
+       (`anthropic.js#sanitizeWarningForHistory`) bleibt unverändert – EIN
+       `[SYSTEM-HINWEIS: …]`-Marker je historischer Nachricht, auch wenn
+       eine Pille jetzt zwei Zeilen trägt (Verwerfungstext + unveränderter
+       `opsWarning`-Block).
+     - **E7 – Replay-Korpus (`evals/corpus/*.json`,
+       `tests/replay.test.js`).** Neun Fälle: sieben aus DECISIONS-Prosa
+       rekonstruierte, anonymisierte Vorfälle (#80, #103 Versuch 1+2, #106
+       T1+T2, Restrisiko intra-Notizbuch-Verschieben, Restrisiko
+       rewrite-Kapitelverlust) plus zwei nicht-vakuöse Kontrollfälle
+       (rewrite-Umgliederung ohne Verlust, Mehr-Op-Sequenz mit
+       inkrementell erklärtem Verlust) – belegen, dass das Gate NIE einen
+       stillen schädlichen Commit zulässt UND legitime Alltagsänderungen
+       weiterhin committet. Anlage-Parität (K-🔵13) als RELATION geprüft
+       (jede `created`-Überschrift kommt in einer Engine-Note vor UND
+       umgekehrt), nicht als Gleichheit der Anzahl – eine Op kann Kapitel
+       UND Abschnitt in EINER Note anlegen. Restrisiko: das Korpus ist eine
+       Annäherung aus der DECISIONS-Prosa, keine Byte-Kopie der Live-
+       Vorfälle (`repros.json` lag beim Nachbau nicht vor).
+     - **Prompt (`src/lib/anthropic.js`):** ein neues Bullet DIREKT NACH der
+       ℹ️-Regel (vor REINE FRAGEN) erklärt die „⚠️ Änderung verworfen
+       (nichts gespeichert)“-Pille (GESAMTER Turn, alle Verwerfungs-Codes
+       benannt) und beide Override-Wortlaute („trotz Prüfhinweis
+       übernommen“/„ohne Lösch-/Ersetz-Ops übernommen“) als bereits
+       gespeicherte, nicht zu wiederholende Nutzerentscheidung – verlangt
+       im Korrektur-Turn ausdrücklich eine VOLLSTÄNDIGE Op-Liste (Ziel- UND
+       Quell-Op zusammen) statt eines Ausweichens auf rewrite.
+     - **Restrisiken:** V2-H2-Läufe (≥2 im selben Container) können ein
+       bewusst zweimal angehängtes, identisches mehrzeiliges Template
+       treffen – Ventil: Override, `V2_RUN_MIN` (aktuell 2) wird nach den
+       ersten E2E-Läufen anhand der Soft-/Hard-Häufigkeit ggf. auf 3
+       nachkalibriert. Die V3-R-„geändert“-Heuristik (`CHANGED_PREFIX_LEN=20`)
+       kann eine Umformulierung, die den (um Listenmarker/Checkbox
+       bereinigten, siehe `stripMarker()`, Nacharbeit Runde 2) Zeilenanfang
+       erhält, aber Inhalt kürzt, als „geändert“ statt „verloren“ werten –
+       bewusst in Kauf genommen (rewrite bleibt durch Bild-/Titel-/
+       Kapitelregel und die 25-%-Grenze geschützt). Seit Nacharbeit Runde 3
+       vergleicht der Präfix nur noch `min(CHANGED_PREFIX_LEN, Länge der
+       before-Zeile)` Zeichen (statt fest 20 auf beiden Seiten – das traf bei
+       kurzen before-Zeilen faktisch nur noch Gleichlänge) plus ein
+       Enthaltensein-Fallback ab `CHANGED_CONTAIN_MIN=12` Zeichen (Reflow:
+       die alte Zeile steckt vollständig, aber nicht am Anfang, in der neuen)
+       und `CHANGED_MIN_LEN=4` als Zufallstreffer-Schutz für sehr kurze
+       Zeilen; dieselbe Lockerung gilt für die Kapitelregel, die zusätzlich
+       ein absolutes Minimum (`lostContent >= V3_REWRITE_HARD_MIN_LOST`)
+       verlangt, bevor ein umbenanntes/aufgelöstes Kapitel hart statt soft
+       wird (schützt Kleinst-Kapitel mit nur 1–2 Inhaltszeilen). Ehrlich
+       bleibt: eine reine Umformulierung von > 25 % der Zeilen OHNE
+       erhaltenen Zeilenanfang und OHNE dass die alte Zeile als Ganzes in
+       einer neuen Zeile steckt (z. B. mehrere Prosazeilen komplett
+       neu formuliert) bleibt bewusst hart – die Heuristik erkennt
+       Umformulierung nur über Zeilenanfang/Enthaltensein, nicht per
+       semantischem Vergleich; Ventil: Override. Ein SHA-Konflikt MITTEN in
+       `commitPlannedGroups` bleibt ein ehrlicher Teil-Commit über
+       Notizbücher hinweg (wie v7.53) – der Prompt-Satz „ganz oder gar
+       nicht“ gilt nur für die Verwerfung selbst. Override bei hard-Gründen
+       löscht bewusst (Label nennt die Zeilenzahl, Knopf erst nach Diff-
+       Ansicht) – ein Nutzer kann trotzdem falsch klicken, Historie-Restore
+       bleibt der Rückweg. Die Override-Basisprüfung kann bei aktivem
+       Remote-Refresh häufiger zur Meldung „seit dem Prüfhinweis geändert“
+       führen (bewusst: Sicherheit vor Komfort). Die Diff-Vorschau zeigt
+       den reinen Engine-Text VOR `renumberCitations`/`linkifyFilePaths` –
+       Fußnotennummern im tatsächlichen Commit können geringfügig
+       abweichen (kein Verlustpfad). Verwaiste Bild-Uploads bei einem
+       verworfenen Turn bleiben ein bekanntes, unverändertes Restrisiko
+       (Upload läuft vor der Bewertung, wie schon bei reinen Skips).
+       V2-H3 löst NUR NOCH bei einer destruktiven SCHREIB-Op in der Gruppe
+       hart aus (`replace_section`/`replace_entry`/`rewrite`, siehe
+       `V2H3_WRITE_DESTRUCTIVE`, Nacharbeit Runde 2) – eine bewusste
+       Vorlagen-Kopie per `append_to_section` neben einer UNABHÄNGIGEN
+       Lösch-/Verschiebe-Op bleibt jetzt soft; eine Vorlagen-Kopie per
+       `replace_section` in einen NEUEN Abschnitt, während das Original z. B.
+       per `delete_entry` in derselben Gruppe woanders entfernt wird, bleibt
+       weiterhin bewusst hart (`replace_section` KANN selbst einen
+       Vollkopie-Lauf erzeugen) – Ventil: Override. Eine
+       reine Titel-Umbenennung per `rewrite` (nur die `#`-Titelzeile ändert
+       sich, der restliche Inhalt bleibt) löst IMMER V3-R hard aus
+       (`titleLost`) – bewusst kein Sonderfall, Titel ändert man über den
+       Editor oder eine gezielte Op-Sequenz statt eines rewrite.
+     - **Vertagt:** B2/v7.55 (In-Turn-Retry in `anthropic.js#callClaude`,
+       `retryWith(diagnosis)`), `fast-check`-Property-Tests, ein
+       eigenständiges Tier-B-Eval-Skript (`run-eval.mjs`), `create:true` als
+       explizites Op-Flag für Neuanlagen.
+     - **Tests/Version:** `src/lib/verify.js` (NEU), `src/lib/turn.js`
+       (NEU), `evals/corpus/*.json` (9 Fälle), `tests/verify.test.js` (56
+       Tabellen-Tests), `tests/turn.test.js` (25 Tests), `tests/
+       replay.test.js` (12 Tests) – Teil 1. `src/App.jsx#send()` auf
+       `evaluateTurn`/`commitPlannedGroups`/`applyRejectedTurn` umgebaut,
+       `rejectedTurn`-State samt Invalidierung, `DiffRows`/
+       `buildOverrideGroups`-Helfer, drei neue App.jsx-Builder
+       (`overrideButtonLabel`/`overrideKurzform`/`buildOverrideWarning`,
+       Tests in `tests/appOps.test.js`, Describe „Pillen-Komposition
+       v7.54“), Prompt-Bullet + drei Pins in `tests/anthropic.test.js` –
+       Teil 2. **Gesamt: 2359 Tests grün** (2343 nach Teil 1 + 16 neu:
+       13 in `tests/appOps.test.js`, 3 in `tests/anthropic.test.js`),
+       Coverage `src/lib` unverändert zu Teil 1 (App.jsx zählt nicht zum
+       Coverage-Gate, `vitest.config.js#coverage.include`): 92.6 %
+       Statements / 86.21 % Branches / 92.09 % Funktionen / 95.15 % Zeilen
+       (Gate 60 %). Version `v7.53` → `v7.54` (`src/App.jsx` Kopfzeile).
+     - **Nacharbeit Runde 1 (vor dem ersten Commit von v7.54, Code-Review
+       gegen den o. g. Stand): ein 🔴- und zwei 🟡-Findings vollständig
+       behoben, dazu vier 🔵-Findings (billig/risikoarm); zwei 🔵-Findings
+       bewusst zurückgestellt.**
+       - 🔴 `verify.js#buildV2#isDup` prüfte nur den Pro-Container-Anstieg
+         plus „irgendein Vorkommen vor der Op-Anwendung“ (`bc>=1`) und
+         hatte damit die Spec-2.3-Bedingung „`count_after(L) >
+         count_before(L) >= 1` GLOBAL“ verloren – JEDES reine Verschieben
+         (Quelle weg, Ziel neu: `move_entry` eines mehrzeiligen/Bild-
+         Eintrags, `append_to_section`+`delete_entry` als Verschiebe-
+         Muster, `move_entry` in Kapitel-Freitext) erhöht die globale
+         Zählung NICHT und wurde trotzdem fälschlich HART als „Vollkopie“/
+         „stünde danach doppelt“ verworfen, obwohl das Ergebnisdokument
+         jede Zeile genau einmal enthält. Fix: `isDup` verlangt jetzt
+         zusätzlich `ac > bc` (global), die Pro-Container-Zählung wählt
+         weiterhin nur die richtige Vorkommensstelle unter den GLOBAL
+         gestiegenen Treffern aus. Fünf neue False-Positive-Regressions-
+         tests (mehrzeiliger Eintrag/Bild, beide Verschiebe-Op-Wege,
+         Kapitel-Freitext-Ziel) plus zwei neue Kontrollfälle (Vorlagen-
+         Kopie per `replace_section` in neuen Abschnitt bei stehendem
+         Original, Bild-Kopie bei destruktiver Gruppe – bleiben weiterhin
+         zurecht hart) in `tests/verify.test.js`.
+       - 🟡 `App.jsx#applyRejectedTurn` sammelte die Engine-Skips des
+         Override-Commits (`result.notApplied2`/Gedächtnis-Skips) in
+         `notApplied`, nutzte die Liste aber nie – die Override-Pille kam
+         ausschließlich aus `buildOverrideWarning()` OHNE die zweite
+         `buildOpsWarning`-Zeile. Bei einem atomic-Grund, dessen
+         verbleibende (nicht-destruktive) Ziel-Op nach dem Herausfiltern
+         der Lösch-Op weiterhin an ihrem Skip-Grund scheitert, wurde
+         NICHTS committet (`commitLabel` undefined), die Pille sagte
+         trotzdem „… übernommen (Nutzer-Entscheidung)“ – der Prompt weist
+         das Modell an, das als angewendet zu behandeln und nicht zu
+         wiederholen (Prompt↔Verhalten-Inkonsistenz). Fix:
+         `buildOverrideWarning` bekommt eine neue `opts.nothingSaved` (kein
+         Konflikt, aber `!changed.length && !memoryUpdated`) mit eigenem
+         Wortlaut „… – die verbleibenden Ops haben nicht gewirkt, nichts
+         gespeichert: …“; `applyRejectedTurn` hängt zusätzlich
+         `buildOpsWarning(notApplied)` als Zeile 2 an (wie beim
+         `buildRejectWarning`-Pfad, kein Doppel-Feedback – Zeile 1 nennt
+         den Skip-Grund selbst weiterhin nicht). Prompt-Bullet
+         (`anthropic.js`) um einen Halbsatz ergänzt: eine zusätzliche
+         „Nicht angewendet“-Zeile unter der Override-Pille bedeutet, dass
+         GENAU dieser Teil weiterhin der ⚠️-Korrekturregel unterliegt.
+         Neue Tests in `tests/appOps.test.js` (eigenes Fixture mit
+         `append_to_section` statt `replace_section` als Skip-Op, weil
+         `replace_section` selbst `DESTRUCTIVE_OP_TYPES` ist und sonst vom
+         Override restlos mitgefiltert würde) und ein neuer Pin in
+         `tests/anthropic.test.js`. `docs/TESTFAELLE.md` C33 entsprechend
+         nachgezogen (die dortige `move_entry`-Override-Probe filtert i. d.
+         R. ALLES heraus, weil `move_entry` selbst destruktiv ist – neue
+         erwartete Pille dokumentiert).
+       - 🟡 `stats.lostLines` (Grundlage des Override-Labels „löscht N
+         Zeilen“) war die NETTO-Differenz nicht-leerer Zeilen (vorher minus
+         nachher) statt „Σ unexplained + erlaubter Verlust“ (Spec 4.1) –
+         ein rewrite/eine Op-Gruppe, die 4 Zeilen verliert UND 5 neue
+         anhängt, ergab `lostLines===0`, obwohl 4 Zeilen unwiderruflich
+         gelöscht wurden. Fix: neue `grossLostLines()` über das Zeilen-
+         Multiset (Brutto, wie `buildV3R#lost` es für rewrite schon intern
+         tat, jetzt aber einheitlich für ALLE Turns inkl. gezielter Ops).
+         Vier neue Tests in `tests/verify.test.js` (Netto-0/Brutto-4 bei
+         rewrite, `delete_section`+`append_to_section` im selben Turn,
+         reiner Zugang → 0, reines Verschieben → 0).
+       - 🔵 `verify.js#buildV2` H2/H3: zwei Kopien DESSELBEN Laufs im
+         selben Container (Original + separater, nicht angrenzender
+         Resend) konnten denselben Satz zweimal in `hard` pushen (H1 hatte
+         bereits `reportedHardKeys`, H2/H3 nicht) – Fix: gleicher Dedup-
+         Schlüssel wie H1, neuer Test mit drei getrennten Kopien desselben
+         Blocks → genau ein `V2`-Hard-Eintrag.
+       - 🔵 `App.jsx`: `buildOverrideGroups(rejectedTurn.plan)` lief bei
+         geöffneter Diff-Ansicht in JEDEM Render neu (`applyOpsDetailed`
+         je Gruppe + `diffLines` in `DiffRows`) – neuer `overrideGroups =
+         useMemo(...)`-Wert auf Komponentenebene (Hooks dürfen nicht in
+         einer `.map()`-Callback stehen), `applyRejectedTurn()` ruft
+         `buildOverrideGroups` weiterhin separat (einmalig pro Klick, kein
+         Render-Hot-Path) – Vorschau/Commit bleiben identisch, weil beide
+         auf demselben `rejectedTurn.plan` beruhen.
+       - 🔵 `verify.js#buildV3R`: totes `contentLineIdxs` (befüllt, nie
+         gelesen) und eine sofort überschriebene erste `totalContent`-
+         Zuweisung ersatzlos entfernt (reines Aufräumen, keine
+         Verhaltensänderung).
+       - 🔵 DECISIONS #112 Restrisiken um zwei Sätze ergänzt (V2-H3 trifft
+         auch eine bewusste Vorlagen-Kopie per `replace_section` in einen
+         neuen Abschnitt bei stehendem Original; eine reine Titel-
+         Umbenennung per rewrite löst IMMER V3-R hard aus), `docs/
+         TESTFAELLE.md` C31 um denselben Hinweis ergänzt.
+       - **Bewusst NICHT behoben (Deviation):** 🔵 die `indexOf()`-basierte
+         Kapitel-Verlustzuordnung in `buildV3R` (kann bei textgleichen
+         Zeilen in zwei Kapiteln den Verlust dem falschen Kapitel
+         zuordnen) bleibt unverändert – reine Heuristik für die SOFT/HARD-
+         Kapitelregel ohne Datenverlustpfad, ein Umbau auf eine
+         indexbasierte Zuordnung wäre eine größere, risikoreichere
+         Änderung ohne bekannten Live-Vorfall. 🔵 die Inkonsistenz
+         zwischen `turn.js#evaluateTurn` (filtert `DELIBERATE_NOOP_REASON`
+         aus `plan.notApplied`) und `App.jsx#commitPlannedGroups`
+         (`notApplied2` bleibt ungefiltert, wie schon in v7.53) bleibt
+         bestehen – beide denkbaren Auflösungen (No-ops künftig auch im
+         Normalpfad aus der ⚠️-Pille filtern, oder den Filter aus der
+         Regel-A-Prüfung in `plan.notApplied` wieder entfernen) ändern
+         bestehendes, gut getestetes v7.53-Pillenverhalten und sollten
+         zusammen mit den ersten E2E-Läufen von v7.54 kalibriert werden,
+         nicht isoliert in dieser Nacharbeitsrunde.
+       - **Tests:** `tests/verify.test.js` (+12: fünf False-Positive-
+         Regressionstests, zwei Vollkopie-Kontrollfälle, ein H2/H3-Dedup-
+         Test, vier `stats.lostLines`-Brutto-Tests), `tests/appOps.test.js`
+         (+5, neues Describe „Pillen-Komposition v7.54 Nacharbeit Runde 1“),
+         `tests/anthropic.test.js` (+1 Pin). Beim Schreiben der Tests
+         wurden zwei rohe NUL-Bytes (0x00) in einem bereits bestehenden
+         `tests/verify.test.js`-Testfall gefunden (Verstoß gegen die
+         Quelltext-Konvention „keine rohen Steuerzeichen“) und durch die
+         Escape-Sequenz `\u0000` ersetzt (Laufzeitverhalten identisch,
+         reiner Quelltext-Fix, kein Findings-Bezug). **Gesamt nach
+         Nacharbeit Runde 1: 2377 Tests grün** (2359 + 18 neu), Coverage
+         Gesamt-Repo 92.66 % Statements / 86.22 % Branches / 92.21 %
+         Funktionen / 95.17 % Zeilen (Gate 60 % auf `src/lib`; `verify.js`
+         92.98 %/77.93 %/95.49 %/96.23 %, `turn.js` 96.73 %/84.84 %/100 %/
+         100 %). Version bleibt `v7.54` (kein Feature-Bump für eine
+         Review-Nacharbeitsrunde vor dem ersten Commit, wie schon bei
+         v7.53 Nacharbeit Runde 1–3).
+     - **Nacharbeit Runde 2 (zweite Review-Runde vor dem ersten Commit von
+       v7.54): ein 🔴- und ein 🟡-Finding vollständig behoben, dazu drei
+       🔵-Findings (billig/risikoarm); ein 🔵-Finding bewusst nur teilweise
+       übernommen (Deviation).**
+       - 🔴 `verify.js#buildV3R` zählte Überschriftszeilen (`#`/`##`/`###`)
+         als normale Inhaltszeilen in `lost`/`total` mit - ein rewrite, das
+         drei Abschnitte zu einem zusammenlegt oder drei Kapitel umbenennt
+         (Inhalt VOLLSTÄNDIG erhalten), erreichte in kleinen Dokumenten
+         `ratio > V3_REWRITE_HARD_RATIO` allein durch die verschwundenen
+         Überschriftszeilen und wurde fälschlich HART verworfen - Spec 2.3
+         verlangt wörtlich „Umgliederung ohne Verlust → ratio 0“ und
+         behandelt eine fehlende `#`/`##`-Zeile über eigene, separate SOFT-
+         Regeln (`chapterSoftHit`/`sectionSoftHit`). Fix: `buildV3R`
+         berechnet `beforeLines`/`afterLines` jetzt über
+         `computeFenceLineMask` + eine Heading-Erkennung
+         (`/^#{1,3}\s/`, NICHT maskierte Fence-Zeilen ausgenommen - eine
+         `#`-Zeile INNERHALB eines Codezauns ist Nutzinhalt) und schließt
+         Überschriften aus Zähler/Nenner der Ratio aus; der Titelvergleich
+         (`titleLost`) braucht weiterhin ALLE `after`-Zeilen (die Titelzeile
+         selbst ist eine Überschrift) - dafür ein separates
+         `afterNormAll = afterAll.map(normLine)` eingeführt, statt des jetzt
+         content-only `afterNorm`. Die Kapitel-Verlustzuordnung (`c.lines`/
+         `sec.lines`, bereits reine Inhaltszeilen) bleibt kompatibel, weil
+         `beforeLines.indexOf(t)` weiterhin im selben (jetzt kleineren, aber
+         korrekten) Inhalts-Array sucht. Fünf neue Tests in
+         `tests/verify.test.js`: zwei False-Positive-Regressionstests
+         (drei Abschnitte zusammengelegt, drei Kapitel umbenannt - je hard
+         leer + soft V3-R), eine Kontrolle (3 von 6 Inhaltszeilen bei
+         UNVERÄNDERTER Überschrift verloren -> bleibt hart, die
+         Überschriften-Ausnahme darf echten Inhaltsverlust nicht
+         verschleiern).
+       - 🟡 `verify.js#buildV2` H3 (Vollkopie in einem ANDEREN Container)
+         löste HART bei JEDER destruktiven Op in der Gruppe aus
+         (`hasDestructive`, `DESTRUCTIVE_OP_TYPES`) - eine bewusste
+         Vorlagen-Kopie per `append_to_section` neben einer fachlich
+         UNABHÄNGIGEN `delete_entry` (z. B. „Checkliste für KW 38 anlegen
+         UND den erledigten Punkt aus der Inbox streichen“) wurde dadurch
+         verworfen, obwohl die Invariantenmatrix („Vorlage bewusst per
+         append kopieren bleibt soft“) genau das als soft verlangt. Fix:
+         neue `V2H3_WRITE_DESTRUCTIVE = new Set(["replace_section",
+         "replace_entry", "rewrite"])` - nur diese drei Op-Typen (können
+         selbst einen Vollkopie-Lauf ERZEUGEN, indem sie einen Abschnitt/
+         Eintrag komplett ersetzen) lösen H3 noch hart aus; reine Lösch-/
+         Verschiebe-Ops (`delete_*`/`move_entry`) irgendwo sonst in der
+         Gruppe machen aus einer append-Kopie keine „Vollkopie statt
+         Änderung“ mehr. H1 (Bild) bleibt bewusst bei `hasDestructive`
+         (kein bekannter legitimer Fall, Spec „Offen“). Beide bestehenden
+         H3-Hard-Tests (`replace_section`-Vollkopie) bleiben unverändert
+         grün. Zwei neue Tests in `tests/verify.test.js` (Vorlagen-Kopie
+         per `append_to_section` + `delete_entry` -> hard leer + soft V2;
+         Kontrolle mit `replace_section` statt `append_to_section` -> bleibt
+         hart „Vollkopie“).
+       - 🔵 `verify.js#buildV3R` CHANGED_PREFIX_LEN-Präfixvergleich verglich
+         den ROHEN `normLine`-Präfix inkl. Listenmarker/Checkbox - ein
+         rewrite, das nur `- ` in `1. ` umformatiert oder `- [ ]` in
+         `- [x]` abhakt, verschob dadurch jeden Zeilenanfang und zählte den
+         reinen Markerwechsel fälschlich als „verloren“ statt „geändert“.
+         Fix: neuer `stripMarker()`-Helfer
+         (`/^([-*+]|\d+[.)])\s+(\[[ xX]\]\s*)?/`) NUR im Präfixvergleich
+         (der vorausgehende Exaktvergleich/Multiset bleibt unverändert,
+         Duplikat-Logik bleibt stabil). Zwei neue Tests (Bullet -> nummeriert
+         per rewrite -> hard leer; Kontrolle mit drei von sechs Zeilen durch
+         UNABHÄNGIGEN Text ersetzt -> bleibt hart, `stripMarker` matcht
+         nicht zu großzügig).
+       - 🔵 `App.jsx#applyRejectedTurn`: `commitLabel` wurde NACH
+         `switchNotebook(others[0].id)` berechnet - `switchNotebook` setzt
+         `activeNbRef.current` SYNCHRON, bei genau einer Override-Gruppe in
+         einem ANDEREN Notizbuch wurde `result.changed[0].id ===
+         activeNbRef.current` dadurch fälschlich wahr, das 💾-Label verlor
+         den Notizbuchnamen (Inkonsistenz zu `send()`, das „commit“ bewusst
+         VOR dem Auto-Wechsel bestimmt). Fix: `commitLabel`-Berechnung vor
+         den Aufklapp-/Auto-Wechsel-Block gezogen, exakt wie in `send()`.
+         Zusätzlich lief `setNotesDirty(true)` im Override bisher
+         UNBEDINGT, auch im `nothingSaved`-Fall (nichts committet) und
+         unabhängig von `view` - Fix: `if (commitLabel && view === "chat")
+         setNotesDirty(true)`, wie im Normalpfad. Kein dedizierter Unit-Test
+         (App.jsx ist nicht im Coverage-Gate, `applyRejectedTurn` ist keine
+         exportierte reine Funktion wie `buildOverrideWarning`/
+         `overrideKurzform` in `tests/appOps.test.js` - eine Testabdeckung
+         bräuchte einen vollen Component-/Fetch-Mock-Aufbau, unverhältnismäßig
+         für ein 🔵-Finding; die Fixes sind reine, risikoarme Reihenfolge-/
+         Bedingungs-Korrekturen nach demselben, bereits getesteten Muster
+         wie `send()`).
+       - 🔵 `tests/anthropic.test.js`: neuer End-zu-End-Pin für den in
+         Spec 8.4 genannten „Gate-Wächter“-Fall - eine verworfene Turn-Pille
+         (`turn.js#buildRejectWarning`) besteht selbst schon aus ZWEI
+         Zeilen (Verwerfungstext + unveränderter `opsWarning`-Block, per
+         `"\n"` verbunden), BEVOR sie in `m.warning` landet; der Test
+         belegt, dass `sanitizeWarningForHistory` daraus trotzdem GENAU
+         EINEN `[SYSTEM-HINWEIS: …]`-Marker macht (kein roher Zeilenumbruch
+         im Rahmen, beide Teiltexte enthalten).
+       - **Bewusst NUR TEILWEISE übernommen (Deviation):** 🔵 der zweite
+         Teil des Findings (Korpus-Format um `wouldBeAfter` erweitern, damit
+         `tests/replay.test.js` für Korpusfälle mit `outcome:"skip"` UND
+         gesetztem `hardIfApplied` diese Behauptung auch tatsächlich
+         VERIFIZIERT statt sie nur unausgeführt in der Beschreibung stehen
+         zu lassen) wurde NICHT umgesetzt - das hätte für die betroffenen
+         zwei Korpusfälle (`2026-09-07-kpis-turn2`, `2026-07-v740`) ein
+         handgeschriebenes, historisch plausibles „Nachher“-Dokument
+         gebraucht, das die damalige (fehlerhafte) Engine tatsächlich
+         erzeugt hätte - eine größere, im Kern spekulative Rekonstruktion
+         ohne `repros.json` (siehe bereits dokumentiertes Korpus-Restrisiko
+         in E7), die in dieser Nacharbeitsrunde nicht mit vertretbarem
+         Risiko nachgebaut werden konnte. Der End-zu-End-Pin (siehe oben)
+         deckt den ANDEREN Teil des Findings (den Mechanismus selbst) ab.
+       - **Tests:** `tests/verify.test.js` (+7: drei 🔴-Tests [zwei
+         Positiv-/False-Positive-Fälle + eine Kontrolle], zwei 🟡-Tests
+         [ein Positiv-/False-Positive-Fall + eine Kontrolle], zwei
+         🔵-stripMarker-Tests [ein Positiv-Fall + eine Kontrolle]),
+         `tests/anthropic.test.js` (+1 Pin). **Gesamt
+         nach Nacharbeit Runde 2: 2385 Tests grün** (2377 + 8 neu: 7 in
+         `tests/verify.test.js`, 1 in `tests/anthropic.test.js`), Coverage
+         Gesamt-Repo 92.73 % Statements / 86.33 % Branches / 92.42 %
+         Funktionen / 95.21 % Zeilen (Gate 60 % auf `src/lib`; `verify.js`
+         93.35 %/78.56 %/96.49 %/96.47 %, `turn.js` unverändert 96.73 %/
+         84.84 %/100 %/100 %). Version bleibt `v7.54` (weiterhin kein
+         Feature-Bump für eine Review-Nacharbeitsrunde vor dem ersten
+         Commit).
+     - **Nacharbeit Runde 3 (dritte Review-Runde vor dem ersten Commit von
+       v7.54): ein 🔴- und zwei 🟡-Findings vollständig behoben, dazu drei
+       🔵-Findings behoben und ein 🔵-Finding bewusst NICHT übernommen
+       (Deviation, Alternative bereits im Finding selbst vorgesehen).**
+       - 🔴 `verify.js#buildV3R` zählte eine umformulierte Zeile nur dann als
+         „geändert“ statt „verloren“, wenn `after`-Präfix UND `before`-Präfix
+         auf GLEICH VIELE (`CHANGED_PREFIX_LEN=20`) Zeichen exakt
+         übereinstimmten – bei einer KÜRZEREN `before`-Zeile (z. B. „Alice“,
+         5 Zeichen) bedeutete das faktisch Gleichlänge: „Alice“ → „Alice
+         (Lead)“ (12 Zeichen) verglich `"Alice"` mit `"Alice (Lead)"` und war
+         damit NIE gleich, obwohl der komplette Zeilenanfang erhalten blieb –
+         genau der Fall, den der Präfixvergleich eigentlich abdecken sollte.
+         Zusätzlich kannte die Kapitelregel (verlorene `#`-Zeile hart nur bei
+         ≥ 50 % Kapitelinhalt-Verlust) KEIN absolutes Minimum: ein
+         umbenanntes Kapitel mit NUR 2 Inhaltszeilen, von denen EINE nicht
+         erkannt wurde, erreichte bereits `chapterRatio` 0.5 und löste HART
+         „verliert Kapitel samt Inhalt“ aus, obwohl beide Zeilen weiterhin im
+         Dokument stehen (genau der vom Auftrag geforderte Matrix-Fall).
+         Fix: neue `isChanged(b, a)`-Heuristik – `n = min(CHANGED_PREFIX_LEN,
+         b.length)`, Präfixvergleich nur auf diesen `n` Zeichen BEIDER
+         Seiten (statt fest 20 auf beiden), zusätzlich ein
+         Enthaltensein-Fallback (`b.length >= CHANGED_CONTAIN_MIN(12) &&
+         a.includes(b)`, Reflow: die alte Zeile steckt vollständig, aber
+         nicht zwingend am Anfang, in der neuen) und `CHANGED_MIN_LEN(4)` als
+         Zufallstreffer-Schutz für sehr kurze Zeilen (beide neue, benannte
+         Konstanten, exportiert). Kapitelregel: zusätzliche Bedingung
+         `lostContent >= V3_REWRITE_HARD_MIN_LOST` vor dem Hard-Treffer,
+         sonst bleibt es bei `chapterSoftHit`. Zwölf neue Tests in
+         `tests/verify.test.js`: Probe A (10 kurze Zeilen, 3 mit
+         Klammerzusatz → hard leer), Probe A2 (Kapitel mit 2 Zeilen
+         umbenannt + 1 Zeile komplett neu formuliert → hard leer, bleibt
+         soft), Matrix D (Kombination aus Kapitel-Rename + kurzer Zusatz +
+         Abschnitt-in-anderes-Kapitel-Verschiebung, alle Zeilen erhalten →
+         hard leer), Reflow/CONTAIN (Kategorie-Präfix vor drei Zeilen, alte
+         Zeile steckt nicht am Anfang → hard leer) samt CONTAIN-Schwellen-
+         Kontrolle und CHANGED_MIN_LEN-Kontrolle (Zufallstreffer-Schutz bei
+         sehr kurzen Zeilen), sowie drei Kontrollen für ECHTEN Verlust
+         (10 kurze Zeilen mit 3 völlig unabhängig ersetzten Zeilen bleibt
+         hart; Kapitel mit 4 Zeilen verliert 3 davon + Kapitelzeile bleibt
+         hart „samt Inhalt“).
+       - 🟡 `turn.js#evaluateTurn`: die Atomaritätsprüfung (A) lief bisher
+         NUR im „else“-Zweig NACH einem hard-Kurzschluss (`continue`) – trug
+         eine Gruppe ZUGLEICH einen hard-Verstoß UND das (A)-Muster (Skip +
+         gewirkte destruktive Op), bekam der Reason NUR `kind:"hard"` OHNE
+         das Atomaritäts-Flag; `overrideOpsFor()` filterte deshalb KEINE
+         destruktiven Ops heraus – der Override hätte in diesem Fall das
+         #65-Muster VOLLZOGEN (Quelle gelöscht, Ziel-Op weiterhin ein Skip),
+         obwohl Spec 4.4/K-🟡7 das ausdrücklich ausschließen. Fix: (A) wird
+         jetzt für JEDE Gruppe VOR dem hard-Kurzschluss berechnet und als
+         `atomic`-Flag am Reason mitgeführt (auch bei `kind:"hard"`);
+         `turn.js#overrideOpsFor` filtert bei `reason.kind==="atomic" ||
+         reason.atomic`; `App.jsx#overrideButtonLabel` erkennt dieselben
+         Gruppen zusätzlich zu den reinen atomic-Gruppen und zeigt die
+         gemischte Beschriftung („ohne Lösch-Ops in «NB», löscht N Zeilen“) –
+         N kommt dabei NICHT aus der vollen `g.lostLines` der UNGEFILTERTEN
+         `finalOps`, sondern aus dem tatsächlichen Verlust NACH dem Filter
+         (lokal berechnet über `applyOpsDetailed`/`verifyTurn` auf den
+         gefilterten Ops, mit Fallback auf `g.lostLines`, falls einer
+         Test-Fixture die vollen `PlannedGroup`-Felder fehlen). Zwei neue
+         Tests in `tests/turn.test.js` (Probe C: Skip auf einem
+         `###`-Unterthema + gewirkte `delete_entry` + hartes V2-H2-Resend in
+         derselben Gruppe → `reasons[0]` mit `kind:"hard"`, `atomic:true`,
+         `overrideOpsFor` entfernt `delete_entry`, `applyOpsDetailed` auf den
+         gefilterten Ops enthält die gelöschte Zeile weiterhin; Kontrolle:
+         reine hard-Gruppe ohne Atomaritätsmuster bekommt `atomic:false` und
+         bleibt ungefiltert), zwei neue Tests in `tests/appOps.test.js`
+         (Sanity-Check der Fixture, `overrideButtonLabel` zeigt „löscht 0
+         Zeilen“ statt der vollen `g.lostLines`).
+       - 🟡 Dreifaches Präfix in jeder ℹ️-Prüfhinweis-Pille: `verify.js`
+         erzeugte Soft-Texte bereits mit „ℹ️ Prüfhinweis: …“ bzw. „ℹ️
+         Kapitel …“/„ℹ️ Abschnitt …“, `turn.js#evaluateTurn` stellte ein
+         ZWEITES „Prüfhinweis: “ davor, `App.jsx#buildOpsInfo` ein DRITTES
+         „ℹ️ Hinweis: “ – der Nutzer sah „ℹ️ Hinweis: Prüfhinweis: ℹ️
+         Prüfhinweis: Zeile „…“ ist bereits in „Log“ vorhanden“, derselbe
+         Text lief per SYSTEM-HINWEIS-Rahmen in die Modell-History. Fix: EIN
+         Präfix-Eigentümer – `verify.js` liefert Soft-Texte jetzt
+         EINHEITLICH mit „Prüfhinweis: “ (ohne Emoji; „ℹ️ Kapitel …“ →
+         „Prüfhinweis: Kapitel …“, „ℹ️ Abschnitt …“ → „Prüfhinweis:
+         Abschnitt …“), `turn.js` reicht `s.text` unverändert durch (kein
+         zweites Präfix mehr), `App.jsx#buildOpsInfo` bleibt der EINZIGE
+         „ℹ️“-Absender. Zwei neue Tests in `tests/appOps.test.js` (Log-
+         Wiederholung → `buildOpsInfo(plan.softInfos)` ergibt exakt „ℹ️
+         Hinweis: Prüfhinweis: Zeile „…“ ist bereits in „Log“ vorhanden“ mit
+         GENAU EINEM „ℹ️“; rewrite-Zusammenlegung → `createdInfos` +
+         `softInfos` zusammen ergeben ebenfalls nur EIN „ℹ️“ im
+         zusammengesetzten Text).
+       - 🔵 `verify.js#buildV2` H2: das typische Trainings-/Standup-Log wurde
+         hart verworfen, sobald eine NEUE Datumszeile zusammen mit
+         identischen Folgezeilen (≥ `V2_HARD_MIN_CHARS`) angehängt wurde –
+         ein echtes Resend fügt dem Container dagegen KEINE genuin neue
+         Zeile hinzu. Fix: neue `containerHasGenuineNewLine(container)` –
+         enthält der Container in `after` mindestens eine Zeile mit
+         `count_before===0` (genuin neu, nicht-leer, nicht Tabellen-/Trenn-/
+         Leer-Bullet-Zeile), wird ein sonst hart eingestufter H2-Lauf
+         DIESES Containers zu soft herabgestuft; ein reiner Resend OHNE
+         jede neue Zeile bleibt hart. Zwei neue Tests in
+         `tests/verify.test.js` (Trainingslog-Fixture → hard leer, soft V2;
+         Kontrolle: reiner 2-Zeilen-Resend ohne neue Zeile → bleibt hart).
+         Nebenbefund beim Testen: der bestehende H2/H3-Dedup-Test
+         (Nacharbeit Runde 1, 🔵 4) nutzte als Trennzeilen zwischen zwei
+         Resends bislang FRISCH ERFUNDENEN Text – das ist strukturell
+         IDENTISCH zum jetzt behobenen Trainingslog-Muster (neue Zeile
+         unmittelbar vor einem wiederholten Block) und wäre mit dem Fix
+         fälschlich zu soft geworden, ohne dass der Dedup-Mechanismus selbst
+         betroffen war. Die Trennzeilen wurden durch bereits VORHANDENEN
+         Text („- vorhanden“, erneut gesendet) ersetzt – der Test prüft
+         damit weiterhin ausschließlich das Dedup zweier echter Resends,
+         die Trainingslog-Kalibrierung hat einen eigenen, neuen Test.
+       - 🔵 `verify.js#buildV5`: „heißt wie „X““ (ohne Ebenenangabe) war
+         tautologisch – der Name steht schon im Fragment selbst, der Hinweis
+         sagte nichts Neues. Fix: die tatsächlich GETROFFENE Quelle wird
+         jetzt benannt (`Kapitel „# …“`/`Unterthema „### …“`/`Titel „# …“`
+         bzw. `Abschnitt „## …“`), dieselbe Priorität wie die bestehende
+         Bedingung. Bestehender Test um `toContain("heißt wie Titel")`
+         erweitert, zwei neue Tests (Abschnitt heißt wie Kapitel, Kapitel
+         heißt wie Abschnitt).
+       - 🔵 `App.jsx#applyRejectedTurn`: `unsavedNames` lief über ALLE
+         Plan-Gruppen (per Namensgleichheit) statt nur über die, für die es
+         überhaupt etwas zu speichern gab – eine Gruppe, deren Override-Text
+         bereits identisch zur Basis ist (`commitPlannedGroups`: `text ===
+         base` → `continue`, landet nie in `changed`), zählte im
+         Konfliktfall trotzdem als „nicht gespeichert“, obwohl für sie nie
+         etwas zu speichern war; zudem fehlte der Bezug per `nbId` (nur
+         Namensgleichheit). Fix: `pending = groups.filter(g => g.text !==
+         g.before)`, `savedIds = new Set(result.changed.map(c => c.id))`,
+         `unsavedNames = pending.filter(g => !savedIds.has(g.nbId)).map(g =>
+         g.name)` (`groups` = `buildOverrideGroups`-Ergebnis, bereits
+         vorhanden). Kein dedizierter Unit-Test (App.jsx ist nicht im
+         Coverage-Gate, `applyRejectedTurn` ist keine exportierte reine
+         Funktion – wie bereits bei den 🔵-Fixes der Nacharbeit Runde 2
+         dokumentiert, wäre ein Component-/Fetch-Mock-Aufbau für dieses
+         🔵-Finding unverhältnismäßig).
+       - 🔵 `App.jsx` Diff-Vorschau: eine Override-Gruppe, deren Text nach
+         dem Herausfiltern der destruktiven Ops identisch zur Basis bleibt
+         (typisch: atomic-Gruppe, in der nur noch eine skippende Ziel-Op
+         übrig ist, siehe `nothingSaved`), fiel in `DiffRows` auf den
+         `diffLines===null`-Fallback und rendert das GESAMTE Dokument als
+         `<pre>` – das suggeriert fälschlich eine vollständige Neuanlage
+         statt „keine Änderung“. Fix: vor `DiffRows` wird geprüft, ob
+         `g.text === g.before`; wenn ja, erscheint stattdessen „(keine
+         Änderung – verbleibende Ops wirken nicht)“. Kein dedizierter
+         Unit-Test (dieselbe Begründung wie beim vorigen 🔵-Fix – reines
+         JSX-Rendering ohne exportierte reine Funktion).
+       - **Bewusst NICHT übernommen (Deviation, Alternative bereits im
+         Finding vorgesehen):** 🔵 `verify.js#buildV2` H1 (Bild-Duplikat in
+         einem ANDEREN Container) bleibt bei `hasDestructive` (JEDE
+         destruktive Op der Gruppe löst hart aus) statt auf
+         `hasDestructiveWrite` (wie H3) umgestellt zu werden. Grund: die
+         beiden EXISTIERENDEN, bereits gepinnten H1-Hard-Regressionstests
+         („Bild doppelt bei destruktiver Gruppe“, Teil 1; „Bild bleibt am
+         Ursprungsort UND wird zusätzlich kopiert“, Nacharbeit Runde 1, K-🔴1)
+         verwenden BEIDE exakt das Muster `append_to_section` (Bild, anderer
+         Container) + `delete_entry` (unabhängig) – mit `hasDestructiveWrite`
+         (das `delete_entry` NICHT enthält) würde `isHard` für BEIDE Tests
+         fälschlich `false`, das Bild-Vollkopie-Muster aus #106 T2/#103-2
+         würde bei einer reinen `delete_entry`-Begleit-Op nicht mehr
+         erkannt. Das im Finding genannte Beispiel („append Bild + KORRIGIERE
+         den Eintrag“, Matrix E2) benennt zusätzlich `replace_entry` als
+         Begleit-Op – `replace_entry` ist aber bereits Teil von
+         `V2H3_WRITE_DESTRUCTIVE`, sodass `hasDestructiveWrite` für GENAU
+         dieses Beispiel unverändert `true` bliebe (der Fix würde also für
+         den im Finding beschriebenen Fall gar nichts ändern) und NUR bei
+         einer NICHT-Schreib-Begleit-Op (`delete_*`/`move_entry`) überhaupt
+         wirksam würde – exakt der Fall, den die beiden bestehenden
+         Regressionstests bewusst als hart pinnen. Das Finding selbst nennt
+         als Alternative ausdrücklich „die Abweichung in DECISIONS #112 als
+         bewusste Entscheidung mit Begründung festhalten“ – diese Option
+         wird hier gewählt: H1 bleibt konservativ bei `hasDestructive`
+         (Restrisiko unverändert wie bereits dokumentiert: „ob ein
+         Bild-Duplikat bei destruktiver Gruppe je legitim ist“ – kein
+         bekannter Fall; Ventil bleibt Override).
+       - **Tests:** `tests/verify.test.js` (+12: acht 🔴-Tests [Probe A,
+         Probe A2, Matrix D, Reflow/CONTAIN, CONTAIN-Kontrolle, drei
+         Kontrollen für echten Verlust], zwei 🔵-Trainingslog-Tests, zwei
+         🔵-V5-Wortlaut-Tests – dazu ein bestehender V5-Test um eine
+         zusätzliche Prüfung erweitert und der bestehende H2/H3-Dedup-Test
+         mit neutralisierten Trennzeilen, siehe oben), `tests/turn.test.js`
+         (+2), `tests/appOps.test.js` (+4: zwei Finding-2-Tests, zwei
+         Finding-3-Tests), `tests/citations.test.jsx` (+6, siehe
+         C3-Nachlauf-Finding unten), `tests/anthropic.test.js` (+1 Pin,
+         siehe C3-Nachlauf-Finding unten). **Gesamt nach Nacharbeit Runde 3:
+         2410 Tests grün** (2385 + 25 neu), Coverage Gesamt-Repo 92.85 %
+         Statements / 86.67 % Branches / 92.45 % Funktionen / 95.33 % Zeilen
+         (Gate 60 % auf `src/lib`; `verify.js` 93.92 %/79.58 %/96.55 %/
+         97.07 %, `turn.js` 96.77 %/85 %/100 %/100 %). Version bleibt
+         `v7.54` (weiterhin kein Feature-Bump für eine Review-
+         Nacharbeitsrunde vor dem ersten Commit).
+     - **C3-Nachlauf-Finding (E2E-Nachlauf v7.53, `src/lib/citations.jsx`,
+       Teil desselben v7.54-Pakets): das Modell schrieb im Chat-Text
+       vereinzelt einen Zitat-Marker als `(cite index="1">330 Meter …`
+       (runde statt spitzer Klammer, byteweise verifiziert 0x28) UND ohne
+       schließendes `</cite>` – `OPEN_RE`/`stripCiteTags` verlangten bisher
+       STRIKT `<cite …>`, das Rohmarkup blieb im Chat sichtbar (das
+       Dokument war über `citeTagsToDocLinks` unabhängig davon korrekt).
+       Ursache ist Modellvarianz (dieselbe ZITIER-PFLICHT-Regel produziert
+       im Regelfall korrektes `<cite>`), KEIN Typo im Bestandscode.** Fix:
+       `OPEN_RE = /[<(]cite\s+index="([^"]*)"[^>]*>/i` toleriert `<` ODER
+       `(` als Öffner-Zeichen; `CLOSE_RE` bleibt STRIKT `</cite>` (KEIN
+       laxes `)` als Schluss – sonst würde normale Prosa wie „(siehe oben)“
+       beschädigt); `stripCiteTags` toleriert dieselbe Klammer-Variante
+       (`[<(]\/?cite[^>]*>`). Fehlt das Schluss-Tag, endet das Zitat in
+       `renderWithCites` UND `citeTagsToDocLinks` implizit am Beginn des
+       NÄCHSTEN `OPEN_RE`-Treffers statt am Stringende, damit eine zweite
+       Quellenattribution direkt danach nicht als Teil des ERSTEN Zitats
+       verschluckt wird. Prompt (`anthropic.js`, ZITIER-PFLICHT-Regel UND
+       Tool-Schema-Beschreibung des `content`-Felds): neuer Satz
+       „AUSSCHLIESSLICH spitze Klammern `<cite …>…</cite>` – NIE runde
+       Klammern, und jedes cite immer schließen“, gepinnt in
+       `tests/anthropic.test.js`. Sechs neue Tests in
+       `tests/citations.test.jsx` (neue Describe-Gruppe „Toleranz gegen
+       Klammer-Variante (C3, v7.54)“, Fixture exakt aus dem Vorfall mit
+       ZWEI Quellen): Text-Knoten enthalten kein `[<(]cite` mehr, ZWEI
+       Fußnoten, Fußnote 1 endet vor dem zweiten Marker; `stripCiteTags`
+       erkennt die Klammer-Form; Regression (korrekt geschlossene
+       `<cite>`-Form bleibt unverändert funktionsfähig); `citeTagsToDocLinks`
+       analog (Dokument-Fußnoten `[0](url)` auch bei Klammer-Form/fehlendem
+       Schluss-Tag, zweiter Marker nicht verschluckt); Sicherheit (normale
+       Prosa mit runden Klammern „(siehe oben)“ bleibt unangetastet, kein
+       `)` wird je als Schluss gewertet).
+     - **Nacharbeit Runde 4 (vierte Review-Runde vor dem ersten Commit von
+       v7.54, Verdict der dritten Runde: NACHARBEIT, kein 🔴): drei
+       🟡- und drei 🔵-Findings vollständig behoben, kein Finding
+       zurückgestellt.**
+       - 🟡 **Finding A – `verify.js#buildV3R` echtes Reflow blieb hart.**
+         Werden ZWEI `before`-Zeilen zu EINER `after`-Zeile zusammengeführt,
+         matcht die ERSTE Hälfte die zusammengeführte Zeile typischerweise
+         per PRÄFIX (sie steht am Anfang der neuen Zeile) und belegt deren
+         Index in `afterUsed` – die ZWEITE Hälfte (steckt weiter hinten in
+         DERSELBEN `after`-Zeile) fand unter den noch UNBENUTZTEN
+         `after`-Zeilen keinen Treffer mehr; der Enthaltensein-Fallback
+         (`CHANGED_CONTAIN_MIN`) griff nie, weil er nur INNERHALB desselben
+         `findIndex()`-Laufs (also ebenfalls nur gegen unbenutzte Zeilen)
+         geprüft wurde. Drei zusammengeführte Paare (alle Hälften ≥ 12
+         Zeichen) in einem 10-Zeilen-Dokument ergaben `lost=3`, `ratio=30 %`
+         – fälschlich HART „rewrite verliert 30 % …“. Fix: bleibt der
+         reguläre Lauf ohne Treffer, prüft ein ZWEITER, von `afterUsed`
+         UNABHÄNGIGER Enthaltensein-Check (bewusst OHNE `afterUsed[idx] =
+         true` – mehrere `before`-Hälften dürfen sich dieselbe
+         zusammengeführte `after`-Zeile als „geändert“ teilen, das ist bei
+         einem Merge der Regelfall). Der bisherige „Reflow/CONTAIN“-Test
+         (Nacharbeit Runde 3) prüfte tatsächlich nur eine Präfix-Ergänzung
+         (jede `before`-Zeile bleibt 1:1 einer EIGENEN `after`-Zeile
+         zugeordnet, kein echtes Zusammenführen) – umbenannt in
+         „Präfix-Ergänzung/CONTAIN“, damit der Name zur geprüften Situation
+         passt. Zwei neue Tests in `tests/verify.test.js` (drei Paare
+         zusammengeführt → `r.hard` leer; Kontrolle: dieselben ersten
+         Hälften, aber die ZWEITEN Hälften durch unabhängigen Text ersetzt
+         → bleibt hart – die Lockerung darf echten Verlust INNERHALB einer
+         zusammengeführten Zeile nicht verschleiern). Restrisiko (siehe
+         Restrisiken-Absatz unten): eine Hälfte KÜRZER als
+         `CHANGED_CONTAIN_MIN` (12 Zeichen) zählt weiterhin als „verloren“ –
+         bewusst, derselbe Zufallstreffer-Schutz wie beim bereits
+         dokumentierten `CHANGED_CONTAIN_MIN`-Restrisiko.
+       - 🟡 **Finding B – `citations.jsx#stripCiteTags` beschädigte Prosa mit
+         runden Klammern.** Die runde Öffner-Variante verlangte bisher KEIN
+         `index=` und stoppte erst am NÄCHSTEN `>` irgendwo im String – Prosa
+         wie „Wir nutzen (cite) als Kürzel. 3 > 2 gilt.“ wurde zu „Wir nutzen
+         2 gilt.“, ein Blockquote-„>“ nach „(cited in …)“ verschluckte sogar
+         den Rest des Zitats. Blast-Radius: `anthropic.js` schickt JEDEN
+         `op.content` durch `citeTagsToDocLinks` (auch OHNE Websuche), dazu
+         die History und `archive.js` – ein zu laxer Stopper hätte dort
+         echten Dokumentinhalt verstümmelt. Fix: eine neue
+         `STRIP_ROUND_OPEN_RE = /\(cite\s+index="[^"]*"[^>)\n]*>/gi` (genauso
+         streng wie `OPEN_RE`: `index="…"` Pflicht, kein `)`/Zeilenumbruch
+         vor dem schließenden `>`) läuft VOR der bisherigen, weiterhin
+         lax bleibenden `STRIP_RE` (spitze Variante plus die runde
+         Schluss-Variante `(/cite>`) – ein „<“ gefolgt von „cite“ kommt in
+         normaler Prosa praktisch nie vor, anders als eine runde Klammer.
+         `OPEN_RE` selbst brauchte KEINE analoge Verschärfung: es verlangt
+         bereits das literale `cite index="…"`-Attribut, das in normaler
+         Prosa nie zufällig vorkommt – keine der drei neuen Prosa-Fixtures
+         matcht `OPEN_RE` überhaupt (geprüft, nicht nur behauptet – siehe
+         Tests). Neun neue Tests in `tests/citations.test.jsx` (`describe`
+         „stripCiteTags-Blast-Radius“, `it.each` über drei Fixtures × drei
+         Funktionen `stripCiteTags`/`citeTagsToDocLinks`/`renderWithCites`)
+         – alle drei Fixtures bleiben byteidentisch, das C3-Vorfalls-Fixture
+         (mit echtem `index=`) bleibt unverändert grün (alle 19 bereits
+         bestehenden Tests weiterhin grün).
+       - 🟡 **Finding C – `App.jsx#buildOverrideWarning` verschluckte den
+         Lösch-Hinweis bei hard+atomic in DERSELBEN Gruppe.** `allAtomic`
+         wird nur wahr, wenn JEDER Reason `kind:"atomic"` trägt – eine
+         Gruppe mit `kind:"hard"` UND gesetztem `atomic`-Flag (siehe
+         Nacharbeit Runde 3, `turn.js#evaluateTurn`) machte `allAtomic`
+         damit IMMER `false`, obwohl `overrideOpsFor()` für sie GENAUSO alle
+         Lösch-/Ersetz-Ops herausfiltert wie bei einem reinen
+         `atomic`-Grund. Die Pille zeigte trotzdem den REINEN „trotz
+         Prüfhinweis übernommen“-Wortlaut ohne jeden Hinweis, dass
+         Lösch-/Ersetz-Ops in dieser Gruppe gar nicht mitgelaufen sind –
+         obwohl der Override-Knopf selbst („… ohne Lösch-Ops in «NB» …“,
+         siehe `overrideButtonLabel`) das bereits korrekt ankündigte. Der
+         Text geht als SYSTEM-HINWEIS in die Modell-History
+         (`sanitizeWarningForHistory`) und hätte das Modell glauben lassen
+         können, `delete_entry` sei gewirkt, obwohl es herausgefiltert
+         wurde. Fix: `anyAtomic` erkennt zusätzlich hard+atomic-Reasons; ist
+         der Plan GEMISCHT (`!allAtomic && anyAtomic`), ergänzt ein
+         Halbsatz „– ohne Lösch-/Ersetz-Ops in «NB»“ (nur die Namen der
+         hard+atomic-Gruppen, `reasons.filter(r => r.atomic && r.kind ===
+         "hard")`) – reine `atomic`-Gründe brauchen den Zusatz nicht (die
+         eigene Präfix-Variante „Ohne Lösch-/Ersetz-Ops übernommen“ sagt es
+         bereits). Derselbe Zusatz gilt im `nothingSaved`-Zweig. Der
+         Prompt-Satz „hat der Nutzer die (ggf. um Lösch-Ops gekürzte)
+         Änderung bewusst gespeichert“ (`anthropic.js`, gepinnt in
+         `tests/anthropic.test.js`) deckt den neuen Zusatz bereits ab – die
+         Literalmarker „trotz Prüfhinweis übernommen“/„ohne Lösch-/Ersetz-
+         Ops übernommen“ bleiben als exakte Teilstrings in der Pille
+         erhalten (der Zusatz steht INNERHALB der Klammer, VOR dem
+         Doppelpunkt), kein Prompt-Update nötig. Neuer Test in
+         `tests/appOps.test.js` mit der bereits vorhandenen Nacharbeit-
+         Runde-3-Probe-C-Fixture (`append_to_section` skip + `delete_entry`
+         gewirkt + `append_to_section` mit bereits vorhandenem 2-Zeilen-Block
+         → hard V2 mit `atomic:true`): Pille enthält „ohne Lösch-/Ersetz-Ops
+         in „Beispielbuch““.
+       - 🔵 **Finding D – `verify.js#buildV3R` irreführender Kapitel-Wortlaut
+         bei Totalverlust.** Ein KOMPLETT gelöschtes Kleinst-Kapitel (1–2
+         Inhaltszeilen, unterhalb `V3_REWRITE_HARD_MIN_LOST` deshalb weiterhin
+         nur soft statt hard) bekam IMMER den Wortlaut „umbenannt/
+         zusammengelegt?“ – irreführend, wenn `lostContent === totalContent`
+         gilt: es gibt gar nichts mehr, das umbenannt/zusammengelegt worden
+         sein könnte. Fix: `chapterSoftHit` führt jetzt `{title, lostContent,
+         totalContent}`; bei vollständigem Verlust lautet der Text „Kapitel
+         „# C“ fehlt samt N Zeile(n) – umbenannt/zusammengelegt?“, bei
+         Teilverlust bleibt die reine Frageform (dort ist die Umbenennung
+         tatsächlich plausibel). Zwei neue Tests in `tests/verify.test.js`
+         (2-Zeilen-Kapitel komplett gelöscht → neuer Wortlaut; Kontrolle: nur
+         eine von zwei Zeilen verloren, bleibt bei der reinen Frage).
+       - 🔵 **Finding E – `citations.jsx` verschachtelte cites ohne eigenen
+         Schluss.** Ein erstes, UNGESCHLOSSENES cite gefolgt von einem
+         zweiten, GESCHLOSSENEN cite ließ `nextOpen` bisher nur berechnen,
+         wenn GAR KEIN `</cite>` gefunden wurde (`close ? null :
+         OPEN_RE.exec(rest)`) – lag ein `</cite>` (das eigentlich zum
+         ZWEITEN Zitat gehört) VOR der Position des nächsten Öffners, wurde
+         es trotzdem dem ERSTEN zugeschlagen; das zweite Öffner-Tag blieb
+         als Rohtext im Inhalt des ersten stecken, `stripCiteTags` entfernte
+         nur das Tag selbst, die zweite Quelle wurde nie aufgelöst. Fix: ein
+         neuer, gemeinsamer `citeBoundary(rest)`-Helfer (statt der
+         Duplizierung in `renderWithCites`/`citeTagsToDocLinks`) berechnet
+         `nextOpen` jetzt IMMER und wählt die JEWEILS FRÜHERE Position von
+         `close`/`nextOpen`. Drei neue Tests in `tests/citations.test.jsx`
+         (`A (cite index="1">eins (cite index="3">drei</cite> Rest.` → ZWEI
+         Fußnoten [1 und 3] statt einer, in `renderWithCites` UND
+         `citeTagsToDocLinks`; Regressionsschutz: der Text-Knoten vor der
+         ERSTEN Fußnote enthält NICHT „drei“).
+       - 🔵 **Finding F – `App.jsx#overrideButtonLabel` „löscht 0 Zeilen“ im
+         gemischten Label.** Die gemischte Beschriftung („ohne Lösch-Ops in
+         «NB», löscht N Zeilen“, Nacharbeit Runde 3) zeigte bei `N=0` (z. B.
+         weil der einzige Verlust aus der gefilterten Lösch-Op selbst
+         stammt, siehe Probe C) trotzdem „löscht 0 Zeilen“ – suggeriert
+         fälschlich einen Verlust, wo keiner mehr übrig ist. Fix: der
+         Klammerzusatz „, löscht N Zeilen“ entfällt bei `N=0` komplett
+         (analog zum bereits bestehenden reinen hard-Zweig, der bei `N=0`
+         ebenfalls ohne Klammerzusatz bleibt). Bestehender Test in
+         `tests/appOps.test.js` (Probe-C-Fixture) angepasst: erwartet jetzt
+         „Trotzdem übernehmen (ohne Lösch-Ops in „Beispielbuch“)“ ohne
+         Zeilenzahl.
+       - **Bewusst NICHT geändert (Deviation):** `docs/TESTFAELLE.md` bekam
+         KEINEN neuen Eintrag für Finding A/B/C/D/E/F – alle sechs sind
+         interne Invarianten-/Text-Korrekturen ohne neuen sichtbaren
+         Nutzer-Ablauf (Finding C ändert nur den bereits in C33 dokumentierten
+         Pillentext für einen sehr seltenen Kombinationsfall, der schon in
+         Nacharbeit Runde 3 bewusst ohne eigenen TESTFAELLE-Eintrag blieb;
+         Finding B/E betreffen Modellvarianz im Zitat-Rohformat, die ein
+         Tester nicht gezielt provozieren kann). Konsistent mit dem
+         bestehenden Präzedenzfall aus Nacharbeit Runde 3 (dortiges
+         hard+atomic-Finding in `turn.js` bekam ebenfalls nur Unit-Tests).
+       - **Restrisiken (Ergänzung zum bestehenden Absatz oben):** die
+         Reflow-Lockerung (Finding A) schützt weiterhin NUR Hälften ≥
+         `CHANGED_CONTAIN_MIN` (12 Zeichen) – eine zusammengeführte Zeile,
+         deren eine Hälfte KÜRZER ist, zählt bewusst weiterhin als
+         „verloren“ (derselbe Zufallstreffer-Schutz wie beim
+         `CHANGED_CONTAIN_MIN`-Wert selbst, siehe oben). Die
+         `indexOf()`-basierte Kapitel-Verlustzuordnung (bereits dokumentiertes
+         Restrisiko) bleibt unverändert – Finding D ändert nur den
+         WORTLAUT bei einem bereits korrekt erkannten Totalverlust, nicht die
+         Zuordnungslogik selbst.
+       - **Tests:** `tests/verify.test.js` (+4: zwei Finding-A-Tests
+         [Positiv + Kontrolle], zwei Finding-D-Tests [Positiv + Kontrolle],
+         dazu der umbenannte Bestandstest ohne Zählungsänderung),
+         `tests/citations.test.jsx` (+12: neun Finding-B-Tests [`it.each`
+         über drei Fixtures × drei Funktionen], drei Finding-E-Tests),
+         `tests/appOps.test.js` (+1 neuer Finding-C-Test, ein bestehender
+         Test für Finding F angepasst, keine Zählungsänderung dort).
+         **Gesamt nach Nacharbeit Runde 4: 2427 Tests grün** (2410 + 17
+         neu), Coverage Gesamt-Repo 92.87 % Statements / 86.68 % Branches /
+         92.47 % Funktionen / 95.34 % Zeilen (Gate 60 % auf `src/lib`;
+         `verify.js` 93.96 %/79.75 %/96.58 %/97.08 %, `citations.jsx`
+         98.59 %/88.23 %/100 %/100 %, `turn.js` unverändert 96.77 %/85 %/
+         100 %/100 %). Version bleibt `v7.54` (weiterhin kein Feature-Bump
+         für eine Review-Nacharbeitsrunde vor dem ersten Commit, wie schon
+         bei Nacharbeit Runde 1–3).
+     - **Nacharbeit Runde 5 (fünfte Review-Runde vor dem ersten Commit von
+       v7.54, Verdict der vierten Runde: NACHARBEIT, kein 🔴): drei
+       🟡- und zwei 🔵-Findings vollständig behoben, kein Finding
+       zurückgestellt.**
+       - 🟡 **Finding N1 – `citations.jsx#OPEN_RE` verschluckte Dokumenttext
+         bei verstümmelten runden Tags.** `OPEN_RE` bestand bisher aus EINEM
+         gemeinsamen Muster (`[<(]cite\s+index="…"[^>]*>`) für BEIDE
+         Öffner-Zeichen - der Stopper `[^>]*` lief für die RUNDE Variante bis
+         zum NÄCHSTEN `>` irgendwo im restlichen Fließtext. `renderWithCites`/
+         `citeTagsToDocLinks` nutzen `OPEN_RE` DIREKT für die Tag-Grenzen,
+         NICHT die bereits in Runde 4 geschärfte `STRIP_ROUND_OPEN_RE` -
+         deren Fix (Finding B, Runde 4) deckte deshalb NUR `stripCiteTags`
+         ab. Ein Modell-Typo mit strayer `)` direkt nach dem index-Attribut
+         fraß dadurch echten Dokumenttext bis zu einem völlig unbeteiligten
+         `>`: `Der Turm ist (cite index="1") 330 Meter hoch.\n> Zitat danach`
+         wurde zu `Der Turm ist  Zitat danach` (Blockquote-`>` in einer
+         FOLGENDEN Zeile verschluckt), `Wert (cite index="1")330 Meter. 3 > 2
+         gilt.` wurde zu `Wert  2 gilt.` (Vergleichszeichen im SELBEN Satz
+         verschluckt). Fix: `OPEN_RE` trägt jetzt EINEN gemeinsamen Ausdruck
+         mit ZWEI eigenen Alternativen/Capture-Gruppen -
+         `/(?:<cite\s+index="([^"]*)"[^>]*>|\(cite\s+index="([^"]*)"[^>)\n]*>)/i`.
+         Gruppe 1 (spitz) bleibt bewusst lax; Gruppe 2 (rund) ist jetzt
+         GENAUSO STRENG wie `STRIP_ROUND_OPEN_RE` (kein `)`/Zeilenumbruch vor
+         dem schließenden `>`) - ein derart verstümmeltes rundes Tag matcht
+         dadurch gar nicht mehr und bleibt byte-identisch als Rohtext stehen,
+         statt Text zu verschlucken. Alle Aufrufer (`renderWithCites`,
+         `citeTagsToDocLinks`) lesen `open[1] ?? open[2]` (NULLISH statt
+         `||`: ein leeres, aber vorhandenes `index=""`-Attribut ist ein
+         gültiger, nur unauflösbarer Treffer aus Gruppe 1 und darf nicht auf
+         Gruppe 2 durchfallen). Der Satz „`OPEN_RE` selbst brauchte KEINE
+         analoge Verschärfung“ aus dem Finding-B-Absatz der Nacharbeit
+         Runde 4 oben war demnach UNGENAU - `OPEN_RE` matchte die drei neuen
+         Prosa-Fixtures aus Finding B zwar tatsächlich nicht (das stimmte),
+         blieb für ANDERE, hier neu gefundene Eingaben aber lax; korrigiert
+         hiermit. Zehn neue Tests in `tests/citations.test.jsx` (`describe`
+         „OPEN_RE-Härtung der runden Variante“, `it.each` über drei
+         Sonden-Strings × drei Funktionen `stripCiteTags`/
+         `citeTagsToDocLinks`/`renderWithCites`, plus ein expliziter
+         Regressionstest für das wohlgeformte runde Tag) - alle drei Sonden
+         bleiben byte-identisch (0 Fußnoten), das C3-Vorfalls-Fixture und der
+         verschachtelte Fall (Finding E, Runde 4) bleiben unverändert grün.
+       - 🟡 **Finding N2 – `App.jsx#buildOverrideWarning` leere Namensliste
+         bei hard/atomic in GETRENNTEN Notizbüchern.** Der `mixedNote`-Filter
+         lautete bisher `r.atomic && r.kind === "hard"` - das traf NUR die
+         Runde-3-Kombination (hard-Grund MIT gesetztem `atomic`-Flag IN
+         DERSELBEN Gruppe), nicht aber einen Plan mit ZWEI GETRENNTEN
+         Notizbüchern (eines rein `kind:"hard"` OHNE `atomic`-Flag, eines
+         rein `kind:"atomic"` OHNE `hard`-kind, siehe der bestehende
+         `overrideButtonLabel`-Test „gemischt (hard + atomic in
+         verschiedenen Notizbüchern)“). Für diese Kombination filterte die
+         Bedingung BEIDE Reasons heraus, die Namensliste blieb leer: „…
+         (Nutzer-Entscheidung – ohne Lösch-/Ersetz-Ops in ): NB A (V3-R); NB
+         B (A)“ - ein sichtbar kaputter Satz, der zudem als SYSTEM-HINWEIS in
+         die Modell-History geht. Fix: derselbe Filter wie `atomicReasons` in
+         `overrideButtonLabel` (`r.kind === "atomic" || r.atomic`) - reine
+         `kind:"atomic"`-Gründe werden jetzt korrekt genannt („ohne
+         Lösch-/Ersetz-Ops in „Notizbuch B““), die Runde-4-Kombination
+         (hard+atomic in DERSELBEN Gruppe) bleibt unverändert korrekt (dort
+         galt die neue Bedingung ohnehin schon, weil `r.atomic` gesetzt ist).
+         Neuer Test in `tests/appOps.test.js`: die bestehende
+         `mixedPlan`-Fixture (bisher lokal in der `overrideButtonLabel`-„it“,
+         jetzt auf Describe-Ebene extrahiert, damit beide Tests sie teilen)
+         auch durch `buildOverrideWarning` geschickt - Erwartung enthält
+         „ohne Lösch-/Ersetz-Ops in „Notizbuch B““ und explizit NICHT „Ops in
+         )“ (das exakte Bug-Signal).
+       - 🟡 **Finding N3 – `verify.js#buildV3R` Reflow-Fallback verdeckte
+         echten rewrite-Verlust bei Zeilen-Suffixen.** Der `afterUsed`-
+         UNABHÄNGIGE Enthaltensein-Fallback aus Runde 4 (Finding A) prüfte
+         gegen ALLE `after`-Zeilen, auch solche, die BEREITS per EXAKTEM
+         Multiset-Treffer einer ANDEREN `before`-Zeile zugeordnet waren. Eine
+         echt VERLORENE `before`-Zeile, deren Text zufällig als SUFFIX in
+         einer exakt erhaltenen ANDEREN Zeile steckt (z. B. „- Beta Gamma
+         Delta Epsilon Zeta“ verschwindet ersatzlos, „- Alpha Beta Gamma
+         Delta Epsilon Zeta“ bleibt unverändert stehen), wurde dadurch
+         fälschlich als „geändert/gematcht“ gezählt statt als verloren - bei
+         3 von 10 Zeilen (alle ≥ `CHANGED_CONTAIN_MIN`) blieb der rewrite
+         dadurch KOMPLETT still (`hard: []` UND `soft: []`), obwohl derselbe
+         Verlust vor Runde 4 hart durchgeschlagen wäre. Der Reflow-Fix aus
+         Runde 4 selbst bleibt vom Fix unberührt: eine ZUSAMMENGEFÜHRTE
+         `after`-Zeile (Merge-Ziel) ist per Definition eine NEUE Zeile, die
+         NIE per exaktem Vergleich zu einer `before`-Zeile passt, landet
+         also nie in der neuen „bereits exakt verbraucht“-Markierung. Fix:
+         ein neues Array `afterExact` merkt sich, welche `after`-Indizes im
+         EXAKTEN Multiset-Lauf (Z. ~685) verbraucht wurden; der
+         Enthaltensein-Fallback prüft jetzt `!afterExact[j]` statt
+         `afterUsed[j]` zu ignorieren - bewusst NICHT `!afterUsed[j]` (das
+         würde die Runde-4-Regression exakt reproduzieren, weil der
+         Reflow-Fallback selbst kein `afterUsed` setzt). Zwei neue Tests in
+         `tests/verify.test.js` (Sonden-Fixture mit drei Suffix-Verlusten in
+         einem 10-Zeilen-Dokument → hard `V3-R`; Kontrolle: dasselbe Dokument
+         ohne Suffix-Verlust bleibt unauffällig, damit der Fix nicht zu
+         aggressiv wird) - die beiden bestehenden Reflow-Tests (Runde 4,
+         Finding A, Positiv + Kontrolle) bleiben unverändert grün.
+         **Restrisiko (Ergänzung):** eine `before`-Zeile, die zufällig Suffix
+         einer NICHT exakt erhaltenen, aber per „geändert“ umformulierten
+         `after`-Zeile ist, kann weiterhin fälschlich matchen - derselbe
+         bereits dokumentierte `CHANGED_CONTAIN_MIN`-Kompromiss
+         (Zufallstreffer-Schutz erst ab 12 Zeichen, keine perfekte
+         Eindeutigkeit).
+       - 🔵 **Finding N4 – `App.jsx` Override-Knopf-Label ohne Memo.**
+         `overrideButtonLabel(rejectedTurn.plan)` lief im Render-Pfad des
+         Override-Knopfs OHNE Memoisierung - `lostFor()` (siehe dortiger
+         Kommentar) ruft für jede atomic-Gruppe `applyOpsDetailed()` UND
+         `verifyTurn()` auf, das lief dadurch bei JEDEM Render neu (z. B.
+         jedem Tastendruck im Eingabefeld), solange ein verworfener Turn
+         angezeigt wird - derselbe Grund, aus dem `overrideGroups` bereits
+         seit Nacharbeit Runde 1 (🔵 5) memoisiert ist. Fix: neues
+         `overrideLabel = useMemo(() => rejectedTurn ?
+         overrideButtonLabel(rejectedTurn.plan) : "", [rejectedTurn])`,
+         direkt neben dem bestehenden `overrideGroups`-Memo, im JSX
+         verwendet statt des direkten Aufrufs.
+       - 🔵 **Finding N5 – `App.jsx#commitPlannedGroups` Re-Apply nach
+         abweichender Basis prüfte nur `v.hard`, nicht die Atomaritätsregel
+         (A).** Weicht der Live-Cache-Stand beim Commit vom Phase-1-`before`
+         ab (toggleTask-Race, Normalpfad OHNE `requireIdenticalBase`), wendet
+         der Code die Ops erneut an und prüfte den neuen Zwischenstand bisher
+         NUR gegen `verifyTurn(...).hard` - die Atomaritätsregel (A, ein
+         Skip UND eine gewirkte destruktive Op IN DERSELBEN Gruppe auf dem
+         NEUEN Stand, das #65-Muster) lief auf diesem speziellen
+         Re-Apply-Pfad NICHT mit, obwohl derselbe Fall im Normalpfad (Phase 4
+         in `evaluateTurn`) längst erkannt wird - eine rein theoretische,
+         aber reale Lücke (Race + gleichzeitig zutreffendes (A)-Muster).
+         Fix: `evaluateTurn()` für die EINZELNE betroffene Gruppe
+         wiederverwenden (`evaluateTurn([{ nbId, name, ops: g.finalOps,
+         before: base }])`) statt die Prüfung ad hoc zu duplizieren - bei
+         WENIGER ALS 2 Gruppen ist `planTurn()` (`turnGuard.js`) ohnehin ein
+         No-op („leere Map bei <2 Gruppen“, siehe dortiger Kommentar),
+         `text`/`results` bleiben dadurch IDENTISCH zum bisherigen einfachen
+         `applyOpsDetailed`-Aufruf, `rejected` deckt jetzt zusätzlich (A) mit
+         ab. Kein neuer Unit-Test: `commitPlannedGroups` ist ein internes,
+         nicht exportiertes `useCallback` mit React-State/GitHub-I/O -
+         dieselbe bewusste Grenze wie bei der Commit-Reihenfolge in E4 oben
+         („Kein Unit-Test pinnt die Reihenfolge“); die wiederverwendete
+         `evaluateTurn()`-Logik selbst ist über die bestehende
+         `turn.test.js`-Suite bereits vollständig abgedeckt.
+       - **Bewusst NICHT geändert (Deviation):** `docs/TESTFAELLE.md` bekam
+         KEINEN neuen Eintrag - alle fünf Findings sind interne
+         Invarianten-/Performance-Korrekturen ohne neuen sichtbaren
+         Nutzer-Ablauf (N1/N3 betreffen Modellvarianz bzw. eine
+         Zeilen-Heuristik, die ein Tester nicht gezielt provozieren kann,
+         N2 einen bereits in Runde 4 bewusst ohne TESTFAELLE-Eintrag
+         gelassenen Pillentext-Kombinationsfall, N4/N5 sind reine
+         Performance-/Robustheits-Härtung ohne beobachtbaren
+         Verhaltensunterschied im Normalfall) - konsistent mit dem
+         Präzedenzfall aus Runde 4.
+       - **Tests:** `tests/citations.test.jsx` (+10: neun `it.each`-Tests
+         über drei N1-Sonden × drei Funktionen, ein Regressionstest),
+         `tests/appOps.test.js` (+1 neuer N2-Test, `mixedPlan`-Fixture auf
+         Describe-Ebene extrahiert, keine Verhaltensänderung an den
+         bestehenden Tests), `tests/verify.test.js` (+2 neue N3-Tests
+         [Sonde + Kontrolle]). **Gesamt nach Nacharbeit Runde 5: 2440 Tests
+         grün** (2427 + 13 neu), Coverage Gesamt-Repo 92.87 % Statements /
+         86.71 % Branches / 92.47 % Funktionen / 95.35 % Zeilen (Gate 60 %
+         auf `src/lib`; `verify.js` 93.97 %/79.80 %/96.58 %/97.08 %,
+         `citations.jsx` 98.59 %/89.09 %/100 %/100 %, `turn.js` unverändert
+         96.77 %/85 %/100 %/100 %). Version bleibt `v7.54` (weiterhin kein
+         Feature-Bump für eine Review-Nacharbeitsrunde vor dem ersten Commit,
+         wie schon bei Nacharbeit Runde 1–4).

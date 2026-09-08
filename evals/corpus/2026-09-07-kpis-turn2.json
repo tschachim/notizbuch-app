@@ -1,0 +1,18 @@
+{
+  "id": "2026-09-07-kpis-turn2",
+  "source": "DECISIONS #106 Turn 2, rekonstruiert aus Prosa + repros.json S3b - anonymisiert (Beispielbuch, fiktive Bild-ID).",
+  "engineAtIncident": "v7.53",
+  "notebook": "Beispielbuch",
+  "doc": "# Beispielbuch\n\n## Inbox\n\n- x\n\n# KPIs\n\n- KPI-Formatierung vereinheitlichen\n- [ ] Offener Punkt: KPI-Definition klären\n![Screenshot KPI-Tabelle](img:ab12cd)\n*Übersicht*\n\n# Anderes Kapitel\n\n## Thema\n\n- t\n",
+  "recordedOps": [
+    { "type": "replace_section", "heading": "## KPIs", "chapter": "# KPIs", "content": "- KPI-Formatierung vereinheitlichen\n- [ ] Offener Punkt: KPI-Definition klären (40220/40230)\n![Screenshot KPI-Tabelle](img:ab12cd)\n*Übersicht*" }
+  ],
+  "expect": {
+    "outcome": ["skip"],
+    "hardIfApplied": ["V1", "V2"],
+    "rejectKinds": [],
+    "mustNotContain": ["\n## KPIs"],
+    "mustKeepLines": [],
+    "maxCountOf": { "![Screenshot KPI-Tabelle](img:ab12cd)": 1 }
+  }
+}

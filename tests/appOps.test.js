@@ -6,9 +6,10 @@
 import { describe, it, expect } from "vitest";
 import {
   splitOps, serializeState, buildOpsWarning, buildOpsInfo, parseConnectPrefill, findSensitiveUrlParams,
-  resolveConnectDialogInitial,
+  resolveConnectDialogInitial, overrideButtonLabel, overrideKurzform, buildOverrideWarning,
 } from "../src/App.jsx";
 import { applyOpsDetailed } from "../src/lib/ops.js";
+import { evaluateTurn, buildRejectWarning, overrideOpsFor } from "../src/lib/turn.js";
 
 describe("splitOps: memory_*-Ops vs. Notizbuch-Ops trennen", () => {
   it("trennt memory_append/memory_replace von allen anderen op-Typen", () => {
@@ -617,5 +618,328 @@ describe("resolveConnectDialogInitial: verbunden ⇒ Parameter werden ignoriert 
   it("settings gesetzt UND kein Prefill ⇒ settings (unverändertes Bestandsverhalten ohne v7.30)", () => {
     const settings = { owner: "echt", repo: "echt-repo", pat: "x", apiKey: "y" };
     expect(resolveConnectDialogInitial(settings, null)).toBe(settings);
+  });
+});
+
+// v7.54 (Verify-then-Commit-Gate, Turn-Atomarität, DECISIONS #112): die
+// Pillen-Bausteine der App.jsx-I/O-Schicht (buildOpsWarning/buildOpsInfo
+// bleiben unverändert, siehe Pins oben) treffen hier auf ECHTE evaluateTurn()-
+// Pläne (aus src/lib/turn.js, bereits über tests/turn.test.js/replay.test.js
+// abgedeckt) - Ziel dieser Tests ist NICHT, die Gate-Logik selbst erneut zu
+// prüfen, sondern die KOMPOSITION: dass die Verwerfungs-Pille (Zeile 1) und
+// der unveränderte buildOpsWarning-Block (Zeile 2) sich NICHT überlappen
+// (Leitplanke 0.2 "kein Doppel-Feedback" - genau EIN "⚠️ Nicht angewendet"),
+// und dass die neuen Override-Wortlaute (App.jsx, nicht turn.js) korrekt aus
+// einem echten Plan zusammengesetzt werden.
+describe("Pillen-Komposition v7.54 (Verify-then-Commit-Gate)", () => {
+  // Wie evals/corpus/2026-09-intra-verschieben.json (Restrisiko #111): Op 1
+  // (replace_section auf ein "###"-Unterthema als heading) wird von der
+  // Engine geskippt (wrong_level), Op 2 (delete_section) wirkt UND ist
+  // destruktiv → Regel A (atomic) greift, der Skip von Op 1 landet als
+  // ECHTER notApplied-Eintrag im Plan.
+  const atomicDoc = "# Beispielbuch\n\n## Quelle\n\n- Punkt A\n\n# Kapitel\n\n## Bereich\n\n### Details\n\n- d\n";
+  const atomicOps = [
+    { type: "replace_section", heading: "### Details", chapter: "# Kapitel", content: "- d\n- Punkt A" },
+    { type: "delete_section", heading: "## Quelle" },
+  ];
+  const atomicPlan = () => evaluateTurn([{ nbId: "x", name: "Beispielbuch", ops: atomicOps, before: atomicDoc }]);
+
+  // Wie evals/corpus/2026-09-rewrite-verlust-kapitel.json (Restrisiko
+  // rewrite): ein rewrite behält nur Kapitel A, Kapitel B/C samt Bild gehen
+  // verloren → V3-R hard (Kapitelverlust), rejectKind "hard".
+  const hardDoc = "# Beispielbuch\n\n# A\n\n## Sek\n\n- a1\n- a2\n\n# B\n\n## Sek\n\n- b1\n- b2\n\n# C\n\n## Sek\n\n- c1\n- c2\n![Bild](img:xy1)\n";
+  const hardOps = [{ type: "rewrite", content: "# Beispielbuch\n\n# A\n\n## Sek\n\n- a1\n- a2\n" }];
+  const hardPlan = () => evaluateTurn([{ nbId: "y", name: "Beispielbuch", ops: hardOps, before: hardDoc }]);
+
+  it("atomic-Plan: rejected mit kind 'atomic' und einem echten notApplied-Eintrag (Sanity-Check der Fixtures)", () => {
+    const plan = atomicPlan();
+    expect(plan.rejected).toBe(true);
+    expect(plan.reasons.map((r) => r.kind)).toEqual(["atomic"]);
+    expect(plan.notApplied.length).toBeGreaterThan(0);
+  });
+
+  it("hard-Plan: rejected mit kind 'hard' und lostLines > 0 (Sanity-Check der Fixtures)", () => {
+    const plan = hardPlan();
+    expect(plan.rejected).toBe(true);
+    expect(plan.reasons.map((r) => r.kind)).toEqual(["hard"]);
+    expect(plan.groups[0].lostLines).toBeGreaterThan(0);
+  });
+
+  it("genau EIN '⚠️ Nicht angewendet' UND Beginn 'Änderung verworfen (nichts gespeichert): ' (kein Doppel-Feedback, Leitplanke 0.2)", () => {
+    const plan = atomicPlan();
+    const opsWarning = buildOpsWarning(plan.notApplied);
+    expect(opsWarning).not.toBeNull(); // Fixture muss einen echten Skip liefern
+    const full = buildRejectWarning(plan, opsWarning);
+    expect(full.startsWith("⚠️ Änderung verworfen (nichts gespeichert): ")).toBe(true);
+    const occurrences = full.split("⚠️ Nicht angewendet").length - 1;
+    expect(occurrences).toBe(1);
+    // Zeile 1 nennt bei Grund (A) NIE den Skip-Grund selbst (K-🔵7) - der
+    // steht ausschließlich in Zeile 2 (dem unveränderten opsWarning-Block).
+    const line1 = full.split("\n")[0];
+    expect(line1).not.toContain("wrong_level");
+  });
+
+  it("KEINE Verwerfungs-Pille ohne echten Skip bleibt trotzdem korrekt (hard-Plan, notApplied kann leer sein)", () => {
+    const plan = hardPlan();
+    const opsWarning = buildOpsWarning(plan.notApplied); // hier ggf. null (kein Skip nötig für V3-R)
+    const full = buildRejectWarning(plan, opsWarning);
+    expect(full.startsWith("⚠️ Änderung verworfen (nichts gespeichert): ")).toBe(true);
+    expect(full.split("⚠️ Nicht angewendet").length - 1).toBeLessThanOrEqual(1);
+  });
+
+  it("overrideButtonLabel: rein atomic ⇒ 'Ohne Lösch-/Ersetz-Ops übernehmen' (kein Zeilen-Löschhinweis)", () => {
+    const label = overrideButtonLabel(atomicPlan());
+    expect(label).toBe("Ohne Lösch-/Ersetz-Ops übernehmen");
+  });
+
+  it("overrideButtonLabel: rein hard ⇒ nennt die Anzahl gelöschter Zeilen (N > 0, aus plan.groups[].lostLines)", () => {
+    const plan = hardPlan();
+    const label = overrideButtonLabel(plan);
+    expect(label).toBe("Trotzdem übernehmen (löscht " + plan.groups[0].lostLines + " Zeilen)");
+  });
+
+  it("overrideButtonLabel: N=0 (hard-Grund ohne Zeilenverlust) ⇒ 'Trotzdem übernehmen' ohne Klammerzusatz", () => {
+    const fakePlan = { reasons: [{ nbId: "z", name: "Z", kind: "hard", codes: ["V1"] }], groups: [{ nbId: "z", lostLines: 0 }] };
+    expect(overrideButtonLabel(fakePlan)).toBe("Trotzdem übernehmen");
+  });
+
+  it("overrideButtonLabel: leerer Plan (kein reasons-Eintrag) ⇒ Fallback ohne Wurf", () => {
+    expect(overrideButtonLabel(null)).toBe("Trotzdem übernehmen");
+    expect(overrideButtonLabel({ reasons: [] })).toBe("Trotzdem übernehmen");
+  });
+
+  // Nacharbeit Runde 5 (🟡 N2): auf Describe-Ebene statt lokal in der "it"
+  // unten, damit der buildOverrideWarning-Test darunter dieselbe Fixture
+  // wiederverwenden kann (Finding N2 verlangt explizit "denselben mixedPlan").
+  const mixedPlan = {
+    reasons: [
+      { nbId: "a", name: "Notizbuch A", kind: "hard", codes: ["V3"] },
+      { nbId: "b", name: "Notizbuch B", kind: "atomic", codes: ["A"] },
+    ],
+    groups: [{ nbId: "a", lostLines: 4 }, { nbId: "b", lostLines: 0 }],
+  };
+
+  it("overrideButtonLabel: gemischt (hard + atomic in verschiedenen Notizbüchern) nennt BEIDES", () => {
+    const label = overrideButtonLabel(mixedPlan);
+    expect(label).toBe("Trotzdem übernehmen (ohne Lösch-Ops in „Notizbuch B“, löscht 4 Zeilen)");
+  });
+
+  // Nacharbeit Runde 5 (🟡 N2, Review-Fund): dieselbe Fixture (hard in NB A,
+  // REINER atomic-Grund - ohne "atomic:true"-Flag - in NB B) auch durch
+  // buildOverrideWarning geschickt. Der bisherige mixedNote-Filter dort
+  // ("r.atomic && r.kind === 'hard'") traf auf KEINEN der beiden reasons zu
+  // (reasons[0] ist hard OHNE atomic-Flag, reasons[1] ist atomic OHNE
+  // hard-kind) - die Namensliste blieb leer ("... ohne Lösch-/Ersetz-Ops in
+  // ): NB A (V3-R); NB B (A)"). Fix: derselbe Filter wie "atomicReasons" in
+  // overrideButtonLabel ("r.kind === 'atomic' || r.atomic").
+  it("buildOverrideWarning: gemischt (hard in NB A + reiner atomic-Grund in NB B) nennt NB B in der Namensliste, nicht ')'", () => {
+    const w = buildOverrideWarning(mixedPlan);
+    expect(w).toContain("ohne Lösch-/Ersetz-Ops in „Notizbuch B“");
+    expect(w).not.toContain("ohne Lösch-/Ersetz-Ops in )"); // exaktes Bug-Signal (leere Namensliste)
+    expect(w).toBe(
+      "⚠️ Änderung trotz Prüfhinweis übernommen (Nutzer-Entscheidung – ohne Lösch-/Ersetz-Ops in „Notizbuch B“): " +
+      overrideKurzform(mixedPlan)
+    );
+  });
+
+  it("overrideKurzform: '«Name» (Codes)' je Gruppe, mit '; ' getrennt", () => {
+    const plan = { reasons: [
+      { nbId: "a", name: "Notizbuch A", kind: "hard", codes: ["V3-R"] },
+      { nbId: "b", name: "Notizbuch B", kind: "atomic", codes: ["A"] },
+    ] };
+    expect(overrideKurzform(plan)).toBe("Notizbuch A (V3-R); Notizbuch B (A)");
+  });
+
+  it("buildOverrideWarning: rein atomic (kein Konflikt) ⇒ 'Teil ohne Lösch-/Ersetz-Ops übernommen'-Wortlaut", () => {
+    const w = buildOverrideWarning(atomicPlan());
+    expect(w.startsWith("⚠️ Teil ohne Lösch-/Ersetz-Ops übernommen (Nutzer-Entscheidung): ")).toBe(true);
+  });
+
+  it("buildOverrideWarning: hard (kein Konflikt) ⇒ 'trotz Prüfhinweis übernommen'-Wortlaut", () => {
+    const w = buildOverrideWarning(hardPlan());
+    expect(w.startsWith("⚠️ Änderung trotz Prüfhinweis übernommen (Nutzer-Entscheidung): ")).toBe(true);
+  });
+
+  it("buildOverrideWarning: Konflikt ⇒ 'Teilweise übernommen (...) – ... nicht gespeichert'-Wortlaut mit Namen aus opts", () => {
+    const w = buildOverrideWarning(hardPlan(), {
+      conflict: true,
+      savedNames: ["Notizbuch A"],
+      unsavedNames: ["Notizbuch B"],
+    });
+    expect(w).toBe(
+      "⚠️ Teilweise übernommen („Notizbuch A“) – „Notizbuch B“ nicht gespeichert; " +
+      "nur den fehlenden Teil neu erfassen, nicht alles erneut senden"
+    );
+  });
+});
+
+// Nacharbeit Runde 1 (🟡 2, Review-Fund): applyRejectedTurn() sammelte
+// bisher NIE genutzte notApplied-Einträge des Override-Commits - beim
+// atomic-Grund bleibt die Ziel-Op nach Herausfiltern der Lösch-Op weiterhin
+// ein Skip, es wird NICHTS committet, die Pille behauptete aber trotzdem
+// "übernommen". Diese Tests spiegeln applyRejectedTurn() 1:1 nach:
+// overrideOpsFor() -> applyOpsDetailed() auf demselben Snapshot wie die
+// Diff-Vorschau (K-🟡6: kein Re-Apply/Re-Gate) -> notApplied aus den
+// tatsächlichen Ergebnissen -> Pillentext.
+describe("Pillen-Komposition v7.54 Nacharbeit Runde 1 (🟡 2: Override verschluckt Engine-Skips)", () => {
+  // ANDERS als das obere atomicPlan()-Fixture (replace_section+delete_section
+  // - BEIDE Op-Typen sind laut DESTRUCTIVE_OP_TYPES destruktiv, overrideOpsFor()
+  // filtert dort daher ALLES heraus, Override wird zu einem echten No-op OHNE
+  // jeden Skip): hier ist die Ziel-Op ein append_to_section (NICHT-destruktiv),
+  // das trotzdem am selben "###"-Unterthema-Grund scheitert (wrong_level) - nach
+  // dem Herausfiltern der destruktiven delete_section BLEIBT dieser Skip als
+  // einzige Override-Op übrig und wirkt weiterhin nicht (genau das im Review
+  // beschriebene K-🟡2-Szenario, siehe evals/corpus/2026-09-intra-verschieben
+  // .json für das destruktive Geschwister-Fixture).
+  const atomicDoc = "# Beispielbuch\n\n## Quelle\n\n- Punkt A\n\n# Kapitel\n\n## Bereich\n\n### Details\n\n- d\n";
+  const atomicOps = [
+    { type: "append_to_section", heading: "### Details", chapter: "# Kapitel", content: "- Punkt A" },
+    { type: "delete_section", heading: "## Quelle" },
+  ];
+  const atomicPlan = () => evaluateTurn([{ nbId: "x", name: "Beispielbuch", ops: atomicOps, before: atomicDoc }]);
+
+  // Eigene lokale Kopie des hard-Fixtures (identisch zur oberen Describe-
+  // Gruppe) statt eines geteilten Closures - beide Testgruppen bleiben so
+  // unabhängig voneinander lesbar.
+  const hardDoc = "# Beispielbuch\n\n# A\n\n## Sek\n\n- a1\n- a2\n\n# B\n\n## Sek\n\n- b1\n- b2\n\n# C\n\n## Sek\n\n- c1\n- c2\n![Bild](img:xy1)\n";
+  const hardOps = [{ type: "rewrite", content: "# Beispielbuch\n\n# A\n\n## Sek\n\n- a1\n- a2\n" }];
+  const hardPlan = () => evaluateTurn([{ nbId: "y", name: "Beispielbuch", ops: hardOps, before: hardDoc }]);
+
+  it("overrideOpsFor() + applyOpsDetailed() auf demselben Snapshot: die verbleibende Op skippt weiterhin (wrong_level), text bleibt UNVERÄNDERT", () => {
+    const plan = atomicPlan();
+    const overrideOps = overrideOpsFor(plan).get("x");
+    expect(overrideOps.some((o) => o.type === "delete_section")).toBe(false); // Lösch-Op wurde herausgefiltert (K-🟡7)
+    const detailed = applyOpsDetailed(atomicDoc, overrideOps);
+    expect(detailed.text).toBe(atomicDoc); // NICHTS committet - die Ziel-Op scheitert weiterhin
+    const notApplied = detailed.results
+      .filter((r) => !r.applied)
+      .map((r) => ({ type: r.type, heading: r.heading, notebook: "Beispielbuch", reason: r.reason }));
+    expect(notApplied.length).toBeGreaterThan(0);
+  });
+
+  it("buildOverrideWarning({nothingSaved:true}) + buildOpsWarning(notApplied): 'nichts gespeichert'-Wortlaut MIT sichtbarem Skip-Grund, genau EIN '⚠️ Nicht angewendet' (kein Doppel-Feedback)", () => {
+    const plan = atomicPlan();
+    const overrideOps = overrideOpsFor(plan).get("x");
+    const detailed = applyOpsDetailed(atomicDoc, overrideOps);
+    const notApplied = detailed.results
+      .filter((r) => !r.applied)
+      .map((r) => ({ type: r.type, heading: r.heading, notebook: "Beispielbuch", reason: r.reason }));
+    const opsWarning = buildOpsWarning(notApplied);
+    expect(opsWarning).not.toBeNull(); // Fixture muss einen echten Skip liefern, sonst testet dies nichts
+    const warning = buildOverrideWarning(plan, { nothingSaved: true }) + "\n" + opsWarning;
+    expect(warning).toContain("die verbleibenden Ops haben nicht gewirkt, nichts gespeichert");
+    expect(warning.split("⚠️ Nicht angewendet").length - 1).toBe(1);
+    // Zeile 1 nennt den Skip-Grund selbst NICHT (der steht nur in Zeile 2).
+    expect(warning.split("\n")[0]).not.toContain("wrong_level");
+  });
+
+  it("buildOverrideWarning: nothingSaved + rein atomic ⇒ eigener Wortlaut statt 'Teil ... übernommen'", () => {
+    const w = buildOverrideWarning(atomicPlan(), { nothingSaved: true });
+    expect(w).toBe(
+      "⚠️ Ohne Lösch-/Ersetz-Ops übernommen (Nutzer-Entscheidung) – die verbleibenden Ops haben nicht gewirkt, nichts gespeichert: " +
+      overrideKurzform(atomicPlan())
+    );
+  });
+
+  it("buildOverrideWarning: nothingSaved + hard ⇒ 'trotz Prüfhinweis übernommen'-Präfix mit demselben Zusatz", () => {
+    const w = buildOverrideWarning(hardPlan(), { nothingSaved: true });
+    expect(w.startsWith(
+      "⚠️ Änderung trotz Prüfhinweis übernommen (Nutzer-Entscheidung) – die verbleibenden Ops haben nicht gewirkt, nichts gespeichert: "
+    )).toBe(true);
+  });
+
+  it("nothingSaved wird bei einem Konflikt NIE gesetzt (opts.conflict hat Vorrang, siehe applyRejectedTurn)", () => {
+    // Dokumentiert die App.jsx-Verdrahtung: result.conflict schließt
+    // nothingSaved aus (beide Fälle sind exklusiv, siehe Kommentar in
+    // applyRejectedTurn) - buildOverrideWarning selbst prüft opts.conflict
+    // zuerst, ein gleichzeitig gesetztes nothingSaved würde also ignoriert.
+    const w = buildOverrideWarning(hardPlan(), { conflict: true, savedNames: [], unsavedNames: ["Beispielbuch"], nothingSaved: true });
+    expect(w).not.toContain("nicht gewirkt");
+    expect(w.startsWith("⚠️ Teilweise übernommen")).toBe(true);
+  });
+});
+
+// Nacharbeit Runde 3 (🟡 Finding 2, Probe C): eine Gruppe trägt ZUGLEICH
+// einen hard-Verstoß UND das Atomaritätsmuster (A) - overrideButtonLabel()
+// muss dafür die GEMISCHTE Beschriftung ("ohne Lösch-Ops in «NB», löscht N
+// Zeilen") wählen, NICHT die reine "löscht N Zeilen"-Fassung für hard, und N
+// muss den Verlust NACH dem Herausfiltern der destruktiven Ops zeigen (hier
+// 0, weil die einzige verlorene Zeile "Punkt A" aus der gefilterten
+// delete_entry-Op stammt) - nicht die volle g.lostLines (1) der
+// UNGEFILTERTEN finalOps (siehe turn.js#evaluateTurn/overrideOpsFor).
+describe("Pillen-Komposition v7.54 Nacharbeit Runde 3 (🟡 Finding 2: hard+atomic in derselben Gruppe)", () => {
+  const mixedDoc = "# Buch\n\n## Quelle\n\n- Punkt A lang genug fuer den Test\n\n## Log\n\n- Log Zeile eins ausreichend lang fuer den Test\n- Log Zeile zwei ausreichend lang fuer den Test\n\n# Kapitel\n\n## Bereich\n\n### Details\n\n- d\n";
+  const mixedOps = [
+    { type: "append_to_section", heading: "### Details", chapter: "# Kapitel", content: "- x" },
+    { type: "delete_entry", entry: "Punkt A", heading: "## Quelle" },
+    {
+      type: "append_to_section", heading: "## Log",
+      content: "- Log Zeile eins ausreichend lang fuer den Test\n- Log Zeile zwei ausreichend lang fuer den Test",
+    },
+  ];
+  const mixedPlan = () => evaluateTurn([{ nbId: "x", name: "Beispielbuch", ops: mixedOps, before: mixedDoc }]);
+
+  it("Sanity-Check der Fixture: hard-Reason mit atomic:true, g.lostLines (ungefiltert) > 0", () => {
+    const plan = mixedPlan();
+    expect(plan.reasons).toHaveLength(1);
+    expect(plan.reasons[0].kind).toBe("hard");
+    expect(plan.reasons[0].atomic).toBe(true);
+    expect(plan.groups[0].lostLines).toBeGreaterThan(0);
+  });
+
+  // Nacharbeit Runde 4 (🔵 Finding F): N=0 zeigt seit Runde 4 KEINEN
+  // "löscht 0 Zeilen"-Zusatz mehr (analog zum reinen hard-Label bei N=0,
+  // Zeile 429) - "löscht 0 Zeilen" suggerierte fälschlich einen Verlust.
+  it("overrideButtonLabel wählt die gemischte Fassung MIT dem tatsächlich gefilterten Verlust (0, nicht g.lostLines) - OHNE Klammerzusatz bei N=0 (Nacharbeit Runde 4, 🔵 Finding F)", () => {
+    const label = overrideButtonLabel(mixedPlan());
+    expect(label).toBe("Trotzdem übernehmen (ohne Lösch-Ops in „Beispielbuch“)");
+  });
+
+  // Nacharbeit Runde 4 (🟡 Finding C, Review-Fund): dieselbe Fixture (hard-
+  // Reason MIT atomic:true) - buildOverrideWarning() zeigte bisher den
+  // REINEN "trotz Prüfhinweis übernommen"-Wortlaut (allAtomic ist hier
+  // false, weil der EINZIGE Reason kind:"hard" trägt, nicht kind:"atomic"),
+  // OHNE jeden Hinweis, dass delete_entry in „Beispielbuch“ herausgefiltert
+  // wurde - der Knopf hieß aber "... ohne Lösch-Ops in «Beispielbuch»" und
+  // delete_entry lief beim Override nie. Die Pille geht als SYSTEM-HINWEIS
+  // in die Modell-History (kein Doppel-Feedback-Kanal, siehe
+  // sanitizeWarningForHistory) - ohne den Zusatz hätte das Modell die Quelle
+  // fälschlich für gelöscht gehalten. Fix: ein "– ohne Lösch-/Ersetz-Ops in
+  // «Beispielbuch»"-Halbsatz ergänzt den Wortlaut.
+  it("buildOverrideWarning: hard+atomic in derselben Gruppe nennt 'ohne Lösch-/Ersetz-Ops in «Beispielbuch»' (Nacharbeit Runde 4, 🟡 Finding C)", () => {
+    const w = buildOverrideWarning(mixedPlan());
+    expect(w).toBe(
+      "⚠️ Änderung trotz Prüfhinweis übernommen (Nutzer-Entscheidung – ohne Lösch-/Ersetz-Ops in „Beispielbuch“): " +
+      overrideKurzform(mixedPlan())
+    );
+  });
+});
+
+// Nacharbeit Runde 3 (🟡 Finding 3, dreifaches Präfix): verify.js lieferte
+// Soft-Texte bisher mit "ℹ️ Prüfhinweis: ...", turn.js stellte ein zweites
+// "Prüfhinweis: " davor, buildOpsInfo ein drittes "ℹ️ Hinweis: " - der
+// Nutzer sah "ℹ️ Hinweis: Prüfhinweis: ℹ️ Prüfhinweis: ...". EIN
+// Präfix-Eigentümer: verify.js liefert jetzt einheitlich "Prüfhinweis: "
+// (ohne Emoji), turn.js reicht den Text unverändert durch, buildOpsInfo
+// bleibt der EINZIGE "ℹ️"-Absender.
+describe("Pillen-Komposition v7.54 Nacharbeit Runde 3 (🟡 Finding 3: dreifaches Präfix in Prüfhinweis-Pillen)", () => {
+  it("Log-Wiederholung: softInfos -> buildOpsInfo ergibt GENAU EIN 'ℹ️'-Präfix, kein Doppel-Präfix", () => {
+    const before = "# Buch\n\n## Log\n\n- 2026-09-01 Standup erledigt\n";
+    const ops = [{ type: "append_to_section", heading: "## Log", content: "- 2026-09-01 Standup erledigt" }];
+    const plan = evaluateTurn([{ nbId: "a", name: "A", ops, before }]);
+    const info = buildOpsInfo(plan.softInfos);
+    expect(info).toBe("ℹ️ Hinweis: Prüfhinweis: Zeile „- 2026-09-01 Standup erledigt“ ist bereits in „Log“ vorhanden");
+    expect((info.match(/ℹ️/g) || []).length).toBe(1);
+  });
+
+  it("rewrite-Zusammenlegung: createdInfos + softInfos zusammen enthalten trotzdem nur EIN 'ℹ️' je Zeile", () => {
+    const before = "# Buch\n\n# A\n\n- a1 lang genug\n- a2 lang genug\n\n# B\n\n- b1 lang genug\n- b2 lang genug\n";
+    const after = "# Buch\n\n# AB\n\n- a1 lang genug\n- a2 lang genug\n- b1 lang genug\n- b2 lang genug\n";
+    const ops = [{ type: "rewrite", content: after }];
+    const plan = evaluateTurn([{ nbId: "a", name: "A", ops, before }]);
+    const info = buildOpsInfo([...plan.infos, ...plan.createdInfos, ...plan.softInfos]);
+    const lines = info.split("\n").filter((l) => l.startsWith("– "));
+    for (const l of lines) expect((l.match(/ℹ️/g) || []).length).toBe(0); // ℹ️ steht NUR im "ℹ️ Hinweis:"-Kopf, nicht je Zeile
+    expect((info.match(/ℹ️/g) || []).length).toBe(1);
   });
 });
