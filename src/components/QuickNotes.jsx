@@ -1,5 +1,6 @@
-import { useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 import { X, Check, StickyNote } from "lucide-react";
+import { indentSelection } from "../lib/textIndent.js";
 
 /* Schnellnotizen: frei schwebende Post-its über der App.
    Verschieben am Kopfbalken, Größe ändern an der Ecke rechts unten,
@@ -12,6 +13,64 @@ function clamp(v, min, max) {
 
 function QuickNote({ note, onChange, onRemove, onOk }) {
   const gesture = useRef(null);
+  const textareaRef = useRef(null);
+  // Merkt eine Ziel-Selektion nach Tab/Umschalt+Tab, bis der neue Text
+  // (note.text) im DOM angekommen ist: das <textarea> ist controlled
+  // (value={note.text}) – ein setSelectionRange() DIREKT im
+  // onKeyDown-Handler würde noch auf dem ALTEN DOM-Wert stehen und vom
+  // Browser auf dessen Länge geklemmt. Der useLayoutEffect unten läuft
+  // NACH dem Re-Render mit dem neuen Wert und kann die Selektion dann
+  // korrekt setzen (vor dem nächsten Zeichnen, kein Flackern).
+  const pendingSelection = useRef(null);
+
+  useLayoutEffect(() => {
+    const sel = pendingSelection.current;
+    if (!sel) return;
+    pendingSelection.current = null;
+    // Zieltext mitprüfen: übernimmt ein Aufrufer den von onChange gemeldeten
+    // Text NICHT 1:1 (z. B. ein zwischenzeitlicher Remote-Merge überschreibt
+    // note.text, bevor der Effect läuft), passt die gemerkte Selektion nicht
+    // mehr zum tatsächlichen Inhalt – dann lieber gar nichts setzen als eine
+    // falsche Cursor-Position.
+    if (sel.text !== note.text) return;
+    const el = textareaRef.current;
+    // Dritter Parameter (Richtung) bewusst mitgeben: ohne ihn setzt
+    // setSelectionRange() die Richtung auf "none" (Chrome/Firefox: Fokus
+    // dann am Ende) – eine rückwärts aufgezogene Auswahl (Umschalt+Pfeil-
+    // hoch, Anker unten) würde nach einem Tab ihre Richtung verlieren und
+    // beim nächsten Umschalt+Pfeil-hoch am falschen Ende weiterwachsen.
+    if (el) el.setSelectionRange(sel.start, sel.end, sel.direction);
+  }, [note.text]);
+
+  // Tab rückt ein, Umschalt+Tab rückt aus (indentSelection, siehe
+  // src/lib/textIndent.js) – dadurch verlässt Tab das Post-it nicht mehr
+  // per Tastatur (Fokusfalle). Escape ist der Ausweg (siehe unten, WCAG
+  // 2.1.2 "No Keyboard Trap"): Maus/Touch bleiben ohnehin unberührt (Klick
+  // raus funktioniert weiterhin). Ebenfalls hingenommen: der programmatische
+  // value-Wechsel des controlled <textarea> leert in Chrome/Firefox dessen
+  // nativen Undo-Stack (Strg+Z wirkt nach einem Tab nicht mehr auf vorher
+  // Getipptes) – für ein Post-it vertretbar.
+  const handleKeyDown = (e) => {
+    // Escape verlässt das Feld per Tastatur (blur), DANACH greift die
+    // normale Tab-Reihenfolge wieder – muss VOR der Tab-Prüfung stehen,
+    // sonst gäbe es keinen Tastatur-Ausweg aus der Fokusfalle oben.
+    if (e.key === "Escape") { e.currentTarget.blur(); return; }
+    // e.isComposing existiert auf Reacts SyntheticKeyboardEvent NICHT (wird
+    // nicht aus dem nativen Event kopiert) – deshalb hier über nativeEvent
+    // geprüft. Relevant v. a. bei IME-Komposition (z. B. Firefox): dort
+    // bleibt "key" während der Komposition der reale Tastenname, Tab soll
+    // die Komposition aber nicht unterbrechen.
+    if (e.key !== "Tab" || e.ctrlKey || e.altKey || e.metaKey || (e.nativeEvent && e.nativeEvent.isComposing)) return;
+    e.preventDefault();
+    const el = e.currentTarget;
+    const result = indentSelection(el.value, el.selectionStart, el.selectionEnd, { outdent: e.shiftKey });
+    if (result.text === el.value) return; // z. B. Umschalt+Tab ohne Einzug: nichts zu tun
+    // selectionDirection VOR dem Ersetzen sichern (siehe useLayoutEffect
+    // oben) – nach onChange steht das DOM noch auf dem alten Wert, die
+    // Richtung ist also hier noch die vom Nutzer gewählte.
+    pendingSelection.current = { start: result.selStart, end: result.selEnd, text: result.text, direction: el.selectionDirection };
+    onChange(note.id, { text: result.text });
+  };
 
   // Position beim Rendern in den Viewport zwingen (z. B. anderes Fenster-/
   // Gerätemaß). Auch Basis für Gesten, damit ein Drag nicht von einer
@@ -81,9 +140,12 @@ function QuickNote({ note, onChange, onRemove, onOk }) {
       </div>
 
       <textarea
+        ref={textareaRef}
         value={note.text}
         onChange={(e) => onChange(note.id, { text: e.target.value })}
+        onKeyDown={handleKeyDown}
         placeholder="Kurz notieren …"
+        style={{ tabSize: 4 }}
         className="flex-1 min-h-0 w-full resize-none bg-transparent px-2 py-1.5 text-sm text-slate-800 placeholder:text-amber-700/50 focus:outline-none"
       />
 

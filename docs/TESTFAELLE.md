@@ -1922,6 +1922,27 @@ bekannte Loose/Tight-Normalisierung von markdown-it/prosemirror-markdown,
 passiert EINMALIG, geht mit keinerlei Inhaltsverlust einher und ist ab
 dem zweiten Zyklus stabil.
 
+**D24 [OFFEN] Toolbar mobil einzeilig und wischbar (v7.56).** Fenster per
+resize_window auf mobile (375×812) stellen, Notizbuch öffnen (im
+Konservativ-Modus ein „QA-Test“-Notizbuch, sonst ein beliebiges), Editor
+per Stift öffnen. Erwartet: Die Formatierungs-Toolbar ist EINE Zeile
+(Höhe des Strip-Containers per `getBoundingClientRect()` < 48 px;
+`scrollWidth` > `clientWidth`), KEIN vertikaler Überlauf am Strip (per
+javascript_tool prüfen: `scrollHeight === clientHeight` – ein reiner
+Sichtbarkeits-Check auf einen Scrollbalken wäre hier NICHT aussagekräftig,
+der Strip blendet jeden Scrollbalken per CSS aus, unabhängig davon, ob
+vertikal übergelaufen wird oder nicht). Horizontales Scrollen
+(`scrollLeft` ans Ende setzen) zeigt Rückgängig/
+Wiederholen; solange das Ende noch nicht erreicht ist, erscheint rechts
+eine schmale Verlaufs-Blende. Schriftfarbe-Knopf antippen: Farbkästchen-
+Popover VOLLSTÄNDIG sichtbar (Bounding-Rect innerhalb des Viewports,
+nicht abgeschnitten, unterhalb der Toolbar). Link-Knopf: Formular
+sichtbar, Eingabefeld fokussierbar. Tabellen-Knopf: Raster sichtbar.
+Popover schließt bei Klick in den Editor-Text. Danach per resize_window
+auf desktop zurückstellen: Erwartet, die Toolbar bricht wieder mehrzeilig
+um (`flex-wrap`), Popover erscheinen wie bisher direkt unter dem Knopf.
+Fenster am Ende zurücksetzen (Preset desktop).
+
 ## E. Schnellnotizen
 
 **E1 [OFFEN] Post-it-Lebenszyklus.** „Schnellnotiz“-Knopf (Desktop:
@@ -1933,6 +1954,37 @@ den Text als „Neue Schnellnotiz:“ + Zeilenumbruch + Text ins Eingabefeld
 **E2 [VERBUNDEN] Sync.** Schnellnotiz „QA-Sync-Test“ anlegen, Seite neu
 laden. Erwartet: Post-it ist nach dem Reload wieder da (kommt aus dem
 Daten-Repo). Danach Post-it wieder löschen.
+
+**E3 [OFFEN] Tab-Einzug im Post-it (v7.56).** Post-it anlegen, „QA-Tab
+eins“ tippen, Enter, Tab, „QA-Tab zwei“ tippen. Erwartet: die zweite Zeile
+beginnt mit einem Tabulator – per JavaScript prüfen, dass der Wert des
+`<textarea>` den Teilstring „\n\tQA-Tab zwei“ enthält (Wert exakt
+„QA-Tab eins\n\tQA-Tab zwei“; Tab per computer-tool-Taste „Tab“ senden,
+Wert per javascript_tool auslesen); der Fokus bleibt dabei im
+`<textarea>` (`document.activeElement` zeigt weiter auf das Feld, Tab hat
+es NICHT verlassen – bewusst so, siehe DECISIONS #114). Danach Escape
+drücken: `document.activeElement` zeigt NICHT mehr auf das `<textarea>`
+(Ausweg aus der Tab-Fokusfalle, siehe DECISIONS #114), Wert unverändert;
+per javascript_tool zurück ins Feld und ans TEXTENDE
+(`ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length)` –
+der Cursor steht damit in Zeile 2; Umschalt+Tab wirkt bei leerer Auswahl
+NUR auf die Cursor-Zeile, in Zeile 1 gäbe es nichts zu entfernen), um
+fortzufahren. Umschalt+Tab (Taste „shift+Tab“) entfernt den Tabulator
+wieder (Wert jetzt exakt
+„QA-Tab eins\nQA-Tab zwei“, KEINE Zeile mehr mit Tabulator). Danach beide
+Zeilen markieren und Tab drücken: beide Zeilen werden eingerückt (Wert
+jetzt exakt „\tQA-Tab eins\n\tQA-Tab zwei“). **Chat-Eingabefeld
+vorher leeren** (sonst steht der Notizblock nach zwei Zeilenumbrüchen
+hinter dem Bestand), dann OK klicken. Erwartet: Das Chat-Eingabefeld
+enthält exakt „Neue Schnellnotiz:“ + Zeilenumbruch + Tabulator +
+„QA-Tab eins“ + Zeilenumbruch + Tabulator + „QA-Tab zwei“ (per
+javascript_tool prüfen, dass der Wert des Eingabefelds auf
+„\n\tQA-Tab eins\n\tQA-Tab zwei“ endet). Der führende Tabulator der
+ERSTEN Zeile bleibt jetzt ERHALTEN (Regression-Fix ggü. früheren
+v7.56-Ständen): `submitQuickNote` (App.jsx) nutzt `trimNoteBlock` statt
+`text.trim()` – das entfernt nur führende Leerzeilen und Whitespace am
+Ende des Blocks, nicht den Einzug der ersten inhaltstragenden Zeile
+(siehe DECISIONS #114).
 
 ## F. Anhänge & Wissen
 

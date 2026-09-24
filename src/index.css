@@ -15,6 +15,28 @@ html, body { overflow-x: hidden; }
 }
 .drawer-in { animation: drawer-in 0.18s ease-out; }
 
+/* Formatierungs-Toolbar des Editors auf dem Handy (v7.56, Nutzerwunsch
+   "einzeilig und wischbar"): Tailwind kennt weder "Scrollbalken
+   ausblenden" noch dessen WebKit-Pseudoelement als Utility-Klasse – hier
+   deshalb als eigene Klasse. Die Klasse selbst gilt unabhängig vom
+   Breakpoint, wirkt sich aber nur unterhalb md sichtbar aus, weil dort
+   allein overflow-x:auto aktiv ist (ab md: overflow-visible, siehe
+   DocEditor.jsx). */
+.toolbar-strip {
+  scrollbar-width: none; /* Firefox */
+  /* KEIN "-webkit-overflow-scrolling: touch" (Review-Fix): seit iOS 13 ist
+     Momentum-Scrolling Standard, die Eigenschaft dort also ein No-op. Auf
+     Legacy-WebKit (<= iOS 12) erzeugte sie dagegen einen eigenen
+     Rendering-Kontext, der "position: fixed"-Nachfahren clippt – exakt der
+     Mechanismus, auf den sich die mobilen Popover (DocEditor.jsx, "fixed"
+     statt "absolute" unterhalb md) verlassen. */
+  /* unterbindet die Zurück-Geste in Chrome/Android; die OS-Kantengeste von
+     iOS Safari reagiert NICHT auf overscroll-behavior (Review-Hinweis
+     Runde 2) – dort bleibt das Wischen am Rand technisch möglich. */
+  overscroll-behavior-x: contain;
+}
+.toolbar-strip::-webkit-scrollbar { display: none; } /* Chrome/Safari/Edge */
+
 /* WYSIWYG-Editor (TipTap): gleiche Optik wie die gerenderte Wissensbasis */
 .tiptap-doc {
   font-size: 0.875rem;

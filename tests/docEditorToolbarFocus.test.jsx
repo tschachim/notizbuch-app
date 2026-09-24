@@ -250,8 +250,13 @@ describe("Toolbar-Knöpfe (Quelltext): onMouseDown={preventFocusSteal} exakt auf
 
   it("Popover-Öffner/-Inhalte, Bild-Trigger-Knopf und Speichern/Abbrechen bleiben ausgenommen", () => {
     const markers = [
-      'onClick={() => setPicker(picker === "color" ? null : "color")}',
-      'onClick={() => setPicker(picker === "highlight" ? null : "highlight")}',
+      // v7.56: die Öffner-Klicks laufen jetzt über den gemeinsamen
+      // openPicker()-Helfer (misst zusätzlich die Strip-Position für die
+      // mobile Popover-Positionierung, siehe DocEditor.jsx) – funktional
+      // UNVERÄNDERT (weiterhin bewusst OHNE preventFocusSteal, siehe
+      // Ausnahmeliste dort), nur der exakte Quelltext-Marker ist neu.
+      'onClick={() => (picker === "color" ? setPicker(null) : openPicker("color"))}',
+      'onClick={() => (picker === "highlight" ? setPicker(null) : openPicker("highlight"))}',
       'onClick={() => (picker === "link" ? closeLinkPicker() : openLinkPicker())}',
       "imageFileInputRef.current && imageFileInputRef.current.click()",
       "onClick={save}",

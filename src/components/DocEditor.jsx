@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import { getHTMLFromFragment, Node, Extension, InputRule, textInputRule } from "@tiptap/core";
 import { Fragment, Slice } from "@tiptap/pm/model";
@@ -3165,6 +3165,22 @@ export default function DocEditor({
   const [error, setError] = useState(null);
   const [picker, setPicker] = useState(null); // null | "color" | "highlight" | "table" | "link"
   const [tableHover, setTableHover] = useState({ r: 0, c: 0 });
+  // Mobile Toolbar (v7.56, Nutzerwunsch "einzeilig und wischbar"): Ref auf
+  // den scrollbaren Strip – dient ZWEI Zwecken: (1) Messgrundlage für die
+  // Popover-Position unterhalb md (siehe pickerTop/openPicker unten), (2)
+  // Scroll-Container für den Wisch-Hinweis (canScrollRight/updateScrollFade
+  // unten). Ein einziger Ref statt zwei, weil beide Zwecke am SELBEN
+  // DOM-Element hängen.
+  const toolbarRef = useRef(null);
+  // Bildschirm-Position (px, Viewport-Koordinaten), an der ein offenes
+  // Popover unterhalb md per "position: fixed" andocken muss (siehe
+  // Kopfkommentar vor der Toolbar unten, Abschnitt "POPOVER"). Nur
+  // relevant, solange "picker" nicht null ist; wird beim Öffnen (openPicker)
+  // sowie bei resize/orientationchange neu gemessen.
+  const [pickerTop, setPickerTop] = useState(0);
+  // Wisch-Hinweis (v7.56): true, solange der Strip noch weiter nach rechts
+  // gescrollt werden kann (rechte Verlaufs-Blende, siehe unten).
+  const [canScrollRight, setCanScrollRight] = useState(false);
   // Formularzustand des Link-Popovers (siehe openLinkPicker/applyLink
   // unten); null solange das Popover geschlossen ist.
   const [linkForm, setLinkForm] = useState(null); // { title, url, error, existing }
@@ -3519,6 +3535,147 @@ export default function DocEditor({
   const dragCleanupRef = useRef(null);
   useEffect(() => () => { if (dragCleanupRef.current) dragCleanupRef.current(); }, []);
 
+  // Ab md (768px = Tailwind-Breakpoint "md", derselbe wie Drawer/
+  // Gliederungsleiste) sind Wisch-Blende UND Popover-"--pop-top" rein
+  // mobile Konzepte – ab md blendet CSS beides bereits aus (Blende:
+  // "md:hidden"; Popover: "md:top-full" überschreibt die Variable). Der
+  // deps-lose useLayoutEffect weiter unten ruft measurePickerTop/
+  // updateScrollFade trotzdem bei JEDER Editor-Transaktion auf (jeder
+  // Tastendruck, siehe setTick) – ab md wäre das ein wirkungsloser,
+  // synchroner Layout-Flush (Review-Fix). "belowMd()" spart diesen Flush
+  // UND vermeidet einen echten Nebeneffekt: ein offenes "md:absolute"-
+  // Link-Popover (w-72) nahe am rechten Rand vergrößert die scrollWidth
+  // des "overflow-visible"-Strips, updateScrollFade würde canScrollRight
+  // sonst fälschlich auf true kippen (wegen "md:hidden" zwar unsichtbar,
+  // aber unnötig gerendert). "typeof … !== 'function'" behandelt ein
+  // fehlendes matchMedia (jsdom in den Unit-Tests implementiert es NICHT)
+  // defensiv als "unterhalb md" – dadurch bleibt das Verhalten in ALLEN
+  // bestehenden Tests unverändert, die Abkürzung greift nur in echten
+  // Browsern.
+  const belowMd = () =>
+    typeof window.matchMedia !== "function" || !window.matchMedia("(min-width: 48rem)").matches;
+
+  // Popover-Position unterhalb md (v7.56, Nutzerwunsch "einzeilig und
+  // wischbar"): "position: fixed" (siehe Kopfkommentar vor der Toolbar
+  // unten, Abschnitt POPOVER) braucht die Bildschirmposition SELBST,
+  // deshalb wird der Strip beim Öffnen vermessen. toolbarRef.current kann
+  // theoretisch noch null sein (Ref erst nach dem Mount gesetzt) – dann
+  // bleibt pickerTop schlicht auf dem letzten Stand, was in der Praxis
+  // nicht vorkommt (der Strip ist zum Zeitpunkt eines Klicks längst da).
+  // "+ 2" statt "+ 4" (Nachbesserung, Abschluss-Review v7.56): der Strip
+  // trägt seit dem Fokus-Ring-Fix "py-0.5" (2px eigenes Padding oben/unten,
+  // siehe DECISIONS #115) statt vorher "py-0" – die 2px Padding zählen
+  // bereits zur gemessenen rect.bottom, ein zusätzlicher Abstand von "+ 4"
+  // hätte das Popover damit 2px zu weit unter dem Knopf sitzen lassen;
+  // "+ 2" bringt den Abstand wieder auf dieselben 4px wie am Desktop
+  // (md:mt-1 = 0.25rem = 4px).
+  // Gleichheits-Guard (Review-Fix): dieselbe Funktion wird jetzt zusätzlich
+  // vom nachfolgenden useLayoutEffect bei JEDEM Render aufgerufen (siehe
+  // dort) – ohne den Guard würde ein unverändert gemessener Wert trotzdem
+  // ein neues Objekt/setState auslösen und React zu einem (in diesem Fall
+  // harmlosen, aber unnötigen) weiteren Render-Durchlauf zwingen.
+  const measurePickerTop = () => {
+    if (!belowMd()) return; // ab md ungenutzt, siehe belowMd() oben
+    if (toolbarRef.current) {
+      const next = toolbarRef.current.getBoundingClientRect().bottom + 2;
+      setPickerTop((prev) => (prev === next ? prev : next));
+    }
+  };
+
+  // Gemeinsamer "Popover öffnen"-Helfer (v7.56, ersetzt vier eigenständige
+  // setPicker(...)-Aufrufe an den vier Öffner-Knöpfen unten, siehe JSX):
+  // jedes Öffnen misst zusätzlich die aktuelle Strip-Position. Das
+  // SCHLIESSEN eines Popovers (setPicker(null)/closeLinkPicker) läuft
+  // weiterhin direkt – dort gibt es nichts zu positionieren.
+  const openPicker = (name) => {
+    setPicker(name);
+    measurePickerTop();
+  };
+
+  // Ein offenes Popover unterhalb md hängt an einer einmal GEMESSENEN
+  // Bildschirmposition (pickerTop) – dreht der Nutzer das Handy oder ändert
+  // sich die Fensterhöhe (z. B. virtuelle Tastatur), muss NEU gemessen
+  // werden, sonst hängt das Popover an der falschen Stelle. Läuft nur,
+  // solange tatsächlich eines offen ist. "orientationchange" ist auf
+  // modernen Browsern als Event-Typ deprecated und feuert auf iOS VOR dem
+  // eigentlichen Layout-Update (liefert dort noch die alten Maße) – die
+  // eigentliche Absicherung ist "resize", das (auch auf iOS) zuverlässig
+  // NACH dem Layout-Update folgt und hier deshalb bewusst zusätzlich
+  // gehalten wird, nicht weil "orientationchange" allein genügen würde.
+  // ZUSÄTZLICH "window.visualViewport" (Nachbesserung, Abschluss-Review
+  // v7.56, entschärft Restrisiko (3) aus DECISIONS #115): eine virtuelle
+  // Bildschirmtastatur auf iOS verschiebt den LAYOUT-Viewport, ohne dabei
+  // ein "resize"-Event auf window auszulösen (window bleibt gleich groß,
+  // nur der sichtbare Ausschnitt ändert sich) – visualViewport meldet das
+  // separat über eigene "resize"- UND "scroll"-Events (Scrollen INNERHALB
+  // des verkleinerten Viewports zählt hier ebenfalls als Verschiebung).
+  // "window.visualViewport" ist in jsdom (Unit-Tests) UNDEFINED -> null-
+  // sicher behandelt, sonst würde jeder Test mit offenem Picker crashen.
+  useEffect(() => {
+    if (!picker) return;
+    window.addEventListener("resize", measurePickerTop);
+    window.addEventListener("orientationchange", measurePickerTop);
+    const vv = window.visualViewport;
+    if (vv) {
+      vv.addEventListener("resize", measurePickerTop);
+      vv.addEventListener("scroll", measurePickerTop);
+    }
+    return () => {
+      window.removeEventListener("resize", measurePickerTop);
+      window.removeEventListener("orientationchange", measurePickerTop);
+      if (vv) {
+        vv.removeEventListener("resize", measurePickerTop);
+        vv.removeEventListener("scroll", measurePickerTop);
+      }
+    };
+  }, [picker]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Wisch-Hinweis (v7.56): true, solange rechts vom sichtbaren Ausschnitt
+  // noch Knöpfe verborgen sind ("- 1" toleriert Rundungsfehler bei
+  // gebrochenen Pixelwerten, wie am Scroll-Ende üblich). setState NUR bei
+  // tatsächlicher Änderung – der aufrufende useLayoutEffect unten läuft
+  // nach JEDEM Render ohne deps-Array, ein bedingungsloses setState würde
+  // eine Render-Schleife auslösen.
+  const updateScrollFade = () => {
+    // Ab md immer false (siehe belowMd() oben) – räumt insbesondere einen
+    // eventuell noch "true" stehenden Wert vom letzten Mal unterhalb md
+    // weg (z. B. nach einem resize von mobil auf desktop).
+    if (!belowMd()) { setCanScrollRight((prev) => (prev ? false : prev)); return; }
+    const el = toolbarRef.current;
+    if (!el) return;
+    const canScroll = el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
+    setCanScrollRight((prev) => (prev === canScroll ? prev : canScroll));
+  };
+
+  // Nach JEDEM Render neu prüfen (bewusst ohne deps-Array): Knöpfe können
+  // ein-/ausblenden (z. B. die Tabellen-Werkzeuge bei editor.isActive
+  // ("table")) und damit scrollWidth ändern, ohne dass ein Scroll- oder
+  // Resize-Event feuert. useLayoutEffect statt useEffect, damit die Blende
+  // nicht erst einen Frame lang im falschen Zustand aufblitzt.
+  // Review-Ergänzung: bei offenem Picker wird HIER zusätzlich pickerTop
+  // nachgemessen (Gleichheits-Guard siehe measurePickerTop oben) – deckt
+  // Verschiebungen der Toolbar ab, die OHNE resize/orientationchange
+  // passieren (z. B. ein Banner oberhalb von <main>, das erscheint,
+  // während ein Popover offen ist).
+  useLayoutEffect(() => {
+    updateScrollFade();
+    if (picker) measurePickerTop();
+  });
+
+  // Fenster-/Orientierungswechsel kann die Strip-Breite unabhängig von
+  // einem offenen Picker ändern (z. B. Dreh ins Querformat) – deshalb ein
+  // EIGENER, dauerhafter Listener (nicht an "picker" gekoppelt wie oben).
+  // "orientationchange" wie oben nur als Zusatz gehalten, "resize" ist auch
+  // hier die eigentliche Absicherung (siehe Begründung oben).
+  useEffect(() => {
+    window.addEventListener("resize", updateScrollFade);
+    window.addEventListener("orientationchange", updateScrollFade);
+    return () => {
+      window.removeEventListener("resize", updateScrollFade);
+      window.removeEventListener("orientationchange", updateScrollFade);
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const startOutlineDrag = (e, index) => {
     e.preventDefault();
     e.stopPropagation();
@@ -3615,8 +3772,13 @@ export default function DocEditor({
     onSave(out);
   };
 
+  // "shrink-0" (v7.56): in der mobilen, EINZEILIGEN Toolbar (flex-nowrap +
+  // overflow-x-auto, siehe JSX unten) würden Flex-Kinder OHNE das sonst
+  // wirkende "shrink" sich gegenseitig quetschen statt zu scrollen – jeder
+  // über btn() gebaute Knopf bekommt es deshalb pauschal, ab md ist
+  // flex-wrap ohnehin aktiv und shrink-0 folgenlos.
   const btn = (active) =>
-    "p-2 rounded-lg border " +
+    "p-2 rounded-lg border shrink-0 " +
     (active
       ? "bg-indigo-50 border-indigo-300 text-indigo-700"
       : "border-slate-300 bg-white text-slate-600 hover:bg-slate-50");
@@ -3696,7 +3858,7 @@ export default function DocEditor({
     const url = hadLink ? editor.getAttributes("link").href || "" : "";
     setLinkForm({ title, url, error: null, existing: hadLink });
     setTitleFetching(false);
-    setPicker("link");
+    openPicker("link");
   };
 
   // "Titel ermitteln" (v7.9): NUR aktiv, wenn die aktuell eingegebene URL zu
@@ -3800,8 +3962,21 @@ export default function DocEditor({
     if (/^https?:\/\//i.test(url)) window.open(url, "_blank", "noopener");
   };
 
+  // Unterhalb md "fixed" statt "absolute" (v7.56, siehe Kopfkommentar vor
+  // der Toolbar, Abschnitt POPOVER): der Strip ist dort overflow-x:auto,
+  // was per CSS-Spezifikation automatisch overflow-y:auto erzwingt – ein
+  // "absolute"-Popover INNERHALB des Containers würde dadurch vertikal
+  // abgeschnitten bzw. der Strip bekäme einen ungewollten Scrollbalken.
+  // "left-4 right-4" ergibt auf einem 375px-Bildschirm 343px Breite – der
+  // BREITESTE Farbgrid hat 7 Kästchen (TEXT_COLORS) × 24px + 6 × 4px Lücke
+  // + 16px Padding = 208px, passt also klar in eine Zeile (kein
+  // flex-wrap nötig, gezählt statt geraten). "--pop-top" kommt aus
+  // measurePickerTop/openPicker oben (toolbarRef-Messung).
   const swatchGrid = (colors, current, apply) => (
-    <div className="absolute z-10 top-full left-0 mt-1 p-2 bg-white border border-slate-200 rounded-lg shadow-lg flex gap-1">
+    <div
+      className="fixed z-10 left-4 right-4 md:absolute md:top-full md:left-0 md:right-auto md:mt-1 top-[var(--pop-top)] p-2 bg-white border border-slate-200 rounded-lg shadow-lg flex gap-1"
+      style={{ "--pop-top": pickerTop + "px" }}
+    >
       {colors.map((c) => (
         <button
           key={c.label}
@@ -3898,7 +4073,58 @@ export default function DocEditor({
   //   aus, Fokusverlust ist hier folgenlos.
   return (
     <div className="flex-1 min-h-0 flex flex-col px-4 pb-4 gap-2">
-      <div className="flex flex-wrap items-center gap-1">
+      {/* Formatierungs-Toolbar (v7.56, Nutzerwunsch "auf dem Handy nimmt die
+          mehrzeilige Leiste zu viel Platz weg, einzeilig zum Wischen?"):
+          unterhalb md (768px, derselbe Breakpoint wie Drawer/Gliederungs-
+          leiste) wird der Strip EINE Zeile (flex-nowrap, overflow-x-auto,
+          Scrollbalken per .toolbar-strip in index.css ausgeblendet); ab md
+          exakt wie vorher (flex-wrap, overflow sichtbar – Desktop-Optik
+          unverändert).
+          Bleed-Aufteilung (bewusst NICHT beides auf demselben Element):
+          der äußere "relative"-Wrapper trägt "-mx-4 md:mx-0" – ein
+          negativer Rand auf einem Block-Element mit width:auto vergrößert
+          dessen EIGENE Box über den Elternrahmen hinaus, der Wrapper
+          reicht unterhalb md also bis an den ECHTEN Bildschirmrand. Genau
+          das ist nötig, weil er zugleich der Positionierungs-Anker der
+          Verlaufs-Blende unten ist ("right-0" trifft dadurch den
+          tatsächlichen Rand, nicht 1rem davor). Der Strip selbst bekommt
+          sein "px-4 md:px-0" zurück (füllt die jetzt breitere Wrapper-Box
+          komplett aus) – Knöpfe starten optisch am gewohnten 1rem-Einzug,
+          können beim Wischen aber bis zum echten Rand scrollen (übliches
+          "bleed"-Muster für horizontale Mobil-Leisten).
+          POPOVER (Schriftfarbe/Textmarker/Tabelle/Link, siehe jeweils
+          unten): overflow-x:auto erzwingt laut CSS-Spezifikation IMMER
+          auch overflow-y:auto (ein "auto"+"visible"-Paar wird zu
+          "auto"+"auto") – ein "absolute" positioniertes Popover INNERHALB
+          des Strips würde dadurch vertikal abgeschnitten bzw. der Strip
+          bekäme einen ungewollten senkrechten Scrollbalken. Unterhalb md
+          daher "position: fixed" (entkommt dem Overflow-Clipping), Top-
+          Position aus toolbarRef.getBoundingClientRect() (measurePickerTop/
+          openPicker oben) als CSS-Variable "--pop-top".
+          VORFAHREN-PRÜFUNG (Auftrag, vor dem Einsatz von "fixed" Pflicht):
+          grep über src/App.jsx, src/index.css und DocEditor.jsx auf
+          transform/translate/scale/filter/backdrop-filter/will-change/
+          contain ergab KEINEN Treffer auf einem Vorfahren des Editors –
+          der einzige "transform"-Treffer ist die @keyframes von
+          ".drawer-in" (src/index.css, Klasse am <nav> des mobilen
+          Abschnitts-Drawers in App.jsx), einem Geschwister-Overlay, NICHT
+          Vorfahre von <DocEditor>. "position: fixed" positioniert hier
+          also zuverlässig relativ zum Viewport.
+          FOKUS-RING (Review-Fix): der Strip ist unterhalb md ein Scroll-
+          Container ohne eigenes vertikales Padding – der native
+          :focus-visible-Umriss eines per Tastatur fokussierten Knopfs
+          ragt dadurch 2px über die Box hinaus und würde oben/unten
+          geclippt (nur mit Hardware-Tastatur auf < 768px relevant, z. B.
+          Tablet-Split-Screen). "py-0.5"/"-my-0.5" schaffen genau diesen
+          Rand, OHNE das Layout ab md zu verändern ("md:py-0"/"md:my-0"
+          heben es exakt wieder auf – der Wrapper trägt "inset-y-0" via
+          die Blende unten, die damit automatisch mitfolgt). */}
+      <div className="relative -mx-4 md:mx-0 -my-0.5 md:my-0">
+      <div
+        ref={toolbarRef}
+        onScroll={updateScrollFade}
+        className="toolbar-strip flex flex-nowrap md:flex-wrap items-center gap-1 overflow-x-auto md:overflow-visible px-4 md:px-0 py-0.5 md:py-0"
+      >
         <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
           className={btn(editor.isActive("heading", { level: 1 }))} title="Kapitel (#)">
           <Heading1 size={15} />
@@ -3936,15 +4162,15 @@ export default function DocEditor({
             BEWUSST OHNE preventFocusSteal (siehe Ausnahmeliste oben) – sie
             setzen nur eine Marke auf die beim Öffnen bereits feststehende
             Selektion, kein Node-Austausch an der Cursor-Position. */}
-        <div className="relative">
-          <button onClick={() => setPicker(picker === "color" ? null : "color")}
+        <div className="relative shrink-0">
+          <button onClick={() => (picker === "color" ? setPicker(null) : openPicker("color"))}
             className={btn(!!currentColor)} title="Schriftfarbe">
             <Palette size={15} style={currentColor ? { color: currentColor } : undefined} />
           </button>
           {picker === "color" && swatchGrid(TEXT_COLORS, currentColor, applyColor)}
         </div>
-        <div className="relative">
-          <button onClick={() => setPicker(picker === "highlight" ? null : "highlight")}
+        <div className="relative shrink-0">
+          <button onClick={() => (picker === "highlight" ? setPicker(null) : openPicker("highlight"))}
             className={btn(!!currentHighlight)} title="Textmarker">
             <Highlighter size={15} style={currentHighlight ? { color: currentHighlight } : undefined} />
           </button>
@@ -4021,6 +4247,9 @@ export default function DocEditor({
               // eigentliche Sicherheitsnetz.
               accept={ACCEPTED_IMAGE_MIME.join(",")}
               multiple
+              // "hidden" ohne "shrink-0" (Review-Fix v7.56 Runde 2):
+              // display:none nimmt am Flex-Layout des Strips gar nicht teil,
+              // "shrink-0" wäre hier wirkungslose Deko.
               className="hidden"
               onChange={(e) => {
                 const files = Array.from(e.target.files || []).filter((f) => isAcceptedImageType(f.type));
@@ -4048,7 +4277,7 @@ export default function DocEditor({
             selbst löst keinen Struktur-Befehl auf einer FRISCH VERÄNDERTEN
             Cursor-Position aus (die Selektion steht bereits seit
             openLinkPicker() fest). */}
-        <div className="relative">
+        <div className="relative shrink-0">
           <button
             onClick={() => (picker === "link" ? closeLinkPicker() : openLinkPicker())}
             className={btn(editor.isActive("link"))}
@@ -4057,7 +4286,10 @@ export default function DocEditor({
             <LinkIcon size={15} />
           </button>
           {picker === "link" && linkForm && (
-            <div className="absolute z-10 top-full left-0 mt-1 p-3 w-72 bg-white border border-slate-200 rounded-lg shadow-lg">
+            <div
+              className="fixed z-10 left-4 right-4 md:absolute md:top-full md:left-0 md:right-auto md:mt-1 top-[var(--pop-top)] p-3 w-auto md:w-72 bg-white border border-slate-200 rounded-lg shadow-lg"
+              style={{ "--pop-top": pickerTop + "px" }}
+            >
               <label className="block text-xs font-medium text-slate-600 mb-0.5">Titel</label>
               <input
                 type="text"
@@ -4127,17 +4359,39 @@ export default function DocEditor({
             erfüllt, das Raster gehört also NICHT in die Ausnahmeliste.
             Am Container statt an den 36 Zellen: mousedown blubbert hoch.
             Gefahrlos, weil weder Öffner noch Raster Eingabefelder haben. */}
-        <div className="relative">
+        <div className="relative shrink-0">
           <button
             onMouseDown={preventFocusSteal}
-            onClick={() => { setPicker(picker === "table" ? null : "table"); setTableHover({ r: 0, c: 0 }); }}
+            onClick={() => {
+              if (picker === "table") { setPicker(null); return; }
+              openPicker("table");
+              setTableHover({ r: 0, c: 0 });
+            }}
             className={btn(editor.isActive("table"))}
             title="Tabelle einfügen"
           >
             <TableIcon size={15} />
           </button>
+          {/* "right-auto" statt "right-4" unterhalb md (Review-Fix, Regression
+              ggü. v7.55): die anderen drei Popover (swatchGrid/Link) brauchen
+              "left-4 right-4" für eine DEFINITE Breite (Farbkästchen laufen
+              zeilenbündig, das Link-Formular braucht Platz für die
+              Eingabefelder) – das Tabellen-Raster dagegen ist ein
+              block-level "<div className="grid grid-cols-6">" (siehe unten),
+              dessen Tailwind-Spalten (repeat(6, minmax(0, 1fr))) bei einer
+              DEFINITEN Popover-Breite (Viewport − 32px, z. B. 343px) die
+              vollen ~327px auf 6 Spalten à ~54px verteilen würden statt des
+              kompakten ~106px-Rasters. "right-auto" lässt die Popover-Breite
+              wie ab md ("md:right-auto") per shrink-to-fit aus dem Inhalt
+              berechnen (position:fixed folgt bei "left" gesetzt/"right: auto"
+              demselben Shrink-to-fit-Algorithmus wie position:absolute) –
+              die 1fr-Spalten kollabieren dadurch auf ihre tatsächliche
+              Zellbreite, GENAU wie ab md. */}
           {picker === "table" && (
-            <div className="absolute z-10 top-full left-0 mt-1 p-2 bg-white border border-slate-200 rounded-lg shadow-lg">
+            <div
+              className="fixed z-10 left-4 right-auto md:absolute md:top-full md:left-0 md:right-auto md:mt-1 top-[var(--pop-top)] p-2 bg-white border border-slate-200 rounded-lg shadow-lg"
+              style={{ "--pop-top": pickerTop + "px" }}
+            >
               <div className="grid grid-cols-6 gap-0.5" onMouseDown={preventFocusSteal}>
                 {Array.from({ length: 6 * 6 }, (_, i) => {
                   const r = Math.floor(i / 6) + 1;
@@ -4166,14 +4420,14 @@ export default function DocEditor({
 
         {editor.isActive("table") && (
           <>
-            <span className="mx-1 w-px h-5 bg-slate-200" />
+            <span className="mx-1 w-px h-5 bg-slate-200 shrink-0" />
             <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().addRowAfter().run()}
-              className="px-2 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 text-xs"
+              className="px-2 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 text-xs shrink-0"
               title="Zeile unterhalb einfügen">
               +Zeile
             </button>
             <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().addColumnAfter().run()}
-              className="px-2 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 text-xs"
+              className="px-2 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 text-xs shrink-0"
               title="Spalte rechts einfügen">
               +Spalte
             </button>
@@ -4182,18 +4436,18 @@ export default function DocEditor({
                 die Leseansicht nicht darstellt. */}
             <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().deleteRow().run()}
               disabled={editor.isActive("tableHeader")}
-              className={"px-2 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-600 text-xs " +
+              className={"px-2 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-600 text-xs shrink-0 " +
                 (editor.isActive("tableHeader") ? "opacity-40" : "hover:bg-slate-50")}
               title={editor.isActive("tableHeader") ? "Kopfzeile kann nicht gelöscht werden" : "Aktuelle Zeile löschen"}>
               −Zeile
             </button>
             <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().deleteColumn().run()}
-              className="px-2 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 text-xs"
+              className="px-2 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 text-xs shrink-0"
               title="Aktuelle Spalte löschen">
               −Spalte
             </button>
             <button onMouseDown={preventFocusSteal} onClick={() => editor.chain().focus().deleteTable().run()}
-              className="px-2 py-1.5 rounded-lg border border-rose-200 bg-white text-rose-700 hover:bg-rose-50 text-xs"
+              className="px-2 py-1.5 rounded-lg border border-rose-200 bg-white text-rose-700 hover:bg-rose-50 text-xs shrink-0"
               title="Ganze Tabelle löschen">
               ✕Tabelle
             </button>
@@ -4213,6 +4467,20 @@ export default function DocEditor({
           className={btn(false) + (editor.can().redo() ? "" : " opacity-40")} title="Wiederholen">
           <Redo2 size={15} />
         </button>
+      </div>
+        {/* Wisch-Hinweis (v7.56): schmale, nicht klickbare Verlaufs-Blende
+            NUR solange noch nach rechts gescrollt werden kann
+            (canScrollRight, siehe updateScrollFade oben) – Farbe = Hinter-
+            grund der Editor-Akte (App.jsx, "Wissensbasis"-Panel um
+            <DocEditor>, className enthält "bg-white" – NICHT geraten).
+            Liegt als GESCHWISTER des Scroll-Containers (nicht darin),
+            sonst würde sie selbst mitscrollen. */}
+        {canScrollRight && (
+          <div
+            aria-hidden="true"
+            className="toolbar-scroll-fade pointer-events-none absolute inset-y-0 right-0 w-8 md:hidden bg-linear-to-l from-white to-transparent"
+          />
+        )}
       </div>
 
       <div className="flex-1 min-h-0 flex gap-2">

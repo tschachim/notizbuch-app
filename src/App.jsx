@@ -44,6 +44,7 @@ import { chatToMarkdown, archiveBaseName, mergeChats } from "./lib/archive.js";
 import { loadSettings, saveSettings, clearSettings } from "./lib/settings.js";
 import { setLinkProviders, resolveProviderLinkTitles } from "./lib/linkProviders.jsx";
 import { sanitizeAutocorrectConfig } from "./lib/autocorrect.js";
+import { trimNoteBlock } from "./lib/textIndent.js";
 import SettingsDialog from "./components/SettingsDialog.jsx";
 import DocEditor from "./components/DocEditor.jsx";
 import QuickNotes from "./components/QuickNotes.jsx";
@@ -3110,8 +3111,12 @@ export default function NotizbuchApp() {
   const submitQuickNote = (id) => {
     const n = quickNotes.find((q) => q.id === id);
     if (!n) return;
-    const text = n.text.trim();
-    if (text) {
+    // trimNoteBlock (statt n.text.trim()) kappt NUR führende Leerzeilen und
+    // Whitespace am Ende, NICHT den Einzug der ersten inhaltstragenden Zeile
+    // – Konsistenz zur Mehrzeilen-Tab-Einrückung in QuickNotes.jsx, die auch
+    // die erste Zeile mit einrückt (siehe DECISIONS #114).
+    const text = trimNoteBlock(n.text);
+    if (text.trim()) {
       setInput((prev) => (prev.trim() ? prev + "\n\n" : "") + "Neue Schnellnotiz:\n" + text);
       setView("chat");
     }
@@ -3827,7 +3832,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.55</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.56</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"

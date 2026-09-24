@@ -13508,3 +13508,327 @@ aus `referenz-app.jsx` übernommen.
          92.77 % Funktionen / 95.52 % Zeilen (Gate 60 % auf `src/lib`;
          `anthropic.js` 95.36 %/85.79 %/100 %/97.47 %; `turn.js` 96.87 %/
          85.84 %/100 %/100 %). Version bleibt `v7.55`.
+
+114. **v7.56, Tab-Einzug in der Schnellnotiz (Nutzerwunsch).** Post-its
+     (`src/components/QuickNotes.jsx`) unterstützen jetzt VS-Code-artige
+     Tab-Einrückung im `<textarea>` statt des Browser-Defaults
+     (Fokuswechsel zum nächsten Element).
+     - **Mechanik:** neues, reines Modul `src/lib/textIndent.js` exportiert
+       `indentSelection(text, selStart, selEnd, opts)` – kein DOM-Zugriff,
+       volle Testbarkeit ohne echtes `<textarea>`. Vier Fälle: (1) leere
+       Auswahl + Tab → `unit` ("\t") an der Cursorposition einfügen; (2)
+       Teilauswahl INNERHALB einer Zeile + Tab → Auswahl durch `unit`
+       ersetzen (kollabiert); (3) Mehrzeilen-Auswahl ODER genau eine ganze
+       Zeile + Tab → JEDE berührte, NICHT-leere Zeile bekommt `unit`
+       vorangestellt, leere Zwischenzeilen bleiben unverändert
+       übersprungen, die Rück-Selektion deckt weiterhin alle betroffenen
+       Zeilen ab (klassisches „Cursor bleibt am Zeilenanfang“, ermöglicht
+       wiederholtes Tab zum weiteren Einrücken); (4) Umschalt+Tab entfernt
+       an jeder berührten Zeile (leere Auswahl: nur die aktuelle Zeile) EIN
+       führendes „\t“ oder – falls keins vorhanden – bis zu 4 führende
+       Leerzeichen (klemmt auf die tatsächlich vorhandene Anzahl),
+       UNABHÄNGIG von `opts.unit` (das gilt nur fürs Einrücken).
+       CRLF-Zeilenumbrüche werden durchgängig korrekt behandelt
+       (Zeilenanfang/-ende landet nie zwischen „\r“ und „\n“).
+     - **Anbindung (`QuickNotes.jsx`):** `onKeyDown` am `<textarea>` fängt
+       Tab/Umschalt+Tab ab (nicht bei ctrl/alt/meta/IME-Komposition –
+       `e.nativeEvent.isComposing`, weil React `isComposing` nicht auf das
+       SyntheticEvent kopiert), ruft `preventDefault()` (verhindert den
+       Browser-Fokuswechsel) und danach `indentSelection()`. Das
+       `<textarea>` ist CONTROLLED (`value={note.text}`) – ein
+       `setSelectionRange()` DIREKT im Handler stünde noch auf dem ALTEN
+       DOM-Wert; die Ziel-Selektion wird deshalb in einem Ref
+       (`pendingSelection`) zwischengespeichert und erst in einem
+       `useLayoutEffect` NACH dem Re-Render mit dem neuen Wert gesetzt
+       (kein Flackern, `useLayoutEffect` läuft vor dem nächsten Zeichnen).
+       `selectionDirection` wird VOR dem Ersetzen gesichert und als
+       dritter Parameter an `setSelectionRange()` übergeben, damit eine
+       rückwärts aufgezogene Auswahl (Umschalt+Pfeil-hoch, Anker unten)
+       ihre Richtung über ein Tab hinweg behält. `style={{tabSize:4}}` am
+       `<textarea>`, damit eingefügte Tabs nicht als 8 Zeichen breit
+       dargestellt werden.
+     - **Restrisiken (bewusst in Kauf genommen):** (1) Tab-Fokusfalle: Tab
+       verlässt das Post-it per Tastatur nicht mehr (Maus-/Touch-
+       Fokuswechsel bleiben unberührt) – für ein reines Notizfeld
+       vertretbar, explizit Teil des Auftrags. Escape bleibt als Ausweg
+       (siehe Nachbesserung Runde 2 unten). (2) Der programmatische
+       `value`-Wechsel des controlled `<textarea>` leert in Chrome/Firefox
+       dessen nativen Undo-Stack (Strg+Z wirkt nach einem Tab nicht mehr
+       auf vorher Getipptes). (3) [behoben in Runde 2, s. u.]
+       `n.text.trim()` in `submitQuickNote` (App.jsx) kappte den Einzug der
+       ERSTEN Zeile einer Schnellnotiz beim Übernehmen in den Chat-Prompt.
+     - **Tests:** `tests/textIndent.test.js` (43 Fälle: Einfügen/Ersetzen/
+       Mehrzeilen/leere Zwischenzeile/Zeilenanfang-Ausschluss/mitten-in-
+       Zeile/Wiederholung/Selektions-Fortführung, Outdent mit Tab/2/4/6-
+       Leerzeichen/gemischt/Klemmen, CRLF, alternative `unit`, kaputte
+       Eingaben) und `tests/quickNotesTab.test.jsx` (16 Fälle: 14 + 2 in
+       Runde 2 – Tab/Umschalt+Tab inkl. Selektions- UND Richtungs-Restore
+       nach dem Re-Render, ctrl/alt-Tab und andere Tasten ohne
+       `preventDefault`, Umschalt+Tab ohne vorhandenen Einzug ohne
+       `onChange`-Aufruf) decken die reine Logik UND die React-Anbindung
+       ab; `docs/TESTFAELLE.md#E3` deckt den End-zu-Ende-Ablauf im Browser
+       ab. Kein Bestandscode-Bug gefunden.
+     - **Nachbesserung (Gesamt-Review v7.56, Review-Fix Runde 1):**
+       `docs/TESTFAELLE.md#E3` verlangte „den Text INKLUSIVE der
+       Tabulatoren“ (Plural) nach „Neue Schnellnotiz:“ – das widerspricht
+       Restrisiko (3) oben UND dem Code: `n.text.trim()` frisst den
+       Tabulator der ERSTEN Zeile (steht am Rand des Gesamtblocks), der
+       Tabulator der ZWEITEN Zeile bleibt dagegen erhalten (steht NICHT am
+       Rand). Nur EIN Tabulator überlebt, nicht zwei – der Testtext hätte
+       einen Tester sonst entweder zu einem falschen Finding oder zu einer
+       zu weich geprüften (die Regression „zweite Zeile verliert ihren
+       Tabulator“ nicht erkennenden) Prüfung verleitet. Testtext auf den
+       exakt erwarteten String präzisiert, KEIN Code-Fix (Restrisiko 3
+       bleibt bewusst bestehen).
+     - **Nachbesserung (Runde 2, Abschluss-Review v7.56):**
+       - **Restrisiko (3) behoben:** `App.jsx#submitQuickNote` rief bislang
+         `n.text.trim()` auf den GESAMTEN Notiztext auf, bevor er als
+         „Neue Schnellnotiz:\n“ + Text in den Chat-Prompt übernommen wurde –
+         das kappte den Einzug der ALLERERSTEN Zeile, inkonsistent zur
+         Mehrzeilen-Tab-Einrückung (die auch die erste Zeile einrückt).
+         Neue reine Funktion `trimNoteBlock(text)`
+         (`src/lib/textIndent.js`): entfernt NUR führende Leerzeilen (Zeilen
+         aus ausschließlich Leerzeichen/Tabs, inkl. ihres Zeilenumbruchs,
+         CRLF-tolerant) und Whitespace am Ende; der Einzug der ersten
+         inhaltstragenden Zeile bleibt erhalten. `submitQuickNote` nutzt
+         jetzt `trimNoteBlock(n.text)`, der Leer-Guard bleibt `if
+         (text.trim())` (nur-Whitespace-Notizen werden weiterhin nicht
+         übernommen). Tests: `tests/textIndent.test.js` (9 neue Fälle:
+         unveränderter Einzug ohne führende Leerzeile, gemischte führende
+         Leerzeilen, Nur-Whitespace-Text, Whitespace am Ende, CRLF,
+         Nicht-String-Eingaben, Text ohne Whitespace, Leerzeile MITTEN im
+         Text bleibt unangetastet).
+       - **Escape als Ausweg aus der Tab-Fokusfalle:** `QuickNotes.jsx`
+         `onKeyDown` prüft VOR der Tab-Behandlung `e.key === "Escape"` und
+         ruft `e.currentTarget.blur()` (Feld per Tastatur verlassen, danach
+         greift die normale Tab-Reihenfolge wieder) – entschärft die unter
+         Restrisiko (1) dokumentierte Tastaturfalle nach WCAG 2.1.2 „No
+         Keyboard Trap“, ohne Maus/Touch oder die Tab-Einrück-Mechanik
+         selbst zu ändern. Text/Selektion bleiben beim Escape unverändert,
+         `onChange` wird nicht aufgerufen. Test:
+         `tests/quickNotesTab.test.jsx` (Escape verlässt das Feld,
+         `document.activeElement !== el`, Text unverändert, kein
+         `onChange`).
+       - `docs/TESTFAELLE.md#E3` entsprechend nachgeführt: der führende
+         Tabulator der ERSTEN Zeile ist jetzt Teil der erwarteten Chat-
+         Eingabe (Restrisiko 3 behoben); die Aussage „Tab verlässt das
+         Post-it nicht“ bleibt unverändert korrekt (nur Escape tut das
+         jetzt zusätzlich, siehe oben).
+     - **Nachbesserung (Runde 3, Freigabe-Review v7.56):**
+       - Echter Bug in `trimNoteBlock` (`src/lib/textIndent.js`) gefunden
+         und gefixt: der 1. Durchgang (führende Leerzeilen entfernen) prüfte
+         nur `[ \t]*` (Space/Tab), der 2. Durchgang (Whitespace am Ende)
+         dagegen `\s` (jedes Whitespace-Zeichen inkl. NBSP `\u00A0`) – eine
+         per Copy&Paste (Word/HTML) eingeschleppte führende Leerzeile aus
+         NBSP statt Space/Tab überlebte dadurch asymmetrisch den 1.
+         Durchgang und landete als Leerzeile im Chat-Prompt (ein früheres
+         `text.trim()` hätte sie entfernt). Fix: `[^\S\r\n]*` (jedes
+         Whitespace-Zeichen außer Zeilenumbrüchen) statt `[ \t]*` – deckt
+         sich jetzt mit dem `\s`-basierten 2. Durchgang. Neuer Testfall in
+         `tests/textIndent.test.js` (`trimNoteBlock("\u00A0\n\tA")` →
+         `"\tA"`).
+       - `tests/quickNotesTab.test.jsx`: `expect(ev).toBeTruthy()` beim
+         Escape-Test durch `expect(ev.defaultPrevented).toBe(false)`
+         ersetzt – ein `KeyboardEvent` ist immer truthy, die Prüfung war
+         wirkungslos und nagelte die bewusste „Escape ruft KEIN
+         `preventDefault()` auf“-Entscheidung nicht fest.
+       - Restrisiko (3)-Liste oben ergänzt (war zuvor nur in den
+         Nachbesserungs-Absätzen referenziert, ohne in der Restrisiken-
+         Aufzählung selbst zu stehen) und die Testzahl von
+         `tests/quickNotesTab.test.jsx` von „14“ auf „16 (14 + 2 in Runde
+         2)“ korrigiert.
+       - `docs/TESTFAELLE.md#E3`: mehrdeutige Formulierung „der Wert des
+         `<textarea>` „\nQA-Tab zwei“ mit vorangestelltem „\t“ enthält“
+         (wörtlich als „\t\nQA-Tab zwei“ lesbar) präzisiert auf den exakten
+         erwarteten Teilstring „\n\tQA-Tab zwei“; Escape-Schritt ergänzt
+         (`document.activeElement` verlässt das Feld), damit der WCAG-
+         Ausweg aus Runde 2 auch im End-zu-Ende-Testfall abgedeckt ist.
+
+115. **v7.56, Editor-Toolbar mobil einzeilig und wischbar (Nutzerwunsch).**
+     Die Formatierungs-Toolbar des WYSIWYG-Editors (`DocEditor.jsx`) bricht
+     unterhalb md (768px, derselbe Breakpoint wie Drawer/Gliederungsleiste)
+     nicht mehr mehrzeilig um, sondern bleibt EINE Zeile mit horizontalem
+     Wisch-Scroll – ab md exakt unverändert (`flex-wrap`, Popover
+     `absolute`, Desktop-Optik identisch).
+     - **Mechanik:** der Strip trägt unterhalb md `flex-nowrap
+       overflow-x-auto` statt `flex-wrap`; die neue Klasse `.toolbar-strip`
+       (`src/index.css`) blendet den Scrollbalken aus (`scrollbar-width:
+       none` plus `::-webkit-scrollbar{display:none}`) und setzt
+       `overscroll-behavior-x:contain` gegen die Zurück-Geste in
+       Chrome/Android. Alle Toolbar-Kinder (außer dem `flex-1`-
+       Abstandhalter) bekommen `shrink-0`, sonst würden sie sich im
+       `nowrap`-Strip gegenseitig quetschen statt zu scrollen.
+     - **Popover per `position:fixed` unterhalb md, WARUM:** die vier
+       Popover (Schriftfarbe/Textmarker/Tabelle/Link) waren bisher
+       `absolute` innerhalb des Strips positioniert – `overflow-x:auto`
+       erzwingt laut CSS-Spezifikation IMMER auch `overflow-y:auto` (ein
+       „auto“+„visible“-Paar wird zu „auto“+„auto“); ein `absolute`
+       positioniertes Popover würde dadurch vertikal abgeschnitten bzw.
+       der Strip bekäme einen ungewollten senkrechten Scrollbalken.
+       Unterhalb md daher `position:fixed` (entkommt dem Overflow-
+       Clipping), die Top-Position kommt aus einer Messung von
+       `toolbarRef.getBoundingClientRect()` über einen neuen, gemeinsamen
+       `openPicker(name)`-Helfer (ersetzt vier separate `setPicker(...)`-
+       Aufrufe beim Öffnen; Schließen bleibt direkt, dort ist nichts zu
+       positionieren), als CSS-Variable `--pop-top`; neu vermessen bei
+       `resize`/`orientationchange` sowie bei jedem Render über
+       `useLayoutEffect` (deckt Verschiebungen ohne Resize-Event ab, z. B.
+       ein Banner oberhalb von `<main>`, während ein Popover offen ist).
+       Vor dem Einsatz von `fixed` wurde per grep geprüft, dass KEIN
+       Vorfahre von `<DocEditor>` transform/translate/scale/filter/
+       backdrop-filter/will-change/contain setzt (einziger Treffer im
+       gesamten Repo: die `@keyframes` von `.drawer-in` in `src/index.css`,
+       Klasse angewendet in `App.jsx` beim mobilen Abschnitts-Drawer (die
+       `.drawer-in`-Klasse am aufklappenden `<nav>` rechts) –
+       ein GESCHWISTER-Overlay, kein Vorfahre); sonst hätte `fixed` relativ
+       zu diesem Vorfahren statt zum Viewport positioniert.
+     - **Ausnahme Tabellen-Raster (Review-Fix, Regression ggü. v7.55):**
+       Das Tabellen-Popover (Öffner `openPicker("table")`) trägt unterhalb
+       md `left-4 right-auto` statt `left-4 right-4` wie die anderen drei
+       Popover (Schriftfarbe/Textmarker über die gemeinsame `swatchGrid()`-
+       Funktion, Link über `openPicker("link")`), Test
+       `docEditorToolbarMobile.test.jsx` Abschnitt „Popover unterhalb md
+       per position:fixed statt absolute“. Grund: `right-4` gäbe
+       dem Popover eine DEFINITE Breite (Viewport − 32px), auf die das
+       block-level `grid grid-cols-6`-Raster seine `1fr`-Spalten voll
+       verteilen würde (36 winzige Punkte mit riesigen Lücken statt des
+       kompakten ~106px-Rasters); `right-auto` lässt die Breite wie ab md
+       (`md:right-auto`) per Shrink-to-fit aus dem Inhalt berechnen.
+     - **Wisch-Blende:** ein rechter Verlaufs-Hinweis (`bg-white`, wie das
+       umgebende Editor-Panel) erscheint nur, solange der Strip noch
+       weiter nach rechts gescrollt werden kann (`updateScrollFade`,
+       `scrollLeft + clientWidth < scrollWidth - 1`, Toleranz „- 1“ gegen
+       Rundungsfehler), liegt als GESCHWISTER des Scroll-Containers statt
+       darin (sonst würde sie selbst mitscrollen), `pointer-events-none`
+       und `aria-hidden`.
+     - **Restrisiken:** (1) kein echter visueller Check auf einem Gerät
+       möglich (Entwickler-Subagent ohne Browser-Zugriff in dieser
+       Session) – Bleed-/Popover-Geometrie wurde rechnerisch (343px auf
+       einem 375px-Bildschirm als Beispiel) und am kompilierten
+       Tailwind-Output verifiziert; `docs/TESTFAELLE.md#D24` verlangt
+       deshalb ausdrücklich Bounding-Rect-Prüfungen im echten Browser.
+       (2) `overscroll-behavior-x:contain` wirkt nur gegen die Zurück-Geste
+       in Chrome/Android, NICHT gegen die iOS-Safari-Kantengeste. (3)
+       **Abgeschwächt (Nachbesserung, Abschluss-Review v7.56):** eine
+       virtuelle Bildschirmtastatur auf iOS kann den Layout-Viewport
+       verschieben, ohne ein `resize`-Event auf `window` auszulösen – die
+       Top-Position eines bereits offenen Popovers wird deshalb jetzt
+       ZUSÄTZLICH über `window.visualViewport` („resize“ UND „scroll“, nur
+       solange ein Picker offen ist, `null`-sicher wegen jsdom ohne
+       `visualViewport`) nachgezogen. Verbleibendes Restrisiko: Browser
+       ohne `visualViewport`-Unterstützung (ältere Safari-/WebView-Stände)
+       profitieren davon nicht, fallen aber auf das bisherige (unveränderte)
+       Verhalten zurück – kein Rückschritt ggü. vorher. (4)
+       Sollte künftig ein transform-/filter-tragender Vorfahre eingeführt
+       werden, bricht die `fixed`-Positionierung der Popover, ohne dass
+       ein Unit-Test das erkennen könnte (reine Layout-Eigenschaft, in
+       jsdom nicht geprüft) – die Vorfahren-Prüfung oben ist eine
+       Momentaufnahme, kein dauerhaftes Netz.
+     - **Tests:** `tests/docEditorToolbarMobile.test.jsx` (23 Fälle: 21 + 2
+       in Runde 2 – Strip-Klassen, `shrink-0` auf allen Kindern inkl.
+       Tabellen-Modus, `fixed`-Popover-Klassen + `--pop-top` für alle vier
+       Picker, Wisch-Blende erscheint/verschwindet inkl. tragender
+       Invarianten wie `pointer-events-none`/`aria-hidden`/Geschwister-
+       statt-Kind, Quelltext-Vollständigkeit, `belowMd()`-Kurzschluss ab md
+       siehe Nachbesserung unten); zwei Marker-Strings in
+       `tests/docEditorToolbarFocus.test.jsx` an den `openPicker`-Refactor
+       angepasst (Verhalten unverändert, alle 8 Tests dort bleiben grün).
+       `docs/TESTFAELLE.md#D24` deckt den End-zu-Ende-Ablauf im Browser
+       ab. Kein Bestandscode-Bug gefunden.
+     - **Nachbesserung (Gesamt-Review v7.56, Review-Fix Runde 1, 🟢-Funde,
+       reine Doku-Fixes ausgenommen):**
+       - `belowMd()`-Kurzschluss in `measurePickerTop`/`updateScrollFade`:
+         der deps-lose `useLayoutEffect` oben lief bislang bei JEDER
+         Editor-Transaktion (jeder Tastendruck, `setTick`) auch AB md, wo
+         Blende (`md:hidden`) und `--pop-top` (`md:top-full` überschreibt
+         sie) CSS-seitig ohnehin wirkungslos sind – ein synchroner
+         Layout-Flush (`getBoundingClientRect`/`scrollWidth`) ohne
+         Wirkung. Nebeneffekt auf Desktop: ein offenes `md:absolute`-
+         Link-Popover (`w-72`) nahe am rechten Rand vergrößerte die
+         `scrollWidth` des `overflow-visible`-Strips, `canScrollRight`
+         kippte dadurch fälschlich auf `true` (wegen `md:hidden` zwar
+         unsichtbar, aber unnötig gerendert). `belowMd()` prüft
+         `window.matchMedia("(min-width: 48rem)")` und behandelt ein
+         FEHLENDES `matchMedia` (jsdom in den Unit-Tests kennt es nicht)
+         defensiv als „unterhalb md“ – dadurch bleibt das Verhalten in
+         ALLEN bestehenden Tests unverändert, die Abkürzung greift nur in
+         echten Browsern. Drei neue Testfälle stubben `matchMedia` gezielt
+         (Desktop UND explizit „unterhalb md“), decken damit sowohl den
+         Kurzschluss als auch den unveränderten Fallback ab.
+       - Fokus-Ring-Clipping (nur mit Hardware-Tastatur auf < 768px, z. B.
+         Tablet-Split-Screen, relevant): der Strip ist unterhalb md ein
+         Scroll-Container ohne eigenes vertikales Padding, ein per Tab
+         fokussierter Knopf ragt mit seinem nativen `:focus-visible`-
+         Umriss 2px über die Box hinaus und wurde oben/unten geclippt.
+         Fix: Strip `py-0.5 md:py-0`, Wrapper `-my-0.5 md:my-0` (die
+         Blende folgt dem Wrapper über `inset-y-0` automatisch mit) –
+         Desktop-Optik unverändert (`md:py-0`/`md:my-0` heben es exakt
+         wieder auf).
+       - `bg-gradient-to-l` → `bg-linear-to-l` an der Wisch-Blende: reiner
+         Namens-Fix für Tailwind v4 (v3-Legacy-Alias, funktioniert
+         weiterhin, aber nicht mehr die kanonische v4-Klasse) – kein
+         Verhaltens-Delta.
+       - `docs/TESTFAELLE.md#D24`: „kein vertikaler Scrollbalken am Strip“
+         war nicht diskriminierend (`.toolbar-strip` blendet JEDEN
+         Scrollbalken per CSS aus, unabhängig von echtem Überlauf) – Fix
+         auf `scrollHeight === clientHeight` (echter Überlauf-Check).
+       - `tests/docEditorToolbarMobile.test.jsx`: `mountDocEditor()`
+         liefert jetzt zusätzlich ein `cleanup()` (unmount + `container
+         .remove()`) statt nur `root.unmount()` – ohne das `remove()`
+         akkumulierten über die vielen Aufrufe dieser Datei leere `<div>`s
+         in `document.body` (aktuell folgenlos, weil jede Query über
+         „container“ läuft, aber `tests/quickNotesTab.test.jsx` macht es
+         aus genau diesem Grund bereits richtig). Alle 13 Aufrufstellen
+         umgestellt.
+       - (Die Präzisierung von `docs/TESTFAELLE.md#E3` betrifft die
+         Schnellnotiz-Tab-Einrückung, nicht diese Toolbar-Funktion – siehe
+         Nachbesserung bei #114 oben.)
+     - **Nachbesserung (Runde 2, Abschluss-Review v7.56):**
+       - `measurePickerTop`: `rect.bottom + 4` → `rect.bottom + 2`. Der
+         Fokus-Ring-Fix aus Runde 1 (oben) gab dem Strip `py-0.5` (2px
+         eigenes Padding oben/unten), das bereits in der gemessenen
+         `rect.bottom` steckt – mit weiterhin `+ 4` säße das mobile Popover
+         2px zu weit unter dem Knopf. `+ 2` bringt den sichtbaren Abstand
+         wieder auf dieselben 4px wie am Desktop (`md:mt-1`). Betroffene
+         Testwerte in `tests/docEditorToolbarMobile.test.jsx` (feste
+         `getBoundingClientRect`-Mocks) entsprechend nachgeführt
+         (z. B. 104px/204px/304px → 102px/202px/302px).
+       - Restrisiko (3) abgeschwächt: zusätzlich zu `resize`/
+         `orientationchange` auf `window` hängt jetzt – solange ein Picker
+         offen ist – auch ein `resize`- UND ein `scroll`-Listener auf
+         `window.visualViewport` (misst bei jeder Verschiebung neu über
+         `measurePickerTop`). `window.visualViewport` ist `null`-sicher
+         behandelt (jsdom kennt es nicht, echte Browser ohne Unterstützung
+         fallen auf das bisherige Verhalten zurück). Zwei neue Testfälle:
+         mit gestubbtem `window.visualViewport` (minimaler
+         `new EventTarget()`-Stub) werden Listener beim Öffnen registriert
+         und beim Schließen exakt wieder entfernt; ohne `visualViewport`
+         (jsdom-Standard) öffnet/schließt der Picker weiterhin ohne Fehler.
+       - `docs/TESTFAELLE.md#D24`/Popover-Beschreibung „Ausnahme Tabellen-
+         Raster“ oben: veraltete feste Zeilenangaben (`DocEditor.jsx:NNNN`)
+         durch Funktions-/Bezeichnernamen (`swatchGrid()`, `openPicker(...)`)
+         ersetzt, die bei künftigen Umbauten nicht erneut veralten.
+       - `tests/docEditorToolbarMobile.test.jsx`: unbenutztes `root` aus
+         allen Test-Destrukturierungen von `mountDocEditor()`/
+         `openAndGetPopover()` entfernt (nur noch `container`/`cleanup`/
+         `popover` – `root` wurde nirgends in den Testkörpern gelesen).
+     - **Nachbesserung (Runde 3, Freigabe-Review v7.56):**
+       - `tests/docEditorToolbarMobile.test.jsx`, `visualViewport`-Test: der
+         Test prüfte bislang nur, dass beim Öffnen je EIN `resize`-/
+         `scroll`-Listener auf dem Stub registriert und beim Schließen
+         entfernt wird – ein `vv.addEventListener("scroll", () => {})` in
+         `DocEditor.jsx` (leerer Handler statt `measurePickerTop`) wäre
+         damit unentdeckt grün geblieben. Test erweitert: nach dem Öffnen
+         `getBoundingClientRect` auf dem Strip umgestellt und `vv`
+         „scroll“/„resize“ dispatcht – `--pop-top` muss sich jeweils auf
+         den neu gemessenen Wert ändern (analog zum window-resize-Test
+         daneben). Zusätzlich: `vi.unstubAllGlobals()` stand inline VOR
+         `cleanup()` – bei einer vorher fehlschlagenden Assertion wäre der
+         Stub in den nächsten Test dieser Datei durchgesickert; jetzt
+         `afterEach(() => vi.unstubAllGlobals())` im `describe`-Block wie
+         beim `belowMd()`-`describe` daneben.
+       - `DocEditor.jsx`-Kommentar zur Vorfahren-Prüfung: veralteter
+         Zeilenverweis `App.jsx:4383` (tatsächlich Zeile 4388) durch einen
+         zeilenlosen Bezeichner ersetzt (Klasse am `<nav>` des mobilen
+         Abschnitts-Drawers) – dieselbe Fehlerklasse, die Runde 2 an
+         anderer Stelle bereits behoben hatte, hier aber übersehen wurde.
