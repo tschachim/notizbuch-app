@@ -1113,6 +1113,48 @@ automatisch prozent-encodiert (z. B. `%20` für ein Leerzeichen) – eine
 einzelne Ebene balancierter Klammern (z. B. ein Wikipedia-Link) bleibt
 dagegen unverändert lesbar.
 
+**D7b [OFFEN] Enter am Ende eines Links (v7.56, DECISIONS #116).** Editor
+öffnen, ans Dokumentende gehen und dort einen neuen Absatz anlegen.
+„QA-Linktext“ tippen, den Text markieren, Link-Knopf klicken, als URL
+`https://dev.azure.com/qa/proj` eingeben, „Einfügen“ klicken. DANACH die
+computer-tool-Taste „End“ senden und per javascript_tool prüfen, dass
+`window.getSelection().isCollapsed === true` ist und der Anker innerhalb
+des Linktexts liegt (z. B. `window.getSelection().anchorNode.textContent`
+enthält „QA-Linktext“). Hinweis: Enter bei noch MARKIERTEM Linktext
+ersetzt die Markierung durch einen Absatzumbruch – das ist
+Standardverhalten jedes Editors und KEIN Fehler; die Prüfung oben stellt
+sicher, dass tatsächlich ein kollabierter Cursor getestet wird. Erst dann
+die computer-tool-Taste „Return“ senden (echtes Tastenereignis, NICHT per
+Skript/dispatchEvent ausgelöst). Erwartet (javascript_tool, muss `true`
+liefern): `const ed = document.querySelector('.tiptap-doc'); const prev =
+ed.children[ed.children.length - 2], last = ed.lastElementChild;
+prev.querySelector('a[href="https://dev.azure.com/qa/proj"]')
+?.textContent === 'QA-Linktext' && last.textContent === ''`. Hinweis:
+„leer“ heißt `textContent === ''` – ein leerer Absatz enthält in
+ProseMirror immer ein `<br class="ProseMirror-trailingBreak">`, ein
+Vergleich über `children.length === 0`/`innerHTML === ''` wäre deshalb
+fälschlich rot. Zusatz 1: denselben Ablauf mit einem Link OHNE
+Provider-Icon wiederholen (URL `https://example.com/seite` statt der
+Azure-URL) – Erwartung analog (javascript_tool, muss `true` liefern):
+`const ed = document.querySelector('.tiptap-doc'); const prev =
+ed.children[ed.children.length - 2], last = ed.lastElementChild;
+prev.querySelector('a[href="https://example.com/seite"]')?.textContent
+=== 'QA-Linktext' && last.textContent === ''`. Zusatz 2: Enter
+stattdessen MITTEN im Linktext auslösen – deterministisch per Tastatur
+statt Klick per Maus (Pixelposition wäre nicht reproduzierbar): Cursor
+mit der computer-tool-Taste „End“ ans Ende des Linktexts setzen, danach
+5× „ArrowLeft“ senden (Cursor landet zwischen „Lin“ und „ktext“), per
+javascript_tool bestätigen, dass die Selektion kollabiert ist
+(`window.getSelection().isCollapsed === true`), dann Return. Erwartet:
+Der Linktext teilt sich an der Cursorposition in zwei Absätze auf, BEIDE
+Hälften bleiben als Link erhalten (nichts geht verloren) – exakt prüfbar
+(javascript_tool, muss `true` liefern): `const ed =
+document.querySelector('.tiptap-doc'); const prev = ed.children[
+ed.children.length - 2], last = ed.lastElementChild;
+prev.querySelector('a')?.textContent === 'QA-Lin' &&
+last.querySelector('a')?.textContent === 'ktext'`. Editor über
+„Abbrechen“ verlassen (keine der Testeinfügungen wird gespeichert).
+
 **D8 [VERBUNDEN][API] Automatische Titel-Ermittlung im Link-Dialog (v7.12).**
 NUR ausführen, wenn unter Einstellungen (siehe A4) bereits ein Provider
 MIT Zugangsdaten (PAT bzw. E-Mail+API-Token) hinterlegt ist – der

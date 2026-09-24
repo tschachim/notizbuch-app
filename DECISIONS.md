@@ -13832,3 +13832,87 @@ aus `referenz-app.jsx` übernommen.
          zeilenlosen Bezeichner ersetzt (Klasse am `<nav>` des mobilen
          Abschnitts-Drawers) – dieselbe Fehlerklasse, die Runde 2 an
          anderer Stelle bereits behoben hatte, hier aber übersehen wurde.
+
+116. **v7.56, E2E-Befund „Enter am Ende eines Links leert den Absatz“ –
+     untersucht, nicht reproduzierbar, kein Code-Fix.** Der Tester meldete
+     nach dem v7.56-Deploy einen 🔴-Befund: Im WYSIWYG-Editor einen Link
+     erzeugen, der den GESAMTEN letzten Absatz bildet (Titel
+     „Azure-Ticket“, URL `dev.azure.com/…`), Cursor exakt ans Ende des
+     Linktexts, Enter → Link-Absatz wird geleert, zwei leere Absätze
+     entstehen, Undo stellt in EINEM Schritt wieder her; zweimal
+     reproduziert. Die Link-Konfiguration ist seit v7.8 (#55) unverändert;
+     v7.41.3 (#85) änderte nur die Fokus-Rückgabe nach einem
+     Toolbar-Klick, NICHT die Enter-/Link-Logik. v7.56 änderte an diesem
+     Pfad nur die Toolbar-Optik (siehe #115).
+     - **Untersuchung, drei unabhängige Schritte:**
+       1. jsdom-Test (`tests/docEditorLinkEnter.test.jsx`) mit der ECHTEN
+          Link-Konfiguration aus `DocEditor.jsx` und dem echten
+          `LinkDecorations`-Plugin: Enter über drei Wege
+          (`keyboardShortcut("Enter")`, `splitBlock()`, ein echtes
+          `keydown`-`KeyboardEvent` am contenteditable) in neun Datenlagen
+          (Provider-Match/kein Match, letzter Block/Folgeabsatz, Cursor am
+          Ende/mitten im Link, Link per Markdown geladen/per
+          `insertContent` wie `applyLink()`, Fußnoten-Titel, Autolink-
+          Form) – 27 Fälle. Ergebnis: in JEDER Lage genau EINE
+          dokumentverändernde Transaktion mit genau einem `replace`-Step
+          (`structure:true` bei splitBlock/Enter), Linktext vollständig
+          erhalten – geprüft per `filterTransaction`-Plugin (sieht auch
+          ANGEHÄNGTE Transaktionen; tiptaps `transaction`-Event liefert
+          dagegen NUR die Wurzel-Transaktion und hätte eine angehängte,
+          textlöschende Transaktion NICHT gezeigt). Das
+          `autolink`-`appendTransaction`-Plugin ist die einzige
+          `appendTransaction`-Instanz DER LINK-EXTENSION. Weitere
+          `appendTransaction`-Plugins (tiptap-core „clearDocument“: greift
+          nur, wenn vorher das GANZE Dokument selektiert war und es danach
+          leer ist; tiptap-core PasteRules: nur bei `paste`/`drop`; im
+          echten Editor zusätzlich prosemirror-tables `tableEditing`: nur
+          Tabellen) greifen in diesem Szenario per Bedingung nicht. Der
+          Test nutzt die echte Link-Konfiguration, aber eine reduzierte
+          Extension-Liste (StarterKit, FencedCodeBlock, Link,
+          FileLinkMarkdownIt, LinkDecorations, Markdown).
+       2. Code-Lektüre: kein eigener Enter-Handler außer im
+          Formel-Node-Input; die Modell-Ebene ist gegen die installierten
+          Paketversionen unauffällig. Verbleibende Hypothese wäre allein
+          die DOM-/View-Synchronisierung von `prosemirror-view` – nicht
+          belegbar.
+       3. Live-Prüfung mit ECHTEN Tastenereignissen gegen die Live-App
+          v7.56: Link „Azure-Ticket“ (`dev.azure.com`, mit
+          Provider-Icon-Widget) als letzter Absatz per Link-Popover
+          eingefügt, Auswahl danach kollabiert am Ende des Linktexts
+          (DOM-Selection: `anchorOffset` 12, `isCollapsed` true), Taste
+          „End“, Taste „Return“ → Blöcke +1, letzte zwei Blöcke
+          „P:Azure-Ticket“, „P:“ (leer), Text erhalten. Zweiter Link ohne
+          Provider-Match (`example.com`) identisch korrekt. Zusätzlich in
+          einem verdeckten Hintergrund-Tab synthetisches `keydown` Enter
+          und natives `execCommand('insertParagraph')`: Text ebenfalls
+          erhalten.
+     - **Schlussfolgerung:** nicht reproduzierbar. Wahrscheinlichste
+       Erklärung ist ein Testartefakt der Tester-Umgebung: In einem
+       verdeckten Hintergrund-Tab übernimmt ProseMirror eine per
+       JavaScript gesetzte DOM-Selektion nicht zuverlässig
+       (`selectionchange`) – die Modell-Selektion umfasste beim
+       gemeldeten Befund vermutlich noch den gesamten Linktext (einen
+       Bereich statt eines kollabierten Cursors). Enter bei markiertem
+       Text ersetzt die Markierung durch einen Absatzumbruch
+       (Standardverhalten jedes Editors), was exakt „zwei leere Absätze,
+       ein Undo-Schritt“ ergibt.
+     - **Entscheidung: KEIN Code-Fix.** Ein Blind-Patch ohne belegte
+       Ursache widerspräche der Projektregel „erst Fehlerklasse prüfen,
+       kein Einzel-Guard ohne Code-Netz“ (siehe Memory
+       „Keine Einzel-Guards bei Editierfehlern“) – ein Guard gegen ein
+       Symptom, das sich in keinem der 27 jsdom-Fälle (neun Datenlagen ×
+       drei Auslöser) und keiner der Live-Stichproben zeigt, würde nur
+       Scheinsicherheit erzeugen. Stattdessen bleibt der Regressionstest
+       bestehen (neun Datenlagen × drei Enter-Auslöser = 27 Fälle, jetzt
+       AKTIV statt `describe.skip` – prüft Absatzanzahl UND -inhalt, kein
+       Pro-forma-„kein Fehler geworfen“),
+       und `docs/TESTFAELLE.md` bekommt einen neuen Fall **D7b**, der die
+       Selektion VOR dem Enter explizit per Skript prüft (kollabiert, im
+       Linktext) – das deckt den mutmaßlichen Testartefakt-Pfad
+       ausdrücklich ab, statt ihn erneut unbemerkt einzugehen.
+     - **Restrisiko:** Eine echte Browser-Bedingung, die jsdom strukturell
+       nicht abbildet (kein Layout, keine native Selection-Implementierung
+       für contenteditable), kann nicht ausgeschlossen werden. Tritt der
+       Fall beim Nutzer real (nicht im Tester-Hintergrund-Tab) auf: bitte
+       exakte Schritte UND den verwendeten Browser melden. Version bleibt
+       `v7.56` (keine Codeänderung).
