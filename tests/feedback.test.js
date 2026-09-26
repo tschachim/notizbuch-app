@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { buildFeedbackTrigger, isNoFeedback, dedupeFeedbackParagraphs } from "../src/lib/feedback.js";
+import {
+  buildFeedbackTrigger, isNoFeedback, dedupeFeedbackParagraphs,
+  buildFeedbackFacts, formatFeedbackFacts, buildFeedbackRequest,
+} from "../src/lib/feedback.js";
+import { diffLines } from "../src/lib/diff.js";
 
 describe("buildFeedbackTrigger", () => {
   it("enthält den MANUELL-bearbeitet-Hinweis mit dem Notizbuchnamen", () => {
@@ -57,6 +61,66 @@ describe("buildFeedbackTrigger", () => {
     const t = buildFeedbackTrigger("X", "");
     expect(t).toContain("Fasse deine Rückmeldung in EINEM kompakten Absatz zusammen");
     expect(t).toContain("wiederhole dieselbe Aussage nicht in anderen Worten");
+  });
+
+  // v7.57.1 (DECISIONS #118, E2E-Befund D1): "oben im Dokument" war
+  // mehrdeutig – der Diff-Kontext UND die Notizbuch-Dokumente stehen beide
+  // "im Prompt", das Modell verwechselte in einem Live-Fall den Diff-Stand
+  // mit dem Vorher-Stand. Explizite Verortung behebt die Mehrdeutigkeit.
+  // DECISIONS #130: diese Klarstellung ist die eigentliche ROOT-CAUSE-Abhilfe
+  // für D1 und bleibt deshalb bestehen, auch nachdem das Kollisions-Netz
+  // wieder zurückgebaut wurde.
+  it("verortet den Nachher-Stand explizit unter 'ALLE NOTIZBÜCHER' statt vage 'oben im Dokument'", () => {
+    const t = buildFeedbackTrigger("X", "");
+    expect(t).toContain("bereits unter ALLE NOTIZBÜCHER (Stand NACH der Änderung) im Dokument");
+    expect(t).not.toContain("oben im Dokument");
+  });
+
+  it("erklärt die Diff-Legende (+ = bereits enthalten, − = entfernt) direkt am Diff", () => {
+    const t = buildFeedbackTrigger("X", "+ neu\n− alt");
+    expect(t).toContain("Diff der Änderung:");
+    expect(t).toContain("\"+ \" = hinzugefügt, im Dokumentstand BEREITS enthalten");
+    expect(t).toContain("\"− \" = entfernt");
+  });
+
+  it("bettet einen übergebenen Fakten-Block VOR dem Diff ein", () => {
+    const t = buildFeedbackTrigger("X", "+ neu", "„x“: 1×");
+    expect(t).toContain("Vom Code ermittelte Fakten zur Änderung");
+    expect(t).toContain("„x“: 1×");
+    expect(t.indexOf("„x“: 1×")).toBeLessThan(t.indexOf("Diff der Änderung:"));
+  });
+
+  it("lässt den Fakten-Block bei leerem factsText komplett weg (Standardfall, Rückwärtskompatibilität)", () => {
+    const ohneArg = buildFeedbackTrigger("X", "+ neu");
+    const mitLeer = buildFeedbackTrigger("X", "+ neu", "");
+    expect(ohneArg).toBe(mitLeer);
+    expect(ohneArg).not.toContain("Vom Code ermittelte Fakten");
+  });
+
+  // DECISIONS #130 (Nutzerentscheidung, Rückbau des #118–#129-Netzes): der
+  // Fakten-Block-Kopf behauptet KEINE Gewissheit mehr für einzelne Zählungen
+  // ("nur „genau 1×“ ist verlässlich geprüft" ist ENTFERNT) – die Zählung
+  // ist zwar immer exakt richtig (String-Gleichheit), deckt aber NUR
+  // identischen Markdown-Wortlaut ab, keine anders formatierten Varianten.
+  it("Fakten-Block-Kopf beschreibt die exakte Zählung und ihre Formatierungsgrenzen (DECISIONS #130)", () => {
+    const t = buildFeedbackTrigger("X", "+ neu", "„x“: 1×");
+    expect(t).toContain("Zählung nach identischem Markdown-Wortlaut");
+    expect(t).toContain("anders formatierte Zeilen wie Fett, Farbe, Link, Formel oder Tabelle zählen NICHT mit");
+    expect(t).toContain("bei Verdacht auf eine inhaltliche Dublette bitte selbst prüfen und den Unterschied benennen");
+    expect(t).not.toContain("genau 1×");
+    expect(t).not.toContain("zähle NICHT selbst nach");
+  });
+
+  // Review-Nachbesserung (🟡, DECISIONS #131): der Fakten-Block-Kopf nennt
+  // jetzt zusätzlich die Zeitbasis (Stand NACH der Änderung, hinzugefügte
+  // Zeile selbst mitgezählt) – das war die eigentliche D1-Root-Cause: "1×"
+  // allein passt auch zur Fehllesung "existierte schon vorher + neue Zeile
+  // dazu = 2, davon 1 gemeldet"; explizit "NACH der Änderung, mitgezählt"
+  // schließt diese Lesart aus.
+  it("Fakten-Block-Kopf nennt die Zeitbasis 'NACH der Änderung, hinzugefügte Zeile mitgezählt' (DECISIONS #131)", () => {
+    const t = buildFeedbackTrigger("X", "+ neu", "„x“: 1×");
+    expect(t).toContain("im Stand NACH der Änderung");
+    expect(t).toContain("die hinzugefügte Zeile selbst mitgezählt");
   });
 });
 
@@ -194,5 +258,385 @@ describe("dedupeFeedbackParagraphs", () => {
       "Konferenz im Mai, obwohl der Flug längst gebucht wurde.";
     const reply = a + "\n\n" + eigenstaendig + "\n\n" + aVariante;
     expect(dedupeFeedbackParagraphs(reply)).toBe(a + "\n\n" + eigenstaendig);
+  });
+});
+
+/* -------------------------------------------------------------------- */
+/* v7.57.1 (DECISIONS #118, E2E-Befund D1): Fakten-Ermittlung.           */
+/* v7.57.1 (DECISIONS #130, Nutzerentscheidung): das zwischenzeitlich      */
+/* gewachsene Kollisions-"Netz" (looseKey()/buildDuplicateFactNote() samt   */
+/* Chat-Anhang, siehe Git-Historie #118/#120–#129) ist ENTFERNT – die       */
+/* Zählung unten prüft AUSSCHLIESSLICH auf exakte String-Gleichheit nach    */
+/* trim(), ohne jede Bewertung.                                            */
+/* -------------------------------------------------------------------- */
+
+// Nachbau des Live-Falls (QA-Repo tschachim/notizbuch-data-qa, Commit
+// 02f1d026): "QA-Edit Beta" wird in QA-Test → Allgemein → Inbox NEU
+// ergänzt; derselbe MARKDOWN-WORTLAUT steht bereits in Wissensbasis → QA →
+// QA-Ergebnisse. (Die echten Live-Dokumente unterschieden sich minimal in
+// der Checkbox-Syntax – seit #130 zählt NUR noch exakter Wortlaut, die
+// Wissensbasis-Zeile ist hier deshalb bewusst WORTGLEICH nachgebaut, um den
+// "identischer Wortlaut auch anderswo"-Fakt zu demonstrieren.)
+const QA_TEST_BEFORE = [
+  "# QA-Test", "", "# Allgemein", "", "## Inbox", "",
+  "- [ ] Kaffee mit Sarah (Dienstag, 2026-09-29)", "",
+].join("\n");
+const QA_TEST_AFTER = [
+  "# QA-Test", "", "# Allgemein", "", "## Inbox", "",
+  "- [ ] Kaffee mit Sarah (Dienstag, 2026-09-29)",
+  "- [ ] **QA-Edit Beta**", "",
+].join("\n");
+const WISSENSBASIS_DOC = [
+  "# Wissensbasis", "", "# QA", "", "## QA-Ergebnisse", "",
+  "- [ ] **QA-Edit Beta**", "",
+].join("\n");
+
+describe("buildFeedbackFacts", () => {
+  // Umbenannt (Review-Nachbesserung, DECISIONS #131): "Wissensbasis" ist hier
+  // bewusst WORTGLEICH nachgebaut (siehe Kommentar bei WISSENSBASIS_DOC oben)
+  // – das demonstriert die Cross-Notizbuch-Meldung bei echter Übereinstimmung,
+  // ist aber NICHT der reale Live-Fall (dort weicht die Checkbox-Syntax ab,
+  // siehe Test "anderes Notizbuch OHNE identischen Wortlaut" unten).
+  it("identischer Wortlaut in anderem Notizbuch: activeCount 1, Fundort exakt gepinnt (Kapitel/Abschnitt/Zeile)", () => {
+    const diff = diffLines(QA_TEST_BEFORE, QA_TEST_AFTER);
+    const notebooks = [{ name: "QA-Test", doc: QA_TEST_AFTER }, { name: "Wissensbasis", doc: WISSENSBASIS_DOC }];
+    const facts = buildFeedbackFacts(diff, notebooks, "QA-Test");
+    expect(facts).toHaveLength(1);
+    const f = facts[0];
+    expect(f.text).toBe("- [ ] **QA-Edit Beta**");
+    expect(f.activeCount).toBe(1);
+    expect(f.chapter).toBe("Allgemein");
+    expect(f.section).toBe("Inbox");
+    expect(f.lineNo).toBe(8); // Mutationsprobe: "lineNo: at" statt "at + 1" (off-by-one) macht dies rot
+    expect(f.elsewhere).toEqual([{ notebook: "Wissensbasis", chapter: "QA", section: "QA-Ergebnisse" }]);
+    expect(formatFeedbackFacts(facts, "QA-Test")).toContain("Allgemein → Inbox, Zeile 8");
+  });
+
+  // Review-Nachbesserung (🟡, DECISIONS #131): der REALE Live-Fall (QA-Repo
+  // tschachim/notizbuch-data-qa) hatte in "Wissensbasis" eine ANDERE
+  // Checkbox-Syntax ("- [x] QA-Edit Beta" statt "- [ ] **QA-Edit Beta**") –
+  // unter der seit #130 geltenden exakten Zählung ist das bewusst KEIN
+  // Treffer. Dieser Grenzfall war ungetestet (Review-Fund); Mutationsprobe:
+  // ein `if (true)`-Mutant an der `firstIdx !== -1`-Stelle in
+  // buildFeedbackFacts() (meldet JEDES andere Notizbuch als Treffer) macht
+  // genau diesen Test rot, alle anderen bleiben grün.
+  it("anderes Notizbuch OHNE identischen Wortlaut (echte Live-Syntax) -> kein elsewhere", () => {
+    const wb = WISSENSBASIS_DOC.replace("- [ ] **QA-Edit Beta**", "- [x] QA-Edit Beta");
+    const nbs = [
+      { name: "QA-Test", doc: QA_TEST_AFTER },
+      { name: "Wissensbasis", doc: wb },
+      { name: "Leer", doc: "# Leer\n" },
+    ];
+    const { facts, trigger } = buildFeedbackRequest(
+      diffLines(QA_TEST_BEFORE, QA_TEST_AFTER), "+ - [ ] **QA-Edit Beta**", nbs, "QA-Test"
+    );
+    expect(facts[0].elsewhere).toEqual([]);
+    expect(trigger).not.toContain("identischer Wortlaut auch in");
+  });
+
+  // Review-Nachbesserung (🟡, DECISIONS #131): exakte Suche statt Teilstring
+  // – eine Zeile, die den Fakt-Wortlaut nur als TEIL eines längeren Satzes
+  // enthält, ist NICHT derselbe Wortlaut. Mutationsprobe: ersetzt man
+  // `onb.trimmed.indexOf(trimmed)` durch eine Teilstring-Suche
+  // (`onb.trimmed.some(l => l.includes(trimmed))`), wird dieser Test rot.
+  it("Teilstring-Treffer in einem anderen Notizbuch zählt NICHT als identischer Wortlaut", () => {
+    const before = "# N\n\n## Inbox\n\nAlt\n";
+    const after = before + "- QA-Edit Beta\n";
+    const diff = diffLines(before, after);
+    const notebooks = [
+      { name: "N", doc: after },
+      { name: "Anderes", doc: "# Anderes\n\n## Kap\n\n- QA-Edit Beta (Termin folgt)\n" },
+    ];
+    const facts = buildFeedbackFacts(diff, notebooks, "N");
+    expect(facts[0].elsewhere).toEqual([]);
+  });
+
+  // Review-Nachbesserung (🟡, DECISIONS #131): Fundort muss die TATSÄCHLICH
+  // HINZUGEFÜGTE Zeile sein, nicht die erste (bereits vorher bestehende)
+  // gleichlautende Zeile im Dokument. Mutationsprobe: ersetzt man den
+  // Positions-Zähler `idx` durch `newLines.indexOf(trimmed)` (erste
+  // Fundstelle statt tatsächlicher Diff-Position), meldet dieser Test
+  // fälschlich Kapitel "Eins" statt "Zwei".
+  it("Fundort ist die HINZUGEFÜGTE Zeile, nicht die erste bereits bestehende gleichlautende Zeile", () => {
+    const before = "# N\n\n# Eins\n\n- Dup\n\n# Zwei\n\n- Alt\n";
+    const after = before.replace("- Alt\n", "- Alt\n- Dup\n");
+    const diff = diffLines(before, after);
+    const facts = buildFeedbackFacts(diff, [{ name: "N", doc: after }], "N");
+    expect(facts).toHaveLength(1);
+    expect(facts[0].chapter).toBe("Zwei");
+    expect(facts[0].activeCount).toBe(2);
+  });
+
+  // Review-Nachbesserung (🟡, DECISIONS #131): Abschnitt (##) muss beim
+  // nächsten Kapitel (#) zurückgesetzt werden, sonst "erbt" eine Zeile ohne
+  // eigenen Abschnitt fälschlich den Abschnitt des VORHERIGEN Kapitels.
+  // Mutationsprobe: entfernt man `section = null` beim Kapitelwechsel in
+  // locateLine(), bleibt "Inbox" fälschlich als Abschnitt stehen.
+  it("Abschnitt wird beim Kapitelwechsel zurückgesetzt (kein Vererben aus dem vorigen Kapitel)", () => {
+    const before = "# N\n\n# Eins\n\n## Inbox\n\n- Alt\n\n# Zwei\n\nNoch kein Abschnitt hier\n";
+    const after = before + "- Neu\n";
+    const diff = diffLines(before, after);
+    const facts = buildFeedbackFacts(diff, [{ name: "N", doc: after }], "N");
+    expect(facts).toHaveLength(1);
+    expect(facts[0].chapter).toBe("Zwei");
+    expect(facts[0].section).toBe(null);
+  });
+
+  // Review-Nachbesserung (🟡, DECISIONS #131): Fence-Maskierung darf nicht
+  // ignoriert werden – eine "# "-Zeile INNERHALB eines ```-Codeblocks ist
+  // KEIN echtes Kapitel. Mutationsprobe: entfernt man den `mask[i]`-Guard in
+  // locateLine(), würde "Kap" fälschlich durch "kommentar" ersetzt.
+  it("eine '# kommentar'-Zeile INNERHALB eines ```-Blocks ist KEIN Kapitel", () => {
+    const before = "# N\n\n# Kap\n\n```bash\n# kommentar\n```\n\nalt\n";
+    const after = before.replace("alt\n", "alt\nneu\n");
+    const diff = diffLines(before, after);
+    const facts = buildFeedbackFacts(diff, [{ name: "N", doc: after }], "N");
+    expect(facts).toHaveLength(1);
+    expect(facts[0].chapter).toBe("Kap");
+  });
+
+  // Review-Nachbesserung (🟡, DECISIONS #131): die TITELZEILE selbst ist kein
+  // Kapitel (titleLineIdx-Ausschluss), und die Zeilennummer ist 1-basiert.
+  // Mutationsprobe: entfernt man den `i === tIdx`-Ausschluss in locateLine(),
+  // würde "N" (der Notizbuchname) fälschlich als Kapitel gemeldet.
+  it("Fundort: Titel ist kein Kapitel, Zeile ist 1-basiert", () => {
+    const before = "# N\n\n## Inbox\n\n- a\n";
+    const after = before.replace("- a\n", "- a\n- b\n");
+    const diff = diffLines(before, after);
+    const facts = buildFeedbackFacts(diff, [{ name: "N", doc: after }], "N");
+    expect(facts).toHaveLength(1);
+    expect(facts[0]).toMatchObject({ chapter: null, section: "Inbox", lineNo: 6 });
+    expect(formatFeedbackFacts(facts, "N")).toContain("Inbox, Zeile 6)");
+  });
+
+  it("identische Zeile 2x im aktiven Notizbuch: activeCount 2, trotzdem nur EIN Fakt (dedupliziert)", () => {
+    const after = QA_TEST_AFTER.replace(
+      "- [ ] **QA-Edit Beta**\n",
+      "- [ ] **QA-Edit Beta**\n- [ ] **QA-Edit Beta**\n"
+    );
+    const diff = diffLines(QA_TEST_BEFORE, after);
+    const facts = buildFeedbackFacts(diff, [{ name: "QA-Test", doc: after }], "QA-Test");
+    expect(facts).toHaveLength(1);
+    expect(facts[0].activeCount).toBe(2);
+  });
+
+  // DECISIONS #130: der Kern der Nutzerentscheidung – anders formatierte,
+  // aber optisch ähnliche Zeilen (hier: Klartext vs. Fett) zählen NICHT mehr
+  // als Kollision. Vor #130 hätte looseKey() beide Zeilen auf denselben
+  // groben Schlüssel reduziert (activeCount 2); seit #130 ist der exakte
+  // Markdown-Wortlaut maßgeblich, activeCount bleibt bei 1.
+  it("nur ANDERS formatiert (Fett statt Klartext) zählt NICHT als Kollision – EXAKTE Zählung bleibt bei 1×", () => {
+    const before = "# N\n\n## Inbox\n\n- QA-Edit Beta\n";
+    const after = before + "- **QA-Edit Beta**\n"; // gleicher sichtbarer Text, ANDERE Markdown-Syntax
+    const diff = diffLines(before, after);
+    const facts = buildFeedbackFacts(diff, [{ name: "N", doc: after }], "N");
+    expect(facts).toHaveLength(1);
+    expect(facts[0].text).toBe("- **QA-Edit Beta**");
+    expect(facts[0].activeCount).toBe(1);
+  });
+
+  // Review-Abschluss (🟡): pinnt die EXAKTHEIT der activeCount-Zählung im
+  // aktiven Notizbuch. Mutationsprobe: `t === trimmed` -> `t.includes(trimmed)`
+  // (oder ein Vergleich ohne Groß-/Kleinschreibung) würde hier 2× melden
+  // (beide Mutationen zusammen 3×) und das Modell damit genau in die
+  // D1-Fehllesung schicken.
+  it("aktives Notizbuch: Teilstring oder andere Groß-/Kleinschreibung zählt NICHT mit (exakt 1×)", () => {
+    const before = "# N\n\n## Inbox\n\n- Milch kaufen (Aldi)\n- milch\n";
+    const after = before + "- Milch\n";
+    const [f] = buildFeedbackFacts(diffLines(before, after), [{ name: "N", doc: after }], "N");
+    expect(f.text).toBe("- Milch");
+    expect(f.activeCount).toBe(1);
+  });
+
+  it("Whitespace am Zeilenrand wird beim Vergleich ignoriert (String-Gleichheit NACH trim())", () => {
+    const before = "# N\n\n## Inbox\n\n- Bestand\n";
+    const after = before + "  - Bestand  \n"; // gleicher Wortlaut, nur mit Einzug/Trailing-Space
+    const diff = diffLines(before, after);
+    const facts = buildFeedbackFacts(diff, [{ name: "N", doc: after }], "N");
+    expect(facts).toHaveLength(1);
+    expect(facts[0].activeCount).toBe(2); // "- Bestand" und "  - Bestand  " sind nach trim() identisch
+  });
+
+  it("leere hinzugefügte Zeilen liefern KEINEN Fakt, entfernte Zeilen ebenfalls nicht", () => {
+    const before = "# N\n\n## Inbox\n\nZeile weg\n";
+    const after = "# N\n\n## Inbox\n\n\nZeile neu\n";
+    const diff = diffLines(before, after);
+    const facts = buildFeedbackFacts(diff, [{ name: "N", doc: after }], "N");
+    expect(facts.map((f) => f.text)).toEqual(["Zeile neu"]);
+  });
+
+  // DECISIONS #130 (bewusster Verzicht auf Sonderregeln, Nutzerentscheidung
+  // "kein Einzel-Guard-Muster"): vor #130 wurde eine hinzugefügte
+  // Überschrift NIE selbst zu einem Fakt (BLANK_OR_HEADING_RE) – seit #130
+  // gibt es diese Ausnahme nicht mehr, eine Überschrift zählt wie jede
+  // andere Zeile.
+  it("eine hinzugefügte ÜBERSCHRIFT zählt jetzt normal als Fakt (anders als vor #130)", () => {
+    const before = "# N\n\n## Inbox\n\nAlt\n";
+    const after = before + "## Neuer Abschnitt\n\nNeuer Text\n";
+    const diff = diffLines(before, after);
+    const facts = buildFeedbackFacts(diff, [{ name: "N", doc: after }], "N");
+    expect(facts.map((f) => f.text)).toEqual(["## Neuer Abschnitt", "Neuer Text"]);
+    expect(facts.every((f) => f.activeCount === 1)).toBe(true);
+  });
+
+  // DECISIONS #130: vor #130 wurde eine Zeile INNERHALB eines ```-Codeblocks
+  // NIE selbst zu einem Fakt (machte das Ergebnis höchstens "uncertain") –
+  // seit #130 gibt es kein `uncertain`-Konzept mehr, die Zeile zählt normal.
+  it("eine hinzugefügte Zeile INNERHALB eines ```-Codeblocks zählt jetzt normal als Fakt", () => {
+    const before = "# N\n\n## Bash\n\n```\nold\n```\n";
+    const after = "# N\n\n## Bash\n\n```\nold\nnew-code-line\n```\n";
+    const diff = diffLines(before, after);
+    const facts = buildFeedbackFacts(diff, [{ name: "N", doc: after }], "N");
+    expect(facts).toHaveLength(1);
+    expect(facts[0].text).toBe("new-code-line");
+    expect(facts[0].activeCount).toBe(1);
+  });
+
+  it("diff === null (z. B. diffLines() bei >400k Zellen): liefert leere Fakten statt zu werfen", () => {
+    expect(buildFeedbackFacts(null, [{ name: "N", doc: "x" }], "N")).toEqual([]);
+  });
+
+  it("unbekannter activeName (Notizbuch nicht in der Liste): liefert leere Fakten", () => {
+    const diff = diffLines("a\n", "a\nb\n");
+    expect(buildFeedbackFacts(diff, [{ name: "Anderes", doc: "a\nb\n" }], "N")).toEqual([]);
+  });
+
+  it("deckelt auf höchstens 20 eigenständige Fakten (Kosten/Latenz-Deckel wie DIFF_CAP)", () => {
+    const beforeLines = ["# N", "", "## Inbox", ""];
+    const afterLines = [...beforeLines];
+    for (let i = 0; i < 25; i++) afterLines.push("- Punkt " + i);
+    const diff = diffLines(beforeLines.join("\n"), afterLines.join("\n"));
+    const facts = buildFeedbackFacts(diff, [{ name: "N", doc: afterLines.join("\n") }], "N");
+    expect(facts).toHaveLength(20);
+    expect(facts[0].text).toBe("- Punkt 0");
+    expect(facts[19].text).toBe("- Punkt 19");
+  });
+
+  it("Escaping/Sonderzeichen: eine Zeile mit eingebetteten Anführungszeichen bleibt UNVERÄNDERT als Fakt-Text erhalten", () => {
+    const before = "# N\n\n## Inbox\n\nAlt\n";
+    const after = before + '- Sage "Hallo" zu Bob\n';
+    const diff = diffLines(before, after);
+    const facts = buildFeedbackFacts(diff, [{ name: "N", doc: after }], "N");
+    expect(facts).toHaveLength(1);
+    expect(facts[0].text).toBe('- Sage "Hallo" zu Bob');
+  });
+
+  // Review-Nachbesserung (🟡, DECISIONS #131): der bisherige Escaping-Test
+  // nutzte ASCII-Anführungszeichen (") – die kollidieren NIE mit den
+  // typografischen Begrenzern „ “, die formatFeedbackFacts() um das Zitat
+  // legt, und können deshalb keinen Escaping-Fehler aufdecken. Diese Variante
+  // nutzt dieselben typografischen Zeichen wie die Begrenzer selbst.
+  it("Escaping/Sonderzeichen: eine Zeile mit typografischen „…“-Anführungszeichen bleibt unverändert erhalten", () => {
+    const before = "# N\n\n## Inbox\n\nAlt\n";
+    const after = before + "- Termin „Kaffee“ verschieben\n";
+    const diff = diffLines(before, after);
+    const facts = buildFeedbackFacts(diff, [{ name: "N", doc: after }], "N");
+    expect(facts).toHaveLength(1);
+    expect(facts[0].text).toBe("- Termin „Kaffee“ verschieben");
+  });
+});
+
+describe("formatFeedbackFacts", () => {
+  it("formatiert genau EINE Zeile pro Fakt mit Notizbuch/Pfad/Zeile + Cross-Notizbuch-Hinweis, OHNE Bewertung (DECISIONS #130)", () => {
+    const diff = diffLines(QA_TEST_BEFORE, QA_TEST_AFTER);
+    const notebooks = [{ name: "QA-Test", doc: QA_TEST_AFTER }, { name: "Wissensbasis", doc: WISSENSBASIS_DOC }];
+    const facts = buildFeedbackFacts(diff, notebooks, "QA-Test");
+    const text = formatFeedbackFacts(facts, "QA-Test");
+    expect(text).toContain("„- [ ] **QA-Edit Beta**“");
+    // Review-Nachbesserung (🟡, DECISIONS #131): "nach der Änderung X×" statt
+    // der bloßen Zahl – nennt explizit die Zeitbasis (siehe D1-Root-Cause).
+    expect(text).toContain("im Notizbuch „QA-Test“ nach der Änderung 1×");
+    expect(text).toContain("mitgezählt");
+    expect(text).toContain("Allgemein → Inbox");
+    expect(text).toContain("identischer Wortlaut auch in „Wissensbasis“ (QA → QA-Ergebnisse)");
+    // DECISIONS #130: KEINE Bewertung mehr – weder "genau einmal"/"kein
+    // zweiter Eintrag" noch "Dublette"/"unsicher".
+    expect(text).not.toContain("genau einmal");
+    expect(text).not.toContain("Dublette");
+    expect(text).not.toContain("unsicher");
+  });
+
+  it("meldet mehrfache Vorkommen ebenfalls nur als nackte Zahl, ohne Bewertung", () => {
+    const text = formatFeedbackFacts(
+      [{ text: "x", chapter: null, section: null, lineNo: 3, activeCount: 2, elsewhere: [] }], "N"
+    );
+    expect(text).toContain("im Notizbuch „N“ nach der Änderung 2×");
+    expect(text).not.toContain("Dublette");
+    expect(text).not.toContain("unsicher");
+  });
+
+  it("kürzt sehr lange Fakten-Zeilen im ANGEZEIGTEN Zitat auf 160 Zeichen (Kosten-Deckel)", () => {
+    const langerText = "x".repeat(200);
+    const text = formatFeedbackFacts(
+      [{ text: langerText, chapter: null, section: null, lineNo: 1, activeCount: 1, elsewhere: [] }], "N"
+    );
+    expect(text).toContain("x".repeat(157) + "…");
+    expect(text).not.toContain(langerText);
+  });
+
+  it("ohne Cross-Notizbuch-Treffer bleibt der Zusatzsatz weg", () => {
+    const text = formatFeedbackFacts(
+      [{ text: "x", chapter: null, section: null, lineNo: 1, activeCount: 1, elsewhere: [] }], "N"
+    );
+    expect(text).not.toContain("identischer Wortlaut auch in");
+  });
+
+  it("leere/keine Fakten liefern einen leeren String", () => {
+    expect(formatFeedbackFacts([], "N")).toBe("");
+    expect(formatFeedbackFacts(null, "N")).toBe("");
+  });
+
+  it("Escaping von Anführungszeichen: ein Fakt-Text mit eingebetteten \"-Zeichen bleibt unverändert innerhalb der „ “-Klammer stehen", () => {
+    const text = formatFeedbackFacts(
+      [{ text: '- Sage "Hallo" zu Bob', chapter: null, section: null, lineNo: 1, activeCount: 1, elsewhere: [] }], "N"
+    );
+    expect(text).toContain('„- Sage "Hallo" zu Bob“');
+  });
+
+  // Review-Nachbesserung (🟡, DECISIONS #131): ASCII-Anführungszeichen (")
+  // kollidieren nie mit den typografischen Begrenzern „ “ – dieser Test
+  // nutzt dieselben Zeichen wie die Begrenzer selbst (Zitat-in-Zitat) und
+  // pinnt das gewählte Verhalten: der Fakt-Text bleibt unverändert stehen,
+  // die äußeren Begrenzer bleiben eindeutig am Anfang/Ende des Zitats.
+  it("Escaping: ein Fakt-Text mit eingebetteten typografischen „…“-Zeichen bleibt unverändert erhalten", () => {
+    const text = formatFeedbackFacts(
+      [{ text: "- Termin „Kaffee“ verschieben", chapter: null, section: null, lineNo: 1, activeCount: 1, elsewhere: [] }], "N"
+    );
+    expect(text).toContain("„- Termin „Kaffee“ verschieben“");
+  });
+});
+
+describe("buildFeedbackRequest", () => {
+  // Live-Fall D1 als End-to-End-Test: die echte Ergänzung "- [ ] **QA-Edit
+  // Beta**" ist im aktiven Notizbuch neu und kommt dort genau 1× vor; der
+  // identische Markdown-Wortlaut steht bereits in "Wissensbasis" – GENAU
+  // diese beiden Fakten (kein Datenverlust, keine echte Dublette IM aktiven
+  // Notizbuch, aber ein Hinweis auf denselben Wortlaut anderswo) sind das,
+  // was dem Modell laut DECISIONS #130 verlässlich mitgeteilt werden soll.
+  it("Live-Fall D1 End-to-End: Fakt meldet 1× im aktiven Notizbuch, identischer Wortlaut auch in Wissensbasis", () => {
+    const diff = diffLines(QA_TEST_BEFORE, QA_TEST_AFTER);
+    const notebooks = [{ name: "QA-Test", doc: QA_TEST_AFTER }, { name: "Wissensbasis", doc: WISSENSBASIS_DOC }];
+    const { trigger, facts } = buildFeedbackRequest(diff, "+ - [ ] **QA-Edit Beta**", notebooks, "QA-Test");
+    expect(facts).toHaveLength(1);
+    expect(facts[0].text).toBe("- [ ] **QA-Edit Beta**");
+    expect(facts[0].activeCount).toBe(1);
+    expect(facts[0].elsewhere).toEqual([{ notebook: "Wissensbasis", chapter: "QA", section: "QA-Ergebnisse" }]);
+    expect(trigger).toContain("Vom Code ermittelte Fakten zur Änderung");
+    // Review-Nachbesserung (🟡, DECISIONS #131): Zeitbasis explizit im Fakt
+    // UND im Block-Kopf – nimmt dem Modell genau die D1-Fehllesung ab
+    // ("existierte schon vorher" + "+"-Zeile zusätzlich gezählt).
+    // Notizbuchname MIT im Fakt: pinnt die Verdrahtung nbName -> formatFeedbackFacts
+    // in buildFeedbackRequest (Mutationsprobe: formatFeedbackFacts(facts, "") bliebe
+    // sonst unbemerkt).
+    expect(trigger).toContain("im Notizbuch „QA-Test“ nach der Änderung 1×");
+    expect(trigger).toContain("mitgezählt");
+    expect(trigger).toContain("identischer Wortlaut auch in „Wissensbasis“");
+  });
+
+  it("diff===null liefert leere Fakten, Trigger fällt auf den Gesamtdokument-Hinweis zurück", () => {
+    const { trigger, facts } = buildFeedbackRequest(null, "", [{ name: "N", doc: "x" }], "N");
+    expect(facts).toEqual([]);
+    expect(trigger).toContain("Die Änderung ist umfangreich (kein kompakter Diff verfügbar) – prüfe das Gesamtdokument.");
+    expect(trigger).not.toContain("Vom Code ermittelte Fakten");
   });
 });

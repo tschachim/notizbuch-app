@@ -14859,3 +14859,2682 @@ aus `referenz-app.jsx` übernommen.
          Lookup-Fortsetzungs-Kombination im Nachfassen (a) deckt eine
          Verzweigung ab, die vorher nur isoliert, nicht in dieser
          Kombination getestet war).
+
+118. **v7.57.1, E2E-Befund D1 („QA-Edit Beta“ unter „Kaffee mit Sarah“) –
+     Modell-Fehlzählung bei an sich KORREKTER Eingabe, Fakten-Ermittlung +
+     Code-Netz gegen widerlegte Dubletten-Behauptungen.** Der Tester hat im
+     Editor „QA-Edit Beta“ (fett) unter „Kaffee mit Sarah“ ergänzt und
+     gespeichert; der Auto-Kommentar behauptete danach: „…erzeugt eine
+     Dublette: „- [ ] QA-Edit Beta“ steht … nun zweimal (der Eintrag
+     existierte dort bereits)“. Eine direkte DOM-Prüfung zeigte durchgehend
+     GENAU EIN Vorkommen – die Behauptung war falsch, es ging nichts
+     verloren.
+     - **Root Cause (belegt, siehe `gh api`-Auszug aus dem QA-Repo,
+       Commit `02f1d026`, und die Prototyp-Proben im Analyse-Scratchpad):
+       genau EIN Speichervorgang, genau EIN Feedback-Request, ein sauberer
+       Diff mit genau `+1` Zeile.** Sonnet 5 hat den bereits COMMITTETEN
+       Diff-Stand („+ …“) als Vorher-Zustand gelesen („existierte dort
+       bereits“) UND die „+“-Zeile zusätzlich mitgezählt – „nun zweimal“.
+       Begünstigt durch drei Umstände im Prompt-Aufbau: (1) der Diff kam
+       ohne Legende, nirgends stand, dass „+“-Zeilen BEREITS im Dokument
+       enthalten sind; (2) der Trigger fragt ausdrücklich nach „Dubletten“,
+       das lenkt aufs Thema; (3) eine Altlast in den Testdaten
+       (Wissensbasis → QA → QA-Ergebnisse enthielt „QA-Edit Beta“ bereits
+       aus einem früheren Testlauf) machte den Wortlaut real dreifach im
+       Prompt präsent. Die Doppel-Speicher-Hypothese des Testers ist
+       WIDERLEGT (`saveEdit` ruft `requestFeedback` nachweislich nur einmal
+       nach erfolgreichem Commit auf, `oldDoc`/`buildNbCtx` liefern in
+       keiner Variante eine Eingabe mit echter Dublette).
+     - **Fix, zwei Stufen in `src/lib/feedback.js` (kein reiner
+       Prompt-Wortlaut – der hat den Fehler in Klausel „Der Dokumentstand …
+       ist IMMER maßgeblich“ (`lib/anthropic.js`) bereits NICHT verhindert,
+       siehe Memory „Keine Einzel-Guards bei Editierfehlern“):**
+       - **A) Vorbeugend – `buildFeedbackFacts()`/`formatFeedbackFacts()`:**
+         zählt für jede eindeutige HINZUGEFÜGTE Diff-Zeile (Überschriften/
+         Leerzeilen/entfernte Zeilen/Codeblock-Inhalt ausgenommen) über eine
+         normalisierte Form (Listen-/Checkbox-Präfix, `**`/`__`/`~~`/`*`/`_`/
+         `` ` ``-Auszeichnungen und `[Text](url)`-Links entfernt, Whitespace
+         kollabiert, lowercase) das tatsächliche Vorkommen im NACHHER-Stand
+         des aktiven Notizbuchs (Kapitel/Abschnitt/Zeile) sowie in ALLEN
+         anderen Notizbüchern. `buildFeedbackTrigger()` bekommt diesen
+         Fakten-Block VOR dem Diff, dazu eine Diff-Legende
+         (`"+ "` = bereits enthalten, `"− "` = entfernt, `"  "` = Kontext)
+         und den Verweis „bereits unter ALLE NOTIZBÜCHER (Stand NACH der
+         Änderung)“ statt des mehrdeutigen „oben im Dokument“.
+       - **B) Netz – `findContradictedDuplicateClaims()`/
+         `stripContradictedSentences()`:** entfernt aus der Modellantwort
+         NUR einen Satz, der (a) ein Dubletten-Wort enthält
+         (dublette/duplikat/doppelt/zweimal/mehrfach/zweifach), (b) eine
+         Zeile zitiert, die zu einem von `buildFeedbackFacts()` gezählten
+         Fakt passt, UND (c) dieser Fakt HÖCHSTENS 1× im aktiven Notizbuch
+         steht UND (d) der Satz KEIN Notizbuch nennt, in dem der Wortlaut
+         laut Fakten TATSÄCHLICH vorkommt. Bewusst konservativ (Fence-Guard
+         wie bei `dedupeFeedbackParagraphs()`) – eine umschriebene
+         Falschbehauptung ohne Zitat rutscht durch, ein echter,
+         eigenständiger Zweitbefund wird NIE gelöscht. `App.jsx#
+         requestFeedback` zieht dafür `buildNbCtx()` jetzt VOR den
+         Trigger-Aufbau (braucht den Nach-Commit-Stand aller Notizbücher).
+         ⚠️ **Korrektur (#120/#121):** Bedingungen (a)–(d) und die
+         „NIE gelöscht“-Zusage stimmen nur noch für den HISTORISCHEN Stand
+         dieses Eintrags. #120 ergänzte (b)/(e) (aktives Notizbuch nennen,
+         nur erlaubte Zusatz-Zitate), #121 ergänzte (f) (kein relationaler/
+         semantischer Marker außerhalb der Zitate) und einen
+         Verneinungs-Guard, UND präzisierte (b) selbst (Notizbuchname
+         AUSSERHALB eines Zitats bzw. als eigenes Zitat, nicht als
+         Zufalls-Substring in einem ANDEREN Zitat). Die aktuellen
+         Bedingungen und die (bewusst abgeschwächte) Zusage stehen in #121.
+         ⚠️ **abgelöst durch #124:** `findContradictedDuplicateClaims()`/
+         `stripContradictedSentences()` sind komplett ENTFERNT – fünf
+         Nachbesserungsrunden (#118/#120–#123) zeigten, dass das Streichen
+         von Modellsätzen strukturell zwischen "zu viel" und "zu wenig"
+         pendelt. Seit #124 wird NICHTS mehr gestrichen, sondern ein
+         zusätzlicher, garantiert wahrer Fakten-Absatz angehängt
+         (`buildDuplicateFactNote()`). Teil A (Fakten-Ermittlung,
+         `buildFeedbackFacts()`/`formatFeedbackFacts()`) bleibt unverändert
+         bestehen. ⚠️ **abgelöst durch #130:** `buildDuplicateFactNote()`
+         (Teil B, s. o.) UND die seit #120–#129 in Teil A gewachsene
+         Normalisierung (`looseKey()` u. a.) sind per Nutzerentscheidung
+         zurückgebaut; Teil A zählt seit #130 wieder rein EXAKT nach
+         Markdown-Wortlaut, ohne jede Bewertung, siehe dort.
+     - **Bewusste Abweichungen vom Analysevorschlag:** (1) Nebenbefund C
+       (Ref-Guard gegen ein doppelt ausgeführtes `saveEdit`) NICHT
+       umgesetzt – der Vorschlag selbst nennt ihn „optional, niedrige
+       Priorität“, das Zeitfenster ist bei echten Klicks durch den bereits
+       deaktivierten Speichern-Knopf praktisch geschlossen (rein
+       theoretisch). (2) `DIFF_CAP` bleibt bewusst NUR für den Diff selbst
+       gültig statt gemeinsam mit dem Fakten-Block gedeckelt – stattdessen
+       ein eigener, fester 20-Fakten-Deckel in `buildFeedbackFacts()`; das
+       ist einfacher und ändert nichts an den bestehenden, gepinnten
+       `DIFF_CAP`-Tests. (3) ~~`findContradictedDuplicateClaims()` bekommt
+       NUR `(reply, facts)` statt zusätzlich `notebooks`/`activeName` –
+       alles Nötige steckt bereits in `facts`~~ ⚠️ **Korrektur (#120):**
+       Diese Abweichung wurde WIEDER AUFGEGEBEN – #120 fand, dass ohne
+       `activeName` auch Sätze OHNE jeden Bezug zum aktiven Notizbuch
+       gestrichen wurden. Signatur seit #120 `(reply, facts, activeName,
+       nbNames)`, seit #121 unverändert. ⚠️ **abgelöst durch #124,
+       seinerseits abgelöst durch #130:**
+       `findContradictedDuplicateClaims()` ist komplett entfernt, die
+       Signatur-Historie ist nur noch historisch relevant. (4) Kein
+       Retry-Ansatz (Variante „einen Sonnet-Call mehr im Trefferfall“) –
+       das reine Streichen ist einfacher, kostet keinen Zusatz-Call und das
+       Restrisiko (evtl. hängender Satzanschluss wie „Zudem …“) ist klein
+       gegen den zusätzlichen API-Kosten/Latenz-Aufwand. ⚠️ **abgelöst durch
+       #124:** "das reine Streichen ist einfacher" gilt nicht mehr – #124
+       ersetzt das Streichen durch einen Fakten-Anhang.
+     - **Tests/Verifikation.** `tests/feedback.test.js`: 50 Tests gesamt
+       (21 neu: 6 neue `buildFeedbackTrigger`-Fälle für Legende/Fakten-Block/
+       neuen Wortlaut, 8 `buildFeedbackFacts` inkl. Live-Fixture aus dem
+       echten QA-Repo-Commit, Normalisierung, Codeblock-/Überschriften-
+       Ausschluss, 20er-Deckel, 4 `formatFeedbackFacts`, 11
+       `findContradictedDuplicateClaims`/`stripContradictedSentences` inkl.
+       wortgetreuem Nachbau des Live-Antwort-Ausschnitts). Mutationsprobe
+       (`findContradictedDuplicateClaims` auf `return []` gesetzt): exakt
+       die beiden Tests, die den Live-Fall bzw. die Normalisierung ohne
+       Fett-Markierung prüfen, schlugen fehl; nach dem Zurücksetzen wieder
+       grün. `npx vitest run --maxWorkers=3` (voller Lauf, zusammen mit
+       #119 unten): 2836/2836 grün (57 Testdateien). `npm run
+       test:coverage -- --maxWorkers=3`: „All files“ Statements 93,7 % /
+       Branches 87,81 % / Funktionen 93,33 % / Lines 95,96 % (Gate 60 %);
+       `feedback.js` 100/90/100/100.
+     - **Restrisiko:** Die Heuristik in B erkennt nur ZITIERTE, eindeutig
+       zuordenbare Falschbehauptungen – eine umschriebene Dubletten-
+       Behauptung ohne Anführungszeichen bleibt stehen (false negative,
+       bewusst in Kauf genommen, siehe A: die Häufigkeit sinkt dadurch
+       bereits deutlich). Die Normalisierung behandelt `- [ ] x` und
+       `- [x] x` sowie `**x**` und `x` als denselben Eintrag – gewollt,
+       aber eine Vergröberung. Gestrichene Sätze können einen hängenden
+       Anschlusssatz hinterlassen. Ob das Modell mit A ALLEIN (ohne B) die
+       Dublette gar nicht mehr behauptet, ist nur live/per Eval belegbar –
+       deshalb bleibt B als deterministisches Netz nötig. Version:
+       `v7.57.1` (Produktivcode in `src/lib/feedback.js`/`src/App.jsx`
+       geändert). ⚠️ **abgelöst durch #124, seinerseits abgelöst durch
+       #130:** "B als deterministisches Netz" ist NICHT mehr das
+       Streich-Netz, sondern war `buildDuplicateFactNote()` (annotieren
+       statt streichen, #124) – auch dieses ist per Nutzerentscheidung
+       wieder zurückgebaut, siehe #130.
+
+119. **v7.57.1, E2E-Befund E2 (Schnellnotiz-Sync nach Reload) – echter
+     App-Bug (Datenverlust), 3-Wege-Merge mit Basis statt "Remote gewinnt
+     komplett".** Der Tester legte ein Post-it „QA-Sync-Test“ an, der Text
+     stand im localStorage-Cache, verschwand aber nach einem Reload
+     (leeres Post-it mit anderer ID statt des getippten Texts) – zweimal
+     reproduziert. Einschränkung des Testers: echte Tastatureingaben kamen
+     in diesem Feld nicht an, der Text wurde per nativem Setter+`input`-
+     Event nachgebildet.
+     - **Root Cause (Code-Lektüre + jsdom-Nachstellung mit der ECHTEN App
+       gegen ein In-Memory-Daten-Repo, siehe `tests/quickNotesSync.test.jsx`
+       und die ausführlicheren Proben im Analyse-Scratchpad): kein
+       Testartefakt, sondern ein echter Verlustpfad.** `App.jsx#connect`
+       und `#maybeRefresh` mergten Schnellnotizen bisher PRO NOTIZBUCH als
+       GANZE Liste: „Remote gewinnt, lokale Notizbücher ohne Remote-Eintrag
+       behalten ihre Notizen“ (DECISIONS #33) – ohne jede Basis konnte die
+       App nicht unterscheiden, ob der lokale oder der Remote-Stand NEUER
+       ist. Ein lokal getippter, aber wegen des 2,5-s-`state.json`-
+       Debounce bzw. des 300-ms-`localStorage`-Cache-Writes noch nicht
+       geschriebener Text wurde beim nächsten Laden/Refresh durch JEDEN
+       Remote-Stand ersetzt, auch durch eine (nach früherem Aufräumen)
+       leere Liste. Der Write ins Repo war zudem OHNE `maxWait` entprellt
+       (Dauertippen mit Pausen < 2,5 s verschob den Write beliebig weit),
+       und ein SHA-Konflikt beim Schreiben (`flushState`) überschrieb den
+       Remote-Stand blind mit dem lokalen – ein zwischenzeitliches Post-it
+       eines anderen Geräts ging dabei ersatzlos verloren. Die fehlenden
+       Tastatureingaben sind ein separates Automationsproblem
+       (`QuickNotes.jsx#handleKeyDown` greift nur bei Tab/Escape) und
+       erklären den Verlust selbst NICHT – der Text im Cache belegt, dass
+       er im React-State war und ein Write eingeplant war.
+     - **Fix (Fehlerklasse geschlossen, kein Einzel-Guard):**
+       - **`src/lib/quicknotes.js` (neu, reine Funktionen).**
+         `mergeQuickNotes(base, local, remote)`: 3-Wege-Merge PRO
+         NOTIZBUCH und PRO NOTIZ-ID. Ist eine Seite deckungsgleich mit der
+         Basis, entscheidet die ANDERE (inkl. Löschung); sind BEIDE von der
+         Basis abgewichen, gewinnt eine Bearbeitung über eine Löschung, bei
+         zwei Bearbeitungen der höhere `u`-Zeitstempel (Gleichstand:
+         lokal). Ist die Basis für eine ID unbekannt, verhält sich der
+         Merge wie eine reine Vereinigung OHNE Löschung. `addQuickNote`/
+         `updateQuickNote` stempeln jetzt `u: Date.now()`.
+         `parseQuickNotesCache()`/`serializeQuickNotesCache()`: neues
+         Cache-Format `{v:2, notes, base}` als EIN localStorage-Paar (ein
+         `setItem()`), mit Migration aus dem alten Array- bzw. flachen
+         Objekt-Format (Basis dort „unbekannt“ = `{}`).
+       - **`src/App.jsx`.** `connect()`/`maybeRefresh()` nutzen jetzt
+         `mergeQuickNotes()` mit einer in `quickNotesBaseRef` gepflegten
+         Basis statt des blinden Spreads; `flushState()` merged bei einem
+         SHA-Konflikt ~~Chat (`mergeChats()`, bereits vorhanden) UND~~
+         Schnellnotizen statt den Remote-Stand zu überschreiben, und
+         übernimmt das Merge-Ergebnis zurück in den React-State (sonst
+         würde der nächste Save-Effect-Durchlauf es wieder verwerfen).
+         Neuer `STATE_MAX_WAIT` (10 s) im Save-Effect gegen Dauertippen
+         ohne Flush. Neuer `pagehide`/`visibilitychange`-Handler schreibt
+         den Schnellnotizen-Cache synchron und stößt einen ausstehenden
+         Flush als Best Effort an, BEVOR die Seite verschwindet.
+         ⚠️ **Korrektur (Eintrag #120):** Der durchgestrichene Chat-Merge-Teil
+         war ein Fehler in dieser Erst-Fassung und widersprach bereits dem
+         eigenen Restrisiko-Absatz weiter unten ("Chat … bleibt bewusst
+         Last-Writer-Wins"). Ein Code-Review deckte auf, dass `mergeChats()`
+         hier einen per „Chat archivieren“ gerade geleerten Chat wieder
+         zurückholt (reine Vereinigung ohne Löschsemantik). Seit #120 bleibt
+         der Chat im Konfliktpfad unverändert Last-Writer-Wins (lokal), wie
+         es dieser Absatz von Anfang an hätte sein sollen.
+     - **Eigener Fund während der Umsetzung (kein Bestandscode-Fehler,
+       sondern ein Defekt in der eigenen Erst-Fassung des Fixes –
+       gemeldet statt kaschiert):** Ein zusätzlicher Schutz „Basis auf
+       `{}` zurücksetzen, sobald `connect()` läuft“ (gedacht gegen einen
+       Reconnect auf ein ANDERES Daten-Repo) hätte GENAU den zu fixenden
+       Fall wieder zerstört – er lief auch beim ALLERERSTEN `connect()`
+       nach einem echten Reload und warf die aus dem Cache geladene Basis
+       weg, BEVOR sie genutzt wurde. `tests/quickNotesSync.test.jsx#P8`
+       schlug dadurch fehl; behoben, indem der Reset nur bei einem
+       RECONNECT greift (`if (connectEpoch.current > 0) …`), nicht beim
+       ersten Connect einer Sitzung.
+     - **Bewusste Abweichungen vom Analysevorschlag:** (1) KEIN Retry mit
+       Backoff bei einem gescheiterten (nicht-Konflikt-)Write und keinem
+       `online`-Event-Listener (Vorschlagsteil zu Probe P3) – das ist eine
+       ANDERE Fehlerklasse (Sende-Fehlschlag ohne Netz) als der gemeldete
+       Befund (verlorener Merge nach Reload) und hätte den Umfang deutlich
+       vergrößert; bleibt dokumentiertes Restrisiko wie im Analysebericht.
+       (2) Der seltene Import-Pfad für alte Artifact-Historien (`App.jsx`,
+       „Chat, Modell, Klappzustände nach state.json“) schreibt weiterhin
+       ohne Basis-Pflege für Schnellnotizen – ein einmaliger, Nutzer-
+       ausgelöster Migrationspfad, keine Regel-Schreibstelle des
+       Alltagsbetriebs; die Basis heilt beim nächsten normalen
+       `connect()`/`flushState()` automatisch nach. (3) `mergeQuickNotes()`
+       liefert direkt die gemergte Map zurück statt eines
+       `{merged, localPending}`-Wrappers – der `localPending`-Zusatz aus
+       dem Vorschlag wird nirgends gebraucht (der bestehende Save-Effect
+       erkennt eine Abweichung vom Remote-Stand ohnehin automatisch über
+       den Payload-Vergleich).
+     - **Tests/Verifikation.** `tests/quicknotes.test.js` (neu, 30 reine
+       Tests): alle Datenlagen aus dem Analysebericht (lokal/remote
+       unverändert vs. editiert, beide editiert mit/ohne Gleichstand,
+       Löschung vs. unverändert in beide Richtungen, Löschung vs.
+       Bearbeitung in beide Richtungen, unbekannte Basis, defekte
+       Einträge, Reihenfolge, alle drei Cache-Formate samt Migration und
+       Roundtrip). `tests/quickNotesSync.test.jsx` (neu, 5 Tests): echte
+       App gegen ein In-Memory-GitHub-Mock, echter Reload (Unmount +
+       `vi.clearAllTimers()` + Remount), deckt den Live-Kernbefund, zwei
+       Reloads in Folge, die Löschungs-Umkehrung (P8), den Mehrgeräte-
+       Konflikt (P6) und `maxWait` (P7) ab. Drei separate Mutationsproben
+       durchgeführt (Merge in `connect()` zurückgenommen; Merge in
+       `flushState()`s Konfliktpfad überbrückt; `STATE_MAX_WAIT` künstlich
+       auf 10.000.000 gesetzt) – jeweils schlugen GENAU die zugehörigen
+       Tests fehl, alle anderen blieben grün; danach zurückgesetzt.
+       `npx vitest run --maxWorkers=3` (voller Lauf, zusammen mit #118
+       oben): 2836/2836 grün (57 Testdateien, gegenüber der Baseline vor
+       diesem Auftrag 2774/2774). `npm run test:coverage -- --maxWorkers=3`:
+       „All files“ Statements 93,7 % / Branches 87,81 % / Funktionen
+       93,33 % / Lines 95,96 % (Gate 60 %); `quicknotes.js` 98,75/95,34/
+       100/100.
+     - **Restrisiko:** Die 3-Wege-Merge-Garantie gilt PRO NOTIZBUCH/PRO
+       NOTIZ – Mehrgeräte-Konflikte bei Chat/`collapsed`/`order`/
+       `autocorrect` bleiben bewusst Last-Writer-Wins (lokal) wie bisher.
+       `u` fehlt auf älteren, noch nicht migrierten Geräten (gilt dann als
+       0, Gleichstand fällt auf „lokal“ zurück). `updateQuickNote` stempelt
+       `u` bei JEDER Änderung neu, auch bei reiner Geometrie (Verschieben/
+       Größe) – verschiebt Gerät A eine Notiz, NACHDEM Gerät B ihren Text
+       geändert hat, gewinnt beim Tiebreak A mit dem ALTEN Text (Geometrie
+       schlägt Text). Bewusst nicht behoben (Review-Fund #121, blau/
+       niedrige Priorität) – Text und Geometrie getrennt zu mergen wäre ein
+       größerer Umbau für einen seltenen Randfall. Der `pagehide`-Flush ist
+       NUR Best Effort (kein `fetch keepalive`, 64-KB-Limit ohnehin zu
+       klein für `state.json` samt Chat) – die eigentliche Garantie bleibt
+       der Merge beim nächsten Laden. Eine ungeprüfte Vermutung aus dem
+       Analysebericht (GitHub-GET-Antworten könnten bis zu 60 s aus dem
+       Browser-Cache stammen, `cache: "no-store"` wäre die Gegenmaßnahme)
+       wurde NICHT umgesetzt/verifiziert – bleibt offen für eine künftige
+       Untersuchung. ⚠️ **Ergänzung (#122, Review-Fund 🔵, zwei bisher NICHT
+       genannte Restrisiken):** (1) Nach dem Update (Cache v0/v1 → v2) taucht
+       ein Post-it, das ein ANDERES Gerät seit der letzten Sitzung dieses
+       Geräts gelöscht hat, einmalig wieder auf (Basis für diese ID ist
+       unbekannt = per Definition keine Löschung erkennbar, siehe
+       `mergeOneNote()`) und wird beim nächsten Flush ins Repo
+       zurückgeschrieben – einmalig pro Gerät, danach kennt die Basis die
+       Löschung. (2) Mehrere Tabs im selben Browser teilen denselben
+       `localStorage`-Cache; der `pagehide`/`visibilitychange`-Handler (siehe
+       oben) schreibt bedingungslos den Stand DES SCHREIBENDEN TABS – ein
+       veralteter zweiter Tab kann damit beim Verstecken/Schließen einen
+       ungesicherten Text eines ANDEREN, gerade aktiv bearbeiteten Tabs im
+       Cache überschreiben, wenn dessen letzter Write noch nicht dort
+       angekommen war. Version: `v7.57.1` (Produktivcode in
+       `src/lib/quicknotes.js`/`src/App.jsx` geändert; gemeinsamer Bump mit
+       #118, da beide Befunde im selben Auftrag bearbeitet wurden).
+
+120. **v7.57.1, Code-Review-Nachbesserung zu #118/#119 (7× 🔴, 7× 🟡).** Ein
+     Code-Review der Erst-Fassung fand in beiden Fixes echte, teils
+     schwerwiegende Fehler – dieser Eintrag behebt sie, OHNE die
+     Fehlerklassen aus #118/#119 wieder zu öffnen. Kein weiterer
+     Versions-Bump (bleibt `v7.57.1`, nur derselbe Produktivcode
+     nachgebessert).
+     - **E2/`src/App.jsx`, vier 🔴- und zwei 🟡-Funde in `flushState()`/dem
+       Save-Effect/`connect()`:**
+       - **Konfliktpfad überschrieb den React-State mit einem VERALTETEN
+         Merge (🔴🔴, doppelt gemeldet).** `setQuickNotesAll(() =>
+         mergedQuick)` verwarf JEDE Eingabe, die WÄHREND der drei await
+         (PUT-409 → GET → PUT) im UI entstand – der Konfliktpfad erzeugte
+         damit selbst einen neuen E2-Verlustpfad. Fix: Der Updater merged
+         jetzt GEGEN DEN AKTUELLEN State, mit dem zu Flush-Beginn bekannten
+         Stand (`flushedQuick`) als Basis:
+         `setQuickNotesAll((cur) => mergeQuickNotes(flushedQuick, cur,
+         mergedQuick))`. Mutationsprobe (Test „R1“, siehe unten): mit dem
+         alten `setQuickNotesAll(() => mergedQuick)` bleibt eine WÄHREND der
+         Konfliktauflösung getippte Ergänzung („A1“ → „A1 und mehr“) auf dem
+         alten Stand stehen; mit dem Fix bleibt sie erhalten.
+       - **Chat-Merge via `mergeChats()` im Konfliktpfad machte „Chat
+         archivieren“ rückgängig (🔴🔴, doppelt gemeldet, unbegründete
+         Abweichung von der #119-Analyse, die den Chat-Merge ausdrücklich
+         GETRENNT entscheiden wollte).** `mergeChats()` ist eine reine
+         Vereinigung OHNE Löschsemantik. Läuft der Flush nach
+         `archiveChat()` (setzt `setChat([WELCOME])`) in einen SHA-Konflikt,
+         holte der Merge den gerade archivierten Chat vollständig zurück.
+         Fix: Chat bleibt im Konfliktpfad unverändert Last-Writer-Wins
+         (lokal) wie in v7.57 vor #119 – kein Merge-Versuch mehr. Siehe auch
+         die Korrektur am #119-Eintrag oben (dort stand das Gegenteil im
+         Fix- UND im Restrisiko-Absatz). Mutationsprobe (Test „R2“): mit
+         `mergeChats()` im Konfliktpfad bleiben nach dem Archivieren wieder
+         2 alte Nachrichten im Remote-Chat; ohne ihn 0.
+       - **Reconnect auf ein ANDERES Daten-Repo mischte lokale Post-its aus
+         dem alten Repo blind ins neue (🔴, Live-relevant für genau diesen
+         Workflow: das Browser-Pane wechselt zwischen `notizbuch-data-qa`
+         und dem Produktiv-Repo).** Der bisherige Schutz
+         (`if (connectEpoch.current > 0) quickNotesBaseRef.current = {}`)
+         setzte die Basis bei JEDEM Reconnect auf „unbekannt“ – das bedeutet
+         in `mergeQuickNotes()` aber „reine Vereinigung OHNE Löschung“,
+         nicht „Remote gewinnt“. Fix: Das Ziel-Repo wird mit dem VORHER
+         verbundenen (`settingsRef.current`, an dieser Stelle in `connect()`
+         noch der alte Stand) verglichen. Bei einem FREMDEN Repo gilt direkt
+         am Merge-Aufruf „lokal == Basis“
+         (`mergeQuickNotes(foreignRepo ? loc : quickBase, loc, nQuick)`) –
+         Remote entscheidet dann vollständig, inklusive Löschungen. Bei
+         einem Reconnect auf DASSELBE Repo bleibt die echte Basis erhalten.
+         Mutationsprobe (Test „R4“): mit `foreignRepo` fest auf `false`
+         landet „Geheim aus A“ im Post-it-Bestand von Repo B (und wird dort
+         zurückgeschrieben); mit dem Fix nicht.
+       - **`stateTimer.current` blieb nach dem `maxWait`-Zweig auf einer
+         bereits gelöschten Timer-ID stehen (🔴/🟡, doppelt gemeldet).**
+         `if (stateTimer.current) clearTimeout(stateTimer.current);` ohne
+         `stateTimer.current = null` ließ `maybeRefresh()`s Guard
+         (`!stateTimer.current && !stateFlushing.current`) dauerhaft
+         fehlschlagen, sobald einmal `maxWait` gegriffen hatte – Chat/
+         Post-its/Modell/Reihenfolge anderer Geräte kamen dann per
+         Fokus-/Poll-Refresh nicht mehr an, bis wieder eine lokale Änderung
+         einen neuen Timer anlegte. Fix: `stateTimer.current = null` direkt
+         mit dazu. Mutationsprobe (Test „R5b“): ohne das `= null` bleibt ein
+         per Poll (nach `maxWait`) erwartetes Post-it von „Gerät B“ nach 26 s
+         unsichtbar; mit dem Fix erscheint es.
+       - **Erfolgspfad schrieb den zu Flush-BEGINN eingefrorenen
+         (`written`) statt den AKTUELLEN Stand in den Schnellnotizen-Cache
+         (🟡🟡, doppelt gemeldet).** `saveQuickNotesCache(written, written)`
+         konnte einen währenddessen (PUT lief noch) neu getippten, vom
+         300-ms-Cache-Effekt bereits geschriebenen Text wieder auf den
+         älteren Stand zurücksetzen – ohne ein anschließendes `pagehide`
+         dieselbe E2-Fehlerklasse, nur ohne SHA-Konflikt. Fix:
+         `saveQuickNotesCache(stateRef.current.quickNotesAll, written)` –
+         `stateRef` spiegelt dank des davor deklarierten Sync-Effects immer
+         den aktuellen React-State. Mutationsprobe (Test „R3“): mit
+         `written` bleibt der Cache nach einem verzögerten, aber
+         erfolgreichen Flush bei "AB" stehen, obwohl der Nutzer
+         währenddessen zu "ABC" weitergetippt hat; mit dem Fix zeigt der
+         Cache "ABC".
+       - **Blaue Randkorrektur mitgenommen:** Im Konfliktpfad wurde ein
+         FEHLENDES `quicknotes`-Feld im Remote-Stand bisher als `{}` (leere
+         Liste = "Remote hat alles gelöscht") statt wie bei `connect()`/
+         `maybeRefresh()` als `null` ("unverändert", Migrationsfall)
+         behandelt – jetzt konsistent `null`.
+     - **D1/`src/lib/feedback.js`, zwei (doppelt gemeldete) 🔴-Funde plus
+       zwei 🟡-Funde zur Testqualität:**
+       - **Das Netz strich auch ECHTE, nur ANDERS FORMULIERTE inhaltliche
+         Dubletten (semantische Übereinstimmung, kein wortgleiches Zitat
+         nötig) – genau die Fehlerklasse, die #118 eigentlich verhindern
+         sollte ("ein echter, eigenständiger Zweitbefund wird NIE
+         gelöscht").** Beispiel aus dem Review: eine neue Zeile
+         „Zahnarzttermin vereinbaren“ neben einem bestehenden „Termin beim
+         Zahnarzt machen“ – der Fakten-Text sagte dem Modell dazu bisher
+         explizit "KEINE Dublette" (bezog sich aber nur auf WORTGLEICHE
+         Vorkommen), und `findContradictedDuplicateClaims()` strich jeden
+         Satz mit Dubletten-Wort + einem zum Fakt passenden Zitat, egal ob
+         der Satz überhaupt einen Bezug zum aktiven Notizbuch hatte. Fix in
+         zwei Teilen:
+         1. `formatFeedbackFacts()`: bei `activeCount<=1` jetzt "kein
+            zweiter WORTGLEICHER Eintrag in diesem Notizbuch (inhaltliche
+            Überschneidungen bitte selbst beurteilen)" statt "KEINE
+            Dublette" – der Fakten-Text bewertet nur noch die reine
+            Zählung, nicht die inhaltliche Einschätzung.
+         2. `findContradictedDuplicateClaims(reply, facts, activeName,
+            nbNames)`: NEU zwei Pflichtbedingungen. Der Satz muss (b) das
+            AKTIVE Notizbuch ausdrücklich beim Namen nennen, UND (e) außer
+            dem Fakt-Zitat darf er NUR erlaubte Namen zitieren (aktives/
+            anderes Notizbuch, Kapitel/Abschnitt des Fakts) – ein
+            zusätzliches Zitat einer ANDEREN konkreten Zeile ist ein
+            semantischer Vergleich, den der Code nicht nachprüfen kann, und
+            wird NIE gestrichen. Bedingung (b) allein reicht bereits für die
+            meisten Review-Beispiele, weil eine umschriebene Behauptung
+            typischerweise kein oder das falsche Notizbuch nennt.
+         Der Live-Fall bleibt unverändert ein Treffer (er nennt „QA-Test“,
+         das einzige weitere Zitat ist der Notizbuchname selbst). Signatur-
+         änderung: `App.jsx#requestFeedback` übergibt jetzt `nb.name` und
+         `nbCtx.notebooks.map(n => n.name)` mit.
+         Mutationsprobe (`tests/feedback.test.js`): ohne den
+         `activeName`/`nbNames`-Check werden zwei neue Negativ-Tests rot
+         ("Satz nennt das aktive Notizbuch NICHT…" und "semantische …
+         Dublette mit Verweis auf eine ANDERE konkrete Zeile…"), alle
+         anderen bleiben grün; danach zurückgesetzt.
+         ⚠️ **abgelöst durch #124, seinerseits abgelöst durch #130:** Sowohl
+         die hier unter 1. beschriebene `formatFeedbackFacts()`-Formulierung
+         ("kein zweiter WORTGLEICHER Eintrag …") als auch
+         `findContradictedDuplicateClaims()` (2., samt der (b)/(e)-
+         Bedingungen) sind komplett entfernt/ersetzt – siehe #124 (D1-Netz:
+         annotieren statt streichen) bzw. #130 (Rückbau des gesamten
+         Fakten-Anhang-Netzes, Nutzerentscheidung); #130 liefert stattdessen
+         eine reine, unbewertete exakte Zählung ohne jede
+         "Dublette"/"WORTGLEICHER Eintrag"-Formulierung.
+       - **Tabellen-Trennzeilen/Trennlinien konnten als "ECHTE Dublette"
+         gemeldet werden (🟡, Probe R8 aus dem Review): Eine zweite Tabelle
+         im selben Notizbuch wiederholt "| --- | --- |" oder "---" NOTWENDIG
+         wortgleich.** Neuer `STRUCTURAL_RE`-Ausschluss in
+         `buildFeedbackFacts()` (Tabellen-Trennzeile bzw. Trennlinie), plus
+         ein zusätzlicher, unabhängiger Guard: eine Zeile braucht
+         MINDESTENS 2 Buchstaben/Ziffern INSGESAMT (nicht zwingend
+         zusammenhängend – eine Tabellenzeile wie "| A | B |" hat pro Zelle
+         nur EIN Zeichen), sonst liefert sie keinen Fakt (filtert z. B.
+         leere Tabellenzellen "|  |" oder reine Interpunktion "| ... |").
+         Anmerkung zur Testabdeckung (ehrlich gemeldet): Weil
+         Tabellen-/Trennlinien-Syntax per Definition frei von Buchstaben/
+         Ziffern ist, überlappen sich beide Guards für DIESEN Befund
+         vollständig – der neue Test "Tabellen-Trennzeilen und
+         Trennlinien…" beweist das GESAMTERGEBNIS (kein Fakt), unterscheidet
+         aber nicht, welcher der beiden Guards greift. Der zweite Test
+         ("leere Tabellenzellen…") isoliert wenigstens den
+         Buchstaben/Ziffern-Guard eindeutig (Mutationsprobe: ohne ihn wird
+         genau dieser Test rot).
+         ⚠️ **abgelöst durch #130:** `STRUCTURAL_RE` und der eigenständige
+         Buchstaben/Ziffern-Guard sind Teil des per Nutzerentscheidung
+         zurückgebauten Netzes – seit #130 zählt jede hinzugefügte,
+         nicht-leere Zeile (auch eine Tabellen-Trennzeile) EXAKT, ohne
+         Sonderregel.
+       - **Testqualität (🟡): Die D1-Testfixtures waren nicht wortgetreu
+         (ASCII-Anführungszeichen statt der typografischen „…“, die das
+         Modell tatsächlich verwendet) und deckten die typografische
+         Variante damit nicht ab.** Neue Konstante mit dem ECHTEN Volltext
+         aus `data/state.json@6f915c2d` (inkl. Pfadangabe „→ Allgemein →
+         Inbox“ und dem vollständigen zweiten Satz); die bisherige
+         ASCII-Kurzform bleibt als zusätzlicher, einfacherer Testfall
+         daneben stehen.
+     - **Bewusst NICHT umgesetzt (mit Begründung, statt blind übernommen):**
+       - Ein Vorschlag verlangte, `findContradictedDuplicateClaims()` NUR
+         über die "erlaubte Namen"-Bedingung (e) zu härten, OHNE Bedingung
+         (b) (Satz muss das aktive Notizbuch nennen). Eigene Gegenprobe:
+         Bedingung (e) allein hätte einen der drei Review-Belege
+         ("„Kaffee mit Sarah…“ ist doppelt – derselbe Termin steht bereits
+         eine Zeile darüber", nur EIN Zitat, kein zweites) NICHT gefangen,
+         weil dort gar kein "anderes" Zitat vorhanden ist, das die
+         Bedingung hätte auslösen können. Bedingung (b) ist deshalb
+         zusätzlich nötig, nicht optional – beide Bedingungen zusammen
+         umgesetzt.
+       - `App.jsx`-Blaufund "Basis-Reset bei jedem Settings-Save, auch
+         ohne Repo-Wechsel" ist durch den `foreignRepo`-Vergleich oben
+         bereits mit-behoben (Speichern MIT gleichem Owner/Repo erkennt
+         jetzt "nicht fremd").
+       - Die Testlücken-Liste des Reviews (sechs benannte Mutanten M2–M8)
+         wurde NICHT vollständig einzeln nachgezogen. Abgedeckt sind M2
+         (Poll-Refresh-Merge, indirekt über Test „R5b“, der denselben
+         `mergeQuickNotes`-Aufruf in `maybeRefresh()` durchläuft) und M8
+         (Merge-Übernahme in den State im Konfliktpfad, Test „R1“/„R2“
+         prüfen jetzt explizit das UI, nicht nur den Remote-Stand). NICHT
+         gezogen: M3 (`pagehide`-Listener entfernt), M4 (`u`-Stempel
+         entfernt), M5/M6 (D1-Verdrahtung in `App.jsx#requestFeedback`
+         selbst, z. B. vertauschte Argumente oder `raw` statt `reply`).
+         Der volle App-Regressionstest mit echtem TipTap-Editor + Fake-
+         Anthropic-Call (Muster "Probe B" aus der Ursachenanalyse) für die
+         D1-Verdrahtung wurde aus Zeit-/Umfangsgründen NICHT gebaut – die
+         Verdrahtung selbst wurde beim Umsetzen manuell nachvollzogen
+         (`nb.name`/`nbCtx.notebooks.map(...)` korrekt übergeben), bleibt
+         aber ohne eigenen automatisierten Test. Offener Punkt für eine
+         künftige Runde.
+         ⚠️ **Korrektur (Eintrag #121):** Die Behauptung "M2 ist indirekt
+         über R5b abgedeckt" war FALSCH – ein Review-Fund zu #121 belegte per
+         eigener Mutationsprobe, dass R5b unverändert grün bleibt, wenn der
+         Merge-Aufruf in `maybeRefresh()` durch einen blinden Spread ersetzt
+         wird (R5b's Remote-Stand enthält in seinem Szenario ohnehin BEIDE
+         Notizen, unabhängig vom Merge-Verfahren). Test „M2“ in
+         `tests/quickNotesSync.test.jsx` deckt den eigentlichen M2-Fall jetzt
+         direkt ab (gescheiterter Nicht-Konflikt-Write, danach Poll). M3/M4
+         sind seit #121 ebenfalls durch eigene Tests abgedeckt, M5/M6 durch
+         die neue Verdrahtung in `feedback.js` (siehe dort).
+     - **Tests/Verifikation.** `tests/quickNotesSync.test.jsx`: 5 neue Tests
+       ("R1" bis "R5b", siehe Mutationsproben oben) zusätzlich zu den 5
+       bestehenden aus #119; die Fake-GitHub-Mock wurde dafür auf ECHT
+       GETRENNTE Repos pro `owner/repo` umgestellt (vorher eine einzige
+       globale Datei-Map) und um eine per Test aktivierbare künstliche
+       Verzögerung für `state.json`-GET/PUT erweitert (öffnet ein
+       Zeitfenster zum Weitertippen während einer laufenden
+       Konfliktauflösung). `tests/feedback.test.js`: 57 Tests gesamt (vorher
+       50; neu u. a. die beiden Negativ-Tests zur semantischen Dublette,
+       der wortgetreue Live-Volltext-Test, die Tabellen-/Trennlinien-Tests,
+       ein Test für den 160-Zeichen-Kürzungs-Deckel im Fakten-Text). Alle
+       sieben Mutationsproben oben durchgeführt (Fix jeweils kurz
+       zurückgenommen, betroffener Test wurde rot, alle anderen blieben
+       grün; danach zurückgesetzt) – Details siehe jeweils dort.
+       `npx vitest run --maxWorkers=3`: 2848/2848 grün (57 Testdateien,
+       gegenüber 2836/2836 vor dieser Nachbesserung). `npm run
+       test:coverage -- --maxWorkers=3`: „All files“ Statements 93,71 % /
+       Branches 87,85 % / Funktionen 93,34 % / Lines 95,97 % (Gate 60 %);
+       `feedback.js` 100/90,53/100/100; `quicknotes.js` unverändert
+       98,75/95,34/100/100 (Modul selbst nicht angefasst).
+     - **Restrisiko (zusätzlich zu #118/#119, dort weiterhin gültig):** Der
+       R1-Fix schließt das ursprünglich gemeldete Zeitfenster, öffnet aber
+       kein neues – bei ÜBERLAPPENDEN Konfliktauflösungen (sehr seltener
+       Grenzfall: ein zweiter Debounce-Flush startet, während der erste
+       noch in seiner eigenen Konfliktauflösung steckt) konvergiert der
+       Zustand über mehrere Runden, statt in einer einzigen; das ist durch
+       die Testsuite beobachtet (Test "R1" braucht dafür bewusst einen
+       großzügigen Nachlauf), aber nicht formal bewiesen. Der `foreignRepo`-
+       Vergleich erkennt nur `owner`+`repo`; ein Reload DIREKT in ein
+       anderes Repo (kein Reconnect im selben Tab, siehe Analysebericht zu
+       #119, Punkt "optional zusätzlich Repo im Cache speichern") bleibt
+       wie zuvor unbehandelt. Die D1-Verdrahtung in `requestFeedback` ist
+       weiterhin ohne eigenen App-Level-Test (siehe oben, "bewusst nicht
+       umgesetzt").
+
+121. **v7.57.1, Code-Review-Nachbesserung Runde 2 zu #118–#120 (3× 🔴, 6× 🟡,
+     mehrere 🔵).** Ein zweites Code-Review (nach der #120-Nachbesserung)
+     fand erneut echte Fehler in beiden Fixes UND Testlücken, die #120 sich
+     fälschlich als "abgedeckt" zuschrieb. Kein weiterer Versions-Bump
+     (bleibt `v7.57.1`, nur derselbe Produktivcode nachgebessert).
+     - **E2/`src/lib/quicknotes.js`, 🔴 (doppelt gemeldet, korrektheit +
+       befundtreue): Cache-Migration v1/v0 → v2 verlor bei GLEICHER ID mit
+       abweichendem Inhalt und unbekannter Basis systematisch die REMOTE
+       Änderung.** `mergeOneNote()`s Tiebreak-Regel (`lu >= ru ? l : r`)
+       entscheidet bei Gleichstand (0 >= 0) für lokal – ALTE Geräte
+       stempelten `u` vor der v2-Migration gar nicht, ein Gleichstand war
+       also der REGELFALL bei jeder Migration, nicht die Ausnahme. Betroffen
+       ist NICHT der (seltene) ID-Kollisionsfall, sondern der GEWÖHNLICHE
+       Fall: dieses Gerät kennt eine Notiz-ID noch aus einer früheren
+       Sitzung (im v1-Cache gespeichert), ein ANDERES Gerät hat sie
+       SEITDEM geändert – nach dem Update auf v7.57.1 gewann bisher IMMER
+       der alte lokale Text. Fix: `if (b === undefined) return lu > ru ? l
+       : r;` – ohne BELEGTEN Zeitvorsprung (`lu > ru`, nicht `>=`) gewinnt
+       bei unbekannter Basis jetzt der Remote-Stand, wie vor v7.57.1.
+       Mutationsprobe: Fix-Zeile auf `false && …` gesetzt → die neuen
+       Migrationsfall-Tests werden rot, alle anderen 30 `quicknotes.test.js`-
+       Tests bleiben grün; danach zurückgesetzt.
+     - **D1/`src/lib/feedback.js`, 🟡 (korrektheit) + 🔴 (befundtreue):
+       das Netz aus #120 strich weiterhin echte Beobachtungen in drei neuen
+       Ausprägungen.**
+       1. **Bedingung (b) prüfte den GANZEN Satz per Substring, auch
+          INNERHALB eines Zitats** – ein Notizbuchname, der nur zufällig als
+          Teilstring in einem GANZ ANDEREN Zitat steckt (`„Einkauf Milch“`
+          enthält `„Einkauf“`), erfüllte (b) fälschlich. Fix: geprüft wird
+          jetzt AUSSERHALB jedes Zitats (`unquoted.includes(activeName)`)
+          ODER als vollständiges EIGENES Zitat (`quoted.includes(activeKey)`
+          mit `activeKey = normalizeFactText(activeName)`).
+       2. **Ein relational/semantisch formulierter, aber trotzdem
+          zitatgestützter Dubletten-Hinweis wurde weiterhin gestrichen**
+          (`"„X“ entspricht inhaltlich dem bestehenden Punkt Y"`,
+          `"„X“ ist eine Dublette ZUM bestehenden Punkt Y"`, `"… doppelt
+          erfasst: DERSELBE Termin …"`) – (b)/(e) allein reichten nicht,
+          weil das aktive Notizbuch dabei durchaus konkret genannt wird.
+          Neue Konstante `RELATION_RE` (Marker: `zu[mr]?`/`wie` NUR als
+          STANDALONE Wort per Wortgrenzen-Lookaround, sonst würde jedes
+          `dazu`/`zusammen`/`wieder` den Guard auslösen und das Netz
+          wirkungslos machen; `entspr`/`ähnl`/`ähnel`/`inhaltlich`/
+          `sinngemäß`/`selbe`/`überschneid`/`gleichbedeutend`/`vergleichbar`
+          als reine, unkritische Teilstring-Stämme). Ein Treffer AUSSERHALB
+          der Zitate lässt den Satz unangetastet.
+       3. **Eine ganze mehrzeilige Aufzählung galt als EIN "Satz" – ein
+          Treffer in EINEM Listenpunkt strich ALLE, auch berechtigte,
+          Punkte mit.** `splitSentences()` trennte nur an `.!?` +
+          Großbuchstabe/Zitat/Ziffer – ein Zeilenumbruch vor einem
+          Aufzählungszeichen (`"\n- "`) erfüllte dieses Muster nie. Fix:
+          ZUERST an Zeilenumbrüchen trennen, ERST DANN je Zeile grob an
+          Satzenden. Zusätzlich (🔴, selbe Fundstelle): eine VERNEINTE
+          Dubletten-Aussage (`"… ist NICHT doppelt …"`, `"… ist KEINE
+          Dublette …"`) enthält das Dubletten-Wort trotzdem – neue Konstante
+          `NEGATION_RE` verhindert, dass das Netz das GEGENTEIL der
+          Behauptung streicht.
+       Die Zusage "ein echter, eigenständiger Zweitbefund wird NIE
+       gelöscht" (Kopfkommentar, #118/#120, TESTFAELLE D1b) war damit
+       objektiv FALSCH – korrigiert auf "eine bewusste Heuristik, keine
+       Garantie" (Kopfkommentar, TESTFAELLE D1/D1b, siehe dort). Der Live-
+       Fall (Satz nennt "QA-Test" als eigenes Zitat, keine relationale
+       Formulierung) bleibt weiterhin ein Treffer.
+       Mutationsproben (`tests/feedback.test.js`, je einzeln zurückgenommen
+       und wieder zurückgesetzt): (b)-Refinement deaktiviert → GENAU der
+       neue P-C-Test (Notizbuchname nur als Zufalls-Substring, OHNE
+       Relations-Marker) wird rot. `RELATION_RE` deaktiviert → GENAU P-B/S2/
+       S2b werden rot. `splitSentences()` auf die alte Fassung zurückgesetzt
+       → GENAU S1 wird rot (der ganze mehrzeilige Reply wird dabei
+       zufällig durch `RELATION_RE` komplett verschont, weil "zum Kapitel"
+       irgendwo im Text steht – zeigt zusätzlich, wie unvorhersehbar sich
+       ungeteilte Mehrsatz-Antworten sonst verhalten würden).
+       `NEGATION_RE` deaktiviert → GENAU S3 wird rot (S3b bleibt zufällig
+       durch `RELATION_RE` mitgeschützt, weil "ähnlichen" darin vorkommt –
+       kein Beleg gegen die Notwendigkeit von `NEGATION_RE`, siehe S3).
+       Jeweils alle anderen Tests blieben grün.
+       ⚠️ **abgelöst durch #124, seinerseits abgelöst durch #130:**
+       `RELATION_RE`/`NEGATION_RE`/`splitSentences()` sind komplett
+       entfernt – siehe #124 (D1-Netz: annotieren statt streichen) bzw.
+       #130 (Rückbau auch dieses Nachfolge-Designs, Nutzerentscheidung).
+     - **E2/`src/App.jsx#connect`, 🟡 (befundtreue, mit identischer
+       Analyse auch als 🔵 im selben Review gemeldet): der `foreignRepo`-
+       Schutz aus #120 griff NUR innerhalb `if (nQuick)`.** Hatte das NEUE
+       Repo GAR KEINE `state.json` (frisches privates Repo) oder keine
+       `quicknotes` darin, blieben die lokalen Post-its des ALTEN Repos im
+       UI stehen und wurden vom Save-Effect anschließend INS NEUE Repo
+       zurückgeschrieben – dieselbe Fehlerklasse wie R4, nur ohne
+       `quicknotes`-Feld. Fix: `const effQuick = nQuick || (foreignRepo ?
+       {} : null);` – bei einem FREMDEN Repo gilt "kein Feld" jetzt wie
+       "Remote hat nichts" (Remote entscheidet vollständig), bei einem
+       Reconnect auf DASSELBE Repo bleibt "kein Feld" weiterhin
+       "unverändert lassen" (Migrationsfall, DECISIONS #119). Mutationsprobe
+       (Tests „F1“/„F2“): `effQuick = nQuick` (alte Fassung) → GENAU F1/F2
+       werden rot, alle anderen 13 Tests bleiben grün.
+     - **Testlücken (🟡, korrektheit): #120 schrieb sich mehrere
+       Testabdeckungen fälschlich zu.** Eigene Mutationsprobe bestätigte:
+       `maybeRefresh()`s Schnellnotizen-Merge (`App.jsx`, Poll-/Fokus-
+       Refresh) auf einen blinden Spread zurückgesetzt → Test "R5b" blieb
+       GRÜN (dessen Remote-Stand enthält in seinem Szenario ohnehin beide
+       Notizen, unabhängig vom Merge-Verfahren) – die #120-Behauptung "M2
+       indirekt über R5b abgedeckt" war falsch (⚠️ Korrektur direkt am
+       #120-Eintrag oben). Neue Tests in `tests/quickNotesSync.test.jsx`:
+       "M2" (gescheiterter NICHT-Konflikt-Write, danach holt der 25s-Poll
+       die Änderung eines anderen Geräts UND behält die eigene lokale
+       Eingabe), "M3" (`pagehide` schreibt den Schnellnotizen-Cache SOFORT,
+       ohne die 300-ms-Debounce abzuwarten), "M4" (`updateQuickNote`
+       stempelt `u` bei jeder Änderung neu). Alle drei Mutationsproben
+       (Merge durch blinden Spread ersetzt / `pagehide`-Listener entfernt /
+       `u: Date.now()` entfernt) bestätigt: GENAU der zugehörige Test wird
+       rot, alle anderen bleiben grün.
+     - **D1-Verdrahtung (🟡, korrektheit + befundtreue, seit #120 offener
+       Punkt): die komplette Verdrahtung in `App.jsx#requestFeedback` war
+       ohne TipTap-Harness nicht unit-testbar.** Statt des vorgeschlagenen
+       vollen App-Regressionstests (TipTap-Editor + Fake-Anthropic-Call,
+       zeitaufwändig) wurde die Verdrahtung selbst in zwei reine, exportierte
+       Funktionen nach `src/lib/feedback.js` verschoben:
+       `buildFeedbackRequest(diff, diffText, notebooks, nbName)` (Fakten +
+       Trigger bauen) und `finalizeFeedbackReply(raw, facts, activeName,
+       nbNames)` (Netz + Streichen + `isNoFeedback` + Dedupe, liefert `null`
+       statt eines Sentinel-Strings für "keine Pille"). `App.jsx#
+       requestFeedback` ruft jetzt NUR noch diese beiden Funktionen auf –
+       ein vertauschtes Argument, `raw` statt `reply` oder Fakten aus dem
+       falschen Diff-Stand werden jetzt von `tests/feedback.test.js`
+       (Live-Fixture + Sentinel-Fälle) erfasst. Das ist eine BEWUSSTE
+       Abweichung von der Review-Empfehlung (dort auch als Option genannt):
+       ein echter App-Level-Test mit TipTap bleibt weiterhin offen (siehe
+       Restrisiko).
+       ⚠️ **abgelöst durch #130:** `finalizeFeedbackReply()` ist komplett
+       entfernt; `App.jsx#requestFeedback` wertet die Modellantwort seither
+       wieder direkt über `isNoFeedback()`/`dedupeFeedbackParagraphs()` aus
+       (wie vor v7.57.1), ohne eigenen Anhang. `buildFeedbackRequest()`
+       bleibt bestehen, liefert seit #130 aber nur noch die unbewertete
+       exakte Zählung (siehe dort).
+     - **Doku-Korrekturen (🔵):** ⚠️-Korrekturvermerke an #118 (veraltete
+       Bedingungen/Signatur, "NIE gelöscht" relativiert) und #119 (Geometrie
+       schlägt Text im Tiebreak, siehe Restrisiko dort) ergänzt.
+       `STRUCTURAL_RE` in `feedback.js` bleibt bewusst als redundante
+       Zweitsicherung stehen (überlappt vollständig mit dem `alnumCount`-
+       Guard) statt entfernt zu werden – im Kommentar jetzt explizit so
+       benannt. `docs/TESTFAELLE.md`: D1/D1b auf die tatsächlichen
+       (nicht mehr absoluten) Bedingungen umgestellt, D1b von einer
+       unmöglichen UI-Prüfung auf einen Beobachtungsfall mit Beleg-Pflicht
+       umgestellt; E2f auf einen neuen `[NUTZER]`-Tag umgestellt (der
+       Tester gibt NIE einen PAT ein und verbindet NIE auf ein Repo ohne
+       „-qa“-Endung – vorher hätte E2f mit einem frischen Zweit-Repo den F1-
+       Fall ausgelöst bzw. ein Verbindungsversuch ohne passenden PAT-Scope
+       zu einem falschen Finding geführt).
+     - **Bewusst NICHT umgesetzt (mit Begründung):**
+       - Der Analysevorschlag für `RELATION_RE` (`entspr\p{L}*`/
+         `ähnl\p{L}*`/`inhaltlich\p{L}*` usw. MIT Wortgrenzen-Lookaround auf
+         BEIDEN Seiten) hätte deutsche Flexionsformen wie "inhaltlich**e**"
+         verpasst (die Lookahead-Wortgrenze verlangt exakt das Wortende).
+         Umgesetzt stattdessen: Wortgrenzen NUR für die beiden kurzen,
+         potenziell überall vorkommenden Wörter `zu[mr]?`/`wie`, die übrigen
+         Stämme als freie (aber im Deutschen eindeutige) Teilstring-Suche.
+       - Der Analysevorschlag zum Konflikt-Retry in `flushState()`
+         ("begrenzt auf 3 Versuche" statt einem) wurde NICHT umgesetzt –
+         ein zweiter SHA-Konflikt in Folge (zwei fast gleichzeitige
+         Schreiber) ist selten, eine Retry-Schleife hätte den Umfang dieser
+         Nachbesserung deutlich vergrößert; bleibt dokumentiertes
+         Restrisiko wie bisher (Banner bei einem zweiten Konflikt).
+       - Kein voller App-Level-Regressionstest für die D1-Verdrahtung
+         (TipTap-Editor + Fake-Anthropic) – siehe D1-Verdrahtung oben.
+       - Ein zunächst erwogener Test "Basis BEKANNT, aber diese ID fehlt
+         darin" wurde NICHT aufgenommen: `mergeOneNote()` erhält pro ID
+         bereits `b.get(id)`, das bei einer BEKANNTEN Basis ohne diese ID
+         GENAUSO `undefined` liefert wie bei einer UNBEKANNTEN Basis – beide
+         Fälle sind auf dieser Ebene nicht unterscheidbar, und dieselbe ID
+         unabhängig auf beiden Seiten mit unterschiedlichem Inhalt entstehen
+         zu lassen ist wegen der zufälligen ID-Vergabe (`Date.now()` +
+         Zufallszeichen) praktisch nur im Migrations- oder im (astronomisch
+         seltenen) ID-Kollisionsfall denkbar.
+     - **Tests/Verifikation.** Neue/geänderte Tests: `tests/quicknotes.test.js`
+       (+2, insgesamt 32), `tests/feedback.test.js` (+14, insgesamt 71),
+       `tests/quickNotesSync.test.jsx` (+6: M2/M3/M4/F1/F2 + `failStatePut`-
+       Mechanismus im Fake-Repo, insgesamt 15). Alle oben beschriebenen
+       Mutationsproben durchgeführt (Fix jeweils kurz zurückgenommen,
+       GENAU der zugehörige Test wurde rot, alle anderen blieben grün;
+       danach zurückgesetzt). `npx vitest run --maxWorkers=3`: **2869/2869
+       grün** (57 Testdateien, gegenüber 2848/2848 vor dieser
+       Nachbesserung). `npm run test:coverage -- --maxWorkers=3`: „All
+       files“ Statements 93,7 % / Branches 87,89 % / Funktionen 93,38 % /
+       Lines 95,99 % (Gate 60 %); `feedback.js` 99/90,05/100/100;
+       `quicknotes.js` 98,78/97,77/100/100.
+     - **Restrisiko (zusätzlich zu #118/#119/#120, dort weiterhin gültig):**
+       ⚠️ **abgelöst durch #124 (Streich-Netz entfernt), inzwischen auch
+       #124 selbst per #130 zurückgebaut:** Das D1-Netz blieb bis #130 eine
+       HEURISTIK: eine relationale/semantische
+       Formulierung, die `RELATION_RE` nicht kennt (z. B. reine Paraphrase
+       ohne jedes der gelisteten Signalwörter), konnte weiterhin
+       fälschlich gestrichen werden – TESTFAELLE D1b verlangte deshalb
+       einen BELEG (Netzwerk-Tab), bevor das als Finding gilt, statt einer
+       unmöglichen "war da mal ein Hinweis"-Prüfung. Seit #130 gibt es
+       keine Heuristik dieser Art mehr, siehe dort. Die Migrationsfall-Regel
+       in `quicknotes.js` (Remote gewinnt ohne belegten Zeitvorsprung) kann
+       umgekehrt EINMALIG eine tatsächlich neuere lokale Änderung verlieren,
+       wenn sie GENAU im Update-Moment (v7.57 → v7.57.1) entstanden ist,
+       bevor `u` gestempelt wurde – bewusst in Kauf genommen (kleinerer
+       Fehler als der bisherige Regelfall-Verlust bei JEDER Migration). Die
+       D1-Verdrahtung in `App.jsx#requestFeedback` bleibt ohne eigenen
+       App-Level-Test (TipTap + Fake-Anthropic) – die Logik selbst ist jetzt
+       zwar unit-testbar (siehe oben), ein Fehler in den zwei verbleibenden
+       Aufrufzeilen selbst (z. B. falsches `nb`) wäre aber weiterhin nicht
+       automatisiert erfasst. Der einmalige Konflikt-Retry in `flushState()`
+       bleibt wie zuvor. ⚠️ **Ergänzung (#122, Review-Fund 🔵):** zwei bisher
+       nirgends dokumentierte Restrisiken der E2-Lösung – die einmalige
+       Wiederauferstehung eines von einem ANDEREN Gerät gelöschten Post-its
+       direkt nach der Cache-Migration, und ein veralteter Zweit-Tab, der
+       beim Verstecken/Schließen einen ungesicherten Text eines anderen Tabs
+       im `localStorage`-Cache überschreiben kann – sind jetzt am
+       #119-Restrisiko im Detail nachgetragen.
+
+122. **v7.57.1, Code-Review-Nachbesserung Runde 3 zu #118–#121 (1× 🟡 Pflicht,
+     mehrere 🔵).** Ein drittes Code-Review (zwei unabhängige Linsen,
+     übereinstimmend) fand, dass die #121-Fassung von `RELATION_RE` selbst
+     nach zwei Nachbesserungsrunden noch IMMER zu weit gefasst war, plus
+     mehrere kleinere Testlücken/Kosmetik-Funde. Kein weiterer Versions-Bump
+     (bleibt `v7.57.1`, nur derselbe Produktivcode nachgebessert).
+     - **D1/`src/lib/feedback.js`, 🟡 (Pflicht, korrektheit + befundtreue):
+       die freistehenden Marker „zu/zum/zur“ und „wie“ in `RELATION_RE`
+       ließen knapp die Hälfte typischer Falschbehauptungs-Formulierungen
+       unangetastet durch.** `RELATION_RE` aus #121 band „zu[mr]?“/„wie“
+       zwar per Wortgrenzen-Lookaround an STANDALONE Vorkommen, das reichte
+       aber nicht: JEDES Infinitiv-„zu“ („um … zu vermeiden“), JEDES
+       „führt zu“ und JEDES freistehende „wie“ („wie schon zuvor“) sind
+       allgegenwärtige deutsche Funktionswörter, keine Vergleichsmarker –
+       ein Satz, der außerhalb der Zitate irgendeines davon enthielt, blieb
+       automatisch stehen, unabhängig davon, ob er tatsächlich relational
+       formuliert war. Review-Probe (8 realistische Varianten derselben
+       Falschbehauptung, Zeile steht nachweislich 1× im aktiven Notizbuch):
+       nur 4 von 8 wurden noch erkannt. Fix: „zu[mr]?“ nur noch DIREKT nach
+       einem Dubletten-Wort (`(?:dublette|duplikat|doppelt)\s+
+       (?:zu[mr]?|von|des|der)` – die tatsächliche relationale Konstruktion
+       „Dublette zum/von/des/der X“), „wie“ nur noch nach
+       „genauso/ebenso/so/ähnlich“ (die tatsächliche Vergleichskonstruktion
+       „X ist genauso/ähnlich wie Y“). Die übrigen Stämme (`entspr`/`ähnl`/
+       `ähnel`/`inhaltlich`/`sinngemäß`/`selbe`/`überschneid`/
+       `gleichbedeutend`/`vergleichbar`) bleiben unverändert als reine
+       Teilstring-Suche. Probe mit dem Fix: 7 von 8 Varianten erkannt (die
+       achte, „… doppelt – derselbe Eintrag existierte dort bereits“, bleibt
+       wegen des bewusst behaltenen `selbe`-Markers ein bekannter, lexikalisch
+       unvermeidbarer Durchläufer, siehe Restrisiko). Alle 71 Bestandstests
+       aus `tests/feedback.test.js` blieben dabei grün. **Mutationsprobe**
+       (RELATION_RE auf die #121-Fassung zurückgesetzt): GENAU die drei neuen
+       Tests „(R3-V1)“/„(R3-V3)“/„(R3-V4)“ (führt-zu / Infinitiv-zu /
+       freistehendes wie) werden rot, alle anderen 81 Tests bleiben grün.
+       Neue Tests: „(R3-V1)“/„(R3-V3)“/„(R3-V4)“/„(R3-V6)“ (typische
+       Falschbehauptungs-Varianten, MÜSSEN jetzt gestrichen werden),
+       „(R3-isoliert)“ (die „Dublette zu[mr]?“-Teilregel isoliert von der
+       „anderes Zitat“-Regel geprüft, ohne Zweitzitat), „(R3-true1)“/
+       „(R3-true2)“ (echte semantische Marker `überschneid`/`selbe` schützen
+       weiterhin), „(R3-bekannter Durchläufer)“ (pinnt den bewusst in Kauf
+       genommenen `selbe`-Fall statt ihn unbemerkt zu lassen).
+       ⚠️ **abgelöst durch #124:** `RELATION_RE` (und damit auch diese
+       ganze Nachbesserung) ist mit dem restlosen Streich-Netz entfernt –
+       das neue Fakten-Anhang-Design (`buildDuplicateFactNote()`) braucht
+       keine Relations-/Negations-/Satzzerlegungs-Heuristik mehr. ⚠️ #124
+       selbst ist seit #130 ebenfalls zurückgebaut (Nutzerentscheidung),
+       siehe dort.
+     - **D1/`src/lib/feedback.js`, 🔵 (aus beiden Review-Linsen, Punkt 3a der
+       Aufgabenstellung): nach dem Streichen konnte eine Pille übrig
+       bleiben, die nur eine nackte Überschrift/ein Label oder eine leere
+       Aufzählungsmarke zeigt.** Zwei Ursachen behoben: (1)
+       `stripContradictedSentences()` entfernt jetzt zusätzlich Zeilen, die
+       NACH dem Streichen nur noch aus einer nackten Aufzählungsmarke
+       bestehen (`- `, `1.` …) – `splitSentences()` trennt eine Ziffern-
+       Marke wie „1.“ als eigenen „Satz“ vom nachfolgenden (widerlegten)
+       Inhalt ab, die Marke selbst enthält kein Dubletten-Wort und wurde
+       deshalb nie mitgestrichen. (2) `finalizeFeedbackReply()` behandelt
+       ein Ergebnis, bei dem NACH dem Streichen JEDE verbliebene Zeile nur
+       aus Formatierungszeichen besteht oder auf „:“ (ggf. fett) endet, wie
+       `##OK##` (liefert `null`, keine Pille) – ohne diesen Zusatz zeigte
+       die UI eine Pille mit ausschließlich „**Auffälligkeiten:**“ oder
+       „Hinweise:“ ohne jeden Inhalt. Bleibt daneben ein ECHTER zweiter
+       Hinweis erhalten, wird NICHTS unterdrückt (neuer Test „bleibt nach
+       dem Streichen eine ECHTE zweite Beobachtung übrig …“). Neue Tests:
+       vier in der `buildFeedbackRequest / finalizeFeedbackReply`-Suite,
+       einer in der `findContradictedDuplicateClaims / stripContradictedSentences`-
+       Suite.
+       ⚠️ **abgelöst durch #124:** Die gesamte "leere Pille nach dem
+       Streichen"-Fehlerklasse entfällt seit #124 KONSTRUKTIONSBEDINGT –
+       ohne Streichen kann nichts leer werden. `isLabelOnly()` und die
+       zugehörigen Tests sind entfernt. ⚠️ #124 selbst ist seit #130
+       ebenfalls zurückgebaut (Nutzerentscheidung), siehe dort.
+     - **Nebenbefund/`src/lib/quicknotes.js`, 🔵 (Punkt 2 der
+       Aufgabenstellung, schon in v7.57 vorhanden, KEINE Regression aus
+       #118/#119): abweichende Notizbuch-Schlüsselreihenfolge je Gerät
+       erzeugte eine endlose, inhaltslose Schreibschleife in `state.json`.**
+       `mergeQuickNotes()` baute die Schlüsselreihenfolge des Ergebnisses
+       bisher als `[...Object.keys(base), ...local, ...remote]`.
+       `App.jsx#flushState` vergleicht aber den SERIALISIERTEN JSON-String
+       gegen `lastSavedState` (den ROHEN Remote-String) – wichen zwei Geräte
+       nur in der Notizbuch-REIHENFOLGE ab (typisch: beide legen
+       gleichzeitig ein eigenes neues Notizbuch mit Post-it an, siehe P6),
+       lieferte „Basis zuerst“ auf JEDEM Gerät eine ANDERE, vom jeweils
+       zuletzt geschriebenen Remote-Stand abweichende Reihenfolge – jedes
+       Gerät hielt seinen String für neu und schrieb zurück, das andere sah
+       beim nächsten Poll wieder einen fremden String: eine ENDLOSE
+       Schreibschleife ohne inhaltliche Änderung (Review-Probe: 5
+       verschiedene `state.json`-SHAs in 120 s, 4 Commits „Chat &
+       Einstellungen aktualisiert“ ohne jede inhaltliche Änderung, läuft
+       endlos weiter). Fix: Reihenfolge jetzt REMOTE-ZUERST
+       (`[...Object.keys(remote), ...local, ...base]`) – das Merge-Ergebnis
+       übernimmt damit immer die Reihenfolge des zuletzt gelesenen
+       Remote-Stands (rein lokale, noch nicht synchronisierte Notizbücher
+       hängen unverändert dahinter); ein Gerät ohne inhaltlichen Beitrag
+       erzeugt dadurch keinen abweichenden JSON-String mehr. **Mutationsprobe**
+       (Reihenfolge auf die alte Fassung zurückgesetzt): GENAU die zwei
+       neuen Tests werden rot („Object.keys()-Reihenfolge …“ und „verhindert
+       die Ping-Pong-Schreibschleife …“), alle anderen 32 Tests in
+       `tests/quicknotes.test.js` bleiben grün; `tests/quickNotesSync.test.jsx`
+       (15 Tests) bleibt in beiden Fällen unberührt grün (kein dortiges
+       Szenario deckt eine abweichende Schlüsselreihenfolge ab). Neue Tests
+       (2, reine Funktions-Ebene statt der aufwändigeren App-Level-Probe aus
+       dem Review-Scratchpad – Zeit/Determinismus-Vorteil, dieselbe Aussage):
+       Reihenfolge-Test (`Object.keys(mergeQuickNotes(…))` folgt Remote) und
+       Idempotenz-Test (JSON-String des Merge-Ergebnisses ist bei
+       inhaltlicher Übereinstimmung BYTE-IDENTISCH mit dem Remote-String,
+       trotz abweichender Basis-/lokaler Reihenfolge – genau die Bedingung,
+       die `flushState()`s String-Vergleich einen weiteren PUT ausslösen
+       oder unterlassen lässt).
+     - **`tests/quickNotesSync.test.jsx`, 🔵 (Punkt 3d der Aufgabenstellung,
+       überlebende Mutanten getötet, wo billig):**
+       - „M3“ prüfte bisher NUR den sofortigen `localStorage`-Cache-Write bei
+         `pagehide`, nicht den sofortigen `state.json`-PUT, der den 2,5-s-
+         Debounce-Timer ersetzt (`App.jsx#flushBeforeUnload`) – ein Mutant,
+         der nur diesen PUT-Aufruf entfernte, blieb bisher unentdeckt. „M3“
+         prüft jetzt zusätzlich, dass der Remote-Stand direkt nach dem
+         `pagehide`-Event (und VOR Ablauf der 2,5 s) den neuen Text zeigt.
+       - Neuer Test „A3c“: derselbe Sofort-Flush über den ANDEREN Auslöser
+         (`visibilitychange`=„hidden“ statt `pagehide`) – auf Mobilgeräten
+         oft das einzige beim Tab-Wechsel zuverlässig ankommende Signal.
+       - **Mutationsproben:** Remote-PUT im `pagehide`-Handler stillgelegt
+         (`if (false) flushState(…)`) → GENAU „M3“ und „A3c“ werden rot
+         (beide hängen am selben `flushBeforeUnload()`), alle anderen 15
+         Tests bleiben grün; danach zurückgesetzt. Nur den
+         `visibilitychange`-Listener entfernt (Listener-Registrierung selbst,
+         `pagehide` bleibt bestehen) → GENAU „A3c“ wird rot, „M3“ bleibt
+         GRÜN – bestätigt, dass „A3c“ den `visibilitychange`-Pfad tatsächlich
+         ISOLIERT abdeckt statt zufällig über „M3“ mitgeschützt zu sein;
+         danach zurückgesetzt.
+       - **Bewusst NICHT umgesetzt:** die im Review vorgeschlagenen Tests für
+         die zwei Fallback-Stellen im Konfliktpfad (`flushedQuick =
+         localData.quicknotes || {}` bzw. der `remoteQuick`-Ternary auf
+         `null`, App.jsx:1486/1493f.) wurden NICHT umgesetzt – eine erste
+         Prüfung legt nahe, dass mindestens der `{}`-Fallback ein
+         GLEICHWERTIGER Mutant sein könnte (`normalizeQuickNotesMap()`
+         behandelt `undefined` bereits identisch zu `{}`), eine
+         abschließende Klärung hätte den Umfang dieser Nachbesserung
+         deutlich vergrößert; bleibt offener Punkt für eine künftige Runde.
+     - **Testlücke/`tests/quickNotesSync.test.jsx#F1`, 🔵 (aus beiden Review-
+       Linsen): die Assertion stand unter `if (stB) …` – schriebe der
+       Save-Effect aus irgendeinem Grund GAR NICHT, liefe der Test ohne
+       jede Prüfung grün durch.** Der Save-Effect schreibt in diesem
+       Szenario tatsächlich IMMER (der Merge-Stand weicht vom initialen
+       „kein `lastSavedState`“ ab) – die Assertion ist jetzt unbedingt
+       (`expect(stB).toBeTruthy()`) und prüft zusätzlich den GENAUEN
+       Quicknotes-Inhalt (`{ wissensbasis: [] }` statt nur „enthält nicht
+       'Geheim aus A'“).
+     - **Testlücke/`tests/quickNotesSync.test.jsx`, 🔵 (Punkt 3c der
+       Aufgabenstellung): das wörtliche Befundsymptom P1c (X + neu anlegen +
+       Text tippen + Reload NACH 0,8 s) hatte bisher keinen eigenen
+       App-Test, nur eine reine Logging-Probe im Analyse-Scratchpad OHNE
+       Assertion.** Neuer Test „P1c“ pinnt das tatsächliche Verhalten: nach
+       dem Reload bleibt „QA-Sync-Test“ als einziger Text stehen, die ALTE
+       (per X gelöschte) ID erscheint NICHT wieder – weder im
+       `localStorage`-Cache noch (nach dem nächsten Flush) im Remote-Stand.
+     - **Doku (Punkt 3b der Aufgabenstellung): zwei bisher nirgends
+       dokumentierte Restrisiken der E2-Lösung ergänzt** – siehe die
+       Ergänzungen direkt an #119 (Volltext) und #121 (Kurzverweis) oben:
+       (1) die einmalige Wiederauferstehung eines von einem anderen Gerät
+       gelöschten Post-its direkt nach der Cache-Migration v0/v1 → v2
+       (Basis für diese ID ist per Definition unbekannt, keine Löschung
+       erkennbar), und (2) ein veralteter Zweit-Tab, der beim Verstecken/
+       Schließen einen ungesicherten Text eines anderen, gerade aktiv
+       bearbeiteten Tabs im `localStorage`-Cache überschreiben kann.
+       `docs/TESTFAELLE.md` D1/D1b: Verweis auf #122 ergänzt, bekannte
+       lexikalische Durchläufer („Dublette zum bereits vorhandenen
+       Eintrag“, „derselbe Eintrag existierte dort bereits“) jetzt explizit
+       als NICHT zu meldende Fälle benannt (vorher implizit über die
+       allgemeine Heuristik-Klausel gedeckt, aber nicht konkret benannt).
+       ⚠️ **abgelöst durch #124 (Streich-Netz entfernt), #124 seinerseits
+       seit #130 zurückgebaut:** diese Durchläufer-Klausel gibt es schon
+       seit #124 nicht mehr – ohne Streichen kann nichts mehr
+       "durchlaufen"; seit #130 gilt das erst recht (keine Heuristik mehr).
+     - **Tests/Verifikation.** Neue/geänderte Tests: `tests/feedback.test.js`
+       (+13, insgesamt 84), `tests/quicknotes.test.js` (+2, insgesamt 34),
+       `tests/quickNotesSync.test.jsx` (+2 neue Tests „P1c“/„A3c“, plus „M3“
+       erweitert und „F1“ auf eine unbedingte Assertion umgestellt,
+       insgesamt 17). Alle oben beschriebenen Mutationsproben durchgeführt
+       (Fix jeweils kurz zurückgenommen, GENAU die zugehörigen Tests wurden
+       rot, alle anderen blieben grün; danach zurückgesetzt).
+       `npx vitest run --maxWorkers=3`: **2886/2886 grün** (57 Testdateien,
+       gegenüber 2869/2869 vor dieser Nachbesserung). `npm run test:coverage
+       -- --maxWorkers=3`: „All files“ Statements 93,7 % / Branches 87,91 % /
+       Funktionen 93,39 % / Lines 95,99 % (Gate 60 %); `feedback.js`
+       99,01/90,37/100/100; `quicknotes.js` 98,78/97,77/100/100.
+     - **Restrisiko (zusätzlich zu #118/#119/#120/#121, dort weiterhin
+       gültig):** ⚠️ **abgelöst durch #124 (Streich-Netz entfernt), #124
+       seinerseits seit #130 zurückgebaut:**
+       `RELATION_RE` blieb eine HEURISTIK, kein Beweis: „Dublette
+       zum bereits vorhandenen Eintrag“ (relationale Konstruktion, aber
+       lexikalisch nicht von einer ECHTEN, anders formulierten Dublette
+       unterscheidbar) und „derselbe Eintrag existierte bereits“ (`selbe`
+       als Substring von `derselbe`) bleiben BEWUSST geschützt bzw. rutschen
+       bewusst weiterhin durch eine Falschbehauptung – siehe
+       `docs/TESTFAELLE.md` D1/D1b. Der optional im Review genannte
+       zusätzliche Marker „(das/der/die) Gleiche“ wurde NICHT aufgenommen
+       (bereits als Restrisiko in #121 dokumentiert, kein Teil dieses
+       Auftrags) – „… faktisch doppelt, weil der Termin darüber das Gleiche
+       beschreibt“ wird deshalb weiterhin gestrichen. Die zwei
+       Fallback-Stellen im Konfliktpfad (`flushedQuick`/`remoteQuick`,
+       App.jsx:1486/1493f.) bleiben ohne dedizierten Mutations-Test (siehe
+       oben, „bewusst NICHT umgesetzt“). Version bleibt exakt `v7.57.1`
+       (Auftrag: kein weiterer Bump).
+
+123. **v7.57.1, Code-Review-Nachbesserung Runde 4 zu #118–#122 (3× 🟡 Pflicht,
+     mehrere 🔵).** Ein viertes Code-Review (zwei unabhängige Linsen) fand,
+     dass die #122-Verengung von `RELATION_RE` ihrerseits zu weit ging (der
+     SCHWERERE der beiden möglichen Fehler, siehe Kopfkommentar in
+     `feedback.js`), dass das Zwei-Geräte-Kriterium aus #122 nur auf reiner
+     Funktions-Ebene gepinnt war statt im tatsächlichen App.jsx-Zusammenspiel,
+     plus mehrere echte, kleinere Fehler (Testlücken/Kosmetik) in
+     Bestandscode. Kein weiterer Versions-Bump (bleibt `v7.57.1`).
+     - **D1/`src/lib/feedback.js`, 🟡 (Pflicht, korrektheit + befundtreue,
+       zwei übereinstimmende Review-Linsen): die #122-Verengung von "wie"
+       auf "nur nach genauso/ebenso/so/ähnlich" strich jetzt ECHTE
+       semantische Dubletten-Hinweise der (laut Auftrag ausdrücklich zu
+       erhaltenden) Form "wie X in Y".** Review-Proben (unabhängig,
+       übereinstimmend): 8 von 12 bzw. 8 von 16 berechtigten
+       "wie"-Vergleichen wurden von der #122-Fassung gestrichen (gegenüber
+       3 von 12/16 in der #121-Fassung) – u. a. "„X“ ist in „Y“ doppelt,
+       wie der Termin … in der Inbox", "… genau wie der Punkt … direkt
+       darüber" und "… meint genau das Gleiche wie der Punkt …". Fix: "wie"
+       ist wieder ein RELATIONS-Marker (wie vor #122), AUSSER es folgt einer
+       der üblichen zeitlich/verweisenden Anschlüsse ("schon", "bereits",
+       "zuvor", "vorher", "vorhin", "vor", "oben", "unten", "erwähnt",
+       "gesagt", "besprochen", "beschrieben", "man", "gewohnt", "üblich") –
+       das behält die #122-Trefferquote gegen die typischen
+       Falschbehauptungs-Varianten ("führt zu einer Dublette", "um …
+       zu vermeiden", "wie schon zuvor") bei, ohne die #121-Regression
+       (nur 4/8 erkannt) zurückzuholen. Zusätzlich zwei von der ersten
+       Review-Linse belegte Lücken geschlossen: "Punkt/Eintrag/Aufgabe/
+       Termin/Notiz zu[mr] X" (Relation OHNE Dubletten-Wort direkt davor,
+       z. B. "… es gibt schon einen Punkt zum Zahnarzttermin") und
+       "(das/der/die/den/dem/des) Gleiche" (in #121/#122 noch als bewusst
+       NICHT aufgenommenes Restrisiko dokumentiert). **Mutationsprobe**
+       (RELATION_RE auf die #122-Fassung zurückgesetzt): GENAU die 9 neuen
+       Tests aus der Suite „RELATION_RE Runde 4“ werden rot, alle anderen
+       93 Tests in `tests/feedback.test.js` bleiben grün. Neue Tests: 9 in
+       einer eigenen Suite (7× echte Vergleichs-Relation bleibt stehen,
+       inkl. der wortnahen Review-Proben-Varianten ohne Artikel, 1×
+       "Punkt zum" ohne "wie", 1× verweisendes "wie man … sieht" bleibt
+       weiterhin GESTRICHEN, 1× Regressionstest für die #122-Fälle
+       "führt zu"/"wie schon zuvor").
+       ⚠️ **abgelöst durch #124:** die gesamte `RELATION_RE`-Historie
+       (#118/#120–#123) ist mit dem Streich-Netz entfernt. ⚠️ #124 selbst
+       ist seit #130 ebenfalls zurückgebaut (Nutzerentscheidung), siehe
+       dort.
+     - **`tests/quickNotesSync.test.jsx`, 🟡 (Pflicht, korrektheit): das
+       Zwei-Geräte-Kriterium aus #122 ("nach der Angleichung KEIN weiterer
+       state.json-PUT") war nur auf reiner Funktions-Ebene
+       (`tests/quicknotes.test.js`) gepinnt, nicht im tatsächlichen
+       App.jsx-Zusammenspiel** (`lastSavedState` wird in
+       `connect()`/`maybeRefresh()` aus dem Remote-Rohstand gebildet und mit
+       dem serialisierten Merge-Ergebnis verglichen – ein vertauschtes
+       Argument dort wäre unbemerkt geblieben). Neuer Test „PP2“: zwei
+       UNABHÄNGIG gemountete App-Instanzen (neuer Helper `mountInto()`,
+       eigener Container/eigene Root, ohne die bestehenden
+       globalen `container`/`root` zu berühren) mit abweichender
+       Notizbuch-Schlüsselreihenfolge im Cache; dazu ein neuer
+       `fake.statePuts`-Zähler (inkrementiert bei jedem `state.json`-PUT-
+       Versuch im Mock). **Mutationsprobe** (Reihenfolge in
+       `mergeQuickNotes()` auf "Basis zuerst" zurückgesetzt, die #122-
+       Regression): „PP2“ wird rot (5 statt 0 PUTs in 120 s – exakt die
+       Ping-Pong-Schreibschleife), alle anderen 19 Tests bleiben grün.
+     - **`tests/quickNotesSync.test.jsx`, 🔵 (Korrektur einer FALSCHEN
+       Einschätzung in #122): die zwei im Review Runde 3 vorgeschlagenen
+       Tests für die Fallback-Stellen im Konfliktpfad (`App.jsx#flushState`,
+       `remoteQuick`-Fallback auf `null` bzw. die Merge-Basis) wurden in
+       #122 NICHT umgesetzt, mit der Vermutung "mindestens der
+       `{}`-Fallback könnte ein gleichwertiger Mutant sein".** Ein viertes
+       Review widerlegt das per Gegenprobe: der dort gemeinte `{}`-Fallback
+       (`flushedQuick = localData.quicknotes || {}`, App.jsx:1486) IST
+       tatsächlich gleichwertig (`normalizeQuickNotesMap()` behandelt
+       `undefined` identisch zu `{}`) – das war aber NICHT der ursprünglich
+       gemeldete Mutant. Die tatsächlich gemeldeten zwei Mutanten
+       (`remoteQuick`-Fallback auf `{}` statt `null`, App.jsx:1493f.; Merge-
+       Basis auf `null` statt `quickNotesBaseRef.current`, App.jsx:1495)
+       sind NICHT gleichwertig, sondern echte, bisher ungeschützte
+       Datenverlust- bzw. Wiederauferstehungspfade. Neue Tests „A7“ (Konflikt
+       mit einem Remote-`state.json` OHNE `quicknotes`-Feld darf ein
+       unverändertes ZWEITES Post-it nicht löschen) und „A8“ (Konflikt nach
+       lokaler Löschung darf das gelöschte Post-it nicht wieder auferstehen
+       lassen). **Mutationsproben** (beide Stellen einzeln mutiert):
+       „A7“ wird rot (1 statt 2 Post-its übrig), „A8“ wird rot (1 statt 0
+       Post-its übrig) – jeweils GENAU der zugehörige Test, alle anderen
+       21 Tests bleiben grün; beide Mutationen danach zurückgesetzt. Der
+       Absatz „Bewusst NICHT umgesetzt“ in #122 gilt damit nur noch für den
+       (tatsächlich gleichwertigen) `{}`-Fallback in `flushedQuick`.
+     - **`src/lib/quicknotes.js`, 🔵 (Nebenbefund): ein Notizbuch, das auf
+       BEIDEN Seiten (lokal UND remote) gelöscht wurde, erzeugte einen
+       Zombie-Schlüssel `"p": []` im Merge-Ergebnis und damit einen
+       unnötigen Extra-Commit.** `mergeQuickNotes()` bildete die
+       Notizbuch-Menge bisher aus `[...Object.keys(remote),
+       ...Object.keys(local), ...Object.keys(base)]` – ein Notizbuch, das
+       NUR noch in der Basis existiert, lieferte über
+       `mergeQuickNotesForNb(baseListe, undefined, undefined)` ein leeres
+       Array `[]` statt gar keinen Eintrag. Folgen sind harmlos (leeres
+       Array, keine Endlosschleife), aber neues, unnötiges Verhalten
+       gegenüber `v7.57` (v1-Cache). Fix: die Notizbuch-Menge kommt jetzt
+       NUR noch aus `remote`/`local` (`[...Object.keys(r),
+       ...Object.keys(l)]`); ist ein Notizbuch dort nirgends mehr vertreten,
+       gehört es schlicht nicht ins Ergebnis. **Mutationsprobe** (Basis
+       wieder in die Notizbuch-Menge aufgenommen): GENAU der neue Test
+       "Notizbuch nur noch in der Basis …" wird rot, alle anderen 35 Tests
+       in `tests/quicknotes.test.js` bleiben grün. Zwei neue Tests (Zombie-
+       Fall + Gegenprobe: ein NUR lokal wieder angelegtes Notizbuch mit
+       demselben Namen bleibt erhalten, kein Über-Verwerfen).
+     - **D1/`src/lib/feedback.js`, 🔵 (aus beiden Review-Linsen): die
+       #122-Heuristik "Zeile endet auf ':'" gegen eine leere Pille nach dem
+       Streichen hatte zwei Lücken in ENTGEGENGESETZTE Richtungen.** (1)
+       Eine reine Markdown-Überschrift bzw. eine ganze fett gesetzte Zeile
+       OHNE ":" ("### Auffälligkeiten", "**Hinweise**") zählte NICHT als
+       Label und blieb als leere Pille stehen. (2) Umgekehrt zählte JEDE
+       Zeile, die zufällig auf ":" endet, als Label – ein LANGER, echter
+       Beobachtungssatz mit Doppelpunkt am Ende ("… bitte ergänzen:")
+       verschwand dadurch fälschlich mit. Neue `isLabelOnly()`-Helper-
+       Funktion in `finalizeFeedbackReply()`: erkennt zusätzlich eine
+       Markdown-Überschrift bzw. eine GANZE fett/kursiv gesetzte Zeile OHNE
+       Satzzeichen (".", "!", "?") als Label, UND begrenzt den
+       "endet auf ':'"-Fall auf kurze Zeilen (<=40 Zeichen vor dem ":").
+       **Mutationsprobe** (auf die #122-Heuristik zurückgesetzt): GENAU die
+       drei neuen Tests werden rot, alle anderen 99 Tests bleiben grün.
+       Vier neue Tests (Markdown-Überschrift ohne ":", fette Überschrift
+       ohne ":", Überschrift + echter zweiter Punkt bleibt erhalten, langer
+       echter Satz mit ":" am Ende bleibt erhalten) plus ein fetter GANZER
+       Satz MIT Satzzeichen als Gegenprobe.
+       ⚠️ **abgelöst durch #124:** `isLabelOnly()` ist entfernt – die
+       Fehlerklasse "leere Pille nach dem Streichen" entfällt
+       konstruktionsbedingt, weil seit #124 nichts mehr gestrichen wird.
+       ⚠️ #124 selbst ist seit #130 ebenfalls zurückgebaut
+       (Nutzerentscheidung), siehe dort.
+     - **`tests/quickNotesSync.test.jsx#P1c`, 🔵 (aus beiden Review-Linsen):
+       die Cache-Assertion direkt nach `reload()` prüfte den Stand VOR dem
+       Reload, nicht danach.** `reload()` endet mit `settle(0)`; der
+       300ms-Cache-Effect des NEU gemounteten Baums läuft zu diesem
+       Zeitpunkt noch nicht. Die betroffene Assertion (`idsAfterReload`)
+       konnte deshalb gar nicht fehlschlagen – getragen wurde der Test
+       allein von der UI- und der späteren Remote-Prüfung. Fix: ein
+       `await settle(400)` direkt vor dem Lesen des Caches.
+     - **Tests/Verifikation.** Neue/geänderte Tests: `tests/feedback.test.js`
+       (+18, insgesamt 102), `tests/quicknotes.test.js` (+2, insgesamt 36),
+       `tests/quickNotesSync.test.jsx` (+3 neue Tests „PP2“/„A7“/„A8“, plus
+       „P1c“ um ein `settle(400)` ergänzt, insgesamt 20). Alle oben
+       beschriebenen Mutationsproben durchgeführt (Fix jeweils kurz
+       zurückgenommen, GENAU die zugehörigen Tests wurden rot, alle anderen
+       blieben grün; danach zurückgesetzt). `npx vitest run --maxWorkers=3`:
+       **2909/2909 grün** (57 Testdateien, gegenüber 2886/2886 vor dieser
+       Nachbesserung). `npm run test:coverage -- --maxWorkers=3`: „All
+       files“ Statements 93,71 % / Branches 87,92 % / Funktionen 93,39 % /
+       Lines 96 % (Gate 60 %); `feedback.js` 99,05/90,57/100/100;
+       `quicknotes.js` 98,78/97,77/100/100.
+     - **Doku.** `docs/TESTFAELLE.md` D1/D1b: Marker-Liste (f) auf den
+       #123-Stand gebracht ("wie" außer bei zeitlich/verweisenden
+       Anschlüssen, "Punkt/Eintrag/… zu[mr] X", "(das/der/…) Gleiche");
+       die BEKANNTEN Durchläufer werden nicht mehr als "kein Finding"
+       behandelt, sondern sind jetzt als eigener 🔵-Meldepunkt
+       ("bekannter Durchläufer, DECISIONS #123") vorgesehen – sichtbar im
+       QA-Report, aber ohne die Release-Regel für 🔴/🟡 auszulösen.
+       ⚠️ **abgelöst durch #124 (Streich-Netz entfernt), #124 seinerseits
+       seit #130 zurückgebaut:** diesen 🔵-Meldepunkt kannte
+       `docs/TESTFAELLE.md` schon seit #124 nicht mehr – ohne Streichen gab
+       es keine "bekannten Durchläufer" mehr; seit #130 gibt es auch keine
+       Anhang-Regel mehr (siehe #130, TESTFAELLE D1 ist entsprechend
+       angepasst).
+     - **Restrisiko (zusätzlich zu #118–#122, dort weiterhin gültig):**
+       `RELATION_RE` bleibt eine HEURISTIK, kein Beweis: "Dublette zum
+       bereits vorhandenen Eintrag" und "derselbe Eintrag existierte
+       bereits" bleiben bewusst geschützte, lexikalisch unvermeidbare
+       Durchläufer (unverändert seit #121/#122); NEU dazu: ein "wie", dem
+       ein der Ausschlussliste UNBEKANNTES zeitlich/verweisendes Anschluss-
+       wort folgt (z. B. "wie eben festgestellt"), rutscht bewusst weiterhin
+       als Falschbehauptung durch (die Ausschlussliste ist per Definition
+       nicht vollständig). ⚠️ **abgelöst durch #124, seinerseits seit #130
+       zurückgebaut:** Dieses gesamte
+       Restrisiko (lexikalische Heuristik, die zwischen "zu viel" und "zu
+       wenig" Streichen pendelt) entfiel mit der Ablösung des Streich-
+       Netzes durch das Fakten-Anhang-Design – seit #130 gibt es auch
+       dieses Anhang-Design nicht mehr, siehe dort. Der `{}`-Fallback in
+       `flushedQuick` (App.jsx:1486) bleibt ohne dedizierten Mutations-Test
+       (bestätigt gleichwertig, siehe oben) – DAS bleibt unverändert
+       gültig. Version bleibt exakt `v7.57.1` (Auftrag: kein weiterer
+       Bump).
+
+124. **v7.57.1, D1-Netz: annotieren statt streichen (löst #118/#120–#123
+     ab).** ⚠️ **Abgelöst durch #130** (Nutzerentscheidung, Rückbau des
+     gesamten Fakten-Anhang-Netzes) – siehe dort. Fünf Code-Review-Nachbesserungsrunden (#118, #120, #121, #122,
+     #123) hatten `findContradictedDuplicateClaims()`/
+     `stripContradictedSentences()` – ein lexikalisches Netz, das Sätze mit
+     einer vom Code widerlegten Dubletten-Behauptung aus der Modellantwort
+     STREICHT – immer weiter nachgeschärft, ohne das strukturelle Problem
+     zu lösen: Streichen pendelt zwischen zwei Fehlern. #122 fing 17 von 18
+     Falschbehauptungs-Varianten aus einer Review-Probe, strich dabei aber
+     berechtigte, semantisch (anders) formulierte Dubletten-Hinweise mit;
+     #123 schützte die Hinweise wieder, fing danach aber nur noch 4 von 18
+     Falschbehauptungen. Zwei unabhängige Reviewer schlugen zwei
+     VERSCHIEDENE Regex-Fassungen vor, jeweils nur gegen ihre eigenen
+     Probesätze passend – exakt das Einzel-Guard-Muster, das laut
+     Nutzervorgabe (Memory „Keine Einzel-Guards bei Editierfehlern“) NICHT
+     die Lösung sein soll. Auf ORCHESTRATOR-ENTSCHEIDUNG hin wird das Netz
+     daher NICHT ein sechstes Mal nachgeschärft, sondern durch ein anderes
+     Design abgelöst.
+     - **Neues Design: ANNOTIEREN statt STREICHEN.** Der Modelltext wird ab
+       sofort NIE mehr verändert oder gekürzt. `buildFeedbackFacts()`/
+       `formatFeedbackFacts()` (Teil A aus #118, präventiv – dem Modell die
+       Fakten VOR seiner Antwort mitgeben) bleiben unverändert bestehen.
+       NEU in `src/lib/feedback.js`: `buildDuplicateFactNote(reply, facts,
+       activeName)` – eine reine, exportierte Funktion:
+       - **Auslöser:** `reply` enthält ein Dubletten-Wort
+         (dublette/duplikat/doppelt/zweimal/mehrfach/zweifach/"zwei mal"),
+         geprüft per Wortanfangs-Regex (`(?<!\p{L})…`, Unicode-safe,
+         case-insensitive). KEINE Relationsanalyse, KEINE Satzzerlegung,
+         KEINE Negationserkennung – bewusst, weil genau diese drei
+         Heuristiken über fünf Runden hinweg abwechselnd zu viel oder zu
+         wenig erkannt haben (siehe oben).
+       - **Bedingung:** mindestens EINE vom Code geprüfte hinzugefügte
+         Zeile (aus `facts`) steht im AKTIVEN Notizbuch GENAU 1×, UND KEINE
+         hinzugefügte Zeile steht dort ≥2×. Gibt es eine ECHTE (wortgleiche)
+         Dublette, kann die Behauptung des Modells zutreffen – dann wird
+         NICHTS angehängt (der Anhang würde einer zutreffenden Aussage
+         nicht widersprechen, aber auch nichts beitragen).
+       - **Aktion:** der Modelltext bleibt IMMER exakt wie vom Modell
+         geliefert. Es wird höchstens EIN zusätzlicher Absatz ans Ende
+         gehängt, z. B. „ℹ️ Automatische Prüfung: „QA-Edit Beta“ steht in
+         „QA-Test“ genau einmal (Allgemein → Inbox); gleicher Wortlaut
+         außerdem in „Wissensbasis“ (QA → QA-Ergebnisse).“ – pro
+         betroffener Zeile ein Satz, gedeckelt auf 3 (danach „Und N
+         weitere.“), Zeilen auf ~80 Zeichen gekürzt. Der Anhang enthält
+         AUSSCHLIESSLICH vom Code selbst gezählte, garantiert wahre Fakten
+         – er bewertet die Modellaussage nicht, er ergänzt sie nur. Er darf
+         deshalb auch neben einem BERECHTIGTEN semantischen Dubletten-
+         Hinweis erscheinen, ohne diesem zu widersprechen.
+       - `finalizeFeedbackReply(raw, facts, activeName)`: ruft weiterhin
+         `isNoFeedback()` (unverändert) und `dedupeFeedbackParagraphs()`
+         (unverändert) auf, hängt danach ggf. `buildDuplicateFactNote()`
+         an. Das `nbNames`-Argument entfällt (nicht mehr gebraucht – die
+         "elsewhere"-Angaben stecken bereits in `facts`); `App.jsx#
+         requestFeedback` entsprechend angepasst (kein `nbNames` mehr
+         gebaut/übergeben).
+     - **Entfernt (mit allen zugehörigen Tests):**
+       `findContradictedDuplicateClaims()`, `stripContradictedSentences()`,
+       `RELATION_RE`, `NEGATION_RE`, `DUP_WORD_RE`, `QUOTE_RE`,
+       `splitSentences()`, `extractQuotedKeys()`, sowie die
+       `isLabelOnly()`-Leerpillen-Heuristik in `finalizeFeedbackReply()`
+       (nur wegen des Streichens nötig – ohne Streichen kann nichts leer
+       werden). Per `grep` geprüft: außerhalb von `feedback.js`/
+       `feedback.test.js` referenzierte KEINE dieser Funktionen irgendwo
+       (`App.jsx` importierte nur `buildFeedbackRequest`/
+       `finalizeFeedbackReply`, nie die Netz-internen Funktionen direkt).
+     - **Tests (`tests/feedback.test.js`, komplett neu für den D1-Teil).**
+       Alle Testsätze sind WORTGETREU aus den Review-Proben der Runden 4/5
+       übernommen (Scratchpad `d1data.js`/`sets.mjs`/`d1b.probe.test.js`),
+       nicht neu erfunden:
+       - Deduplizierte Gesamtmenge ALLER Falschbehauptungs-Varianten gegen
+         die Live-Fixture ("QA-Edit Beta" in "QA-Test", bereits in
+         "Wissensbasis" vorhanden) – Anhang erscheint, Modelltext bleibt
+         WORTGETREU (Startgleichheit + Volltext-Vergleich im Live-Fall).
+       - Deduplizierte Gesamtmenge ALLER berechtigten semantischen Hinweise
+         (sowohl gegen die QA-Test- als auch die Privat/Zahnarzt-Fixture) –
+         Modelltext bleibt WORTGETREU; der Anhang folgt derselben reinen
+         Zählregel, unabhängig davon, ob die Aussage inhaltlich stimmt.
+       - Echte Dublette (Zeile 2× im aktiven Notizbuch): kein Anhang.
+       - Kein Dubletten-Wort: kein Anhang.
+       - "kein Feedback" (Sentinel/Floskeln): `null`, kein Anhang.
+       - Mehrere hinzugefügte Zeilen: Deckel bei 3 + "Und N weitere.",
+         Kürzung einer >80-Zeichen-Zeile.
+       - Vorkommen in einem ANDEREN Notizbuch: Zusatzsatz im Anhang.
+       - Codeblock-/Überschriftzeilen fließen nicht ein (bereits über
+         `buildFeedbackFacts()` ausgeschlossen, hier gegen die Verdrahtung
+         geprüft).
+       - Die 17 LEFTOVER-Proben aus #122/#123 (vorher: Auslöser für die
+         "leere Pille"-Fehlerklasse) – jetzt: Originaltext bleibt
+         VOLLSTÄNDIG (inkl. Überschrift/Label) erhalten, Anhang kommt ans
+         Ende. Belegt, dass die GESAMTE Fehlerklasse konstruktionsbedingt
+         entfällt, statt nur erneut kaschiert zu werden.
+       - Live-Fall (`data/state.json@6f915c2d`, echte Vorher-/Nachher-
+         Dokumente aus dem QA-Repo-Commit `02f1d026`, inkl. Tabelle,
+         Bash-Snippet, LaTeX, Sonderzeichen) als End-to-End-Test über
+         `buildFeedbackRequest()`/`finalizeFeedbackReply()`: der ECHTE,
+         historisch falsche Auto-Kommentar bleibt WORTGETREU erhalten, der
+         Anhang stellt ihn richtig.
+       - **Mutationsproben:** (1) Bedingung "keine Zeile ≥2×" entfernt
+         (`if (false && facts.some(...))`) – GENAU der Test "MEHRERE
+         hinzugefügte Zeilen, EINE davon >=2×" wird rot (der Test "echte
+         Dublette" allein bleibt bei dieser Mutation FÄLSCHLICH grün, weil
+         dort schon der separate `singles.length===0`-Guard greift – das
+         ist im Test dokumentiert, damit das nicht unbemerkt bleibt). (2)
+         Auslöser-Regex-Check entfernt (`if (!text) return "";` statt `if
+         (!text || !DUP_TRIGGER_RE.test(text)) return "";`) – GENAU DREI
+         Tests werden rot: "KEIN Dubletten-Wort …", "eine echte Beobachtung
+         OHNE Dubletten-Wort …" UND "löst NICHT aus bei 'Doppelpunkt' …"
+         (bei allen drei ist der reply-Text nicht-leer, die Fakten-Lage
+         würde ohne den Auslöser-Check also einen Anhang erlauben), alle
+         anderen bleiben grün. Beide Mutationen durchgeführt und danach
+         zurückgesetzt. ⚠️ **Korrigiert in #126:** diese Stelle nannte
+         ursprünglich fälschlich nur ZWEI Tests (der "Doppelpunkt"-Fall war
+         übersehen worden) – per erneuter Mutationsprobe verifiziert.
+     - **E2-Testlücken (blau, billig) aus dem letzten Review geschlossen,
+       jeweils mit Mutationsprobe – `tests/quickNotesSync.test.jsx`:**
+       - **a) Synchroner Cache-Write bei pagehide/visibilitychange.** M3/A3c
+         (aus #122) dispatchen bisher über `await act(async () => {…})` und
+         lesen den Cache ERST danach – `act()` flusht dabei Microtasks, der
+         (mit `stateDelayMs=0` praktisch sofort auflösende) PUT in
+         `flushState()` bekam dadurch genug Zeit, den Cache über seinen
+         EIGENEN Erfolgspfad zu aktualisieren; ein Mutant, der NUR den
+         synchronen `saveQuickNotesCache(...)`-Aufruf in
+         `flushBeforeUnload()` entfernte, blieb dadurch unentdeckt (M3/A3c
+         blieben bei dieser Mutation GRÜN, live nachgeprüft). Neuer Test
+         „A9“: dispatcht bewusst über das SYNCHRONE `act(() => {…})` (kein
+         `async`/`await`) und lässt den PUT über `fake.stateDelayMs` für
+         den Rest des Tests "hängen" – der Cache muss allein durch den
+         synchronen Aufruf aktuell sein. **Mutationsprobe:** GENAU „A9“
+         wird rot, M3/A3c bleiben (wie erwartet) grün.
+       - **b) Nachführung der Merge-Basis im Konfliktpfad.** A8 (aus #123)
+         deckt nur EINEN Konflikt ab, bei dem die Basis von VORHER bereits
+         korrekt war – nicht, ob `quickNotesBaseRef.current = mergedQuick;`
+         (App.jsx#flushState) nach einem Konflikt tatsächlich NACHGEFÜHRT
+         wird. Neuer Test „A10“: ZWEI aufeinanderfolgende Konflikte – Runde
+         1 lernt eine fremde Notiz "Y" neu kennen, Runde 2 prüft, ob eine
+         zwischenzeitliche Löschung von "Y" durch ein anderes Gerät
+         respektiert wird. **Mutationsprobe** (die Nachführungs-Zeile
+         entfernt): GENAU „A10“ wird rot ("Y" ersteht wieder auf), alle
+         anderen 21 Tests bleiben grün.
+       - **c) PP2-Gegenstück für `maybeRefresh` (Schreibschleife im
+         Poll-Pfad).** PP2 (aus #123) läuft zwar 120s über mehrere
+         25s-Polls, erreicht den `if (nQuick) {…}`-Merge-Zweig in
+         `maybeRefresh()` dabei aber NIE – ohne eigenen inhaltlichen Write
+         ändert sich die Remote-SHA nie, der Zweig wird nie betreten. Neuer
+         Test „PP3“: erzwingt EINE echte SHA-Änderung (ein anderes Gerät
+         schreibt dieselben Notizen mit ABWEICHENDER Notizbuch-Reihenfolge
+         zurück) und prüft dasselbe PP2-Kriterium ("kein Folge-PUT"), aber
+         über den Poll-Pfad. **Mutationsprobe** (`if (nQuick)` auf `if
+         (false && nQuick)` gesetzt): GENAU „PP3“ (plus die bereits
+         bestehenden „R5b“/„M2“, die denselben Zweig aus anderem Grund
+         durchlaufen) werden rot.
+       - **d) PP2-Zusatzinstanzen per finally abräumen.** Das Abräumen der
+         beiden `mountInto()`-Instanzen stand bisher NACH den Assertions,
+         ohne `try`/`finally` – ein fehlschlagender Test hätte die beiden
+         Instanzen (laufende 25s-Poll-Intervalle, nicht entfernte
+         DOM-Container) ungeräumt hinterlassen und ggf. nachfolgende Tests
+         verunreinigt. Fix: Assertions in `try`, Abräumen in `finally`.
+         **Verifiziert** (live, keine dauerhafte Testcode-Änderung): eine
+         temporär auf einen falschen Wert gesetzte Assertion lässt NUR
+         „PP2“ fehlschlagen, alle 22 anderen Tests bleiben grün – das
+         Abräumen greift also auch im Fehlerfall.
+     - **Restrisiko (NEU, zusätzlich zu #118–#123, soweit dort nicht per
+       "abgelöst durch #124" markiert):**
+       - Der Fakten-Anhang ist bewusst NUR eine Wortanfangs-Suche ohne
+         Fence-Guard: enthält die Modellantwort zufällig ein Dubletten-Wort
+         INNERHALB eines ```-Codeblocks, kann der Anhang trotzdem erscheinen
+         (harmlos, weil er nur ANGEHÄNGT wird, nie in den Codeblock
+         eingreift – aber theoretisch ein Fehlalarm-Anhang zu einem
+         Code-Snippet). Bewusst nicht extra behandelt (Aufgabenstellung
+         nennt keinen Fence-Guard, der Fall ist im Feedback-Pfad praktisch
+         nicht beobachtet).
+       - Der optionale Nebenbefund "Zombie-Schlüssel `\"p\": []` im
+         connect-Pfad" (ein Notizbuch, dessen LOKALE Notizliste bereits vor
+         dem Reconnect explizit auf `[]` stand statt gar nicht zu
+         existieren, bleibt über `Object.keys(local)` dauerhaft als leerer
+         Schlüssel im Merge-Ergebnis stehen – anders als der in #123
+         gefixte "nur noch in der Basis"-Fall, den `mergeQuickNotes()`
+         bereits nicht mehr in die Notizbuch-Menge aufnimmt) wurde NICHT
+         behoben (laut Auftrag optional) – harmlos (leeres Array, kein
+         Extra-Commit-Trigger, da inhaltlich stabil), aber dokumentiert
+         statt stillschweigend liegen gelassen.
+       - `buildDuplicateFactNote()` normalisiert Zeilen über dieselbe
+         `normalizeFactText()`-Vergröberung wie `buildFeedbackFacts()`
+         (Checkbox/Fett/Listenzeichen werden gleichgesetzt) – ein bewusst
+         in Kauf genommenes, bereits seit #118 bekanntes Verhalten, keine
+         neue Abweichung.
+         ⚠️ **abgelöst durch #127:** `normalizeFactText()` ist komplett
+         entfernt und durch `looseKey()` ersetzt (alnum-only nach Autolink-/
+         Tag-/Entity-Normalisierung, `.includes()` statt `===`) – die
+         Vergröberung ist seither noch weiter gefasst, siehe dort.
+     - **Tests/Verifikation.** `tests/feedback.test.js`: kompletter
+       Neuaufbau des D1-Teils, 203 Tests in der Datei insgesamt (vorher
+       120). `tests/quickNotesSync.test.jsx`: +3 neue Tests
+       („A9“/„A10“/„PP3“), plus „PP2“ auf `try`/`finally` umgestellt,
+       insgesamt 23. `npx vitest run --maxWorkers=3` (voller Lauf): **3013/
+       3013 grün** (57 Testdateien). `npm run test:coverage --
+       --maxWorkers=3`: „All files“ Statements 93,68 % / Branches 87,99 % /
+       Funktionen 93,35 % / Lines 95,97 % (Gate 60 %); `feedback.js`
+       99,42/92,68/100/100; `quicknotes.js` unverändert 98,78/97,77/100/100
+       (Modul selbst nicht angefasst).
+     - **Doku.** `docs/TESTFAELLE.md` D1/D1b aktualisiert: die erwartete
+       Pille darf eine Falschbehauptung enthalten, WENN der Faktenanhang
+       ("ℹ️ Automatische Prüfung: …") direkt folgt – ohne Anhang ist eine
+       Falschbehauptung weiterhin ein 🟡-Finding. Korrekturvermerke
+       "⚠️ abgelöst durch #124" in #118/#122/#123 an allen Stellen zum
+       Streich-Netz ergänzt.
+       ⚠️ **abgelöst durch #127:** ein FEHLENDER Anhang ist seither NUR
+       noch ein 🔵-Finding (ausdrücklich akzeptiertes Restrisiko, kein
+       Pflicht-Fix mehr) statt 🟡 – siehe `docs/TESTFAELLE.md` D1.
+
+125. **v7.57.1, Code-Review-Nachbesserung zu #124 (1× 🔴, 2× 🟡 Pflicht,
+     mehrere 🔵).** ⚠️ **Abgelöst durch #130** (Nutzerentscheidung, Rückbau
+     des gesamten Fakten-Anhang-Netzes) – siehe dort. Ein sechstes Review nach der #124-Ablösung des
+     Streich-Netzes fand drei echte Fehler IM NEUEN "annotieren statt
+     streichen"-Design selbst (keine Rückkehr zum Streichen – das bleibt
+     laut ORCHESTRATOR-ENTSCHEIDUNG in #124 verbindlich abgelöst):
+     - **🔴 (befundtreue): `countKeyInDoc()` zählte Zeilen INNERHALB eines
+       ```-Codeblocks bisher GAR NICHT mit** – nicht nur bei der (gewollt
+       codeblock-freien) Fakten-ERZEUGUNG, sondern auch beim reinen
+       VORKOMMEN-ZÄHLEN für `activeCount`. Stand dieselbe Zeile zusätzlich
+       in einem Codeblock (z. B. ein Bash-Kommando, das danach als
+       Klartext-Listenpunkt wiederholt wird – 2× im Dokument), behauptete
+       `formatFeedbackFacts()` dem MODELL "kein zweiter WORTGLEICHER
+       Eintrag" UND `buildDuplicateFactNote()` "steht … genau einmal" –
+       beides FALSCH, und genau das widerlegte die eigene "garantiert
+       wahre Fakten"-Zusage aus #124. Fix: neue Hilfsfunktion
+       `skipForCount(line, inFence)` – Leerzeilen/Trennzeilen werden
+       weiterhin übersprungen, eine Überschriftzeile ("# X") aber NUR
+       AUSSERHALB eines Codeblocks (innerhalb ist "# X" gewöhnlicher Text,
+       z. B. ein Bash-Kommentar) – angewendet in `countKeyInDoc()` UND in
+       der "elsewhere"-Suche (dieselbe Fehlerklasse, dort nur mit
+       geringerer Sichtbarkeit). Die FAKTEN-ERZEUGUNG selbst (welche Zeile
+       überhaupt ein "Fakt" wird) bleibt unverändert codeblock-frei (siehe
+       #118) – nur das nachträgliche ZÄHLEN wurde korrigiert.
+       Mutationsprobe (`skipForCount` auf den alten `if (inFence) return
+       true;`-Zustand zurückgesetzt): GENAU die 4 neuen Tests im Describe
+       "Codeblock-Zählung" werden rot, alle anderen 228 bleiben grün;
+       danach zurückgesetzt.
+       ⚠️ **abgelöst durch #127:** `countKeyInDoc()`/`skipForCount()` sind
+       komplett entfernt und durch `countLooseOccurrences()` (zählt über
+       ALLE Zeilen ohne jede Ausnahme – auch Überschriften/Tabellenzellen/
+       Zitate, nicht nur Codeblöcke) ersetzt, siehe dort.
+     - **🟡 (korrektheit): der Fakten-Anhang landete in `m.text` statt im
+       bestehenden ℹ️-Kanal (`m.opsInfo`, DECISIONS #106).**
+       `finalizeFeedbackReply()` klebte den Anhang bisher mit `"\n\n" +
+       note` an den zurückgegebenen Text, den `App.jsx#requestFeedback`
+       1:1 als `m.text` der Assistent-Nachricht speicherte. Zwei
+       unabhängige Nebenwirkungen: (1) `m.text` geht in den nächsten bis
+       zu 12 Chat-Turns UNVERÄNDERT als HISTORISCHE Assistent-Aussage an
+       das Modell zurück (`anthropic.js#callClaude`, "msgs"-Mapping) – das
+       Modell hätte das feste Präfix "ℹ️ Automatische Prüfung: …" dort als
+       eigenen Stil sehen und in einem SPÄTEREN, echten Chat-Turn
+       nachahmen können; eine vom MODELL selbst (fehleranfällig) gezählte
+       Pseudo-Prüfung stünde dann unter genau dem Präfix, das #124 als
+       "garantiert wahr" ausweist – nicht mehr unterscheidbar vom echten
+       Code-Anhang. Die Codebasis verhindert diese Art Nachahmung sonst
+       ausdrücklich (cite-Marker werden aus der Historie gestrippt, "es
+       soll sie nicht nachahmen"; Op-Hinweise laufen NIE über `m.text`,
+       sondern über `m.warning`/`m.opsInfo`). (2) der Anhang durchlief das
+       Markdown-/Fence-/Math-Rendering der Modellblase – bei einem NICHT
+       geschlossenen ```-Fence in der Modellantwort wäre der Anhang als
+       Code dargestellt worden. Fix: `finalizeFeedbackReply(raw, facts,
+       activeName)` liefert jetzt `{ text, note }` (`note` ist `undefined`
+       ohne Anhang) statt eines verklebten Strings; `text` ist BYTE-
+       IDENTISCH mit `dedupeFeedbackParagraphs(raw)`.
+       `App.jsx#requestFeedback` reicht `fin.note` als `m.opsInfo` weiter
+       – derselbe bestehende ℹ️-Kanal, der NIE in die Modell-Historie als
+       eigene `m.text`-Aussage einfließt, sondern separat als
+       "[SYSTEM-HINWEIS: …]" UND als eigene sky-farbene Pille UNTER der
+       Modellblase angezeigt wird (kein Markdown-/Fence-Rendering).
+       Mutationsprobe (`finalizeFeedbackReply` wieder auf den verklebten
+       String zurückgesetzt): GENAU die 171 Tests, die `.text` auf
+       Byte-Identität mit dem Modelltext prüfen, werden rot; danach
+       zurückgesetzt.
+     - **🟡 (befundtreue): `DUP_TRIGGER_RE` verpasste gängige
+       Reformulierungen desselben D1-Befunds.** Der ursprüngliche
+       Wortanfangs-Lookbehind (`(?<!\p{L})…`) ließ "Doppelung"/"Dopplung"/
+       "Doppeleintrag"/"Doublette"/"dupliziert"/"verdoppelt" sowie
+       Komposita wie "Eintragsdublette"/"Terminduplikat" durch – jede
+       dieser Formen reproduziert den D1-Befund (Falschbehauptung ohne
+       Richtigstellung), weil sie den Auslöser schlicht nicht trafen.
+       ORCHESTRATOR-ENTSCHEIDUNG: der Lookbehind entfällt GANZ (Treffer
+       auch mitten im Wort/Kompositum), zusätzlich löst jetzt auch "2×"/
+       "2x" aus (der eigene Fakten-Block prägt dem Modell genau diese
+       Notation vor, siehe `formatFeedbackFacts()`). Das ist eine bewusste
+       Abweichung von der im Auftrag ursprünglich genannten, engeren
+       Wortliste – gerechtfertigt, weil Überauslösen hier (anders als beim
+       ENTFERNTEN Streich-Netz) FOLGENLOS ist: der Anhang ist nur eine
+       zusätzliche, garantiert wahre Ergänzung und verändert den
+       Modelltext nie, es gibt also kein Pendeln zwischen zwei Fehlern.
+       Einzige Ausnahme: `doppel(?!punkt)` schließt "Doppelpunkt"
+       weiterhin explizit aus. Neue Regex: `/dublette|doublette|duplikat|
+       dupliz|doppel(?!punkt)|dopplung|zweimal|zweifach|mehrfach|
+       zwei\s+mal|(?<![\p{L}\p{N}])[2-9]\s?[×x](?![\p{L}\p{N}])/iu`.
+       Mutationsprobe (Regex auf die alte, engere Fassung zurückgesetzt):
+       GENAU die 10 neuen it.each-Fälle im Describe "DUP_TRIGGER_RE –
+       erweiterte Auslöser-Wörter" werden rot, alle anderen 222 bleiben
+       grün; danach zurückgesetzt.
+     - **Nicht umgesetzt (mit Begründung):** die im Review vorgeschlagene
+       `hiddenDuplicate`-Ergänzung (Bedingung "keine Zeile ≥2×" nur gegen
+       die max. 20 GEFILTERTEN `facts` statt gegen ALLE hinzugefügten
+       Zeilen prüfen) wurde NICHT umgesetzt – sie bräuchte einen
+       zusätzlichen Rückkanal durch `buildFeedbackFacts()`/
+       `buildFeedbackRequest()`, der die bestehende, gepinnte Rückgabeform
+       (`facts[]`) ändern würde. Der Randfall (>20 unterschiedliche
+       hinzugefügte Zeilen, davon eine außerhalb der ersten 20 eine ECHTE
+       Dublette) ist bei der Zielgruppe dieses Pfads (kleiner manueller
+       Zusatz, siehe `MAX_FACTS`-Kommentar) unrealistisch – als
+       Restrisiko dokumentiert statt umgesetzt.
+     - **Tests (`tests/feedback.test.js`, jetzt 232 statt 203).** Alle
+       `finalizeFeedbackReply()`-Erwartungen auf `{ text, note }`
+       umgestellt (Startgleichheit → exakte Byte-Identität für `text`).
+       Neue Describe-Blöcke "DUP_TRIGGER_RE – erweiterte Auslöser-Wörter"
+       (10 Positiv- + 1 Negativfall) und "Codeblock-Zählung" (4 Fälle,
+       inkl. Listenpunkt-mit-Inline-Code-Variante). Fehlende Probesätze
+       aus `scratchpad/cr5/sets.mjs` ergänzt: der fehlende `OLD_TRUE_Z`-Satz
+       sowie `NEW_TRUE_ZQ` (12 Sätze, Referenz-Eintrag zitiert statt frei
+       im Satz).
+     - **E2-Testlücken (blau, billig), zusätzlich zu den in #124 bereits
+       geschlossenen a–d – `tests/quickNotesSync.test.jsx` (jetzt 25 statt
+       23):**
+       - **CR6/CR6c: Basis-Nachführung im Poll- UND im connect()-Pfad war
+         bisher NICHT abgesichert** (nur der KONFLIKT-Pfad, `flushState`,
+         war seit #124/A10 gepinnt). Dieselbe Fehlerklasse (Basis nicht
+         nachgeführt → ein woanders gelöschtes Post-it ersteht wieder auf)
+         gilt strukturell auch für `quickNotesBaseRef.current = nQuick;`
+         (Poll, `maybeRefresh`) und `= effQuick;` (`connect()`).
+         Mutationsprobe (je eine der beiden Zeilen entfernt): GENAU "CR6"
+         bzw. "CR6c" wird rot, alle anderen 24 bleiben grün; danach
+         zurückgesetzt.
+       - **PP3 konnte leerlaufen**, weil nur "kein PUT" geprüft wurde, ohne
+         zu belegen, dass der Poll-Merge-Zweig überhaupt ERREICHT wurde –
+         dieselbe Schwäche, die PP2 vor #124 hatte. Ergänzt: positive
+         Erreichbarkeits-Probe (`Object.keys(lsCache().notes)` übernimmt
+         nach dem Poll die REMOTE-Schlüsselreihenfolge, nicht mehr die
+         lokale Startreihenfolge).
+     - **Doku.** `docs/TESTFAELLE.md` D1/D1b: dritter Punkt präzisiert
+       ("Eintrag steht tatsächlich doppelt" statt des in sich
+       widersprüchlichen "Falschbehauptung, obwohl ECHT doppelt"), neue
+       Regel für einen INHALTLICH FALSCHEN Faktenanhang (🔴) und Hinweis,
+       dass ein Anhang nach einer VERNEINTEN oder zutreffenden Aussage
+       ("keine Dubletten") bewusst KEIN Finding ist (#124 verzichtet
+       bewusst auf Negationserkennung). Korrekturvermerke "⚠️ abgelöst
+       durch #124" an drei weiteren, bisher nicht markierten Stellen in
+       #118 (Restrisiko "B als deterministisches Netz nötig",
+       Abweichungen (3)/(4)) und #120/#121 (jeweils am Ende des dortigen
+       Netz-Abschnitts) ergänzt.
+     - **Restrisiken (zusätzlich zu #124, dort weiterhin gültig):**
+       - Der Fakten-Anhang ist weiterhin bewusst NUR eine reine
+         Substring-Suche ohne Fence-Guard auf der MODELLANTWORT selbst
+         (nicht zu verwechseln mit dem jetzt gefixten Zählungs-Fence-Guard
+         auf den NOTIZBUCH-Dokumenten oben): enthält die Modellantwort
+         zufällig ein Dubletten-Wort innerhalb eines eigenen ```-
+         Codeblocks, kann der Anhang trotzdem erscheinen (harmlos, siehe
+         #124).
+       - Die oben beschriebene `hiddenDuplicate`-Lücke (>20 hinzugefügte
+         Zeilen, ECHTE Dublette außerhalb der ersten 20) bleibt bewusst
+         unbehoben.
+       - Die breitere `DUP_TRIGGER_RE`-Wortliste kann in seltenen Fällen
+         auf inhaltlich unrelated Wörter treffen (z. B. "Doppelzimmer",
+         "Doppelklick") – bewusst in Kauf genommen (Überauslösen ist
+         folgenlos, siehe oben).
+     - **Tests/Verifikation.** `npx vitest run --maxWorkers=3` (voller Lauf,
+       NACH allen hier beschriebenen Fixes + neuen Tests dieser Runde):
+       3044/3044 grün (57 Testdateien; Basis-Stand nach #124 war
+       3013/3013, +29 neue `feedback.test.js`-Fälle +2 neue
+       `quickNotesSync.test.jsx`-Fälle). `npm run test:coverage --
+       --maxWorkers=3`: ⚠️ **nachgetragen in #126** (Zahlen fehlten hier
+       ursprünglich) – „All files“ Lines 95,97 % / Statements 93,69 % /
+       Branches 87,99 % / Functions 93,36 %.
+
+126. **v7.57.1, Code-Review-Nachbesserung Runde 7 zu #124/#125 (1× 🔴, 1× 🟡
+     Pflicht, mehrere 🔵).** ⚠️ **Abgelöst durch #130** (Nutzerentscheidung,
+     Rückbau des gesamten Fakten-Anhang-Netzes) – siehe dort. Ein siebtes Review am annotieren-statt-
+     streichen-Design (#124, seit #125 verbindlich) fand ZWEI weitere echte
+     Fehler in `normalizeFactText()` – dieselbe Fehlerklasse wie die
+     #125-Codeblock-Zählung: eine Zählungs-Lücke bei editor-erzeugter
+     Formatierung, die zwei OPTISCH identische Zeilen als unterschiedlichen
+     Wortlaut zählte.
+     ⚠️ **abgelöst durch #127:** drei WEITERE Review-Runden fanden nach
+     dieser Runde nacheinander vier weitere Darstellungsvarianten derselben
+     Fehlerklasse (Editor-Escape `&lt;`/`&gt;`, Autolink `<url>`, rohes
+     HTML/Entities im Chat-Anhang) – `normalizeFactText()` ist deshalb
+     komplett entfernt und durch `looseKey()` ersetzt (siehe #127). Die
+     BEIDEN hier beschriebenen Fixes (Tag-Strip, Unicode-Normalisierung)
+     bleiben inhaltlich richtig, sind aber jetzt Teilaspekte von
+     `looseKey()` statt eigene `replace()`-Zeilen in `normalizeFactText()`.
+     - **🔴 (korrektheit): Schriftfarbe/Textmarker-Markup wurde nicht
+       entfernt.** `<span style="color:…">`/`<mark data-color="…" …>`
+       (DECISIONS #15, markdown.jsx/anthropic.js) blieb in
+       `normalizeFactText()` unentfernt stehen – ein optisch identischer,
+       nur farblich markierter Bestandseintrag zählte dadurch als ANDERER
+       Wortlaut als eine neu ergänzte, unmarkierte Zeile mit sonst
+       identischem Text (`activeCount` 1 statt 2). Fix: eine zusätzliche
+       `replace`-Zeile `s.replace(/<\/?(?:span|mark)\b[^>]*>/gi, "")`
+       zwischen der Fett- und der Durchgestrichen-Auszeichnung. **Live-
+       taugliche Probe:** ein bestehendes `<mark …>QA-Edit Beta</mark>`-
+       bzw. `<span style="color:…">QA-Edit Beta</span>`-Listenelement plus
+       ein neu ergänztes „- QA-Edit Beta“ ergaben vorher fälschlich
+       „genau einmal“ statt „2×“ – obwohl im Notizbuch zwei optisch gleiche
+       li-Einträge stehen, was TESTFAELLE D1 ausdrücklich als 🔴 wertet.
+       **Mutationsprobe** (die neue `replace`-Zeile entfernt): GENAU die
+       zwei neuen it.each-Fälle im Describe "Schriftfarbe/Textmarker- und
+       Unicode-Normalisierung" (Mark-/Span-Teil) werden rot
+       (`activeCount` fällt auf 1), alle anderen 259 Tests bleiben grün;
+       danach zurückgesetzt.
+     - **🟡 (korrektheit): fehlende Unicode-Normalisierung des Vergleichs-
+       Schlüssels.** Zwei im Browser IDENTISCH aussehende Zeilen, die sich
+       nur in unsichtbaren Zeichen unterscheiden (NFD- vs. NFC-Komposition
+       eines Akzents, weiches Trennzeichen U+00AD, Nullbreiten-Leerzeichen
+       U+200B – typisch nach Kopieren aus Fremdquellen), bekamen bisher
+       verschiedene Schlüssel und damit ebenfalls einen falschen „genau
+       einmal“-Anhang trotz tatsächlich 2× vorhandener Zeile. Fix:
+       `String(line || "").normalize("NFC").replace(/\p{Cf}/gu, "").trim()`
+       statt nur `.trim()` als ERSTER Schritt in `normalizeFactText()` –
+       `\p{Cf}` (Unicode-Kategorie "Format") deckt Soft-Hyphen, ZWSP, ZWNJ/
+       ZWJ und Bidi-Steuerzeichen ab, OHNE echte Diakritika (Kategorie
+       `Mn`) zu berühren. Wirkt NUR auf den Vergleichs-Schlüssel – `f.text`
+       (die ANGEZEIGTE Zeile) bleibt unverändert roh. **Kontrollprobe**
+       (siehe Test "Kontrollprobe: ECHT verschiedener Wortlaut..."): zwei
+       inhaltlich verschiedene Zeilen bleiben weiterhin verschieden – die
+       Normalisierung ist NICHT zu grob. **Mutationsprobe** (`.normalize`/
+       `.replace` entfernt, zurück auf reines `.trim()`): GENAU die drei
+       neuen it.each-Fälle (NFD/NFC, weiches Trennzeichen, Nullbreiten-
+       Leerzeichen) werden rot, alle anderen bleiben grün; danach
+       zurückgesetzt.
+     - **Zurückgewiesene Findings (mit Code-Beleg):** keine – beide
+       Pflicht-Findings dieser Runde waren durch eigene Reproduktion (siehe
+       oben) belegt und wurden 1:1 umgesetzt.
+     - **Korrekturen an früheren DECISIONS-Einträgen (Review-Fund 🔵):**
+       - **#124, Mutationsprobe (2):** nannte fälschlich nur ZWEI statt drei
+         betroffene Tests, wenn der Auslöser-Regex-Check in
+         `buildDuplicateFactNote()` entfällt. Per erneuter Mutationsprobe
+         verifiziert: GENAU DREI Tests werden rot ("KEIN Dubletten-Wort …",
+         "eine echte Beobachtung OHNE Dubletten-Wort …" UND "löst NICHT aus
+         bei 'Doppelpunkt' …" – der "Doppelpunkt"-Fall war übersehen
+         worden). Text an der Stelle korrigiert.
+       - **#121/#122 (2×)/#123:** an vier bisher unmarkierten Restrisiko-/
+         Doku-Stellen zum entfernten Streich-Netz (RELATION_RE-Heuristik-
+         Grenzen, "bekannte Durchläufer"-Klausel, 🔵-Meldepunkt) den
+         Korrekturvermerk "⚠️ abgelöst durch #124" ergänzt.
+       - **#125, Z. "siehe Abschlussbericht":** die dort fehlenden
+         Coverage-Zahlen des #125-Laufs nachgetragen (Lines 95,97 % /
+         Statements 93,69 % / Branches 87,99 % / Functions 93,36 %).
+       - **Testkommentar (`tests/feedback.test.js`, "Mutationsprobe... GENAU
+         dieser Test rot"):** war ungenau – vermischte zwei verschiedene
+         Mutationen (früher Return vs. nie matchende Regex) zu einer
+         Aussage. Kommentar präzisiert (siehe oben, drei statt ein
+         betroffener Test für die erste Mutation).
+       - **Echtes Testduplikat entfernt:** der Test "'zwei mal' … löst
+         weiterhin genauso aus" im Describe "DUP_TRIGGER_RE – erweiterte
+         Auslöser-Wörter" war ein reiner Textduplikat (identischer
+         Testkörper) von "'zwei mal' (getrennt geschrieben) löst genauso
+         aus wie 'zweimal'" im Describe "buildDuplicateFactNote" weiter
+         oben in derselben Datei.
+     - **Testlücken (blau, billig) zusätzlich geschlossen, jeweils mit
+       Mutationsprobe – `tests/feedback.test.js`:**
+       - 19 weitere LEFTOVER-Konstruktionen (`LEFTOVER_F`) aus denselben
+         Review-Proben, die dort per String-Verkettung ("<Label>\n- " + F)
+         statt als Literal standen (Herkunft: `scratchpad/cr4/
+         d1.probe.test.js` "leftover", `scratchpad/cr5/left.probe.test.js`,
+         `scratchpad/cr5/cmp.probe.test.js`) – dem Literal-Textabgleich der
+         Vorrunde dadurch entgangen. Verhalten bestätigt korrekt (alle
+         bleiben wortgetreu, bekommen einen Anhang).
+       - elsewhere-Suche zählt eine Codeblock-Zeile in einem ANDEREN
+         Notizbuch mit (der #125-Fix "angewendet in countKeyInDoc() UND in
+         der elsewhere-Suche" war für die elsewhere-Suche bisher
+         ungetestet). **Mutationsprobe** (elsewhere-Suche auf den alten
+         `if (mask[i]) continue;`-Fence-Skip zurückgesetzt): GENAU dieser
+         Test wird rot, alle anderen bleiben grün.
+       - ein Bash-Kommentar ("# …") INNERHALB eines Codeblocks zählt als
+         TEXT, nicht als übersprungene Überschrift (`skipForCount()`s
+         `!inFence &&`-Guard war nur für die Fakten-ERZEUGUNG, nicht für
+         diesen Zählungsfall separat getestet). **Mutationsprobe**
+         (`!inFence &&` aus `skipForCount()` entfernt): GENAU dieser Test
+         wird rot, alle anderen bleiben grün.
+       - Kürzung zerschneidet kein Surrogatpaar (Emoji genau an der
+         80-Zeichen-Schnittkante) – der #125-Fix (`Array.from` statt
+         `.split("")`) stand bisher ohne eigenen Testschutz. **Mutations-
+         probe** (`Array.from(t)` → `t.split("")`): GENAU dieser Test wird
+         rot (Surrogat-Rest „�“ im Ergebnis), alle anderen bleiben grün.
+       - `activeCount` 0 liefert `""` statt eines widersinnigen "genau
+         einmal"-Satzes (isoliert `f.activeCount === 1` von einer
+         `<= 1`-Variante). **Mutationsprobe** (`=== 1` → `<= 1`): GENAU
+         dieser Test wird rot, alle anderen bleiben grün.
+       - elsewhere-Fund im Vorspann eines anderen Notizbuchs (kein
+         Kapitel/Abschnitt) zeigt "Vorspann" statt eines leeren Pfads.
+         **Mutationsprobe** (`|| "Vorspann"` im elsewhere-Zweig entfernt):
+         GENAU dieser Test wird rot, alle anderen bleiben grün.
+       - `finalizeFeedbackReply("##OK## (keine Dublette)", …)` liefert
+         `null` – pinnt, dass `isNoFeedback()` VOR `buildDuplicateFactNote()`
+         greift, mit einem Sentinel-Text, der tatsächlich ein Dubletten-
+         Wort enthält (die bisherigen Sentinel-Fälle enthielten alle KEIN
+         Dubletten-Wort, der Kommentartitel war damit nicht belegt).
+     - **Doku.** `docs/TESTFAELLE.md` D1: das Pillen-Beispiel zitierte
+       bisher eine "saubere" Zeile ohne Markdown – tatsächlich erscheint
+       die Zeile ROH inkl. Listen-/Fett-/Checkbox-Markdown (z. B. „- **QA-
+       Edit Beta**“), da `f.text` unverändert bleibt und nur der
+       Vergleichs-Schlüssel normalisiert wird. Beispiel korrigiert, dazu
+       ein Klarstellungssatz bei der 🟡-Regel ("andere Zeile" bezieht sich
+       NICHT auf rohes Markdown) und "irgendeine Zeile ≥2×" auf "eine
+       HINZUGEFÜGTE Zeile ≥2×" präzisiert.
+     - **Bewusst NICHT umgesetzt (mit Begründung, ORCHESTRATOR-Spielraum
+       für optionale 🔵-Findings genutzt):**
+       - Die vorgeschlagene Extraktion der App.jsx-Nachrichten-Konstruktion
+         (`opsInfo: fin.note`) in eine eigene, testbare
+         `buildFeedbackMessages()`-Funktion wurde NICHT umgesetzt – das
+         wäre ein Umbau von `App.jsx#requestFeedback` über den engen
+         PFLICHT-Umfang dieser Runde hinaus (Datei nicht Teil des
+         PFLICHT-Auftrags) und damit ein bewusst vermiedener,
+         unaufgeforderter Zusatz-Umbau. Restrisiko bleibt wie in der
+         Vorlage benannt: ein entferntes `opsInfo: fin.note,` in App.jsx
+         würde von KEINEM Unit-Test erkannt (nur E2E D1, als 🟡).
+         ⚠️ **abgelöst durch #127:** ein FEHLENDER Anhang ist seither NUR
+         noch ein 🔵-Fall, nicht mehr 🟡.
+       - `DUP_TRIGGER_RE` um "redundan|wiederhol" (Formulierungen wie
+         "redundant", "wiederholt einen bestehenden Punkt") NICHT erweitert
+         – bewusst, um das Auslöse-Verhalten nicht über den bereits in #125
+         begründeten Umfang hinaus zu verbreitern (Dauer-Pillen-Risiko bei
+         zu weiter Wortliste). Als Restrisiko dokumentiert: Falschbehaup-
+         tungen ganz ohne Dubletten-Wort (z. B. "redundant", "bereits
+         vorhanden", "zwei Einträge", "wiederholt") lösen weiterhin KEINEN
+         Anhang aus – laut TESTFAELLE D1 ein 🟡-Fall, kein 🔴.
+         ⚠️ **abgelöst durch #127:** ein FEHLENDER Anhang ist seither NUR
+         noch ein 🔵-Fall.
+       - Die Formulierung "steht … genau einmal" NICHT auf "… genau einmal
+         ALS EIGENER EINTRAG" präzisiert (Überschrift/Zitat/Tabellenzelle
+         mit demselben Text zählen nicht als zweiter li-Eintrag) – das hätte
+         alle bestehenden Wortlaut-Assertions in `tests/feedback.test.js`
+         und den Live-Fall-Test angefasst, ohne einen 🔴/🟡-Fall zu
+         berühren (keine li-Dublette). Als Restrisiko dokumentiert statt
+         als Wortlaut-Änderung umgesetzt.
+         ⚠️ **abgelöst durch #127:** die ZÄHLUNG läuft seither über ALLE
+         Zeilen inkl. Überschrift/Zitat/Tabellenzelle (siehe
+         `countLooseOccurrences()`/seit #128 `collides()`/`lineKeys()`) –
+         die hier beschriebene Lücke besteht nicht mehr.
+       - PP2-Testinstanz B wird weiterhin VOR dem `try` gemountet
+         (`tests/quickNotesSync.test.jsx`) – bereits in einer früheren Runde
+         bewusst als rein kosmetisch eingestuft (schlägt der Mount von B
+         fehl, wird A nicht abgeräumt); an dieser Einschätzung hat sich
+         nichts geändert, nicht erneut angefasst.
+     - **Restrisiken (zusätzlich zu #124/#125, dort weiterhin gültig):**
+       - `normalizeFactText()` normalisiert weiterhin NICHT auf Überschrift-/
+         Zitat-/Tabellenzell-Ebene (siehe "bewusst nicht umgesetzt" oben).
+         ⚠️ **abgelöst durch #127:** `normalizeFactText()` ist komplett
+         entfernt und durch `looseKey()`/`countLooseOccurrences()` (seit
+         #128 `lineKeys()`/`collides()`) ersetzt, die Zählung läuft seither
+         über ALLE Zeilen einschließlich Überschrift/Zitat/Tabellenzelle.
+       - Die drei "bewusst nicht umgesetzt"-Punkte oben bleiben offene,
+         bekannte Lücken derselben Art wie die bereits in #124/#125
+         dokumentierten (Überauslösen/Unterauslösen ist im annotieren-
+         statt-streichen-Design grundsätzlich risikoärmer als beim
+         entfernten Streich-Netz, siehe #124).
+     - **Tests/Verifikation.** `npx vitest run --maxWorkers=3` (voller Lauf):
+       **3073/3073 grün** (57 Testdateien; Basis-Stand nach #125 war
+       3044/3044, +29 neue `feedback.test.js`-Fälle, keine Änderung an
+       `tests/quickNotesSync.test.jsx` in dieser Runde). `npm run
+       test:coverage -- --maxWorkers=3`: „All files“ Lines 95,97 % /
+       Statements 93,71 % / Branches 88,04 % / Functions 93,36 % (Gate
+       60 %); `feedback.js` 100/93,9/100/100 (vorher 99,42/92,68/100/100);
+       `quicknotes.js` unverändert 98,78/97,77/100/100 (Modul selbst nicht
+       angefasst). Version bleibt exakt `v7.57.1` (Auftrag: kein weiterer
+       Bump).
+
+127. **v7.57.1, D1: konservativer Prüfschlüssel statt Einzelvarianten
+     (ORCHESTRATOR-ENTSCHEIDUNG "die KLASSE schließen", löst den Zähl-/
+     Vergleichsteil von #118/#120–#126 ab; das annotieren-statt-streichen-
+     Design aus #124 selbst bleibt unverändert bestehen).** ⚠️ **Abgelöst
+     durch #130** (Nutzerentscheidung, Rückbau des gesamten Fakten-Anhang-
+     Netzes inkl. des hier eingeführten Prüfschlüssels) – siehe dort. Nach #126 fanden
+     drei WEITERE Review-Runden nacheinander jeweils eine weitere
+     DARSTELLUNGSVARIANTE derselben sichtbaren Zeile, bei der
+     `normalizeFactText()` einen abweichenden Schlüssel lieferte und der
+     Faktenanhang dadurch fälschlich „genau einmal“ behauptete, obwohl im
+     Notizbuch eine optisch identische oder die Zeile enthaltende Stelle
+     existierte: Textmarker/Farbe (`<span>`/`<mark>`, #126), NFD/NFC und
+     unsichtbare Zeichen (#126), Editor-Escape `&lt;`/`&gt;` gegenüber rohem
+     Codeblock-Inhalt (Runde 8), und Autolink `<url>` gegenüber nackter URL
+     (Runde 8). Jede Runde schloss die JEWEILS GEFUNDENE Variante, aber das
+     strukturelle Muster (eine weitere Art, wie derselbe sichtbare Text im
+     Markdown-Quelltext anders aussehen kann) wiederholte sich – exakt das
+     Einzel-Guard-Muster, das laut Nutzervorgabe (Memory „Keine
+     Einzel-Guards bei Editierfehlern“) NICHT die Lösung sein soll. Auf
+     ORCHESTRATOR-ENTSCHEIDUNG hin wird deshalb NICHT eine fünfte
+     Darstellungsvariante einzeln nachgezogen, sondern die gesamte
+     Fehlerklasse an der WURZEL geschlossen.
+     - **Neuer Prüfschlüssel `looseKey(text)` (ersetzt `normalizeFactText()`
+       vollständig, samt `countKeyInDoc()`/`skipForCount()`).** Statt jede
+       Darstellungsvariante einzeln per `replace()`-Zeile zu erkennen, wirft
+       `looseKey()` ALLES weg, was kein Buchstabe/keine Ziffer ist:
+       1. Autolink `<url>` auspacken (vor dem Tag-Strip, sonst verschluckt
+          dieser die komplette URL).
+       2. ALLE HTML-Tags entfernen (nicht mehr nur `<span>`/`<mark>` wie in
+          #126 – die Ansicht zeigt ohnehin nur den Inhalt, unabhängig vom
+          Tag-Namen).
+       3. `decodeBasicEntities()` aus `markdown.jsx` (kein Importzyklus,
+          `markdown.jsx` importiert `feedback.js` nicht) – dieselbe
+          MINIMALE `&lt;`/`&gt;`-Whitelist wie der Viewer, NACH dem
+          Tag-Strip (sonst würde ein wörtlich getipptes „&lt;span&gt;“ als
+          Tag verschwinden).
+       4. Listen-/Checkbox-Präfix, Zitat-Präfix, `[Titel](url)` (auf den
+          Titel reduziert, siehe Abweichung unten), `**`/`__`/`~~`/`*`/`_`/
+          `` ` `` entfernen.
+       5. `.normalize("NFKC")`.
+       6. NUR NOCH `\p{L}\p{N}` behalten, lowercase.
+       Weil Schritt 6 am Ende ALLES Nicht-Alnum wegwirft, erübrigen sich
+       viele der früheren Einzelschritte von selbst (Whitespace,
+       Interpunktion, unsichtbare Formatzeichen wie ZWSP/weiches
+       Trennzeichen verschwinden automatisch) – insbesondere die in #126
+       eingeführte `\p{Cf}`-Behandlung entfällt VOLLSTÄNDIG (kein
+       Regressionsrisiko: ein Review-Fund zeigte, dass `\p{Cf}` seinerseits
+       ZWJ- und Emoji-Flaggen-Tag-Zeichen mitgerissen und dadurch zwei
+       verschiedene Landesflaggen fälschlich gleichgesetzt hätte – mit
+       `looseKey()` verschwinden Emojis ohnehin komplett, das Problem
+       existiert nicht mehr).
+     - **Zählung über ALLE Zeilen, per TEILFOLGE statt Gleichheit
+       (`countLooseOccurrences()`, ersetzt `countKeyInDoc()`).** Bisher
+       wurden Leerzeilen/Trennzeilen/(außerhalb von Codeblöcken)
+       Überschriften beim ZÄHLEN übersprungen (`skipForCount()`) – jetzt
+       zählt JEDE Zeile mit, ausdrücklich auch Überschriften, Tabellenzellen
+       und Zitate (Auftragspunkt 3). Der Vergleich läuft außerdem per
+       `.includes()`, nicht `===`: eine neue, kurze Zeile, deren grober
+       Wortlaut bereits als TEILSTRING einer längeren, inhaltlich ANDEREN
+       Zeile vorkommt, gilt ebenfalls als Kollision. Das ist die "sichere
+       Richtung" – der Code kann "echte Dublette" und "zufällige
+       Teilstring-Kollision" auf dieser groben Ebene nicht unterscheiden,
+       lieber eine Kollision zu viel erkannt (→ kein Anhang) als eine
+       ECHTE, sichtbare Dublette übersehen. Dieselbe Logik gilt für die
+       "elsewhere"-Suche (Vorkommen in ANDEREN Notizbüchern).
+     - **Gewissheits-Fallunterscheidung statt pauschaler Zusage
+       (`formatFeedbackFacts()`/`buildDuplicateFactNote()`).** Ein Anhang
+       ("„X“ steht in „N“ genau einmal") bzw. die Aussage "kein zweiter
+       Eintrag mit sichtbar gleichem Wortlaut" im Prompt-Fakten-Block wird
+       NUR noch ausgegeben, wenn `activeCount === 1` (GEWISSHEIT: die neue
+       Zeile ist die EINZIGE Übereinstimmung). Bei `activeCount >= 2`
+       (Kollision – echte Dublette ODER grobe Teilstring-Kollision, nicht
+       unterscheidbar) wird die reine Zählung weiterhin mitgeteilt ("kommt
+       … in mindestens N Zeilen vor"), aber OHNE die Gewissheits-Aussage,
+       formuliert als "Vorkommen unsicher, bitte selbst prüfen" – die
+       Zählung darf dem Modell laut Auftrag KEINEN berechtigten
+       Dubletten-Hinweis ausreden. `MIN_FACT_KEY_LEN = 4` (vorher
+       `alnumCount < 2` in #118/#121): ein zu kurzer grober Schlüssel wird
+       gar nicht erst zu einem Fakt – "zu unspezifisch" für jede Aussage,
+       auch für die reine Zählung.
+     - **Anzeige im Chat-Anhang bereinigt (`displayText()`/
+       `shortenForNote()`, Review-Fund 🟡/🔵).** Der Anhang zitierte die
+       hinzugefügte Zeile bisher ROH (`f.text`) – stand sie mit Textmarker/
+       Schriftfarbe im Dokument, zeigte die Chat-Pille rohes HTML statt des
+       Texts (bei reinem Textmarker-Markup war der eigentliche Text darin
+       gar nicht mehr lesbar); bei einem getippten „<“/„>“ das rohe
+       Editor-Escape „&gt;“ statt des Zeichens selbst. `displayText()`
+       entpackt Autolinks, entfernt HTML-Tags und dekodiert Entities VOR der
+       (weiterhin surrogatsicheren) Kürzung – rohes MARKDOWN (`**`, `-`,
+       `[ ]`) bleibt bewusst UNVERÄNDERT stehen (TESTFAELLE D1: nur
+       Editor-HTML/Entities zählen als "nicht sichtbarer Text", Markdown-
+       Auszeichnung nicht). Der Vergleichsschlüssel (`looseKey()`) ist davon
+       komplett getrennt und bleibt unberührt.
+     - **Bewusste Abweichung von der wörtlichen Auftragsformel:**
+       `[Titel](url)` wird in `looseKey()` NUR auf den Titel reduziert
+       (nicht "Titel url" wie im Auftrag skizziert) – die URL ist im
+       RENDERING kein sichtbarer Text (nur `href`), zwei Links mit
+       identischem sichtbarem Titel, aber leicht abweichender URL (z. B.
+       `https://x.de` vs. `https://www.x.de`), sollen weiterhin denselben
+       Schlüssel ergeben. "Titel url" hätte das verhindert (Domain-Zeichen
+       im Schlüssel) und wäre damit GEGEN die "sichere Richtung" gewesen.
+       Empirischer Nebenbefund dazu (Klassentest, siehe unten): ein Link,
+       dessen Titel WORTGLEICH der URL ist ("[url](url)"), wird vom
+       `tiptap-markdown`-Serializer dieses Editors ohnehin automatisch auf
+       die kürzere Autolink-Form `<url>` reduziert – die im Auftrag
+       implizit unterstellte dritte, dauerhaft bestehende Darstellungsform
+       kann in diesem Editor gar nicht entstehen.
+     - **Entfernt:** `normalizeFactText()`, `countKeyInDoc()`,
+       `skipForCount()`, sowie der `\p{Cf}`-Normalisierungsschritt aus #126
+       (siehe oben – durch den finalen Alnum-Filter in `looseKey()`
+       ohnehin überflüssig UND seinerseits mit einem eigenen, jetzt
+       vermiedenen Nebenrisiko). Per `grep` geprüft: keine Referenz mehr
+       außerhalb der Kommentar-Historie in `feedback.js`/`DECISIONS.md`.
+     - **Klassentest (Auftragspunkt 6), `tests/feedbackEditorClasses.test.jsx`
+       (NEU, 17 Tests, jsdom mit dem echten TipTap-Serializer, Harness wie
+       `tests/docEditorEntities.test.jsx`/`tests/docEditorLinks.test.jsx`).**
+       Dieselbe sichtbare Zeile wird über drei Cluster in mehreren
+       Editor-Varianten erzeugt und paarweise (eine Variante als Bestand,
+       eine ANDERE als neu hinzugefügt) gegen `buildFeedbackFacts()`/
+       `buildDuplicateFactNote()`/`formatFeedbackFacts()` geprüft (KEIN
+       Anhang, KEINE "kein zweiter Eintrag"-Aussage):
+       - **Cluster A** (getippt mit „<“/„>“, Inline-Code, Codeblock): drei
+         echte Shell-Befehle mit `>`/`<`/`=>`, alle drei Varianten paarweise.
+       - **Cluster B** (Autolink, nackte URL, Link mit Titel): Autolink ↔
+         nackte URL in beide Richtungen, plus ein Link MIT (vom Titeltext
+         verschiedenem) Titel gegen denselben Titeltext ohne Link – inkl.
+         des oben genannten Autolink-Kollaps-Nebenbefunds.
+       - **Cluster C** (Schriftfarbe, Textmarker, Checkbox, Tabellenzelle,
+         Überschrift, Zitat): jeweils über echten Editor-Roundtrip erzeugt
+         (nicht handgeschrieben), gegen unmarkierten Klartext geprüft;
+         Überschrift bewusst NUR als Bestand-Seite (eine Überschrift wird
+         nie selbst zu einem Fakt, siehe Eligibilität in
+         `buildFeedbackFacts()`).
+       - Dazu der D1-Live-Fall (Anhang erscheint weiterhin unverändert) und
+         eine Negativprobe (eine sichtbar ANDERE Zeile löst weiterhin den
+         Anhang aus – die Klasse ist nicht so geschlossen worden, dass gar
+         nichts mehr erkannt wird).
+       Ergänzt um eine neue Describe "looseKey (Prüfschlüssel)" in
+       `tests/feedback.test.js` (10 Tests, direkte Eingabe-/Ausgabe-Paare
+       je Verarbeitungsschritt) und eine neue Describe
+       "Editor-Darstellungsvarianten schließen" (String-Ebene, 8 Tests:
+       Entity-Escape/Autolink in echten Dokument-Szenarien, die bewusste
+       Teilstring-Kollision, die `MIN_FACT_KEY_LEN`-Schwelle, sowie die
+       Anzeige-Bereinigung im Anhang).
+     - **Mutationsproben (manuell durchgeführt, jeweils live verifiziert,
+       danach zurückgesetzt):**
+       - `decodeBasicEntities()`-Aufruf aus `looseKey()` entfernt: GENAU
+         sechs Tests werden rot (drei Entity-Escape-it.each-Fälle, der
+         `looseKey()`-Unit-Test dazu, zwei Tests in
+         `feedbackEditorClasses.test.jsx`/Cluster A), alle anderen 3102
+         bleiben grün.
+       - `unwrapAutolink()` aus `looseKey()` entfernt: GENAU fünf Tests
+         werden rot (zwei Autolink-it.each-Fälle, der zugehörige
+         `looseKey()`-Unit-Test, zwei Tests in Cluster B), alle anderen
+         3103 bleiben grün.
+       - `stripAllTags()` aus `looseKey()` entfernt: ⚠️ NUR der direkte
+         `looseKey()`-Unit-Test (`<b>Kaffee kaufen</b>`) wird rot – die
+         beiden Textmarker/Schriftfarbe-it.each-Fälle in
+         `tests/feedback.test.js` bleiben ÜBERRASCHEND GRÜN, weil
+         `countLooseOccurrences()` per `.includes()` prüft und die
+         sichtbare Teilzeichenkette auch INNERHALB des ungestrippten
+         `<mark …>`-Blobs zusammenhängend erhalten bleibt. Ein zunächst zu
+         optimistischer Testkommentar dazu wurde korrigiert (siehe
+         `tests/feedback.test.js`) – der `.includes()`-Mechanismus deckt
+         diesen speziellen Mutanten also bereits selbst mit ab, der
+         `stripAllTags()`-Baustein bleibt trotzdem nötig (Anzeige im
+         Anhang, generische Tags, Autolink-Nachbarschaft).
+       - `.includes(key)` → `=== key` in `countLooseOccurrences()`: GENAU
+         der dedizierte Teilstring-Kollisions-Test wird rot, alle anderen
+         3107 bleiben grün (die Farb-/Textmarker-Fälle in
+         `feedbackEditorClasses.test.jsx` beruhen nach einer Korrektur der
+         Testkonstruktion – siehe unten – jetzt auf EXAKTER Gleichheit,
+         nicht mehr auf der Teilfolge).
+       - `.includes(key)` → `=== key` in der "elsewhere"-Suche: GENAU der
+         neue Test "Kollision auch in der 'elsewhere'-Suche …" wird rot,
+         alle anderen 3107 bleiben grün.
+     - **Echter Fehler in der eigenen Testkonstruktion gefunden und
+       behoben (Review-Selbstbefund, kein Produktivcode-Bug).** Die ersten
+       Fassungen der Cluster-C-Tests für Schriftfarbe/Textmarker fügten den
+       farbigen Text per `insertContent()` ans Dokumentende EINES
+       bestehenden Absatzes ("Alt") an, statt einen eigenen Listenpunkt zu
+       laden – die resultierende Zeile lautete dadurch versehentlich
+       "Alt<span …>Text</span>" (Text UND Vorabsatz in einer Zeile). Die
+       Tests bestanden trotzdem (per Teilfolge), verifizierten aber NICHT
+       das behauptete "exakt dieselbe Zeile"-Szenario. Gefunden über die
+       oben beschriebene `includes`/`===`-Mutationsprobe (der erwartete
+       Mutant traf ZU WENIGE Tests). Fix: beide Fälle laden jetzt einen
+       eigenen `- <span …>…</span>`- bzw. `- <mark …>…</mark>`-Listenpunkt
+       aus Markdown-QUELLTEXT und lassen ihn einmal durch den Editor
+       laufen (empirisch verifizierte Attribut-Syntax, `style="color: rgb(…);"`
+       bzw. `style="background-color: rgb(…); color: inherit;"`).
+     - **Doku.** `docs/TESTFAELLE.md` D1: die 🟡-Regel für einen FEHLENDEN
+       Anhang auf 🔵 herabgestuft (ein fehlender Anhang ist seit diesem
+       Umbau ein ausdrücklich akzeptiertes Restrisiko, kein Pflicht-Fix
+       mehr); die 🔴-Regel für einen FALSCHEN Anhang präzisiert (gilt
+       ausdrücklich auch bei einer nur optisch/darstellungsgleichen oder
+       die Zeile enthaltenden Stelle, nicht nur bei exakt gleichem
+       Markdown). D1b-Verweis auf #127 ergänzt. Korrekturvermerke
+       "⚠️ abgelöst durch #127" an den jetzt überholten `normalizeFactText()`/
+       `countKeyInDoc()`/`skipForCount()`-Beschreibungen in #124/#125/#126
+       ergänzt.
+     - **Bewusst NICHT umgesetzt (mit Begründung):**
+       - Keine Erweiterung von `DUP_TRIGGER_RE` (z. B. um "redundant"/
+         "bereits vorhanden") – unverändert aus #125/#126 übernommen,
+         außerhalb des Umfangs dieser Runde (die betrifft den ZÄHL-/
+         VERGLEICHS-Teil, nicht den AUSLÖSER).
+       - Keine Extraktion einer `buildFeedbackMessages()`-Funktion aus
+         `App.jsx` – `App.jsx` bleibt unangefasst (Signatur von
+         `buildFeedbackRequest()`/`finalizeFeedbackReply()` unverändert),
+         bereits in #126 als bewusst nicht umgesetzt begründet.
+     - **Restrisiken (zusätzlich zu #118–#126, dort weiterhin gültig, siehe
+       auch die dortigen Korrekturvermerke):**
+       - **Ein FEHLENDER Anhang ist ausdrücklich zulässig** (ORCHESTRATOR-
+         ENTSCHEIDUNG, Punkt 1 des Auftrags) – der neue Prüfschlüssel ist
+         BEWUSST konservativ: jede Kollision (echte Dublette ODER grobe
+         Teilstring-Kollision mit einer völlig anderen Zeile) unterdrückt
+         den Anhang. Ein Nutzer, der zwei tatsächlich unterschiedliche,
+         aber unter `looseKey()` zufällig kollidierende kurze Zeilen
+         anlegt, bekommt dadurch KEINE Richtigstellung, falls das Modell
+         sich (fälschlich) doppelt meldet.
+       - `looseKey()` ist bewusst GRÖBER als für die Anzeige nötig (z. B.
+         verschmilzt eine Tabellenzelle "cat a.txt" mit dem gleichlautenden
+         Shell-Kommando "cat a.txt" irgendwo im Fließtext) – das ist die
+         gewünschte "sichere Richtung", kann aber in seltenen Fällen einen
+         eigentlich berechtigten Anhang unterdrücken (siehe oben).
+       - `DUP_TRIGGER_RE` löst weiterhin bei Formulierungen ganz ohne
+         Dubletten-Wort ("redundant", "zwei Einträge", "bereits vorhanden")
+         nicht aus – unverändertes, bereits in #125/#126 dokumentiertes
+         Restrisiko, kein neuer Umfang dieser Runde.
+       - `App.jsx#requestFeedback` bleibt ohne eigene, unit-testbare
+         Nachrichten-Konstruktion – unverändertes Restrisiko aus #126.
+     - **Tests/Verifikation.** `npx vitest run --maxWorkers=3` (voller Lauf):
+       **3108/3108 grün** (58 Testdateien – 57 aus #126 + 1 neue,
+       `tests/feedbackEditorClasses.test.jsx`; `tests/feedback.test.js`
+       jetzt 279 statt 261 Tests, +18: neue Describe "looseKey" (8),
+       neue Describe "Editor-Darstellungsvarianten schließen" (10), acht
+       bestehende Tests auf die neue `looseKey()`-Schlüsselform bzw. die
+       neue Gewissheits-Wortlaut umgestellt). `npm run test:coverage --
+       --maxWorkers=3` (einmalig, danach): „All files“ Statements 93,7 % /
+       Branches 88,03 % / Functions 93,39 % / Lines 95,97 % (Gate 60 %,
+       gegenüber #126 praktisch unverändert – der Zähl-/Vergleichsteil war
+       schon vorher vollständig gedeckt); `feedback.js` 100/94,03/100/100
+       (vorher 100/93,9/100/100). `quicknotes.js` unverändert
+       98,78/97,77/100/100 (Modul nicht angefasst). Version bleibt exakt
+       `v7.57.1` (Auftrag: kein weiterer Bump).
+       ⚠️ **Nachbesserung siehe #128:** looseKey()s generischer Tag-Strip
+       (Punkt 2 oben) entfernt in Wahrheit sichtbaren Text (nicht nur
+       Formatierung) – die Begründung "die Ansicht zeigt ohnehin nur den
+       Inhalt, unabhängig vom Tag-Namen" war falsch, siehe dort.
+
+128. **v7.57.1, Nachbesserung zu #127: konservativer Prüfschlüssel statt
+     Einzelvarianten, Runde 2 (ORCHESTRATOR-ENTSCHEIDUNG "die KLASSE
+     schließen", 4× 🔴, 5× 🟡 Pflicht).** ⚠️ **Abgelöst durch #130**
+     (Nutzerentscheidung, Rückbau des gesamten Fakten-Anhang-Netzes) – siehe
+     dort. Drei weitere Review-Runden NACH
+     #127 fanden erneut jeweils eine weitere DARSTELLUNGSVARIANTE, bei der
+     der neue `looseKey()`-Prüfschlüssel selbst noch abwich – dieselbe
+     Fehlerklasse wie in #127 beschrieben ("eine weitere Art, wie derselbe
+     sichtbare Text im Markdown-Quelltext anders aussehen kann"), diesmal
+     aber an einer STRUKTURELLEN Schwachstelle von `looseKey()` selbst statt
+     an einer neuen Einzelvariante: `stripAllTags()` entfernt JEDES
+     "&lt;Buchstabe…&gt;" als vermeintliches HTML-Tag – die Begründung in
+     #127 ("die Ansicht zeigt ohnehin nur den Inhalt, unabhängig vom
+     Tag-Namen") ist FALSCH: die Ansicht (`markdown.jsx#INLINE_TOKEN_RE`)
+     erkennt NUR `<span>`/`<mark>`/Autolink als Markup, jedes andere
+     `<...>` (Platzhalter wie `<branchname>`, Generics wie `List<String>`,
+     HTML-Schnipsel) bleibt SICHTBARER TEXT – ganz besonders in Codeblock/
+     Inline-Code (`code.jsx`), die IMMER roh & unverändert anzeigen. Belegt
+     mit dem echten TipTap-Serializer: ein Codeblock `git checkout -b
+     <branchname>` PLUS dieselbe Zeile getippt (Editor escaped zu `&lt;
+     branchname&gt;`) ergab bisher `activeCount 1` und einen FALSCHEN
+     "genau einmal"-Anhang, obwohl beide Zeilen in der Ansicht identisch
+     aussehen (`<branchname>` bleibt sichtbar stehen).
+     - **KEINE fünfte Einzelvariante nachgezogen** (weiterhin
+       ORCHESTRATOR-ENTSCHEIDUNG aus #127, per Nutzer-Memory "keine
+       Einzel-Guards bei Editierfehlern" verbindlich) – `looseKey()` selbst
+       bleibt UNVERÄNDERT (weiterhin die "aufgeräumte" Lesart für Anzeige/
+       Eligibilität/Dedup, siehe die bestehenden `looseKey()`-Unit-Tests,
+       alle weiterhin grün). Die Kollisions-ERKENNUNG (nicht die Eligibilität)
+       wird stattdessen strukturell um zwei weitere, rein ADDITIVE Lesarten
+       je Zeile erweitert – analog zum "sichere Richtung"-Prinzip aus #127
+       (eine zusätzliche Lesart kann NUR weitere Kollisionen finden, NIE
+       eine von `looseKey()` bereits gefundene wieder verlieren, also NUR
+       einen potenziell falschen Anhang verhindern, NIE einen erzeugen):
+       - **`plainKey(text)`** – entfernt GAR KEIN Markup (keine Tags, keine
+         Listen-/Zitat-Präfixe, keine Fett-/Kursiv-/Code-Auszeichnung),
+         dekodiert NUR die Editor-Escapes `&lt;`/`&gt;`, behält dann NUR
+         Buchstaben/Ziffern. Deckt genau den Fall ab, in dem `looseKey()`s
+         Tag-Strip sichtbaren Text verschluckt.
+       - **`formulaKey(text)`** – wie `looseKey()`, zusätzlich werden
+         TeX-Befehlsnamen (`\le`, `\alpha`, …) entfernt (`TEX_CMD_RE =
+         /\\[a-zA-Z]+/g`). Deckt den Formel-Fall ab: `$a \le b$`
+         (Quelltext) und die vom Nutzer gleich gemeinte, ausgeschriebene
+         Variante `a ≤ b` haben unterschiedliche BUCHSTABEN im Quelltext
+         (`\le` zählt sonst als Textinhalt "le").
+       - **`lineKeys(text)`** fasst beide neuen Lesarten mit `looseKey()`
+         zusammen (dedupliziert, `< MIN_FACT_KEY_LEN` verworfen – sonst
+         könnte eine LEERE Lesart fälschlich jede Zeile treffen), plus (bei
+         einer Tabellenzeile) dieselben drei Lesarten JEDER EINZELNEN Zelle
+         (`tableCellTexts()`, siehe unten). **`collides(hayKeys,
+         searchKeys)`** ersetzt das bisherige `looseKey(l).includes(key)`
+         durch ein Kreuzprodukt: kollidiert, wenn IRGENDEINE Lesart der
+         Dokumentzeile IRGENDEINE Lesart der Suchzeile als Teilfolge enthält.
+         `buildFeedbackFacts()` nutzt `lineKeys()`/`collides()` jetzt
+         durchgängig (aktive Zählung UND "elsewhere"-Suche).
+     - **Tabellenzelle als neue Variante (🟡).** Eine neu hinzugefügte
+       MEHRSPALTIGE Tabellenzeile ("| Text | offen |") hat einen
+       Gesamt-Schlüssel aus ALLEN Zellen verkettet, der nie mit einem
+       einspaltigen Klartext-Bestand ("Text") übereinstimmt, obwohl die
+       ERSTE Zelle in der Ansicht identisch aussieht. `tableCellTexts()`
+       zerlegt eine Pipe-Tabellenzeile in ihre Zellen (bewusst einfacher
+       als `markdown.jsx#splitRow` – kein `\|`-Escaping nötig, reicht für
+       die reine Kollisions-ERKENNUNG als zusätzlicher OR-Zweig); `lineKeys()`
+       wendet das symmetrisch auf BEIDE Seiten (Such- und Dokumentzeile) an,
+       nicht nur asymmetrisch auf die neue Zeile.
+     - **Fußnoten-Links (🟡).** `[N](url)` (CITE_LINK_RE-Konvention aus
+       `markdown.jsx`, NUR http(s) via `LINK_URL_RE`) wird in `looseKey()`
+       jetzt per `stripFootnoteLinks()` GANZ entfernt statt (wie ein
+       generischer Link) auf die Ziffer "N" reduziert – zwei sonst
+       identische Zeilen, die sich NUR durch die Fußnoten-NUMMER
+       unterscheiden ("… Meter[1](url-a)" vs. "… Meter[2](url-b)"), ergeben
+       jetzt denselben Schlüssel. MUSS vor der generischen
+       `[Titel](url)`-Reduktion laufen (sonst bliebe die Ziffer als "Titel"
+       erhalten).
+     - **`facts.uncertain` (🟡, "Nicht berechtigte hinzugefügte Zeilen
+       blockieren den Anhang nicht mehr").** `buildFeedbackFacts()` trägt
+       jetzt zusätzlich eine `uncertain`-Eigenschaft am Rückgabe-Array
+       (NUR gesetzt, wenn `true` – ein Fakten-Array ohne jede Unsicherheit
+       bleibt dadurch weiterhin `toEqual([])`-kompatibel für Bestandstests):
+       `true`, sobald mindestens eine hinzugefügte Zeile aus einem der
+       ELIGIBILITÄTS-Gründe NIE zu einem eigenen Fakt wurde, aber trotzdem
+       echten Inhalt hatte (Codeblock-Zeile mit Text, Überschrift mit Text,
+       ein zu kurzer/unspezifischer Schlüssel, oder eine hinzugefügte Zeile
+       JENSEITS des `MAX_FACTS`-Deckels – Letzteres per
+       `diff.slice(i + 1).some(...)` nachträglich geprüft). `
+       buildDuplicateFactNote()` verzichtet dann auf JEDEN Anhang, auch für
+       andere, für sich genommen sichere Fakten in derselben Änderung – ein
+       Anhang für einen einzelnen sicheren Fakt hätte sonst implizit "sonst
+       keine Dublette" suggeriert, obwohl genau die ungeprüfte Zeile eine
+       sein könnte. Review-Beleg (jetzt Regressionstest): Einkaufsliste mit
+       bereits vorhandenem "- Tee" (looseKey "tee", 3 Zeichen, unter
+       `MIN_FACT_KEY_LEN`), neu ergänzt "- Tee" (echte Dublette) UND
+       "- Hafermilch ungesüßt" (für sich genommen sicher) – VORHER hätte
+       der Code trotz der zutreffenden Modell-Aussage "Tee steht jetzt
+       doppelt" einen scheinbar widersprechenden Anhang "„- Hafermilch
+       ungesüßt“ steht … genau einmal" geliefert.
+     - **Wortlaut-Korrektur (🟡, "gleicher Wortlaut" bei einer reinen
+       Teilstring-Kollision).** Sowohl der Prompt-Fakten-Block
+       (`formatFeedbackFacts()`) als auch der Chat-Anhang
+       (`buildDuplicateFactNote()`) behaupteten bei einem Cross-Notizbuch-
+       Treffer "gleicher Wortlaut außerdem in …" – seit `collides()` per
+       Teilfolge sucht, kann das auch eine reine Teilstring-Kollision
+       INNERHALB einer längeren, inhaltlich anderen Zeile sein ("Milch" in
+       "Buttermilch"), dann ist "gleicher Wortlaut" schlicht falsch. Beide
+       Stellen heißen jetzt "Wortlaut (ggf. nur als Teil einer längeren
+       Zeile) auch in …" – wahr in BEIDEN Fällen (echte Übereinstimmung ODER
+       Teilfolge).
+     - **KLASSENTEST erweitert (Auftragspunkt 6).**
+       `tests/feedbackEditorClasses.test.jsx` wächst von 17 auf 37 Tests:
+       - **Cluster A2 (NEU):** mehrere Beispielphrasen aus dem Review-Fund
+         (`git checkout -b <branchname>`, `List<String> namen pruefen`,
+         `cp <quelle> <ziel> ausfuehren`, `Map<Kunde, Rechnung> anlegen`)
+         über getippt/Inline-Code/Codeblock, in ALLEN sinnvollen Paar-
+         Richtungen (Codeblock nur als Bestand, siehe Eligibilität).
+       - **Cluster C erweitert:** JEDES bisher nur einseitig geprüfte Paar
+         (Farbe, Textmarker, Checkbox, Zitat) bekommt jetzt auch die
+         UMKEHRUNG (unmarkiert als Bestand, formatiert als neu) – genau
+         diese Richtung ist der eigentliche Mutationstöter für
+         `plainKey()`/`stripAllTags()` (siehe Mutationsproben unten).
+         NEU: Fett/Kursiv/Durchgestrichen über den echten Markdown-
+         Roundtrip (bisher nur auf String-Ebene geprüft) und eine
+         ZWEISPALTIGE Tabellenzeile als NEUE Variante gegen einspaltigen
+         Klartext-Bestand (Mutationstöter für `tableCellTexts()`).
+       - Dazu neue String-Ebene-Describes in `tests/feedback.test.js`
+         ("Generisches '<...>' in Codeblock/Inline-Code schließen",
+         "Formel-Glyphen und Tabellenzellen schließen") sowie ein
+         `looseKey()`-Unit-Test für die Fußnoten-Entfernung und zwei neue
+         `buildDuplicateFactNote()`-Tests für `facts.uncertain`.
+     - **Echter Fehler in der EIGENEN Testkonstruktion gefunden und
+       behoben (Review-Selbstbefund, kein Produktivcode-Bug, analog zum in
+       #127 dokumentierten Fund bei Farbe/Textmarker).** Die erste Fassung
+       der Fett/Kursiv/Durchgestrichen-Umkehrungstests baute die formatierte
+       Zeile per `editor.commands.insertContentAt()` ans Dokumentende EINES
+       bestehenden Absatzes ("Alt") – das verschmolz die Zeile zu
+       "Alt**Text**" (Vorabsatz UND Text in einer Zeile). Die Umkehrungs-
+       Tests schlugen dadurch korrekt fehl (activeCount blieb bei 1, weil
+       der zusätzliche "Alt"-Präfix die Teilfolge-Suche in der
+       Rückwärts-Richtung brach) – kein Produktivcode-Fehler, sondern ein
+       Fehler der ERSTEN Testfassung, gefunden BEVOR der Test committet
+       wurde. Fix: wie bei Cluster A/B über `roundtrip()` aus Markdown-
+       QUELLTEXT geladen (`**Text**`/`_Text_`/`~~Text~~`), keine bestehende
+       Zeile im Dokument.
+     - **Mutationsproben (manuell durchgeführt, live verifiziert, jeweils
+       danach per Diff gegen die Original-Datei zurückgesetzt):**
+       - `plainKey()`/`formulaKey()` aus `lineKeys()` entfernt (nur
+         `looseKey()` bleibt): GENAU drei Tests in Cluster A2 werden rot
+         (die drei Paare, die eine GETIPPTE/escapte Variante enthalten –
+         Codeblock+Codeblock- bzw. Inline-Code-Vergleiche bleiben grün,
+         weil beide Seiten dieselbe rohe Tag-Strip-Behandlung durchlaufen
+         und sich dadurch schon vorher deckten).
+       - `tableCellTexts()` aus `lineKeys()` entfernt: GENAU der neue
+         "zweispaltige Tabellenzeile"-Test (Cluster C) wird rot.
+       - `stripFootnoteLinks()` aus `looseIntermediate()` entfernt: GENAU
+         der neue Fußnoten-`looseKey()`-Unit-Test wird rot.
+       - `TEX_CMD_RE`-Ersetzung aus `formulaKey()` entfernt: GENAU der neue
+         "TeX-Quelltext vs. Glyphe"-Test wird rot.
+       - `facts.uncertain`-Guard aus `buildDuplicateFactNote()` entfernt:
+         GENAU die zwei neuen `uncertain`-Regressionstests werden rot.
+       - `collides()` von `.includes()` auf `===` umgestellt: GENAU
+         dieselben zwei Tests wie schon in #127 dokumentiert werden rot
+         (der bestehende Teilstring-Kollisions-Test und sein
+         "elsewhere"-Gegenstück) – die neuen #128-Tests bleiben davon
+         unberührt (sie beruhen auf EXAKTER Übereinstimmung der
+         zusätzlichen Lesarten, nicht auf der Teilfolge-Eigenschaft).
+       - `stripAllTags()` KOMPLETT aus `looseKey()` entfernt (Auftragspunkt
+         6, "Tag-Strip zurücknehmen -> Klassentest wird rot" – #127 hatte
+         dafür nur den DIREKTEN `looseKey()`-Unit-Test, der Klassentest
+         selbst blieb dabei GRÜN, siehe #127-Mutationsprobe-Kommentar dort):
+         GENAU drei Tests werden rot – der direkte `looseKey()`-Unit-Test
+         UND die BEIDEN neuen Cluster-C-Umkehrungen "unmarkiert (Bestand) +
+         Farbe/Textmarker (neu)". Die (bereits vor #128 bestehenden)
+         Vorwärts-Richtungen ("Farbe/Textmarker (Bestand) + unmarkiert
+         (neu)") bleiben dabei weiterhin GRÜN – strukturell unvermeidbar,
+         weil <span>/<mark> den Text nur UMSCHLIESSEN (nicht durchschneiden):
+         die sichtbare Teilzeichenkette bleibt auch im ungestrippten Blob
+         als Substring erhalten, wenn die KÜRZERE (unmarkierte) Zeile die
+         SUCHZEILE ist. Nur die Umkehrung (die LÄNGERE, ungestrippte Zeile
+         als Suchzeile) kann diesen Mutanten überhaupt aufdecken – genau
+         diese Richtung fehlte im #127-Klassentest komplett und wird jetzt
+         durch die neuen Umkehrungstests geschlossen.
+       Alle sieben Proben jeweils gegen `tests/feedback.test.js` UND
+       `tests/feedbackEditorClasses.test.jsx` laufen lassen, danach
+       Original-Datei per Diff gegen eine Sicherungskopie auf Byte-
+       Gleichheit geprüft.
+     - **Korrekturvermerke** in #124 (Z. 16130-16135: ein FEHLENDER Anhang
+       ist seit #127 nur noch 🔵, nicht mehr 🟡) und #126 (Z. 16436-16437,
+       16441-16445: dieselbe Herabstufung; Z. 16446-16452, 16459: die
+       Zählung läuft seit #127 über ALLE Zeilen inkl. Überschrift/Zitat/
+       Tabellenzelle, nicht mehr NICHT) direkt an den betroffenen Stellen
+       ergänzt.
+     - **Restrisiken (zusätzlich zu #124–#127, dort weiterhin gültig):**
+       - Ein FEHLENDER Anhang wird durch `facts.uncertain` HÄUFIGER als
+         vorher (ausdrücklich in Kauf genommen, ORCHESTRATOR-ENTSCHEIDUNG
+         Punkt 1: "Ein FEHLENDER Anhang ist zulässig") – bleibt aber
+         zulässig, ein FALSCHER Anhang nicht.
+       - `formulaKey()` deckt nur die EINFACHE TeX-Kommando-vs.-Glyphe-
+         Diskrepanz ab (Kommandonamen entfernt) – eine vollständige
+         TeX-zu-Unicode-Abbildung (z. B. `\alpha` -> "α" statt nur "alpha"
+         zu entfernen) wurde bewusst NICHT umgesetzt (Umfang/Risiko einer
+         vollständigen Formel-Bibliothek stünde außer Verhältnis zum
+         erwarteten Nutzen); bleibt als bekannte, engere Grenze dieser
+         Lesart bestehen.
+       - `lineKeys()`/`collides()` laufen weiterhin mit derselben O(Zeilen)-
+         Komplexität wie #127 (keine Zwischenspeicherung für die
+         "elsewhere"-Suche über mehrere Fakten) – unverändertes, bereits in
+         #127 als 🔵 dokumentiertes Performance-Restrisiko, kein neuer
+         Umfang dieser Runde.
+     - **Tests/Verifikation.** `npx vitest run --maxWorkers=3` (voller
+       Lauf): **3140/3140 grün** (58 Testdateien, unverändert gegenüber
+       #127 – `tests/feedback.test.js` jetzt 291 statt 279 Tests,
+       `tests/feedbackEditorClasses.test.jsx` jetzt 37 statt 17 Tests).
+       `npm run test:coverage -- --maxWorkers=3` (einmalig, danach): „All
+       files“ Statements 93,75 % / Branches 88,03 % / Functions 93,51 % /
+       Lines 96 % (Gate 60 %, gegenüber #127 praktisch unverändert);
+       `feedback.js` 100/93,25/100/100. Version bleibt exakt `v7.57.1`
+       (Auftrag: kein weiterer Bump).
+       ⚠️ **Nachbesserung siehe #129:** die Restrisiko-Aussage zu
+       `formulaKey()`/`\alpha` (Z. 16933-16939 oben) UND die Einordnung des
+       `lineKeys()`/`collides()`-Performance-Restrisikos als "unverändert,
+       kein neuer Umfang dieser Runde" (Z. 16940-16944 oben) waren FALSCH
+       bzw. wurden in #129 widerlegt – siehe dort (Runde 12 maß ca. 5× (in
+       Wahrheit gemessen: ~34×) langsamer als #127, UND einen ECHTEN
+       falschen Anhang für den `\alpha`-Fall, kein bloßes Restrisiko).
+
+129. **v7.57.1, Nachbesserung zu #127/#128: konservativer Prüfschlüssel statt
+     Einzelvarianten, Runde 12 (ORCHESTRATOR-ENTSCHEIDUNG "die KLASSE
+     schließen" weiterhin verbindlich, 4× 🔴, 5× 🟡 PFLICHT).** ⚠️
+     **Abgelöst durch #130** (NUTZERENTSCHEIDUNG, Rückbau des gesamten
+     Fakten-Anhang-Netzes – JEDE Review-Runde ab #118 fand eine weitere
+     Darstellungsvariante, bei der die "genau einmal"-Zusage falsch gewesen
+     wäre; das ist genau das Einzel-Guard-Muster, das laut Nutzervorgabe
+     vermieden werden soll, siehe #130 für die vollständige Begründung).
+     Runde 12
+     fand die bisher GRUNDSÄTZLICHSTE Ausprägung derselben Fehlerklasse:
+     `looseKey()`/`plainKey()`/`formulaKey()` wenden je EINE globale
+     Transformation auf die GANZE Zeile an und vergleichen danach das
+     Ergebnis ALS GANZES per Teilfolge (`collides()`). Enthält eine Zeile
+     MEHRERE Auszeichnungsarten GLEICHZEITIG (Schriftfarbe UND ein
+     sichtbares "<...>" in Inline-Code in DERSELBEN Zeile, Link-Titel UND
+     Inline-Code, Textmarker UND Generics) oder einen TeX-Befehl, der von
+     KaTeX ALS BUCHSTABE gerendert wird ("\mu"/"\Omega"/"\alpha"/"\Delta"
+     erscheinen in der Ansicht als µ/Ω/α/Δ – der System-Prompt verlangt vom
+     Modell trotzdem AUSSCHLIESSLICH die KaTeX-Schreibweise im Dokument,
+     tippt der Nutzer denselben Wert direkt, sehen beide Zeilen identisch
+     aus), passt KEINE der drei Lesarten mehr exakt – jede weitere
+     Einzellesart hätte nur die JEWEILS NÄCHSTE Kombination offengelassen
+     (dieselbe Meta-Lehre wie schon in #127/#128).
+     - **`visibleTokens()`/`chainHit()` (NEU, feedback.js) – GAP-toleranter
+       Wort-Abgleich statt einer weiteren Einzellesart.** `visibleTokens()`
+       zerlegt die Zeile in ihre sichtbaren WÖRTER (dieselben Schritte wie
+       `looseIntermediate()`: Autolink/Fußnoten-Link entpacken, Tags durch
+       ein LEERZEICHEN statt komplett entfernt – Wörter können dadurch nur
+       ZERFALLEN, nie verschmelzen –, Entities dekodieren, Präfix/Link-
+       Syntax, TeX-Befehlsnamen durch ein Leerzeichen ersetzt, NFKC,
+       griechische Buchstaben/Letterlike-Symbole `℀`-`⅏` als
+       zusätzlicher Wort-TRENNER). `chainHit(hayKeys, tokens)` prüft, ob
+       IRGENDEINE Lesart einer Dokumentzeile (`lineKeys()`) ALLE Wörter IN
+       DERSELBEN REIHENFOLGE enthält – beliebiger Text DAZWISCHEN ist
+       erlaubt (anders als `collides()`, das eine ZUSAMMENHÄNGENDE
+       Teilfolge verlangt). Nur als zusätzlicher OR-Zweig neben `collides()`
+       verdrahtet (`buildFeedbackFacts()`, activeCount UND "elsewhere"-
+       Suche) – "sichere Richtung" wie #127/#128: ein zusätzlicher Treffer
+       kann NUR eine weitere Kollision aufdecken, nie eine von `collides()`
+       bereits gefundene wieder verlieren.
+     - **Warum GAP-Toleranz die richtige Verallgemeinerung ist (statt einer
+       vierten/fünften Einzellesart).** Eine Mischzeile "Schriftfarbe UND
+       Inline-Code" hat z. B. bei `plainKey()` (keine Tag-Entfernung) zwar
+       ALLE Buchstaben der getippten Variante enthalten, aber NICHT
+       zusammenhängend (die Farb-Attribute/Tags stehen dazwischen) –
+       `collides()`s `.includes()` verlangt Zusammenhang, `chainHit()`
+       nicht. Bei einem TeX-Befehl als NEUE Zeile ("$\mu$F") muss der
+       Befehlsname ("mu") zusätzlich aus `visibleTokens()` entfernt werden
+       (wie in `formulaKey()`), sonst bleibt die Richtung "TeX im
+       Dokument, Glyphe neu getippt" bereits über `chainHit()`
+       abgedeckt (die Glyphe wird zum Wort-Trenner), aber die UMGEKEHRTE
+       Richtung ("Glyphe im Dokument, TeX-Quelltext neu getippt") NICHT –
+       empirisch mit dem echten Klassentest gefunden (siehe Mutationsproben
+       unten), NICHT nur am Schreibtisch hergeleitet.
+     - **`displayText()` korrigiert (Review-Fund 🟡, Anzeige im Anhang).**
+       Die #127-Fassung nutzte dasselbe `stripAllTags()` wie `looseKey()`
+       und verschluckte dadurch sichtbaren CODESPAN-Inhalt (ein Anhang für
+       "- `` `git checkout -b <branchname>` `` ausfuehren" zeigte fälschlich
+       "- `` `git checkout -b ` `` ausfuehren", der Platzhalter fehlte) und
+       zerschnitt eine Tabellenzelle mit hartem Zeilenumbruch ohne Trennung
+       ("vereinbarenMontag" statt "vereinbaren / Montag"). `displayText()`
+       segmentiert jetzt wie die ANSICHT: Codespans (`` `…` ``) bleiben ROH,
+       nur AUSSERHALB wird Autolink entpackt, `<span>`/`<mark>` entfernt
+       (NICHT jedes generische "<...>" wie `looseKey()`) und ein "<br>" als
+       " / " dargestellt.
+     - **`tableCellTexts()` erweitert (Review-Fund 🟡).** Ein harter
+       Zeilenumbruch ("<br>", Umschalt+Enter) INNERHALB einer Zelle zeigt
+       die Ansicht als EIGENE Zeile (`markdown.jsx#splitCellLines`) – jede
+       Teilzeile bekommt jetzt zusätzlich ihre EIGENE Lesart (additiv,
+       "sichere Richtung" wie beim Zell-Split selbst).
+     - **Performance: `otherNotebooks` einmal vor der Fakten-Schleife
+       berechnet statt pro Fakt neu (Review-Fund 🟡, WIDERLEGT die
+       #128-Einordnung "unverändert, kein neuer Umfang dieser Runde" – die
+       Zusatz-Lesarten aus #128 machten die pro-Fakt-Neuberechnung
+       tatsächlich TEURER).** Eigene Messung (20 Fakten gegen 3 andere
+       Notizbücher à 4000 Zeilen, Node, `Date.now()`-Differenz um
+       `buildFeedbackFacts()`): VORHER **6073 ms**, NACHHER **180 ms** (Faktor
+       ~34, deutlich mehr als die im Review-Fund geschätzten "~5×" – die
+       zusätzlichen `chainHit()`-Aufrufe dieser Runde machen die
+       eingesparte Neuberechnung noch teurer als vorher). Die eigentliche
+       Kollisions-SUCHE bleibt weiterhin O(Fakten × Zeilen) (unverändertes,
+       in #127/#128 bereits als 🔵 dokumentiertes Restrisiko) – nur die
+       TEURE `lineKeys()`-Berechnung je Zeile entfällt jetzt pro Fakt.
+     - **Prompt-Kopf entschärft + `facts.uncertain`-Hinweis im Fakten-Block
+       (Review-Fund 🟡, Auftragspunkt 4).** `buildFeedbackTrigger()`s
+       pauschales "zähle NICHT selbst nach" widersprach `facts.uncertain`
+       (#128: mind. eine hinzugefügte Zeile wurde NIE geprüft, fehlt dann
+       im Fakten-Block ganz) und hätte dem Modell einen berechtigten
+       Dubletten-Hinweis GENAU über die ungeprüfte Zeile ausreden können.
+       Neuer Kopf: "nur „genau 1×“ ist verlässlich geprüft; bei „unsicher“
+       und für hier NICHT aufgeführte hinzugefügte Zeilen bitte selbst
+       nachprüfen". `formatFeedbackFacts()` hängt bei `facts.uncertain`
+       zusätzlich einen Satz an ("Nicht alle hinzugefügten Zeilen wurden
+       vom Code geprüft … diese bitte selbst auf Dubletten prüfen").
+     - **`IMG_LINE_RE`-Eligibilitäts-Guard (Review-Fund 🔵).** Eine Bildzeile
+       ("![Alt](img:…)") zeigt in der Ansicht NUR das Bild, der Alt-Text ist
+       UNSICHTBAR – der Code kann Bildinhalte nicht beurteilen, ein Anhang
+       für den (unsichtbaren) Alt-Text-Wortlaut wäre irreführend. Wie
+       Codeblock/Überschrift: von der Fakt-Eligibilität ausgeschlossen,
+       macht das Ergebnis aber `uncertain` statt sie einfach zu ignorieren.
+     - **KLASSENTEST erweitert (Auftragspunkt 6).**
+       `tests/feedbackEditorClasses.test.jsx` wächst von 37 auf 41 Tests:
+       neues **Cluster D** (Schriftfarbe + Inline-Code GLEICHZEITIG in
+       einer Zeile, echte Editor-Ausgabe, beide Richtungen) sowie ein
+       Mutationstöter-Test ("Bestand enthält die neue Zeile als Teil einer
+       längeren sichtbaren Zeile", Fett + Zusatztext) – GENAU dieser Test
+       fehlte bisher: alle bisherigen Paare waren in IRGENDEINER Lesart
+       EXAKT gleich, kein Paar prüfte die reine TEILFOLGEN-Eigenschaft.
+       `tests/feedback.test.js` wächst von 291 auf 308 Tests: neue Describe
+       "TeX-Buchstaben-Glyphen und Mischformatierung schließen" (µ/Ω/α/Δ in
+       beiden Richtungen + drei Mischformatierungs-Paare, je beide
+       Richtungen, plus zwei Kontrollproben), ein Tabellenzellen-"<br>"-Test,
+       zwei `displayText()`-Anzeige-Tests, ein isolierter Überschrift-
+       `uncertain`-Test, ein Bildzeilen-`uncertain`-Test, zwei
+       `formatFeedbackFacts()`-Hinweis-Tests, ein `buildFeedbackTrigger()`-
+       Kopf-Test, sowie zwei zusätzliche Assertions im bestehenden
+       MAX_FACTS-Deckel-Test (`facts.uncertain`/kein Anhang).
+     - **Wichtiger Befund zur eigenen Mutationsprobe (Auftragspunkt 6,
+       "includes->equals zurücknehmen -> der Klassentest wird rot") – seit
+       `chainHit()` NICHT MEHR wörtlich zutreffend, mit Begründung.** Die
+       Mutation `collides()`: `.includes()` → `===` (dieselbe wie in
+       #127/#128 dokumentiert) lässt seit `chainHit()` **0 Tests** rot
+       werden (empirisch geprüft, beide Testdateien). Grund: `chainHit()`
+       ist für die Kollisions-ERKENNUNG ein STRUKTURELLER SUPERSET von
+       `collides()` – findet `collides()` eine Kollision (Suchschlüssel als
+       ZUSAMMENHÄNGENDE Teilfolge in einem Dokument-Schlüssel), dann liegen
+       automatisch auch ALLE Wörter dieses Suchschlüssels IN DERSELBEN
+       REIHENFOLGE (mit Lücke null) in genau diesem Dokument-Schlüssel vor
+       – exakt das, was `chainHit()` verlangt, nur toleranter. `collides()`
+       bleibt trotzdem bestehen (schneller Kurzschluss-Pfad, direkt an
+       bestehende Tests/Kommentare gebunden, kein Grund für einen riskanten
+       Umbau in dieser Runde) – die Mutationsprobe, die den Klassentest
+       TATSÄCHLICH rot werden lässt, ist jetzt **`chainHit()`/
+       `visibleTokens()` komplett entfernt** (siehe unten).
+     - **Ähnlicher Befund, EMPIRISCH gegengeprüft: `decodeBasicEntities()`
+       AUS `plainKey()` entfernt (Review-Fund 🟡, "MB").** Bleibt bei
+       **349/349 Tests grün** (beide Testdateien) – KEIN Test bemerkt diese
+       Mutation. Anders als bei `collides()` oben ist das aber kein reiner
+       Vergleichs-Mechanismus-Ersatz, sondern eine ECHTE Redundanz: JEDE
+       konkrete Editor-Zeile, die #128 ursprünglich mit `plainKey()`s
+       Dekodierung motiviert hatte (getippt vs. Inline-Code, siehe Cluster
+       A2/"Generisches '<...>'"-Describe), bleibt weiterhin über `looseKey()`
+       (dekodiert bereits in `looseIntermediate()`) PLUS `chainHit()`
+       (gap-tolerant) erkennbar – dieselben 20 Codeblock/Generics-Tests
+       bleiben auch bei dieser Mutation grün. Bewusst KEIN künstlicher Test
+       ergänzt: jeder Versuch, ein Paar zu konstruieren, das NUR über
+       `plainKey()`s Dekodierung (und über KEINE andere Lesart/`chainHit()`)
+       kollidiert, führte zu einer Konstellation, die in der Ansicht NICHT
+       mehr identisch aussieht (also kein reales "Darstellungsvarianten"-
+       Paar mehr wäre) – ein Test dafür wäre reine Pro-forma-Abdeckung ohne
+       Aussagekraft. Festgehalten als bewusste, begründete Lücke statt
+       stillschweigend übergangen.
+     - **Mutationsproben (empirisch verifiziert, jeweils per `sed`/Edit auf
+       einer laufenden Kopie, danach gegen eine Sicherungskopie
+       zurückgesetzt und mit `npx vitest run --maxWorkers=3` erneut auf
+       Ausgangsstand geprüft):**
+       - `chainHit()`/`visibleTokens()` komplett aus `buildFeedbackFacts()`
+         entfernt (nur `collides()` bleibt): **9 Tests rot** – 7 in
+         `tests/feedback.test.js` (alle vier TeX-Glyphen-`it.each`-Fälle,
+         alle drei Mischformatierungs-`it.each`-Fälle) und 2 in
+         `tests/feedbackEditorClasses.test.jsx` (Cluster D, beide
+         Richtungen). Damit wird Auftragspunkt 6 ("der Klassentest wird
+         rot") durch DIESE Mutation erfüllt, nicht mehr durch die
+         `collides()`-spezifische von #127/#128 (siehe oben).
+       - `GLYPH_SEP_RE` unwirksam gemacht (nie treffende Regex): GENAU die
+         vier TeX-Glyphen-`it.each`-Fälle werden rot (die Glyphe verschmilzt
+         sonst mit dem Nachbarwort zu einem nicht mehr auffindbaren Token).
+       - `TEX_CMD_RE`-Ersetzung aus `visibleTokens()` entfernt: GENAU
+         dieselben vier Fälle werden rot, aber NUR in der Richtung
+         "Glyphe im Dokument, TeX-Quelltext neu getippt" (der Befehlsname
+         "mu"/"alpha"/… bleibt dann als eigenes Wort-Token stehen, das in
+         der Glyphe-Variante nie vorkommt) – empirisch bestätigt, dass
+         beide TeX-Bausteine (GLYPH_SEP_RE UND die TEX_CMD_RE-Ersetzung)
+         unabhängig nötig sind, je für eine Richtung.
+       - `tableCellTexts()`s "<br>"-Split entfernt: GENAU der neue
+         Tabellenzellen-"<br>"-Test wird rot.
+       - `displayText()` auf die #127-Fassung zurückgesetzt
+         (`stripAllTags()` statt Codespan-Segmentierung): GENAU die beiden
+         neuen `displayText()`-Anzeige-Tests werden rot.
+       - MAX_FACTS-`uncertain`-Guard (`diff.slice(i + 1).some(...)`)
+         entfernt: GENAU die neue `facts.uncertain`-Assertion im
+         bestehenden Deckel-Test wird rot.
+       - Überschrift-`uncertain`-Guard entfernt: GENAU der neue isolierte
+         Überschrift-Test wird rot (der bisherige, kombinierte Test hätte
+         das NICHT gemerkt – der gleichzeitig hinzugefügte Codeblock löste
+         `uncertain` bereits unabhängig aus, siehe Review-Fund 🟡).
+       - `IMG_LINE_RE`-Guard entfernt: GENAU der neue Bildzeilen-Test wird
+         rot.
+       - `otherNotebooks`-Vorberechnung zurückgenommen (alte
+         O(Fakten×Zeilen)-Neuberechnung je Fakt): keine funktionale
+         Änderung (alle Tests bleiben grün), aber siehe Performance-Messung
+         oben (6073 ms statt 180 ms für dasselbe Szenario).
+       Alle Proben jeweils gegen BEIDE Testdateien laufen lassen, danach
+       Original-Datei per `md5sum`-Vergleich gegen eine Sicherungskopie auf
+       Byte-Gleichheit geprüft.
+     - **Korrekturvermerke:** in #128 (Z. 16933-16939: der `\alpha`-Fall ist
+       seit dieser Runde KEIN Restrisiko mehr; Z. 16940-16944: die
+       Einordnung "unverändert, kein neuer Umfang" war falsch, siehe
+       Performance-Messung oben) direkt an den Stellen ergänzt. In
+       `docs/TESTFAELLE.md` D1/D1b: die Liste der vom 🔴-Finding erfassten
+       Darstellungsvarianten um Mischformatierung/TeX-Glyphen/Tabellenzelle-
+       mit-"<br>" ergänzt, DECISIONS-Verweise um #129 erweitert, das
+       D1-Beispielzitat auf die tatsächliche Checkbox-Form korrigiert
+       ("- [ ] **QA-Edit Beta**"), "garantiert wahre Fakten" zu "konservativ
+       geprüfte Fakten" korrigiert (die vier Nachbesserungsrunden #126-#129
+       widerlegen eine Unfehlbarkeits-Zusage strukturell). In `feedback.js`
+       selbst: "GARANTIERT WAHR"/"garantiert wahr" durch "konservativ
+       geprüft" ersetzt (Kopfkommentar, `buildDuplicateFactNote()`-Kommentar,
+       DUP_TRIGGER_RE-Kommentar), veraltete Verweise auf entfernte
+       Funktionen (`skipForCount()`, `normalizeFactText()`) durch Verweise
+       auf die tatsächlichen Nachfolger ersetzt, "VIER weitere
+       Darstellungsvarianten" (#127-Absatz) auf die tatsächlich DREI
+       genannten korrigiert.
+     - **Bewusst NICHT umgesetzt (mit Begründung):**
+       - `collides()` NICHT entfernt, obwohl `chainHit()` sie strukturell
+         subsumiert (siehe oben) – ein Umbau, der die bestehende, an vielen
+         Tests/Kommentaren hängende Funktion entfernt, hätte in dieser
+         Runde nur zusätzliches Risiko ohne Verhaltensänderung eingebracht.
+       - Kein eigener Test/Fix für zwei Formeln, die sich NUR durch den
+         griechischen BUCHSTABEN unterscheiden ("$\alpha$" vs. "β") – siehe
+         Restrisiken unten, das ist die "sichere Richtung" (ein FEHLENDER
+         Anhang ist laut Auftrag ausdrücklich zulässig).
+       - Kein eigener TipTap-Math-Harness (`docEditorMath.test.jsx`-Stil) für
+         die TeX-Glyphen-Fälle im KLASSENTEST – die String-Ebene in
+         `tests/feedback.test.js` prüft dieselbe Logik (KaTeX selbst wird
+         nicht neu implementiert, nur der Vergleich der Rohtexte) mit
+         deutlich weniger Aufwand/Risiko; die MathInline/MathBlock-
+         Serialisierung (math.jsx) selbst ist an anderer Stelle bereits
+         gut abgedeckt.
+     - **Restrisiken (zusätzlich zu #124–#128, dort weiterhin gültig):**
+       - `GLYPH_SEP_RE` behandelt JEDEN griechischen Buchstaben gleich als
+         Wort-Trenner – zwei Formeln, die sich NUR durch den griechischen
+         Buchstaben unterscheiden ("Winkel $\alpha$ messen" vs. "Winkel β
+         messen"), kollidieren dadurch ebenfalls (kein Anhang mehr) – "sichere
+         Richtung" (ein FEHLENDER Anhang ist zulässig), aber eine echte,
+         beabsichtigte Präzisionseinbuße gegenüber der Vorrunde.
+       - `visibleTokens()`s generischer Tag-Strip (wie `looseKey()`) verliert
+         Wörter, die INNERHALB eines generischen "<...>" stehen (z. B. ein
+         Platzhalter mitten im Wort) – macht `chainHit()` an dieser Stelle
+         NUR großzügiger (weniger Tokens nötig), nie strenger, bleibt also
+         "sichere Richtung", kann aber theoretisch eine zu grobe Kollision
+         erzeugen.
+       - TeX-Befehle mit Akzent/Kombination (z. B. `\hat a` → "â") bleiben
+         weiterhin ungedeckt (wie schon in #128 als Grenze von `formulaKey()`
+         benannt) – GLYPH_SEP_RE/TEX_CMD_RE decken nur die in Runde 12
+         belegten Fälle (µ/Ω/α/Δ, generische Buchstaben-Kommandos) ab, keine
+         vollständige TeX-zu-Unicode-Tabelle.
+       - `lineKeys()`/`collides()`/`chainHit()` bleiben O(Fakten × Zeilen)
+         für die Kollisions-SUCHE selbst (nur die `lineKeys()`-BERECHNUNG
+         ist jetzt gecached) – unverändertes, bereits in #127/#128 als 🔵
+         dokumentiertes Performance-Restrisiko bei SEHR vielen Fakten/sehr
+         großen Notizbüchern.
+       - Ein FEHLENDER Anhang bleibt ausdrücklich zulässig (ORCHESTRATOR-
+         ENTSCHEIDUNG Punkt 1, unverändert seit #127) – ein FALSCHER Anhang
+         nicht; alle in Runde 12 belegten Fälle (rote Befunde) sind jetzt
+         durch `chainHit()`/`visibleTokens()`/Anzeige-/Tabellenzell-Fixes
+         geschlossen (empirisch, siehe Mutationsproben), das schließt aber
+         nicht aus, dass eine FÜNFZEHNTE Review-Runde eine weitere,
+         bislang unbekannte Kombination findet – die REGEL bleibt: erst die
+         Fehlerklasse verallgemeinern (wie hier `chainHit()`), keine
+         Einzel-Guards.
+     - **Tests/Verifikation.** `npx vitest run --maxWorkers=3` (voller
+       Lauf): **3161/3161 grün** (58 Testdateien – `tests/feedback.test.js`
+       jetzt 308 statt 291 Tests (+17), `tests/feedbackEditorClasses.test.jsx`
+       jetzt 41 statt 37 Tests (+4)). `npm run test:coverage --
+       --maxWorkers=3` (einmalig, danach): „All files“ Statements 93,77 % /
+       Branches 88,01 % / Functions 93,6 % / Lines 96,02 % (Gate 60 %,
+       gegenüber #128 praktisch unverändert); `feedback.js`
+       99,57/92,34/100/100 (vorher 100/93,25/100/100 – die marginale
+       Differenz liegt an neuem, ganz überwiegend getestetem Code, kein
+       Coverage-Rückschritt unterhalb des Gates). Version bleibt exakt
+       `v7.57.1` (Auftrag: kein weiterer Bump).
+
+130. **v7.57.1, D1-Netz zurückgebaut (NUTZERENTSCHEIDUNG).** Das zwischen
+     #118 und #129 gewachsene Kollisions-/Anhang-"Netz" für den D1-Befund
+     (`looseKey()`/`plainKey()`/`formulaKey()`/`viewKey()`, `chainHit()`/
+     `visibleTokens()`, `buildDuplicateFactNote()` mit eigenem Chat-Anhang
+     über `m.opsInfo`, `DUP_TRIGGER_RE`, `uncertain`-Logik, `displayText()`/
+     `shortenForNote()`) ist auf ausdrücklichen Wunsch des Nutzers WIEDER
+     ENTFERNT.
+     - **Warum.** D1 verändert KEINE Daten – der Auto-Kommentar ist ein
+       falscher TEXT, keine Operation, kein Datenverlust. Trotzdem fand
+       JEDE der zwölf Nachbesserungsrunden (#120–#129) eine weitere
+       Darstellungsvariante (Textmarker/Schriftfarbe, NFD/NFC, unsichtbare
+       Zeichen, Autolink, generisches `<...>` in Codeblock/Inline-Code,
+       TeX-Quelltext gegenüber ausgeschriebener Formel, TeX-Buchstaben-
+       Glyphe, Tabellenzelle mit hartem Zeilenumbruch, mehrspaltige
+       Tabellenzeile, MEHRERE Auszeichnungsarten gleichzeitig …), bei der
+       die vom Code behauptete "steht genau einmal"/"keine Dublette"-Zusage
+       falsch gewesen wäre. Das ist exakt das Einzel-Guard-Muster (für
+       jede neu gefundene Darstellungsvariante eine weitere Sonderregel),
+       das der Nutzer grundsätzlich nicht will (siehe Memory "Keine
+       Einzel-Guards bei Editierfehlern") – eine Prompt-Regel/ein Code-Netz
+       ohne diese Erkenntnis ist keine Lösung, nur eine immer größere
+       Ausnahmeliste. Jede weitere Review-Runde hätte mit hoher
+       Wahrscheinlichkeit die DREIZEHNTE Darstellungsvariante gefunden statt
+       die Fehlerklasse endgültig zu schließen.
+     - **Was bleibt (siehe `src/lib/feedback.js`).**
+       1. Die Diff-Legende in `buildFeedbackTrigger()` ("+ " = im
+          Dokumentstand BEREITS enthalten, "− " = entfernt, "  " =
+          unveränderter Kontext) plus die explizite Verortung "bereits
+          unter ALLE NOTIZBÜCHER (Stand NACH der Änderung)" – das ist die
+          eigentliche ROOT-CAUSE-Abhilfe für den D1-Live-Befund (das Modell
+          hatte den committeten Diff-Stand als "existierte schon vorher"
+          gelesen), unabhängig vom Netz.
+       2. `buildFeedbackFacts()`/`formatFeedbackFacts()`, aber auf EXAKTE
+          Zählung reduziert: für jede hinzugefügte, nicht-leere Zeile des
+          Diffs die Anzahl der Zeilen im aktiven Notizbuch mit IDENTISCHEM
+          Markdown-Wortlaut (String-Gleichheit NACH `trim()`, die Zeile
+          selbst mitgezählt) plus Kapitelpfad/Zeilennummer, und dieselbe
+          exakte Suche in den anderen Notizbüchern (nur exakte Treffer,
+          OHNE jede Bewertung). `MAX_FACTS` (20) und `DIFF_CAP` (8000
+          Zeichen) bleiben als Kosten-/Latenz-Deckel bestehen. Der
+          Fakten-Block-Kopf trägt KEIN "genau einmal"/"keine
+          Dublette"-Urteil mehr, sondern den Hinweis: "Zählung nach
+          identischem Markdown-Wortlaut; anders formatierte Zeilen wie
+          Fett, Farbe, Link, Formel oder Tabelle zählen NICHT mit – bei
+          Verdacht auf eine inhaltliche Dublette bitte selbst prüfen und
+          den Unterschied benennen." Eine reine exakte Zählung kann NIE
+          falsch liegen (String-Gleichheit ist eindeutig) – es gibt also
+          keine weitere Darstellungsvariante mehr, die sie widerlegen
+          könnte.
+       3. `buildFeedbackRequest()` (Fakten + Trigger bauen) und die
+          Reihenfolge `buildNbCtx()` VOR dem Trigger-Aufbau in
+          `App.jsx#requestFeedback` (braucht weiterhin den
+          NACH-dem-Commit-Stand ALLER Notizbücher für die Zählung).
+       4. `isNoFeedback()`, `dedupeFeedbackParagraphs()` und alle
+          Funktionen, die es schon VOR v7.57.1 (HEAD `878d967`) gab, sind
+          – bis auf `buildFeedbackTrigger()` (Punkt 1) – unverändert.
+     - **Was entfällt (mit allen Referenzen und Tests).**
+       `buildDuplicateFactNote()`, `displayText()`, `shortenForNote()`,
+       `DUP_TRIGGER_RE`, `MAX_NOTE_LINES`, `NOTE_LINE_MAX_CHARS`,
+       `VIEW_TAG_RE`, `looseKey()`/`looseIntermediate()`/`plainKey()`/
+       `formulaKey()`/`alnumKey()`/`unwrapAutolink()`/`stripAllTags()`/
+       `stripFootnoteLinks()`/`lineKeys()`/`collides()`/`chainHit()`/
+       `visibleTokens()`/`GLYPH_SEP_RE`/`TEX_CMD_RE`/`tableCellTexts()`/
+       `MIN_FACT_KEY_LEN`, die gesamte `uncertain`-Logik, sowie
+       `STRUCTURAL_RE`/`BLANK_OR_HEADING_RE` (nur fürs Netz nötig –
+       `locateLine()`/`titleLineIdx()` bleiben unverändert, die exakte
+       Zählung braucht sie für den Kapitelpfad). `finalizeFeedbackReply()`
+       ist GANZ entfernt; `App.jsx#requestFeedback` wertet die
+       Modellantwort seither wieder direkt über `isNoFeedback()`/
+       `dedupeFeedbackParagraphs()` aus (wie vor v7.57.1) und übergibt
+       KEINEN Anhang mehr als `m.opsInfo` – die ℹ️-Pille "manuell
+       bearbeitet" selbst (App.jsx, eigene Info-Nachricht `role:"user"`)
+       bleibt unverändert bestehen, sie gehörte nie zum Netz.
+       `tests/feedbackEditorClasses.test.jsx` ist komplett gelöscht (testete
+       ausschließlich Editor-Darstellungsvarianten des jetzt entfernten
+       Prüfschlüssels). `tests/feedback.test.js` ist neu geschrieben: alle
+       Netz-Tests (looseKey-Einzelbausteine, Editor-Darstellungsvarianten,
+       Formel-/Tabellenzellen-Kollisionen, `buildDuplicateFactNote`,
+       `DUP_TRIGGER_RE`, Codeblock-Zählung, `finalizeFeedbackReply`) sind
+       entfernt; behalten/neu sind die Diff-Legende-Tests, die exakte
+       Zählung mit den Randfällen identische Zeile 2× im aktiven Notizbuch
+       → "2×", nur anders formatiert (Fett statt Klartext) → bleibt bei 1×
+       (KEINE Kollision mehr), Treffer in einem anderen Notizbuch, leere
+       hinzugefügte Zeilen/Diff-Deckel, Escaping von Anführungszeichen im
+       Fakt-Text, sowie der Live-Fall D1 als End-to-End-Test über
+       `buildFeedbackRequest()` (Fakt meldet "1×" im aktiven Notizbuch,
+       identischer Wortlaut zusätzlich in "Wissensbasis").
+       ⚠️ **Korrektur (#131):** Die "Wissensbasis"-Zeile in diesem Test ist
+       bewusst WORTGLEICH nachgebaut, um den Cross-Notizbuch-Fakt zu
+       demonstrieren – der ECHTE Live-Fall hatte dort eine andere
+       Checkbox-Syntax und liefert unter der exakten Zählung KEINEN Treffer;
+       dieser (akzeptierte) Grenzfall war zunächst ungetestet und ist mit
+       #131 nachgezogen. `docs/TESTFAELLE.md` D1/D1b: Erwartung ist weiterhin die Info-Pille
+       "manuell bearbeitet" + Auto-Kommentar; behauptet der Kommentar eine
+       Dublette, die es nicht gibt, ist das jetzt 🔵 (Modellqualität,
+       dieser Eintrag), NICHT mehr 🟡 – es gibt keinen Faktenanhang/keine
+       "Automatische Prüfung"-Pille mehr, alle entsprechenden Verweise sind
+       entfernt.
+     - **Umfang.** `src/lib/feedback.js`: 1014 → 349 Zeilen (HEAD `878d967`
+       vor Beginn von #118: 143 Zeilen – der jetzige Stand ist im
+       Wesentlichen HEAD plus Diff-Legende, exakte Fakten-Zählung und deren
+       Verdrahtung, mit ausführlichen Begründungskommentaren). `src/App.jsx#
+       requestFeedback`: Import/Aufruf auf `isNoFeedback`/
+       `dedupeFeedbackParagraphs` statt `finalizeFeedbackReply`
+       umgestellt, `opsInfo: fin.note` entfernt.
+     - **Tests/Verifikation.** `npx vitest run --maxWorkers=3` (voller
+       Lauf): **2859/2859 grün** (57 Testdateien, gegenüber 3161/3161 vor
+       diesem Rückbau – die Differenz sind die entfernten Netz-Tests samt
+       der gelöschten `tests/feedbackEditorClasses.test.jsx`). `npm run
+       test:coverage -- --maxWorkers=3` (einmalig, danach): „All files“
+       Statements 93,62 % / Branches 87,88 % / Functions 93,31 % / Lines
+       95,92 % (Gate 60 %); `feedback.js` 100/91,17/100/100. Version bleibt
+       exakt `v7.57.1` (Auftrag: kein weiterer Bump).
+     - **Restrisiko (bewusst in Kauf genommen).** D1 (das Modell behauptet
+       fälschlich eine Dublette, obwohl der Eintrag tatsächlich genau
+       einmal vorkommt und die vom Code exakt gezählten Fakten das
+       korrekt widerspiegeln) kann sich wiederholen – das ist dann
+       ausdrücklich eine MODELL-Qualitätsfrage (🔵 laut `docs/
+       TESTFAELLE.md` D1), kein Datenverlust und kein Code-Fehler. Zwei
+       optisch identische, aber unterschiedlich formatierte Zeilen (Fett/
+       Farbe/Link/Formel/Tabelle) werden von der exakten Zählung als
+       "verschieden" gemeldet – der Fakten-Block-Kopf macht diese Grenze
+       dem Modell gegenüber explizit, ein FEHLENDER oder zu ENGER Fakt ist
+       damit ein bewusst akzeptiertes Verhalten, kein Fehler. ⚠️ **Ergänzung
+       (#131):** Strukturzeilen (Tabellen-Trennzeilen, Code-Zäune,
+       Trennlinien) werden bewusst mitgezählt und können als "N×" im
+       Fakten-Text erscheinen – auch das keine Sonderregel (Einzel-Guard-
+       Muster), sondern dieselbe konsequent exakte Zählung.
+
+131. **v7.57.1, Code-Review-Nachbesserung zu #130 (2× 🟡 Pflicht, mehrere
+     🔵).** Ein Review des #130-Rückbaus fand, dass der verbliebene
+     Fakten-Text die eigentliche D1-Root-Cause (Zeitbasis) nicht explizit
+     nannte, sowie mehrere Testlücken (7 benannte Mutanten blieben grün) und
+     kleinere Doku-Ungenauigkeiten. Kein weiterer Versions-Bump (bleibt
+     exakt `v7.57.1`).
+     - **🟡 Fehlende Zeitbasis im Fakten-Text (korrektheit).** "im
+       Notizbuch „X“ 1×" nennt weder, dass NACH der Änderung gezählt wird,
+       noch, dass die hinzugefügte Zeile selbst mitgezählt ist – "1×" passt
+       damit sowohl zur korrekten Lesart als auch zur D1-Fehllesung
+       ("existierte schon vorher" + "+"-Zeile zusätzlich gezählt). Fix in
+       `formatFeedbackFacts()`: "im Notizbuch „X“ nach der Änderung 1× (diese
+       hinzugefügte Zeile mitgezählt; Pfad, Zeile N)"; der Fakten-Block-Kopf
+       in `buildFeedbackTrigger()` nennt dieselbe Zeitbasis zusätzlich vorweg
+       ("Zählung nach identischem Markdown-Wortlaut im Stand NACH der
+       Änderung, die hinzugefügte Zeile selbst mitgezählt; …"). Beide Stellen
+       sind IMMER wahr (keine Bewertung, kein Einzel-Guard) – die
+       Nutzerentscheidung aus #130 bleibt damit unangetastet.
+     - **🟡 Testlücken (korrektheit + befundtreue).** Eigene Mutationsproben
+       (jeweils die Fix-Stelle in `feedback.js` kurz zurückgenommen, dann
+       zurückgesetzt) bestätigten: 7 Mutanten blieben mit dem #130-Testsatz
+       grün. Neue/umbenannte Tests in `tests/feedback.test.js`, je einzeln
+       gegen den zugehörigen Mutanten geprüft:
+       1. `lineNo: at` statt `at + 1` (Off-by-one) – jetzt gepinnt über
+          `expect(f.lineNo).toBe(8)` im umbenannten Test "identischer
+          Wortlaut in anderem Notizbuch" sowie über den neuen Test "Fundort:
+          Titel ist kein Kapitel, Zeile ist 1-basiert" (`lineNo: 6`).
+       2. `if (firstIdx !== -1)` → `if (true)` bei der Cross-Notizbuch-Suche
+          (meldet JEDES andere Notizbuch als Treffer, unabhängig vom
+          Wortlaut) – neuer Test "anderes Notizbuch OHNE identischen
+          Wortlaut (echte Live-Syntax) -> kein elsewhere" (nutzt die im
+          Live-Fall tatsächlich abweichende Checkbox-Syntax) sowie
+          "Teilstring-Treffer in einem anderen Notizbuch zählt NICHT als
+          identischer Wortlaut".
+       3. Teilstring- statt Exakt-Suche in anderen Notizbüchern – vom
+          selben neuen Teilstring-Test abgedeckt (`onb.trimmed.indexOf()`
+          bleibt exakte Array-Gleichheit, kein `.includes()`).
+       4. Fence-Maske in `locateLine()` ignoriert (eine `# kommentar`-Zeile
+          in einem ```-Block würde zum Kapitel) – neuer Test "eine
+          '# kommentar'-Zeile INNERHALB eines ```-Blocks ist KEIN Kapitel".
+       5. Titelzeile nicht übersprungen (`i === tIdx`-Ausschluss entfernt) –
+          neuer Test "Fundort: Titel ist kein Kapitel, Zeile ist 1-basiert".
+       6. Abschnitt beim Kapitelwechsel nicht zurückgesetzt – neuer Test
+          "Abschnitt wird beim Kapitelwechsel zurückgesetzt (kein Vererben
+          aus dem vorigen Kapitel)".
+       7. Fundort ist die ERSTE Fundstelle statt der tatsächlich
+          hinzugefügten Zeile (`idx` durch `indexOf()` ersetzt) – neuer Test
+          "Fundort ist die HINZUGEFÜGTE Zeile, nicht die erste bereits
+          bestehende gleichlautende Zeile" (zwei Kapitel, dieselbe Zeile
+          oben unverändert/unten neu).
+       Zusätzlich: der bisherige "Live-Fixture (D1)"-Test ist umbenannt
+       ("identischer Wortlaut in anderem Notizbuch") und pinnt jetzt explizit
+       `lineNo`/"Zeile 8"; die beiden Escaping-Tests (`buildFeedbackFacts`/
+       `formatFeedbackFacts`) nutzten bisher nur ASCII-Anführungszeichen
+       (`"`), die NIE mit den typografischen Begrenzern „ “ kollidieren –
+       je ein neuer Test mit typografischen „…“-Zeichen im Fakt-Text ergänzt
+       diese Lücke, ohne den bestehenden ASCII-Test zu ersetzen. Alle sieben
+       Mutationsproben durchgeführt (Fix-Stelle kurz zurückgenommen, GENAU
+       der/die zugehörigen neuen Tests wurden rot, alle anderen blieben
+       grün; danach zurückgesetzt).
+     - **Bewusst NICHT umgesetzt (mit Begründung).** Der Vorschlag, die
+       "echten" Original-Live-Dokumente (Tabelle/Bash-Block/LaTeX) aus dem
+       QA-Repo als eigene Fixture nachzubauen, wurde NICHT wortgetreu
+       umgesetzt – der genaue Inhalt lag zum Zeitpunkt dieser Nachbesserung
+       nicht mehr vor (nur die Beschreibung im Review-Fund). Stattdessen
+       demonstriert der neue Test "anderes Notizbuch OHNE identischen
+       Wortlaut (echte Live-Syntax)" denselben Grenzfall (abweichende
+       Checkbox-Syntax → kein Treffer) mit einer repräsentativen, kleineren
+       Fixture. `MAX_FACTS`-Abschneiden ohne Hinweis im Prompt (Review-Fund
+       🔵) wurde NICHT behoben – zusätzlicher Code- und Testaufwand für einen
+       Kosten-/Latenz-Randfall, der beim gewählten Deckel (20 Fakten) im
+       vorgesehenen Anwendungsfall (kleine manuelle Ergänzung) praktisch
+       kaum auftritt; bleibt offener Punkt. Die produktionsseitige
+       `raw = idx < newLines.length ? newLines[idx] : d.l`-Fallback-Zeile in
+       `buildFeedbackFacts()` (Review-Fund 🔵, der `d.l`-Zweig sei praktisch
+       unerreichbar) wurde NICHT angefasst – eine Änderung der
+       Vertrauensbasis (Diff-Wortlaut vs. Notizbuch-Rekonstruktion) ist eine
+       Verhaltensänderung, keine reine Kosmetik, und war nicht Teil der
+       Pflicht-Findings; bleibt offener Punkt für eine künftige Runde.
+     - **🔵 Doku-Korrekturen.** #130 stellte den "Live-Fall D1"-Test so dar,
+       als liefere der ECHTE Live-Fall den Cross-Notizbuch-Treffer in
+       "Wissensbasis" – tatsächlich ist die Fixture dort bewusst WORTGLEICH
+       nachgebaut (siehe Kommentar in `tests/feedback.test.js`), der echte
+       Live-Fall (andere Checkbox-Syntax) liefert KEINEN Treffer; Korrektur
+       direkt am #130-Eintrag ergänzt, ebenso ein Vermerk zum neu getesteten
+       Strukturzeilen-Restrisiko. `⚠️ abgelöst durch #130`-Vermerke an #120
+       (Formulierung "kein zweiter WORTGLEICHER Eintrag …") und #121
+       (`finalizeFeedbackReply()`-Verdrahtung) ergänzt, die zuvor ohne
+       eigenen Vermerk blieben. Kopfkommentare in `feedback.js` (36 → 13
+       Zeilen) und `App.jsx#requestFeedback` (18 → 10 Zeilen) gekürzt – sie
+       erzählten die komplette Netz-Historie nach, obwohl kein Code mehr
+       darauf verweist (per `grep` bestätigt: keine tote Code-Referenz auf
+       entfernte Bezeichner, nur noch Kommentare). Die Variable `raw` in
+       `App.jsx#requestFeedback` (Rest der entfernten
+       `finalizeFeedbackReply(raw, …)`-Signatur) ist zurück zu `reply`
+       benannt, wie in HEAD vor #118 – verkleinert den Diff gegen HEAD auf
+       die eigentlich beabsichtigten Änderungen (Reihenfolge `buildNbCtx()`
+       vor Trigger-Aufbau, `buildFeedbackRequest()`-Aufruf).
+       `docs/TESTFAELLE.md` D1: Vorbedingung "Reste entfernen" jetzt auf den
+       QA-Modus beschränkt (im Konservativ-Modus nur lesend prüfen, per
+       Kopfregel dürfen dort nur "QA-Test"-Notizbücher geändert werden); die
+       🔵-Bewertungsregel gilt jetzt für eine behauptete Dublette in JEDEM
+       Notizbuch (nicht nur innerhalb des bearbeiteten); der Verweis auf die
+       entfernte "Automatische Prüfung"-Pille ist gekürzt.
+     - **Tests/Verifikation.** `tests/feedback.test.js`: 56 Tests (vorher 47;
+       +9: 1 Trigger-Test zur Zeitbasis, 6 neue `buildFeedbackFacts`-Tests
+       zu den sieben Mutanten, 2 zusätzliche typografische Escaping-Tests;
+       1 Test umbenannt/erweitert). `npx vitest run --maxWorkers=3`: **2868/
+       2868 grün** (57 Testdateien, gegenüber 2859/2859 vor dieser
+       Nachbesserung). `npm run test:coverage -- --maxWorkers=3` (einmalig):
+       „All files“ Statements 93,88 % / Branches 88,1 % / Functions 93,31 %
+       / Lines 96,05 % (Gate 60 %); `feedback.js` 100/92,15/100/100. Version
+       bleibt exakt `v7.57.1` (Auftrag: kein weiterer Bump). Abschluss-Review
+       (Opus, 🟡 → behoben): +1 Test „aktives Notizbuch: Teilstring oder
+       andere Groß-/Kleinschreibung zählt NICHT mit (exakt 1×)“ (fängt
+       `t.includes(trimmed)` und einen Vergleich ohne Groß-/Kleinschreibung)
+       und im Live-Fall-D1-Test die Assertion `im Notizbuch „QA-Test“ nach
+       der Änderung 1×` (fängt `formatFeedbackFacts(facts, "")`); beide
+       Mutanten vom Reviewer auf einer Scratch-Kopie als gefangen bestätigt.
+       Endstand: `feedback.test.js` 57 Tests, voller Lauf **2869/2869 grün**,
+       Coverage „All files“ Statements 93,62 % / Branches 87,9 % / Lines
+       95,92 %. Außerdem `coverage/` in `.gitignore` aufgenommen (der
+       v8-Lauf legt `coverage/.tmp/*.json` an, die ein `git add -A` während
+       eines Laufs mit committen würde). `src/lib/
+       feedback.js`: 349 → 339 Zeilen (Kopfkommentar gekürzt, neue Zeitbasis-
+       Kommentare/-Formulierung addiert).
+     - **Restrisiko.** Unverändert gegenüber #130 (siehe dort, inkl. der
+       #131-Ergänzungen zu Strukturzeilen und zum Live-Fall-Test). Die
+       bewusst nicht behobenen Punkte oben (MAX_FACTS-Deckel ohne Hinweis,
+       `raw`-Fallback in `buildFeedbackFacts()`) bleiben offen.

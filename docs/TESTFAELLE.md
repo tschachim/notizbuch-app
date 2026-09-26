@@ -22,6 +22,12 @@ Markierungen:
   der sich nicht per Browser-Fernsteuerung bestätigen lässt). Wird vom
   Tester immer als ÜBERSPRUNGEN gemeldet, nie als Fehlschlag – Verifikation
   bleibt dem Nutzer selbst überlassen.
+- **[NUTZER]** (v7.57.1, DECISIONS #121) – braucht eine VOM NUTZER VORHER
+  eingerichtete Mehr-Repo-Konstellation (z. B. zwei private „-qa“-Repos mit
+  einem PAT für beide). Der Tester trägt dabei NIEMALS selbst einen
+  Token/PAT ein (nur owner/repo im bereits verbundenen Dialog umstellen)
+  und verbindet NIE auf ein Repo ohne „-qa“-Endung. Ist die Vorbedingung
+  nicht erfüllt, gilt der Fall als ÜBERSPRUNGEN (nie als Fehlschlag).
 
 Datentopf: Der Tester stellt vor dem ersten schreibenden Fall fest,
 welches Daten-Repo verbunden ist (Einstellungs-Dialog, nur Repo-Name
@@ -334,6 +340,13 @@ laden – der Chat bleibt leer (kein Wiederauftauchen).
 ⚠️ IM KONSERVATIV-MODUS (echtes Daten-Repo): „Archivieren“ NIEMALS
 anklicken – es leert den globalen Chat des Nutzers auf allen Geräten;
 dann nur den Abbrechen-Pfad testen.
+Hinweis (DECISIONS #120): Schreibt ein ANDERES Gerät zufällig GENAU in dem
+kurzen Fenster zwischen „Archivieren“-Klick und dem debounced
+`state.json`-Write in dasselbe Repo, geriet der geleerte Chat in einer
+früheren Fassung durch den Konflikt-Merge zurück (der Chat blieb NICHT
+leer). Das ist per Unit-/jsdom-Regressionstest (`tests/quickNotesSync.test.jsx`,
+Fall „R2“) abgedeckt und im Alltag ohne zweites Gerät kaum manuell
+reproduzierbar – kein separater Testschritt hier nötig.
 
 **C8 [OFFEN] Eingabefeld vergrößern.** Kleinen Vergrößern-Knopf (oben
 rechts im Eingabefeld) anklicken. Erwartet: Eingabefeld wird sichtbar
@@ -983,17 +996,63 @@ C32(c). 🔴 bei Zeilenverlust oder -duplikat.
 
 ## D. Manuelles Bearbeiten (WYSIWYG)
 
-**D1 [VERBUNDEN] Editor-Roundtrip.** Stift-Knopf → im QA-Notizbuch einen
-Stichpunkt „QA-Edit Beta“ ergänzen, fett markieren, speichern. Erwartet:
-Ansicht zeigt den fetten Eintrag; keine anderen Inhalte verändert;
-neue Version in der Historie. Nur bei bestehender API-Verbindung
-zusätzlich (Auto-Kommentar nach manueller Bearbeitung, siehe
-DECISIONS.md #57): Kurz abwarten, ob eine Info-Pille „… manuell
-bearbeitet“ mit anschließender Assistent-Nachricht erscheint. Erwartet,
-falls sie erscheint: Sie erscheint HÖCHSTENS EINMAL – kein doppelter,
-fast identischer Absatz in derselben Nachricht. Fällt dem Modell nichts
-auf, erscheint GAR KEINE Nachricht (kein sichtbares Info-Pille+leere
-Antwort-Paar) und NIEMALS ein sichtbares „##OK##“ im Chat-Text.
+**D1 [VERBUNDEN] Editor-Roundtrip.** Vorbedingung: „QA-Edit Beta“ steht vor
+dem Lauf in KEINEM Notizbuch (per Suche prüfen; Reste aus früheren Läufen,
+z. B. in „Wissensbasis“ → QA → QA-Ergebnisse, vorher entfernen – nur im
+QA-Modus; im Konservativ-Modus stattdessen nur lesend prüfen und einen Rest
+im Bericht vermerken, D1 dann trotzdem ausführen und den Kommentar
+entsprechend bewerten). Stift-Knopf
+→ im QA-Notizbuch einen Stichpunkt „QA-Edit Beta“ ergänzen, fett markieren,
+speichern. Erwartet: Ansicht zeigt den fetten Eintrag; keine anderen
+Inhalte verändert; neue Version in der Historie. Nur bei bestehender
+API-Verbindung zusätzlich (Auto-Kommentar nach manueller Bearbeitung, siehe
+DECISIONS.md #57/#118/#130): Kurz abwarten, ob eine Info-Pille „…
+manuell bearbeitet“ mit anschließender Assistent-Nachricht erscheint.
+Erwartet, falls sie erscheint: Sie erscheint HÖCHSTENS EINMAL – kein
+doppelter, fast identischer Absatz in derselben Nachricht. Fällt dem
+Modell nichts auf, erscheint GAR KEINE Nachricht (kein sichtbares
+Info-Pille+leere Antwort-Paar) und NIEMALS ein sichtbares „##OK##“ im
+Chat-Text.
+Bewertung:
+- **Kommentar behauptet fälschlich eine Dublette, die es nicht gibt** (im
+  bearbeiteten ODER einem anderen Notizbuch; per Suche/Ansicht prüfen –
+  v7.57-Live-Befund D1 war INNERHALB des bearbeiteten Notizbuchs, li-Elemente
+  im Editor UND in der Ansicht zählen, der Eintrag steht tatsächlich GENAU
+  EINMAL da): 🔵-Finding, KEIN 🟡 (⚠️ **DECISIONS #130**: dem Modell steht im
+  Prompt eine vom Code exakt nach Markdown-Wortlaut gezählte Fakten-Angabe
+  zur Verfügung – eine Fehleinschätzung TROTZ korrekter Fakten ist eine
+  Modell-Qualitätsfrage, kein Datenverlust und keine Operation. Es gibt
+  KEINE eigene Richtigstellungs-Pille/keinen Faktenanhang mehr – die frühere
+  ℹ️-„Automatische Prüfung“-Pille aus DECISIONS #124/#125 ist entfernt.).
+- **Eintrag steht tatsächlich doppelt im Notizbuch** (Editier-/
+  Speicherfehler, nicht Teil dieses Testfalls): 🔴-Finding wie bisher,
+  unabhängig vom Kommentar.
+- **Kommentar verneint eine Dublette, obwohl eine existiert, oder erwähnt
+  eine inhaltliche Nähe gar nicht**: KEIN Finding – DECISIONS #130 lässt
+  jede inhaltliche/semantische Einschätzung vollständig dem Modell, der
+  Code bewertet den Modelltext nicht.
+Ein zweiter Klick auf „Speichern“ bzw. ein Klick während „Speichert …“
+angezeigt wird, ist KEIN Finding (wird ignoriert); maßgeblich für die
+Anzahl der Speichervorgänge sind die Einträge „Manuelle Bearbeitung“ in der
+Historie. Nach dem Lauf „QA-Edit Beta“ wieder entfernen (Aufräumen für den
+nächsten Testlauf).
+
+**D1b [VERBUNDEN] Positivfall: eine ANDERS FORMULIERTE (semantische)
+Dublette SOLLTE als Hinweis erscheinen – Beobachtungsfall, KEINE feste
+Erwartung (DECISIONS #130: der Code liefert dem Modell nur eine exakte
+Wortlaut-Zählung ohne jede Bewertung, eine inhaltliche/semantische
+Einschätzung bleibt IMMER dem Modell überlassen).** Vorbedingung: Im
+QA-Notizbuch steht bereits ein Stichpunkt, z. B. „Termin beim Zahnarzt
+machen“. Im Editor einen NEUEN, anders formulierten Stichpunkt mit
+demselben Sinn ergänzen, z. B. „Zahnarzttermin vereinbaren“, speichern.
+Beobachten (KEIN Finding allein aus dem Ergebnis ableiten):
+- Erscheint ein Hinweis auf die inhaltliche Nähe: erwartetes Verhalten,
+  nichts zu melden.
+- Erscheint GAR KEIN Hinweis, obwohl das Modell die Nähe erkannt haben
+  könnte: KEIN Finding – der Code verändert/streicht den Modelltext nie,
+  ein fehlender Hinweis kann also NUR daran liegen, dass das Modell die
+  Nähe selbst nicht erkannt hat.
+Nach dem Lauf beide Testzeilen wieder entfernen.
 
 **D2 [VERBUNDEN] Tabelle.** Im Editor per Tabellen-Knopf eine 2×3-Tabelle
 aufziehen, Kopf und eine Zelle füllen, speichern. Erwartet: gerenderte
@@ -2080,9 +2139,67 @@ Text eintippbar, verschieb-/größenveränderbar; X verwirft; OK übernimmt
 den Text als „Neue Schnellnotiz:“ + Zeilenumbruch + Text ins Eingabefeld
 (so spezifiziert) und löscht das Post-it (nicht automatisch gesendet).
 
-**E2 [VERBUNDEN] Sync.** Schnellnotiz „QA-Sync-Test“ anlegen, Seite neu
-laden. Erwartet: Post-it ist nach dem Reload wieder da (kommt aus dem
-Daten-Repo). Danach Post-it wieder löschen.
+**E2 [VERBUNDEN] Sync, Positivpfad (präzisiert v7.57.1, DECISIONS #119 –
+Live-Befund E2 war ein echter Datenverlust-Pfad, seit v7.57.1 durch einen
+3-Wege-Merge behoben).** Schnellnotiz anlegen, „QA-Sync-Test“ eintippen.
+Kommen echte Tastatureingaben im Post-it-`<textarea>` nicht an (bekanntes
+Automationsproblem, siehe DECISIONS #119): Text über den nativen
+Prototyp-Setter + `input`-Event setzen –
+`Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(ta,'QA-Sync-Test'); ta.dispatchEvent(new Event('input',{bubbles:true}))`
+(Selektor `textarea[placeholder="Kurz notieren …"]`) – das im Bericht
+vermerken. NIEMALS `ta.value = …` allein verwenden (erreicht React nicht)
+und NIEMALS localStorage direkt beschreiben. VOR dem Reload abwarten, bis
+der Punkt neben der Version grün ist (`span[title="Gespeichert (im
+Daten-Repo)"]`, höchstens 10 s; länger oder gar nicht grün ⇒ eigenes
+Finding „Speichern hängt“). Erst dann neu laden. Erwartet: Post-it samt
+Text wieder da. Zur Kontrolle vor/nach dem Reload die ID aus
+`localStorage["notizbuch:quicknotes"]` (Feld `notes`) notieren und den
+Zeitstempel dekodieren (`new Date(parseInt(id.slice(0,-5),36)).toISOString()`);
+erscheint eine ANDERE ID, im Bericht angeben, ob sie ÄLTER ist als die
+erwartete (Hinweis auf ein aus dem Repo wiederbelebtes altes Post-it) oder
+JÜNGER als der Reload (per Klick neu angelegt). Danach löschen und
+ERNEUT abwarten, bis der Punkt grün ist, bevor die Seite verlassen wird
+(sonst ersteht das gelöschte Post-it beim nächsten Lauf wieder auf).
+
+**E2b/E2c/E2d/E2e [VERBUNDEN] Sync, Regressionsfälle zum v7.57-Datenverlust
+(neu, DECISIONS #119).** Eingabemethode/Selektor wie bei E2.
+- **E2b:** Text setzen und SOFORT (< 1 s) neu laden, während der Punkt noch
+  amber ist. Erwartet: Text bleibt (vorher: leeres Post-it mit ggf. anderer
+  ID – genau der Live-Befund). Innerhalb einiger Sekunden wird der Punkt
+  grün (Nachsynchronisation); ein zweiter Reload zeigt den Text weiterhin.
+- **E2c:** Post-it löschen und SOFORT neu laden. Erwartet: bleibt gelöscht
+  (vorher konnte ein gerade gelöschtes Post-it wieder auftauchen).
+- **E2d (Offline):** DevTools-Netzwerk auf „Offline“, Text ändern, rotes
+  Fehler-Banner abwarten, Netz wieder „Online“. Bekanntes, UNVERÄNDERTES
+  Restrisiko (DECISIONS #119): es gibt KEINEN automatischen Retry – das ist
+  KEIN neues Finding, sondern dokumentiertes Verhalten. Danach einmal
+  selbst erneut speichern (z. B. Leerzeichen tippen+löschen) und auf den
+  grünen Punkt warten, dann Reload: Text muss da sein.
+- **E2e (nur QA-Modus, zwei Tabs/Geräte mit demselben verbundenen Repo):**
+  In Tab/Gerät B ein eigenes Post-it anlegen, kurz danach in A ein
+  ANDERES Post-it ändern und A synchronisieren lassen (grüner Punkt).
+  Erwartet: NACH dem nächsten Sync BEIDER Seiten existieren beide Post-its
+  (vorher konnte der Konflikt-Schreibpfad das Post-it des anderen Geräts
+  ersatzlos überschreiben).
+
+**E2f [NUTZER] Reconnect auf ein ANDERES Daten-Repo mischt keine Post-its
+(DECISIONS #120/#121, Regression-Fix).** Nur ausführbar, wenn der NUTZER
+SELBST vorher ZWEI Repos mit Endung „-qa“ und einem PAT für BEIDE
+eingerichtet und das Browser-Pane entsprechend verbunden hat – der Tester
+trägt dabei NIEMALS einen Token/PAT ein (nur owner/repo im Dialog
+umstellen) und verbindet NIE auf ein Repo ohne „-qa“-Endung (Risiko:
+Produktiv-Repo). Ohne diese Vorbedingung: als ÜBERSPRUNGEN melden – die
+Fehlerklasse ist bereits durch die jsdom-Tests „R4“/„F1“/„F2“ in
+tests/quickNotesSync.test.jsx abgedeckt (auch für ein Ziel-Repo OHNE
+state.json bzw. ohne „quicknotes“-Feld, seit #121). Falls ausführbar: Ein
+Post-it mit unverwechselbarem Text anlegen und mindestens 3 s abwarten
+(grüner Punkt). Im Einstellungs-Dialog auf das ZWEITE „-qa“-Repo
+umverbinden. Erwartet: Nach dem Verbinden zeigt die Post-it-Fläche
+AUSSCHLIESSLICH die Post-its des NEUEN Repos – der eben angelegte Text aus
+dem ALTEN Repo taucht NICHT auf und wird auch NICHT ins neue Repo
+zurückgeschrieben (kurz `data/state.json` des neuen Repos prüfen). Danach
+zurück auf das ursprüngliche Repo verbinden, sicherstellen, dass dessen
+Post-it dort unverändert weiter existiert.
 
 **E3 [OFFEN] Tab-Einzug im Post-it (v7.56).** Post-it anlegen, „QA-Tab
 eins“ tippen, Enter, Tab, „QA-Tab zwei“ tippen. Erwartet: die zweite Zeile

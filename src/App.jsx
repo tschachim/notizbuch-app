@@ -27,7 +27,8 @@ import {
   makeNotebookIcon, uploadEditorImage,
 } from "./lib/images.js";
 import { MODELS, callClaude, POINTER_ONLY_RETRY_DIAGNOSIS, shouldRetryPointerOnly, normalizeModelId } from "./lib/anthropic.js";
-import { buildFeedbackTrigger, isNoFeedback, dedupeFeedbackParagraphs } from "./lib/feedback.js";
+import { buildFeedbackRequest, isNoFeedback, dedupeFeedbackParagraphs } from "./lib/feedback.js";
+import { mergeQuickNotes, parseQuickNotesCache, serializeQuickNotesCache } from "./lib/quicknotes.js";
 import {
   ShaConflictError, utf8ToB64, ghGetFile, ghGetBlob, ghListDir, ghPutFile,
   ghDeleteFile, ghListCommits, ghCommitMeta, ghCheckRepo, reconcileNotebooksWithRemote,
@@ -58,6 +59,23 @@ const loadLocal = (key, fallback) => {
     const v = JSON.parse(localStorage.getItem(key));
     return v && typeof v === "object" ? v : fallback;
   } catch (e) { return fallback; }
+};
+
+// Schnellnotizen-Cache (v7.57.1, DECISIONS #119): Notizen UND die zugehörige
+// Merge-Basis (siehe lib/quicknotes.js) werden IMMER als EIN Paar in einem
+// einzigen setItem() geschrieben – sonst könnte ein zweiter Tab zwischen
+// beiden Writes lesen und mit einer zur Basis nicht mehr passenden
+// Notiz-Liste weiterarbeiten. loadQuickNotesCache()/saveQuickNotesCache()
+// sind reine localStorage-Hüllen um die testbare Parse-/Serialisierungs-
+// Logik in lib/quicknotes.js.
+const loadQuickNotesCache = () => {
+  let raw = null;
+  try { raw = JSON.parse(localStorage.getItem(QUICKNOTES_KEY)); } catch (e) { raw = null; }
+  return parseQuickNotesCache(raw, ROOT_NB_ID);
+};
+const saveQuickNotesCache = (notes, base) => {
+  try { localStorage.setItem(QUICKNOTES_KEY, JSON.stringify(serializeQuickNotesCache(notes, base))); }
+  catch (e) { /* Speicher voll o. ä. – Cache bleibt eben stehen */ }
 };
 
 /* ---------- Multi-Notizbuch-Helfer ---------- */
@@ -214,6 +232,11 @@ function stripUrlParams(keys) {
 
 const DOC_PATH = "wissensbasis.md";
 const STATE_PATH = "data/state.json";
+// v7.57.1 (DECISIONS #119, Probe P7): maxWait für den state.json-Debounce –
+// ab dieser Wartezeit seit der ERSTEN ungespeicherten Änderung wird sofort
+// geschrieben, auch wenn der 2,5-s-Debounce durch Dauertippen (Pausen
+// darunter) immer wieder neu gestartet würde.
+const STATE_MAX_WAIT = 10000;
 const OLD_HISTORY_PATH = "data/alt-historie.json";
 // Globales, notizbuchübergreifendes Gedächtnis (v7.16, Nutzerwunsch): eigene
 // Datei, unabhängig von state.json – überlebt dadurch by design die
@@ -953,11 +976,19 @@ export default function NotizbuchApp() {
       navW: typeof l.navW === "number" ? Math.min(360, Math.max(96, l.navW)) : 148,
     };
   });
-  const [quickNotesAll, setQuickNotesAll] = useState(() => {
-    const v = loadLocal(QUICKNOTES_KEY, {});
-    if (Array.isArray(v)) return { [ROOT_NB_ID]: v }; // Migration: altes Array-Format
-    return v && typeof v === "object" ? v : {};
-  });
+  // Lazy-Ref-Init (läuft NUR beim allerersten Render): EIN Cache-Read für
+  // Notizen UND Basis statt zwei getrennter loadQuickNotesCache()-Aufrufe.
+  const quickNotesCacheRef = useRef(null);
+  if (quickNotesCacheRef.current === null) quickNotesCacheRef.current = loadQuickNotesCache();
+  const [quickNotesAll, setQuickNotesAll] = useState(() => quickNotesCacheRef.current.notes);
+  // Basis für den 3-Wege-Merge (lib/quicknotes.js#mergeQuickNotes) – der
+  // zuletzt BESTÄTIGTE Remote-Stand der Schnellnotizen (aus dem Cache beim
+  // Start, danach von connect()/maybeRefresh()/flushState() aktuell
+  // gehalten). v7.57.1, DECISIONS #119 – siehe dort für die Root-Cause-
+  // Analyse (E2E-Befund E2), warum ein simples "Remote gewinnt" ohne Basis
+  // einen frisch lokal getippten, noch nicht geschriebenen Text nach einem
+  // Reload verschluckte.
+  const quickNotesBaseRef = useRef(quickNotesCacheRef.current.base);
   const quickNotes = quickNotesAll[activeNb] || [];
 
   const settingsRef = useRef(null);
@@ -996,6 +1027,10 @@ export default function NotizbuchApp() {
   const stateRef = useRef({ chat: [], model: MODELS[0].id, collapsedAll: {}, quickNotesAll: {}, autocorrect: sanitizeAutocorrectConfig(null) });
   const stateSha = useRef(null);
   const stateTimer = useRef(null);
+  // v7.57.1 (DECISIONS #119): Zeitpunkt der ERSTEN noch ungeflushten
+  // Änderung seit dem letzten gespeicherten Stand – 0 = nichts anhängig.
+  // Grundlage für STATE_MAX_WAIT (siehe Save-Effect).
+  const statePendingSince = useRef(0);
   const stateFlushing = useRef(0); // Zähler: auch überlappende Flushes abdecken
   const lastSavedState = useRef(null);
   const lastRefresh = useRef(0);
@@ -1069,6 +1104,30 @@ export default function NotizbuchApp() {
   const connect = useCallback(async (cfg) => {
     setConnecting(true);
     setConnectError(null);
+    // v7.57.1-Nachbesserung (Review-Fund 🔴, DECISIONS #120): die Erst-
+    // Fassung hat hier die Basis für den Schnellnotizen-Merge bei JEDEM
+    // Reconnect (connectEpoch > 0) pauschal auf "unbekannt" ({}) zurück-
+    // gesetzt – mit der Absicht, einen Reconnect auf ein ANDERES Daten-Repo
+    // nicht mit der Basis des VORHER verbundenen Repos zu mergen. "Basis
+    // unbekannt" bedeutet in mergeQuickNotes() aber "reine VEREINIGUNG ohne
+    // Löschung" – das mischte die noch im UI stehenden lokalen Post-its des
+    // ALTEN Repos per Vereinigung in das NEUE Repo und schrieb sie dort
+    // zurück (Live-Beleg Probe R4). Fix: das Ziel-Repo mit dem VORHER
+    // verbundenen vergleichen (settingsRef.current ist an dieser Stelle noch
+    // der ALTE Stand, siehe Zuweisung weiter unten in dieser Funktion). Bei
+    // einem FREMDEN Repo gilt "lokal == Basis" direkt am Merge-Aufruf (siehe
+    // unten) – der lokale UI-Stand gehört zum alten Repo und ist für das neue
+    // bedeutungslos, Remote entscheidet dann vollständig (inkl. Löschungen).
+    // Bei einem Reconnect auf DASSELBE Repo (z. B. nur ein neuer API-Key)
+    // bleibt die echte Basis erhalten, damit ein noch nicht geschriebener
+    // lokaler Text nicht verloren geht. Der ALLERERSTE connect() einer
+    // Sitzung (connectEpoch.current === 0, egal welches Repo) bleibt wie
+    // bisher unangetastet – die aus dem localStorage-Cache geladene Basis
+    // (quickNotesCacheRef, siehe useRef oben) darf dort nicht verworfen
+    // werden (sonst genau der ursprüngliche E2-Bug, siehe DECISIONS #119).
+    const prevCfg = settingsRef.current;
+    const foreignRepo = connectEpoch.current > 0 &&
+      !(prevCfg && prevCfg.owner === cfg.owner && prevCfg.repo === cfg.repo);
     try {
       await ghCheckRepo(cfg);
 
@@ -1221,12 +1280,38 @@ export default function NotizbuchApp() {
       knowledgeIndex.current = kIdx;
       knowledgeTexts.current = {};
 
-      // Merge statt hartem Ersetzen: Remote gewinnt pro Notizbuch, lokale
-      // Notizbücher ohne Remote-Eintrag behalten ihre Notizen (wichtig bei
-      // der Migration mehrerer Geräte). lastSavedState spiegelt den
-      // Remote-Stand – weicht der Merge ab, pusht der Save-Effect ihn.
-      lastSavedState.current = serializeState(nChat, nModel, nCollapsedAll, active, nbs.map((n) => n.id), nQuick || {}, nAutocorrect);
-      if (nQuick) setQuickNotesAll((loc) => ({ ...loc, ...nQuick }));
+      // v7.57.1 (DECISIONS #119, E2E-Befund E2): 3-Wege-Merge statt "Remote
+      // gewinnt pro Notizbuch, komplett" – die alte Regel überschrieb einen
+      // lokal bereits getippten, aber wegen des 2,5-s-Debounce/300-ms-Cache-
+      // Writes noch nicht ins Repo geschriebenen Text nach einem Reload
+      // ersatzlos (siehe mergeQuickNotes/quicknotesBaseRef). lastSavedState
+      // spiegelt weiterhin den ROHEN Remote-Stand – weicht der Merge davon
+      // ab, erkennt der Save-Effect das (payload !== lastSavedState) und
+      // pusht die Nachsynchronisation automatisch.
+      // v7.57.1-Nachbesserung (Review-Fund 🟡, DECISIONS #121): der
+      // foreignRepo-Schutz griff bisher NUR innerhalb "if (nQuick)" – hatte
+      // das NEUE Repo gar keine state.json oder keine quicknotes darin
+      // (nQuick === null, frisches/altes Daten-Repo), blieben die lokalen
+      // Post-its des ALTEN Repos im UI stehen und wurden vom Save-Effect
+      // anschließend IN DAS NEUE Repo zurückgeschrieben (Review-Belege F1/F2
+      // – dieselbe Klasse wie R4, nur ohne quicknotes-Feld). Bei einem
+      // fremden Repo gilt "kein Feld" wie "Remote hat (noch) nichts", NICHT
+      // wie "unverändert" – NUR bei einem Reconnect auf DASSELBE Repo bleibt
+      // "null" weiterhin "lokalen Stand unangetastet lassen" (Migrationsfall
+      // altes state.json, siehe DECISIONS #119).
+      const effQuick = nQuick || (foreignRepo ? {} : null);
+      lastSavedState.current = serializeState(nChat, nModel, nCollapsedAll, active, nbs.map((n) => n.id), effQuick || {}, nAutocorrect);
+      if (effQuick) {
+        // foreignRepo (siehe Kommentar am Funktionsanfang): "lokal == Basis"
+        // erzwingt für JEDE ID sameQuickNote(l,b)===true, Remote entscheidet
+        // dadurch vollständig (inkl. Löschungen) statt einer Vereinigung. Die
+        // Basis MUSS hier (synchron) in eine lokale Konstante kopiert werden
+        // – der Updater unten läuft ERST später, quickNotesBaseRef.current
+        // ist bis dahin schon auf "effQuick" umgebogen (nächste Zeile).
+        const quickBase = quickNotesBaseRef.current;
+        setQuickNotesAll((loc) => mergeQuickNotes(foreignRepo ? loc : quickBase, loc, effQuick));
+        quickNotesBaseRef.current = effQuick;
+      }
       setNotebooks(nbs);
       notebooksRef.current = nbs;
       setActiveNb(active);
@@ -1377,12 +1462,87 @@ export default function NotizbuchApp() {
         stateSha.current = put.sha;
       } catch (e) {
         if (e instanceof ShaConflictError) {
-          // Parallel geändert (z. B. am Handy): neu lesen, lokalen Stand erneut schreiben.
+          // Parallel geändert (z. B. am Handy): neu lesen. v7.57.1 (DECISIONS
+          // #119, Probe P6): Schnellnotizen werden jetzt GEMERGT
+          // (mergeQuickNotes) statt den Remote-Stand blind zu überschreiben –
+          // vorher gewann hier IMMER der lokale Stand, ein zwischenzeitliches
+          // Post-it eines anderen Geräts ging ersatzlos verloren.
+          // v7.57.1-NACHBESSERUNG (Review-Fund 🔴🔴, DECISIONS #120): Chat
+          // bleibt bewusst Last-Writer-Wins (lokal) wie VOR v7.57.1 – die
+          // Erst-Fassung hat den Remote-Chat hier per mergeChats() (reine
+          // Vereinigung OHNE Löschsemantik) zurückgemischt. mergeChats holt
+          // dadurch einen gerade per "Chat archivieren" geleerten Chat
+          // (setChat([WELCOME])) wieder zurück, sobald der anschließende
+          // Flush in genau diesen Konfliktpfad läuft (Live-Beleg Probe R2).
+          // Modell/collapsed/order/autocorrect bleiben ebenfalls Last-Writer-
+          // Wins (lokal) wie bisher – siehe DECISIONS #119, Restrisiko.
           const cur = await ghGetFile(cfg, STATE_PATH);
-          const put2 = await ghPutFile(cfg, STATE_PATH, utf8ToB64(payload), "Chat & Einstellungen aktualisiert", cur ? cur.sha : undefined);
+          let mergedPayload = payload;
+          let mergedQuick = null;
+          let flushedQuick = null;
+          try {
+            const remoteData = cur ? JSON.parse(cur.text) : null;
+            const localData = JSON.parse(payload);
+            flushedQuick = localData.quicknotes || {};
+            if (remoteData) {
+              // v7.57.1-Nachbesserung: fehlt "quicknotes" im Remote-Stand
+              // (altes Gerät/state.json), gilt wie bei connect()/
+              // maybeRefresh() "unverändert" (remote=null in mergeQuickNotes)
+              // statt einer leeren Liste – eine leere Liste würde sonst als
+              // "Remote hat alles gelöscht" gewertet.
+              const remoteQuick = remoteData.quicknotes && typeof remoteData.quicknotes === "object" && !Array.isArray(remoteData.quicknotes)
+                ? remoteData.quicknotes : null;
+              mergedQuick = mergeQuickNotes(quickNotesBaseRef.current, flushedQuick, remoteQuick);
+              mergedPayload = serializeState(
+                localData.chat, localData.model, localData.collapsed, localData.active,
+                localData.order, mergedQuick, localData.autocorrect
+              );
+            }
+          } catch (e2) { /* Remote nicht lesbar/parsebar – lokalen Stand unverändert schreiben */ }
+          const put2 = await ghPutFile(cfg, STATE_PATH, utf8ToB64(mergedPayload), "Chat & Einstellungen aktualisiert", cur ? cur.sha : undefined);
           stateSha.current = put2.sha;
-        } else throw e;
+          if (mergedQuick) {
+            // v7.57.1-NACHBESSERUNG (Review-Fund 🔴🔴, DECISIONS #120): NICHT
+            // mehr direkt `setQuickNotesAll(() => mergedQuick)` – das hätte
+            // JEDE Eingabe verworfen, die WÄHREND dieser Konfliktauflösung
+            // (die drei await oben: PUT/GET/PUT) im UI entstanden ist. Der
+            // Updater merged deshalb GEGEN DEN AKTUELLEN State, mit dem zu
+            // BEGINN dieses Flushs bekannten Stand ("flushedQuick") als
+            // Basis – weicht der aktuelle State davon ab, ist das eine
+            // Eingabe NACH dem Payload-Snapshot und gewinnt (Live-Beleg
+            // Probe R1: "Text A" -> Konflikt -> währenddessen "Text A und
+            // mehr" getippt -> blieb vorher bei "Text A" stehen).
+            quickNotesBaseRef.current = mergedQuick;
+            setQuickNotesAll((cur2) => mergeQuickNotes(flushedQuick, cur2, mergedQuick));
+            // KEIN saveQuickNotesCache() hier – der 300-ms-Cache-Effect (s.
+            // dort) schreibt ohnehin den echten (gerade gemergten) State mit
+            // der neuen Basis, sobald quickNotesAll sich dadurch ändert.
+          }
+          lastSavedState.current = mergedPayload;
+          setSaveState("saved");
+          setStorageError(null);
+          return;
+        }
+        throw e;
       }
+      // Basis für den Schnellnotizen-Merge ist jetzt der GESCHRIEBENE Stand
+      // (v7.57.1, DECISIONS #119) – "bei Erfolg die Basis setzen".
+      try {
+        const written = JSON.parse(payload).quicknotes || {};
+        quickNotesBaseRef.current = written;
+        // v7.57.1-NACHBESSERUNG (Review-Fund 🟡🟡, DECISIONS #120): NICHT
+        // mehr `saveQuickNotesCache(written, written)` – "written" ist der
+        // Stand zu BEGINN dieses Flushs (payload-Snapshot). Wurde währenddessen
+        // (PUT lief noch) weitergetippt, hatte der 300-ms-Cache-Effekt diesen
+        // neueren Text zwischenzeitlich schon geschrieben; das Zurückschreiben
+        // von "written" hätte ihn wieder auf den ALTEN Stand zurückgesetzt –
+        // ohne ein pagehide/visibilitychange DANACH wäre er beim nächsten
+        // Laden verloren (dieselbe E2-Fehlerklasse, nur ohne SHA-Konflikt).
+        // stateRef.current spiegelt IMMER den aktuellen React-State (Ref-
+        // Effect ist vor diesem Save-Effect deklariert, siehe dort) – jede
+        // Abweichung von "written" ist damit eine echte, neuere Änderung.
+        saveQuickNotesCache(stateRef.current.quickNotesAll, written);
+      } catch (e3) { /* payload ist unser eigenes serializeState()-Ergebnis, sollte nie werfen */ }
       lastSavedState.current = payload;
       setSaveState("saved");
       setStorageError(null);
@@ -1401,17 +1561,67 @@ export default function NotizbuchApp() {
       // Zurück auf dem letzten gespeicherten Stand: geplanten Write verwerfen,
       // sonst schriebe der laufende Timer einen inzwischen veralteten Zustand.
       if (stateTimer.current) { clearTimeout(stateTimer.current); stateTimer.current = null; }
+      statePendingSince.current = 0;
       setSaveState("saved");
       return;
     }
     setSaveState("saving");
-    if (stateTimer.current) clearTimeout(stateTimer.current);
+    // v7.57.1-NACHBESSERUNG (Review-Fund 🔴🟡, DECISIONS #120): stateTimer.current
+    // MUSS hier auf null gesetzt werden, nicht nur clearTimeout() – sonst
+    // hält die Ref bis zum nächsten Timer-Neustart eine bereits gelöschte
+    // Timer-ID fest. maybeRefresh() (Fokus-/Poll-Refresh) prüft
+    // "!stateTimer.current" als Bedingung dafür, Chat/Post-its/Modell/Reihen-
+    // folge eines ANDEREN Geräts zu übernehmen – mit der toten ID blieb das
+    // dauerhaft blockiert, sobald einmal der maxWait-Zweig unten gegriffen
+    // hatte (Live-Beleg Probe R5b).
+    if (stateTimer.current) { clearTimeout(stateTimer.current); stateTimer.current = null; }
     const cfg = settingsRef.current;
+    // v7.57.1 (DECISIONS #119, Probe P7): maxWait gegen Dauertippen mit
+    // Pausen unter 2,5 s – ohne diese Grenze verschob jede neue Änderung den
+    // Debounce beliebig weit in die Zukunft, ein Reload konnte dadurch auch
+    // nach vielen Sekunden ununterbrochenen Tippens noch alles verlieren.
+    if (statePendingSince.current && Date.now() - statePendingSince.current >= STATE_MAX_WAIT) {
+      statePendingSince.current = 0;
+      flushState(cfg, payload);
+      return;
+    }
+    if (!statePendingSince.current) statePendingSince.current = Date.now();
     stateTimer.current = setTimeout(() => {
       stateTimer.current = null;
+      statePendingSince.current = 0;
       flushState(cfg, payload);
     }, 2500);
   }, [chat, model, collapsedAll, activeNb, notebooks, quickNotesAll, autocorrect, connected, flushState]);
+
+  // v7.57.1 (DECISIONS #119): Best-effort-Flush beim Verlassen/Verstecken der
+  // Seite – schließt das Zeitfenster "letzte Eingabe <300ms/<2,5s vor einem
+  // Reload" (Live-Befund E2), das sonst weder im Cache noch im Repo stand.
+  // ERSETZT NICHT den 3-Wege-Merge beim nächsten Laden (die eigentliche
+  // Garantie) – pagehide/visibilitychange sind nicht zuverlässig (Absturz,
+  // fetch-Abbruch beim Tab-Schließen), siehe Restrisiko in DECISIONS #119.
+  useEffect(() => {
+    const flushBeforeUnload = () => {
+      saveQuickNotesCache(stateRef.current.quickNotesAll, quickNotesBaseRef.current);
+      if (stateTimer.current && settingsRef.current && connectedRef.current) {
+        clearTimeout(stateTimer.current);
+        stateTimer.current = null;
+        statePendingSince.current = 0;
+        const payload = serializeState(
+          stateRef.current.chat, stateRef.current.model, stateRef.current.collapsedAll,
+          activeNbRef.current, notebooksRef.current.map((n) => n.id),
+          stateRef.current.quickNotesAll, stateRef.current.autocorrect
+        );
+        flushState(settingsRef.current, payload); // Best effort, nicht abwartbar
+      }
+    };
+    const onHidden = () => { if (document.visibilityState === "hidden") flushBeforeUnload(); };
+    window.addEventListener("visibilitychange", onHidden);
+    window.addEventListener("pagehide", flushBeforeUnload);
+    return () => {
+      window.removeEventListener("visibilitychange", onHidden);
+      window.removeEventListener("pagehide", flushBeforeUnload);
+    };
+  }, [flushState]);
 
   /* ---------- Notizbuch committen (genau 1 Commit pro Änderung) ---------- */
   // Liefert true bei Erfolg. Bei SHA-Konflikt: Remote-Stand laden, Nutzer
@@ -1827,9 +2037,10 @@ export default function NotizbuchApp() {
                   notebooksRef.current = sorted;
                 }
               }
-              // Schnellnotizen vom anderen Gerät übernehmen: Merge, Remote
-              // gewinnt pro Notizbuch. Fehlt das Feld im Remote-Stand (altes
-              // Gerät), lokale behalten – sie migrieren beim nächsten Write.
+              // Schnellnotizen vom anderen Gerät übernehmen: 3-Wege-Merge
+              // (v7.57.1, DECISIONS #119, wie bei connect() oben). Fehlt das
+              // Feld im Remote-Stand (altes Gerät), lokale behalten – sie
+              // migrieren beim nächsten Write.
               const nQuick =
                 data.quicknotes && typeof data.quicknotes === "object" && !Array.isArray(data.quicknotes)
                   ? Object.fromEntries(Object.entries(data.quicknotes).filter(([, v]) => Array.isArray(v)))
@@ -1846,7 +2057,11 @@ export default function NotizbuchApp() {
               setChat(nChat);
               setModel(nModel);
               setCollapsedAll(nCollapsedAll);
-              if (nQuick) setQuickNotesAll((loc) => ({ ...loc, ...nQuick }));
+              if (nQuick) {
+                const quickBase = quickNotesBaseRef.current;
+                setQuickNotesAll((loc) => mergeQuickNotes(quickBase, loc, nQuick));
+                quickNotesBaseRef.current = nQuick;
+              }
               setAutocorrect(nAutocorrect);
             } catch (e) { /* defekter State – ignorieren */ }
           }
@@ -3075,7 +3290,11 @@ export default function NotizbuchApp() {
   }, [layout]);
   useEffect(() => {
     const t = setTimeout(() => {
-      try { localStorage.setItem(QUICKNOTES_KEY, JSON.stringify(quickNotesAll)); } catch (e) { /* egal */ }
+      // Basis kommt bewusst FRISCH aus dem Ref (nicht aus den Effect-Deps) –
+      // sie kann sich unabhängig von quickNotesAll ändern (siehe connect()/
+      // maybeRefresh()/flushState()), der Schreibzeitpunkt hier ist ohnehin
+      // nur die 300-ms-Debounce-Momentaufnahme für den Reload-Fall.
+      saveQuickNotesCache(quickNotesAll, quickNotesBaseRef.current);
     }, 300);
     return () => clearTimeout(t);
   }, [quickNotesAll]);
@@ -3123,6 +3342,7 @@ export default function NotizbuchApp() {
           y: 90 + (n % 5) * 32,
           w: 260,
           h: 200,
+          u: Date.now(), // v7.57.1 (DECISIONS #119): Zeitstempel für mergeQuickNotes()
         }],
       };
     });
@@ -3132,7 +3352,10 @@ export default function NotizbuchApp() {
     const nbId = activeNbRef.current;
     setQuickNotesAll((prev) => ({
       ...prev,
-      [nbId]: (prev[nbId] || []).map((q) => (q.id === id ? { ...q, ...patch } : q)),
+      // "u" IMMER auf JEDE Änderung (Text/Position/Größe) frisch stempeln –
+      // siehe lib/quicknotes.js#mergeQuickNotes: entscheidet bei einem
+      // Konflikt zwischen zwei unabhängig geänderten Seiten.
+      [nbId]: (prev[nbId] || []).map((q) => (q.id === id ? { ...q, ...patch, u: Date.now() } : q)),
     }));
   };
 
@@ -3416,9 +3639,12 @@ export default function NotizbuchApp() {
     const cfg = settingsRef.current;
     if (!connectedRef.current || !cfg || !cfg.apiKey) return;
     let diffText = "";
+    let diffArr = null;
     try {
       const d = diffLines(oldDoc, newDoc);
       if (d) {
+        diffArr = d; // ROH (nicht contextize()!) – buildFeedbackFacts braucht
+        // jede "s"/"a"-Zeile, um im Nachher-Dokument mitzuzählen, siehe dort.
         diffText = contextize(d)
           .map((r) =>
             r.t === "gap" ? "···"
@@ -3428,11 +3654,21 @@ export default function NotizbuchApp() {
       }
     } catch (e) { /* Diff ist optional */ }
     const nb = activeNotebook();
-    const trigger = buildFeedbackTrigger(nb.name, diffText);
     setBusy(true);
     setBusyLabel("prüft die Änderung …");
     try {
+      // v7.57.1 (DECISIONS #118/#121/#130/#131): buildNbCtx() läuft VOR dem
+      // Trigger-Aufbau – buildFeedbackFacts() braucht den NACH-dem-Commit-
+      // Stand ALLER Notizbücher, um Vorkommen zu zählen. buildFeedbackRequest()
+      // (Fakten+Trigger bauen) steckt in feedback.js – ohne TipTap-Harness
+      // testbar, siehe tests/feedback.test.js. Das zwischen #118 und #129
+      // gewachsene Fakten-"Netz" (eigener Chat-Anhang über m.opsInfo,
+      // Formatierungs-Toleranz) ist per NUTZERENTSCHEIDUNG wieder entfernt
+      // (DECISIONS #130) – die Modellantwort wird seither wieder wie vor
+      // v7.57.1 direkt über isNoFeedback()/dedupeFeedbackParagraphs()
+      // ausgewertet, ohne eigenen Anhang.
       const nbCtx = await buildNbCtx();
+      const { trigger } = buildFeedbackRequest(diffArr, diffText, nbCtx.notebooks, nb.name);
       const res = await callClaude(cfg.apiKey, trigger, nbCtx, stateRef.current.chat, model, null, null);
       const reply = (res.reply || "").trim();
       if (!isNoFeedback(reply)) {
@@ -3877,7 +4113,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.57</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.57.1</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
