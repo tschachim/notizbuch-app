@@ -13916,3 +13916,946 @@ aus `referenz-app.jsx` übernommen.
        Fall beim Nutzer real (nicht im Tester-Hintergrund-Tab) auf: bitte
        exakte Schritte UND den verwendeten Browser melden. Version bleibt
        `v7.56` (keine Codeänderung).
+
+117. **v7.57, Modell-Generationswechsel (Fable 5.1/Opus 5.5) + Eingabefeld-
+     Schriftgröße im Chat + iOS-Zoom-Schutz.** Nutzerwunsch: (1) der
+     Platzhaltertext im Chat-Eingabefeld soll so klein sein wie die
+     Chat-Schrift (später erweitert: auch der getippte Text, siehe
+     "Review-Fix Runde 4" unten), (2) die aktuellen Modelle verfügbar
+     machen (Opus 5.5, Fable 5.1 u. a.).
+     - **Modellwahl – ERSETZT statt ergänzt, mit Legacy-Migration.**
+       `MODELS` (`src/lib/anthropic.js`) führt jetzt `claude-sonnet-5`
+       (weiterhin `MODELS[0]`/Standard), `claude-fable-5-1`,
+       `claude-opus-5-5`, `claude-haiku-4-5-20251001` – `claude-fable-5`
+       und `claude-opus-4-8` sind KOMPLETT entfernt (kein veraltetes
+       Modell im Dropdown stehen lassen; ein separates "Alt"-Ergänzen
+       hätte die Auswahl nur unübersichtlicher gemacht, ohne einen
+       erkennbaren Nutzen – die neuen Modelle sind laut Auftrag durchweg
+       mindestens gleichwertige Nachfolger). Jeder Eintrag trägt jetzt
+       zusätzlich zwei API-Fähigkeits-Flags, `forcedToolChoice` und
+       `refusalFallback` (Details unten). Ohne Gegenmaßnahme hätte jede
+       in `state.json`/Backups bereits gespeicherte alte Modell-ID beim
+       nächsten Laden STILLSCHWEIGEND auf `MODELS[0]` (Sonnet 5)
+       zurückfallen (bisherige `MODELS.some(...)`-Prüfung an den drei
+       Stellen in `App.jsx`) – ein Nutzer, der bewusst "Fable 5" gewählt
+       hatte, wäre unbemerkt auf ein anderes Modell umgestellt worden.
+       Neuer, reiner Helfer `normalizeModelId(raw, fallback = MODELS[0].id)`
+       übersetzt bekannte Legacy-IDs (`claude-fable-5` →
+       `claude-fable-5-1`, `claude-opus-4-8` → `claude-opus-5-5`,
+       `claude-opus-5` → `claude-opus-5-5`, `claude-haiku-4-5` →
+       `claude-haiku-4-5-20251001`) automatisch auf den Nachfolger;
+       alles andere (unbekannt/leer/kein String) fällt auf den
+       übergebenen `fallback`. Die drei Aufrufstellen in `App.jsx`
+       (Erstladen ~1065: Fallback `MODELS[0].id`; Remote-Refresh ~1775:
+       Fallback der bisherige lokale Wert; Import ~3667: Fallback das
+       aktuell aktive Modell) sind auf `normalizeModelId` umgestellt,
+       mit demselben jeweiligen Fallback-Wert wie zuvor – nur die
+       Legacy-Erkennung ist neu.
+     - **forced-tool_choice-Befund.** Laut API-Fakten lehnen Fable 5.1
+       und Opus 5.5 `tool_choice {type:"tool"}`/`{type:"any"}` mit HTTP
+       400 ab; Sonnet 5/Haiku 4.5 akzeptieren es weiterhin. Neuer, reiner
+       Helfer `supportsForcedToolChoice(modelId)` liest das
+       `forcedToolChoice`-Flag aus `MODELS` (unbekannte IDs → `false`,
+       der sichere Default: `"auto"` löst nie einen 400 aus).
+       `buildRequest()`s `"forced"`-Zweig setzt `tool_choice` jetzt
+       bedingt (`supportsForcedToolChoice(modelId) ? {type:"tool",…} :
+       {type:"auto"}`) – `tools` bleibt in JEDEM Fall unverändert
+       (`[NOTEBOOK_TOOL]`), nur die Erzwingung entfällt.
+     - **Nachfass-Pfad – Modus/Konversation bleiben unverändert, Nudge
+       als Mid-Conversation-Systemnachricht statt Moduswechsel.**
+       Ohne Gegenmaßnahme hätte der bisherige Nachfass-Pfad
+       (`postOnce(lastConvo, "forced")`) bei diesen beiden Modellen
+       weiterhin denselben 400 ausgelöst. Ein einfaches "immer
+       `tool_choice:auto` senden" hätte das Problem nur verlagert: das
+       Modell hätte weiterhin ohne `update_notebook` antworten können,
+       ohne dass irgendetwas den erneuten Aufruf einfordert. Ein
+       Moduswechsel auf `"forced"` (wie bei Sonnet 5/Haiku 4.5) hätte
+       zusätzlich das `tools`-Array verändert (im `"search"`-Ursprung
+       fiele z. B. `web_search` weg) – laut den API-Fakten zu "Preserved
+       Thinking" ist bei Fable 5.1/Opus 5.5 (ab 2026-08-31 für neue
+       Accounts erzwungen) jeder `thinking`-Block einer Antwort an das
+       EXAKTE Präfix aus `system`, `tools` und allen vorangegangenen
+       `messages` gebunden – ein Toolset-Wechsel hätte die bereits
+       gesendeten `thinking`-Blöcke der Konversation ungültig gemacht
+       und einen NEUEN 400 ("Invalid signature in thinking block …")
+       provoziert, sobald ein Folge-Request (`retryWith`) sie
+       zurückschickt. Deshalb bleibt der Modus bei diesen beiden
+       Modellen unverändert (`search` bleibt `search`, `forced` bleibt
+       `forced`) und es wird stattdessen eine neue, exportierte
+       Mid-Conversation-Systemnachricht `FORCE_TOOL_NUDGE`
+       (`{role:"system", content:"Für diesen Turn ist ein Aufruf des
+       Tools update_notebook erforderlich. …"}`) als LETZTES Element an
+       die Konversation angehängt (Voraussetzung: das vorherige letzte
+       Element ist `role:"user"`, wie bisher) – append-only, verändert
+       `system`/`tools` nicht. Betrifft zwei Stellen in `callClaude()`:
+       (a) das Nachfassen nach dem Erstversuch ohne `update_notebook`
+       (bei diesen Modellen ZUSÄTZLICH erlaubt, wenn `lastConvo === msgs`
+       ist – der Tail ist dann der aktuelle Nutzer-Turn selbst, was
+       besser ist als der bestehende "von vorn ohne Recherche"-Neustart,
+       der das Toolset gewechselt hätte) und (b) das eingebettete
+       Nachfassen innerhalb `retryWith()`. Modus `"none"` bleibt
+       AUSSERHALB dieses Pfads (kein Tool deklariert, ein Nudge wäre dort
+       wirkungslos) – dort greift unverändert das bisherige Verhalten.
+       Scheitert der Nudge-Request (400/Exception), bleibt der bestehende
+       Fehlerpfad bestehen: `next = null` → geordneter Neustart "von
+       vorn" ab `msgs` im Modus `"forced"` (für diese Modelle dann
+       automatisch mit `tool_choice:"auto"`, OHNE Nudge – die Konversation
+       beginnt ohnehin neu und kurz). Für Sonnet 5/Haiku 4.5 ist das
+       Verhalten an beiden Stellen Byte für Byte unverändert (eigener
+       `canForceChoice`-Zweig, alle bestehenden Tests dazu blieben grün,
+       ohne eine einzige Test-Anpassung nötig). `toolsSignatureFor(mode)`
+       brauchte KEINE Änderung: da der Modus beim Nudge-Pfad erhalten
+       bleibt, ist die Signatur automatisch konsistent mit den übrigen
+       Requests desselben Modus.
+     - **Refusal-Behandlung (alle Modelle).** Neue, reine Helfer
+       `isRefusal(data)` (prüft `stop_reason === "refusal"`) und
+       `refusalMessage(data)` (deutscher Fehlertext; nennt die Kategorie
+       NUR, wenn `stop_details?.category` ein nicht-leerer String ist –
+       getrimmt und auf 80 Zeichen gedeckelt, da der Wert ungeprüft aus
+       der API kommt und als Chat-Fehlermeldung gerendert wird). Eine
+       `refusal`-Antwort wirft `throw new Error(refusalMessage(data))`
+       SOFORT nach dem Erstversuch UND nach dem Nachfassen (a) – kein
+       weiteres Nachfassen, kein forced/none-Umweg, Teil-Content wird
+       verworfen (nichts wird angewendet). In `retryWith()` (inkl. dem
+       eingebetteten Nachfassen (b)) liefert eine `refusal` dagegen
+       `null` wie jeder andere Retry-Fehlschlag (Konvention von
+       `retryWith`: Fehler werfen nie, der Aufrufer behält das bereits
+       vorliegende B1-Erstergebnis). Wichtiger Abgrenzungs-Punkt, den ein
+       Test explizit belegt: eine `refusal`-Antwort hat KEIN
+       `data.error`-Feld (HTTP 200) – der bestehende `next.error`-Check
+       im Nudge-Pfad hätte sie sonst fälschlich als "next=null" behandelt
+       und einen Neustart statt der korrekten `throw` ausgelöst.
+     - **Serverseitige Fallbacks (Beta, NUR `refusalFallback`-Modelle,
+       also Fable 5.1/Opus 5.5).** `buildRequest()` setzt
+       `body.fallbacks = "default"` und ergänzt den Header-Wert
+       `server-side-fallback-2026-07-01`; der `anthropic-beta`-Header
+       wird jetzt aus allen aktiven Werten dieses Requests kommagetrennt
+       zusammengesetzt (Diagnostics + Fallbacks). Graceful Degradation
+       analog zur bestehenden Diagnostics-Degradation
+       (`diagnosticsDisabled`/`isDiagnosticsRelatedError`), aber PRO
+       MODELL statt global: neues Modul-Set `fallbacksDisabledFor` plus
+       neuer, reiner Helfer `isFallbackRelatedError(error)` – NUR ein
+       HTTP 400 mit erkennbar fallback-bezogener Meldung deaktiviert die
+       Fallbacks für DIESES Modell für den Rest der Sitzung und
+       wiederholt den aktuellen Request sofort einmal ohne. Beide
+       Degradationen können im selben `postOnce()` nacheinander nötig
+       werden (Diagnostics-400 gefolgt von einem Fallback-400) – je
+       Degradation greift dabei höchstens einmal, ein Endlos-Loop ist
+       damit ausgeschlossen (Test deckt die Kombination ab). Ein Eintrag
+       `{type:"fallback_message"}` in `usage.iterations` löst ein
+       `console.info` mit dem tatsächlich antwortenden `data.model` aus
+       (reine Diagnose, kein UI). `{type:"fallback"}`-Audit-Blöcke im
+       `content` werden NIRGENDS gesondert behandelt – alle bestehenden
+       Filter (`collectSources`/`collectText`/`extractParsed`/
+       `retryWith`s `tool_use`-Filter) arbeiten bereits rein typbasiert
+       und ignorieren unbekannte Block-Typen automatisch; in
+       Konversations-Fortsetzungen werden sie unverändert mitgeschickt
+       (geprüft, keine Codeänderung nötig). `resetCacheDiagnosticsForTests()`
+       setzt jetzt zusätzlich `fallbacksDisabledFor` zurück (gleiches
+       Muster wie `diagnosticsDisabled`).
+     - **Präfix-Stabilität geprüft – Runde 1 hatte noch Lücken, siehe
+       "Review-Fix Runde 2" unten.** Alle Folge-Requests INNERHALB eines
+       `callClaude()`-Aufrufs (`pause_turn`-Fortsetzungen,
+       `lookup_wissen`-Runden, beide Nachfass-Pfade, `retryWith`) laufen
+       entweder über eine reine Anhänge-Operation auf einer bestehenden
+       `messages`-Folge mit unverändertem Modus (Präfix bleibt stabil;
+       Ausnahme: aufeinanderfolgende `pause_turn`-Antworten werden dabei
+       in die LETZTE `assistant`-Nachricht zusammengeführt statt als
+       eigene Nachricht angehängt – gleichwertig zu aufeinanderfolgenden
+       `assistant`-Turns, weil die Rollen sonst nicht alternieren würden;
+       Korrektur Runde 4, siehe unten)
+       oder über einen explizit dokumentierten Neustart ab `msgs`
+       (Modus-/Toolset-Wechsel erlaubt, weil `msgs` selbst nie
+       `thinking`-Blöcke einer vorangegangenen, in DIESEM Aufruf bereits
+       gesendeten Antwort enthält). Ein wiederverwendbarer Test-Helfer
+       (`expectStablePrefix`) prüft das – Korrektur nach Review Runde 2:
+       DAMALS deckte er nur einen Teil der Pfade ab (Nudge (a) selbst UND
+       das eingebettete Nachfassen (b), NICHT aber ein `retryWith()` NACH
+       einem erfolgreichen Nudge (a) – genau dafür fehlte ein Test, siehe
+       unten). Der Nudge-Zweig selbst hatte zudem einen echten
+       Präfix-relevanten Bug (lief über `postOnce()` statt `doPost()`,
+       siehe unten) – inzwischen behoben und mit Tests abgesichert.
+     - **Effort/`thinking` bewusst unverändert.** Kein `thinking`- oder
+       `output_config`-Parameter im Request (Opus 5.5 nutzt laut API-
+       Fakten automatisch seinen Default-Effort "medium", mindestens so
+       gut wie Opus 5 auf "high" – kein Grund, das explizit zu setzen).
+       `MAX_TOKENS` bleibt bei 16000 (galt für `thinking` schon bei
+       Fable 5, siehe Kommentar in `anthropic.js`).
+     - **Platzhalter-Schriftgröße (ÜBERHOLT – siehe "Review-Fix Runde 4"
+       unten für den aktuellen Stand).** Chat-`textarea`
+       (`src/App.jsx`, Eingabefeld unten) bekommt `placeholder:text-sm`
+       zusätzlich zum bestehenden `text-base` – der Platzhalter ist jetzt
+       so groß wie die Chat-Blasen (`text-sm`), der GETIPPTE Text bleibt
+       bewusst `text-base` (16px): iOS Safari zoomt beim Fokussieren
+       eines Eingabefelds mit einer Schriftgröße unter 16px automatisch
+       in die Seite hinein – das betrifft nur den tatsächlichen
+       Input-Text, nicht `::placeholder` (die Zoom-Entscheidung hängt an
+       der `font-size` des Elements selbst, nicht am sichtbaren
+       Pseudo-Element-Inhalt). **Runde 4 (neuer Nutzerwunsch) ersetzt
+       das:** der getippte Text wird ebenfalls `text-sm` (14px), und der
+       iOS-Zoom-Schutz läuft stattdessen über `maximum-scale=1` im
+       Viewport-Meta-Tag (`src/lib/viewport.js`) statt über eine
+       Mindestschriftgröße.
+     - **Tests.** `tests/anthropic.test.js`: neue Blöcke für
+       `MODELS`/`supportsForcedToolChoice`/`normalizeModelId` (Legacy-
+       Mappings, Fallback-Semantik, unbekannte/falsch typisierte Werte),
+       `isRefusal`/`refusalMessage` (pur), `isFallbackRelatedError`
+       (pur), sowie Integrationstests gegen `callClaude()`/`retryWith()`
+       für Fable 5.1 UND Opus 5.5 (`describe.each`): kein Request enthält
+       jemals `tool_choice.type` `"tool"`/`"any"`, die Nudge-Nachricht
+       steht korrekt platziert, ein scheiternder Nudge-Request führt zu
+       einem sauberen Neustart, die Präfix-Eigenschaft hält über die
+       getesteten Pfade (Korrektur Runde 4: `expectStablePrefix` prüft
+       den Merge zweier aufeinanderfolgender Pausen NICHT als eigene
+       Bedingung, siehe "DECISIONS-Korrekturen" unter "Review-Fix Runde 4"
+       unten – "über ALLE Requests eines Laufs" war deshalb zu absolut
+       formuliert). Eine
+       Gegenprobe für Sonnet 5 belegt, dass
+       der bisherige `"forced"`-Pfad unverändert bleibt. Refusal- und
+       Fallback-Tests decken Erfolgs-, Fehler- und Kombinationsfälle ab
+       (inkl. der oben genannten `refusal`-vs.-`data.error`-Abgrenzung).
+       Bei der Testerstellung testweise die `buildRequest`-Weiche wieder
+       hart auf `{type:"tool",…}` gesetzt: die neuen Tests schlugen
+       daraufhin gezielt fehl (kein Pro-forma-Test) – anschließend
+       zurückgesetzt. `npm run test:coverage`: alle Tests grün, Gate
+       weiterhin deutlich überschritten.
+     - **Restrisiken.** (1) Die API-Fakten aus dem Auftrag (Modell-IDs,
+       400-Verhalten, Preserved-Thinking-Regeln, Fallback-Beta) wurden
+       laut Vorgabe NICHT per Web nachgeprüft – weicht die reale API
+       davon ab, greifen die neuen Degradationspfade (Diagnostics-Muster,
+       Fallback-Muster) nur, wenn die tatsächliche 400-Fehlermeldung zu
+       den hinterlegten Erkennungs-Mustern passt (`isDiagnosticsRelatedError`/
+       `isFallbackRelatedError`); ein abweichender Wortlaut würde wie ein
+       "normaler" 400 durchgereicht. (2) `refusalMessage`s
+       Kategorie-Deckel (80 Zeichen) ist eine bewusste, nicht aus der API-
+       Doku abgeleitete Schranke – rein defensiv gegen einen unerwartet
+       langen Wert. (3) Legacy-Migration deckt nur die im Auftrag
+       genannten vier IDs ab; ein künftiger weiterer Modellwechsel
+       braucht einen eigenen `LEGACY_MODEL_IDS`-Eintrag.
+     - **Review-Fix Runde 2 (Nachbesserung, Version bleibt bewusst
+       `v7.57` – reine Korrekturen am bereits ausgelieferten Verhalten,
+       kein neues Feature).** Ein Code-Review deckte fünf echte Lücken in
+       der Runde-1-Umsetzung auf, alle behoben und mit Tests belegt (bei
+       den vier wichtigsten Tests zusätzlich per Mutations-/Revert-Probe
+       verifiziert: Fix rückgängig gemacht → genau die neuen Tests
+       schlagen gezielt fehl, kein Pro-forma-Test).
+       - **🔴 Refusal MIT Teil-Content in `doPost()`s Fortsetzungs-
+         Schleife.** Laut API-Fakten kann eine `refusal`-Antwort eine
+         TEILAUSGABE im `content` enthalten (z. B. einen bereits
+         begonnenen `lookup_wissen`-Aufruf). Die Schleife prüfte
+         `stop_reason` bisher NICHT, bevor sie `content` liest – ein
+         `lookup_wissen`-Aufruf im abgelehnten Teil-Content wurde dadurch
+         lokal ausgeführt und der VERWORFENE Content erneut an die API
+         geschickt; dasselbe Problem bestand innerhalb von `retryWith()`
+         (läuft über denselben `doPost()`). Fix: `isRefusal(data)` ergänzt
+         die Abbruchbedingung der Schleife (`if (!data || data.error ||
+         isRefusal(data)) break;`) – dieselbe EINE Zeile behebt beide
+         Aufrufpfade. Tests (`describe.each` über Sonnet 5/Fable 5.1/
+         Opus 5.5 sowie ein `retryWith`-Fall): `refusal` mit
+         `lookup_wissen`-Teil-Content wirft sofort, GENAU EIN Request,
+         kein Lookup-Folgerequest; `refusal` mit `update_notebook`-Teil-
+         Content (inkl. `ops`) wirft ebenfalls, KEIN Ergebnis wird
+         zurückgegeben (letzterer Fall war schon vorher zufällig korrekt,
+         weil `hasFinal` den Lookup-Zweig gar nicht erst betritt – als
+         Regressionsschutz trotzdem mitgetestet).
+       - **🟡 Graceful Degradation nur in EINER Reihenfolge geprüft.**
+         `postOnce()` prüfte Diagnostics- und Fallback-400 bisher in zwei
+         festen, aufeinanderfolgenden `if`-Blöcken (erst Diagnostics, dann
+         Fallbacks) – lehnte der Server zuerst den Fallback-Header ab und
+         der WIEDERHOLTE Request dann zusätzlich den Diagnostics-Header,
+         blieb der zweite 400 unbehandelt (welchen Beta-Wert der Server
+         zuerst validiert, ist von hier aus nicht bekannt). Fix: eine auf
+         zwei Durchläufe gedeckelte Schleife prüft nach JEDEM Retry beide
+         Bedingungen erneut; jede Degradation schaltet ihr Modul-Flag
+         weiterhin höchstens einmal um, ein Endlos-Loop ist ausgeschlossen.
+         Neuer Test mit vertauschter Reihenfolge (Fallback-400 zuerst,
+         dann Diagnostics-400, dann Erfolg: 3 Requests) ergänzt den
+         bestehenden Kombinationstest, statt ihn zu ersetzen.
+       - **🟡 Nudge-Request lief über `postOnce()` statt `doPost()`.** Laut
+         API-Fakten garantiert `tool_choice:"auto"` KEINEN Aufruf – die
+         Nudge-Antwort kann deshalb selbst wieder `pause_turn`
+         (Websuche) oder `lookup_wissen` liefern (typisch genau dann,
+         wenn das Lookup-Budget des Erstversuchs erschöpft war – der
+         Fall, für den dieses Nachfassen überhaupt existiert). Über
+         `postOnce()` endete das bisher SOFORT im Formatfehler, ohne
+         Fortsetzung und ohne `collectSources()`/`collectText()` für den
+         Nudge-Turn. Fix: beide Nudge-Stellen ((a) im Hauptpfad, (b) im
+         eingebetteten Nachfassen von `retryWith()`) laufen jetzt über
+         `doPost()` – `pause_turn`/`lookup_wissen` werden dadurch wie im
+         normalen Turn fortgesetzt. Eine Nudge-Antwort OHNE
+         `update_notebook` UND ohne `refusal`/`max_tokens` gilt weiterhin
+         als Fehlschlag (`extractParsed()` liefert kein Objekt – weder aus
+         einem `update_notebook`-Aufruf noch aus JSON im Text – ⇒ `next`
+         bleibt `null`) –
+         der bestehende Neustart "von vorn ab `msgs`" greift dann genauso
+         wie bei einem 400/Netzwerkfehler. Beim Testen dabei einen ECHTEN,
+         durch diesen Fix selbst eingeführten Folgefehler gefunden und
+         SOFORT behoben: `doPost()` ruft für den Modus `"search"`
+         `collectText()` auf – scheiterte der Nudge-Versuch (erneut kein
+         Tool-Aufruf), blieb dessen Text in `textBlocks` hängen und
+         landete VOR der eigentlichen Antwort des anschließenden Neustarts
+         "von vorn". Gegenmaßnahme: `if (!usedSearch) textBlocks.length =
+         0;` direkt vor dem `doPost("forced")`-Neustart, dieselbe Regel
+         wie beim Moduswechsel weiter oben. Neue Tests: Nudge-Antwort mit
+         `lookup_wissen` (wird fortgesetzt, danach Erfolg), Nudge-Antwort
+         mit `pause_turn`/Websuche (wird fortgesetzt, Quelle bleibt
+         erhalten), Nudge-Antwort erneut ganz ohne Tool (sauberer Neustart
+         statt Formatfehler, KEIN durchgesickerter Nudge-Text).
+       - **🟡 `retryWith()` NACH einem erfolgreichen Nudge (a) war
+         ungetestet.** `finalConvo = canForceChoice ? lastConvo :
+         sentConvo` (die TATSÄCHLICH gesendete Nudge-Konversation,
+         inklusive Systemnachricht und ggf. weiterer Fortsetzungen) ist
+         für Preserved Thinking entscheidend – die `thinking`-Signatur der
+         Nudge-Antwort ist an GENAU dieses Präfix gebunden. Der einzige
+         bisherige `retryWith`-Test für diese Modelle startete mit einer
+         sofort erfolgreichen Erstantwort und prüfte nur den Nudge (b),
+         NICHT den Fall "Nudge (a) erfolgreich, danach `retryWith()`".
+         Per Mutationsprobe verifiziert: `finalConvo = lastConvo;` (ohne
+         Nudge) ließ vor dem neuen Test alle bestehenden Tests weiterhin
+         grün durchlaufen – live wäre die Folge ein 400 "Invalid signature
+         in thinking block". Neuer Test deckt genau das ab (inkl. eines
+         `thinking`-Blocks in der Nudge-Antwort) und schlägt bei dieser
+         Mutation gezielt fehl.
+       - **🟡 `refusalMessage()` erzeugte einen doppelten Satzpunkt samt
+         widersprüchlichem Rat.** `refusalMessage()` endete selbst mit
+         einem Punkt; `App.jsx`s Fehler-Pille hängte zusätzlich ". Deine
+         Nachricht … sende sie einfach noch einmal." an – Ergebnis:
+         "…Sonnet 5).. Deine Nachricht…" (doppelter Punkt) UND der Rat
+         widersprach sowohl den API-Fakten ("Denselben Request erneut
+         senden hilft nicht") als auch `refusalMessage()`s eigenem Rat
+         ("Bitte anders formulieren …"). Fix: `refusalMessage()` endet
+         jetzt OHNE Satzpunkt (wie die übrigen `callClaude`-Fehlertexte);
+         beide Wurfstellen markieren den `Error` zusätzlich mit
+         `refusal: true` (neuer, gebündelter Helfer `throwRefusal(data)`
+         statt Duplikation). Neuer, aus `App.jsx` exportierter reiner
+         Textbaustein `buildSendErrorText(e)` unterscheidet anhand dieses
+         Flags den angehängten Hinweis (Refusal: "bitte umformulieren
+         oder oben ein anderes Modell wählen." – sonst unverändert "sende
+         sie einfach noch einmal."). Für alle ANDEREN Fehler bleibt der
+         Wortlaut Byte für Byte identisch (eigener Test dazu).
+       - **Tests/Verifikation.** `tests/anthropic.test.js`: neue
+         `describe`-Blöcke für alle fünf Punkte oben (Refusal-in-Loop,
+         umgekehrte Degradations-Reihenfolge, Nudge-Fortsetzung ×2,
+         Nudge-Neustart, `retryWith` nach Nudge-Erfolg), `refusalMessage()`
+         ohne Satzpunkt, `err.refusal===true` an beiden Wurfstellen, sowie
+         die exakte 80-Zeichen-Grenze des Kategorie-Deckels (der
+         bisherige Test hätte auch bei 150 Zeichen grün bleiben können).
+         `tests/appOps.test.js`: neuer Block für `buildSendErrorText()`
+         (Normalfall Byte für Byte unverändert, Refusal-Fall, fehlendes
+         `e.message`). Bei den vier PFLICHT-Findings wurde der jeweilige
+         Fix per Hand zurückgenommen und der Testlauf wiederholt – die
+         neuen Tests schlugen jedes Mal gezielt und ausschließlich dort
+         fehl (kein Pro-forma-Test). `npx vitest run` (voller Lauf):
+         2701/2701 grün. `npm run test:coverage`: Gate weiterhin deutlich
+         überschritten.
+       - **Bewusst NICHT umgesetzt (blau/optional, siehe QA-Bericht).**
+         Ein zusätzliches `systemNudge`-Fähigkeits-Flag (statt der
+         Nudge-Zweige weiterhin an `!supportsForcedToolChoice(modelId)`
+         zu koppeln) wurde erwogen, aber zurückgestellt: `App.jsx` erreicht
+         `callClaude()` ausschließlich über `normalizeModelId()`-normierte
+         IDs, ein unbekanntes/Alias-Modell kann den Nudge-Pfad in der
+         Produktion also gar nicht erreichen – das zusätzliche Flag hätte
+         nur redundante Konstanten ohne einen heute beobachtbaren Nutzen
+         hinzugefügt.
+     - **Review-Fix Runde 3 (Nachbesserung, Version bleibt bewusst `v7.57`
+       – reine Korrekturen, kein neues Feature).** Ein zweites Code-Review
+       deckte auf, dass Runde 2s eigener Fix (Nudge (a)/(b) über `doPost()`
+       statt `postOnce()`, siehe oben) einen NEUEN Fehler eingeführt hatte:
+       `doPost()` sammelt im Modus `"search"` per `collectText()`/
+       `collectSources()` auch Text/Quellen der Nudge-Antwort SELBST – der
+       damalige Fix (`if (!usedSearch) textBlocks.length = 0;`) deckte nur
+       den Fehlschlags-Fall OHNE Websuche ab. Drei zusammenhängende Lücken,
+       ALLE mit derselben Marker-/Rollback-Gegenmaßnahme behoben (Snapshot
+       von `textBlocks.length`/`sources.length`/`usedSearch` UNMITTELBAR
+       vor jedem Nudge-`doPost()`-Aufruf, an beiden Stellen (a) und (b)):
+       - **🟡 Text VOR einem ERFOLGREICHEN Nudge-Tool-Aufruf sickerte in die
+         Chat-Antwort.** `postOnce()` (Sonnet 5/Haiku 4.5) sammelt gar
+         keinen Text – der Nudge-Pfad war dadurch NICHT parallel: eine
+         Nudge-Antwort wie `[text "Ich rufe das Tool jetzt auf.", 
+         update_notebook reply "Notiert."]` ergab bei Fable 5.1/Opus 5.5
+         `"Ich rufe das Tool jetzt auf.\n\nNotiert."` statt nur `"Notiert."`
+         – dasselbe galt für das eingebettete Nachfassen (b) in
+         `retryWith()`. Fix: `textBlocks.length` wird nach JEDEM
+         Nudge-`doPost()` unabhängig von Erfolg/Misserfolg auf den
+         Vor-Nudge-Stand zurückgesetzt ("Nudge-Text nie in reply", exakte
+         Parität zu `postOnce()`). **Korrektur Runde 4:** gilt nur noch,
+         wenn der Nudge NICHT selbst gesucht hat; mit eigener Suche bleibt
+         die zitierte Nudge-Prosa erhalten (B'/P6 unten), nur Prosa und
+         Treffer der verworfenen Antwort werden entfernt.
+       - **🟡 Verworfene Nudge-Quellen/-Prosa sickerten in den anschließenden
+         "von vorn"-Neustart bzw. `res.sources`.** Scheiterte der Nudge
+         NACH einer eigenen neuen Websuche (z. B. `pause_turn` mit Treffer,
+         dann trotzdem kein `update_notebook`), blieben dessen Treffer in
+         `sources` UND `usedSearch` hängen – der folgende Neustart "von
+         vorn" (der selbst nicht mehr sucht) zeigte dann eine Quelle an,
+         die aus einer bereits verworfenen Antwort stammte, und (bei einer
+         vorher ECHT recherchierten Prosa im Erstversuch) hängte sich die
+         eigene, ebenfalls verworfene Nudge-Prosa zusätzlich VOR die
+         korrekte Antwort des Neustarts. Fix: bei einem gescheiterten
+         Nudge werden `sources.length` UND `usedSearch` ebenfalls auf den
+         Vor-Nudge-Stand zurückgesetzt – eine VOR dem Nudge bereits echt
+         recherchierte Prosa (v7.6-Verhalten) bleibt dabei erhalten, nur
+         der verworfene Nudge-Versuch selbst verschwindet spurlos. Die
+         alte, jetzt überflüssige Einzelzeile
+         `if (!usedSearch) textBlocks.length = 0;` vor dem
+         "von vorn"-Neustart wurde entfernt (bereits durch das Rollback
+         oben abgedeckt).
+       - **🟡 Falsche cite-Index-Zuordnung bei einem ERFOLGREICHEN Nudge mit
+         EIGENER neuer Websuche, wenn `lastConvo === msgs` war
+         ("freshStart").** Die verworfene Erstantwort ist in der
+         Nudge-Konversation (`[...lastConvo, system]`) dann NICHT
+         enthalten – das Modell zählt seine eigenen
+         `(cite index="…">`-Marker deshalb NUR über SEINE EIGENEN, in
+         DIESER Antwort gefundenen Treffer ab 1. `sources` enthielt zu
+         diesem Zeitpunkt aber bereits die (dem Modell unbekannten)
+         Treffer der verworfenen Erstantwort DAVOR – Index `1` zeigte
+         dadurch auf die FALSCHE (verworfene) Quelle statt auf die neue,
+         tatsächlich zitierte. Fix: bei `freshStart` UND gewachsenem
+         `sources` wird der Vor-Nudge-Anteil per `sources.splice(0,
+         srcMark)` entfernt, übrig bleiben NUR die eigenen neuen Treffer
+         des Nudge-Turns, exakt wie vom Modell gezählt. Kein Analogon in
+         (b) nötig: die dortige Nudge-Konversation (`r.convo`) ist immer
+         die TATSÄCHLICH bereits gesendete, vom Modell gesehene
+         Konversation (kein verdeckter "freshStart"), die cite-Zählung
+         bleibt dort automatisch konsistent. **Korrektur Runde 4: DIESE
+         Aussage war FALSCH** – `r.convo` ist die Konversation, MIT der
+         `r.data` ANGEFRAGT wurde, `r.data` SELBST ist NICHT Teil davon;
+         sucht der Nudge in (b) selbst, gilt dieselbe Lücke wie in (a)
+         (und der `freshStart`-Sonderfall oben deckte ohnehin nur EINEN
+         Spezialfall ab, nicht das allgemeine Problem). Siehe "Review-Fix
+         Runde 4" unten für den vollständigen, verallgemeinerten Fix.
+       - **Test-Lücke (🟡) ergänzt: `retryWith()`s `!isRefusal(n)`-Guards
+         waren durch keinen Test abgesichert.** Der einzige bisherige Test
+         (`content: []`) blieb auch bei ENTFERNTEM Guard grün, weil
+         `extractParsed()` bei leerem `content` ohnehin `null` liefert –
+         eine Mutationsprobe mit einem `update_notebook`-TEIL-Content in
+         der `refusal` (inkl. `ops`) zeigte, dass die Mutante diesen dann
+         tatsächlich ANWENDEN würde. Neue `describe.each`-Tests (Sonnet 5/
+         Fable 5.1/Opus 5.5) decken beide `retryWith`-Nachfass-Pfade
+         (Haupt-Retry UND das eingebettete Nachfassen (b)) mit einem
+         echten Teil-Content ab und schlagen bei entfernten Guards gezielt
+         fehl.
+       - **Optional/blau umgesetzt (billig, risikolos).** (1)
+         `refusalMessage(data, modelId)` nennt "(z. B. Sonnet 5)" NICHT
+         mehr, wenn Sonnet 5 SELBST abgelehnt hat (`modelId` ist optional,
+         Default-Verhalten für bestehende Aufrufer unverändert). **Korrektur
+         Runde 4:** das ließ nach einer Sonnet-5-Ablehnung JEDEN
+         Modell-Hinweis entfallen statt nur den Sonnet-5-Vorschlag zu
+         ersetzen – siehe "Review-Fix Runde 4" unten.
+         `App.jsx#buildSendErrorText` hängt bei einer `refusal` jetzt nur
+         noch "Deine Nachricht steht wieder im Eingabefeld." an (der volle
+         Rat steht bereits einmal in `e.message`, aus `refusalMessage()`)
+         statt ihn ein zweites Mal zu wiederholen. (2) Der Test "Nudge
+         pausiert … Quelle wird übernommen" prüft jetzt tatsächlich
+         `res.sources`. (3) `docs/TESTFAELLE.md` C8b: die Konsolen-Selektoren
+         stehen jetzt in eigenen Codeblöcken (vorher brach das
+         Markdown-Quelltext-Snippet mitten im JS-String um); C1b nennt
+         korrekt "1–3 API-Aufrufe" (ein Neustart nach gescheitertem Nudge
+         ist ein dritter, normaler Request). (4) `DECISIONS.md` Runde 2:
+         der nicht existierende Bezeichner `hasUpdateTool` wurde durch die
+         tatsächliche Prüfung (`extractParsed()` liefert kein Objekt)
+         ersetzt.
+       - **Bewusst NICHT umgesetzt (blau/optional, Restrisiken).** (1) Ein
+         frisches Lookup-/Pause-Budget für den Nudge-`doPost()`-Aufruf
+         (bis zu weitere `LOOKUP_MAX_ROUNDS` Runden nach einem bereits
+         erschöpften Budget) bleibt bestehen – begrenzt (max. wenige
+         zusätzliche Requests) und nur in einem seltenen Zusammentreffen
+         (Lookup-Budget erschöpft UND Nudge greift) relevant; ein Fix
+         hätte `doPost()`s Signatur erweitern müssen (Restbudget als
+         Parameter/Rückgabewert) – außerhalb des Nachbesserungs-Rahmens.
+         (2) Der Neustart "von vorn ab `msgs`" OHNE vorherigen Nudge-Versuch
+         (z. B. nach einer `pause_turn`-Kette, die auf einem
+         assistant-Turn endet, oder im Modus `"none"`) bekommt bei
+         Fable 5.1/Opus 5.5 bewusst KEINE Nudge-Systemnachricht – der
+         Auftrag verlangt "OHNE Systemnachricht" ausdrücklich nur für den
+         Neustart NACH einem gescheiterten Nudge-VERSUCH (der den 400
+         ausgelöst haben könnte); ein Review-Finding merkt zu Recht an,
+         dass dieser Grund bei einem NICHT versuchten Nudge nicht greift
+         und ein Nudge dort ebenfalls sicher wäre. Diese Erweiterung würde
+         vom ursprünglichen Auftragstext abweichen (der den Nudge
+         ausdrücklich nur an zwei benannten Stellen vorsieht) und wurde
+         deshalb NICHT ohne Rückfrage umgesetzt – Restrisiko: in diesem
+         (seltenen) Fall sichert bei diesen beiden Modellen nur noch der
+         Prompt den Tool-Aufruf, ein Turn kann dort mit "Antwort hatte ein
+         ungültiges Format" enden, wo Sonnet 5/Haiku 4.5 ihn per
+         `tool_choice:"tool"` garantiert durchbekämen.
+       - **Tests/Verifikation.** `tests/anthropic.test.js`: fünf neue
+         `describe.each`(Fable 5.1/Opus 5.5)-Tests für die drei
+         Text-/Quellen-Leck-Fixes oben (freshStart-Cite-Index,
+         Präambel-ohne-Suche, gescheiterter Nudge NACH echter Recherche,
+         gescheiterter Nudge MIT eigener neuer Suche, `retryWith`-
+         Nachfassen (b) mit Präambel) plus ein neuer
+         `describe.each`(Sonnet 5/Fable 5.1/Opus 5.5)-Block für die
+         `retryWith`-Refusal-Guards mit echtem Teil-Content, plus Tests für
+         `refusalMessage(data, modelId)`s Sonnet-Sonderfall. Jeder der vier
+         PFLICHT-Fixes wurde per Hand zurückgenommen (Mutationsprobe) und
+         der jeweils neue Test schlug gezielt fehl. `npx vitest run`
+         (voller Lauf) und `npm run test:coverage` siehe Testresultat im
+         Abschlussbericht.
+     - **Review-Fix Runde 4 (Nachtrag, Version bleibt bewusst `v7.57`).**
+       Zwei neue Nutzerwünsche PLUS ein drittes Code-Review deckte weitere
+       Lücken auf.
+       - **A' – getippter Text jetzt ebenfalls 14px.** Neuer Nutzerwunsch:
+         nicht nur der Platzhalter, auch der GETIPPTE Text im Chat-
+         Eingabefeld (`src/App.jsx`) soll so klein sein wie die Chat-Blasen.
+         `text-base` → `text-sm`; das jetzt redundante `placeholder:text-sm`
+         entfällt (der Platzhalter erbt `text-sm` bereits vom Element
+         selbst).
+       - **A'' – iOS-Zoom-Schutz zieht von "Mindestschriftgröße" auf
+         "Viewport-Meta-Tag" um.** Mit A' entfällt die bisherige Begründung
+         "getippter Text bleibt bewusst 16px". Neues Modul
+         `src/lib/viewport.js` mit drei reinen/DOM-Helfern:
+         `isIOSLike({userAgent, platform, maxTouchPoints})` (iPhone/iPad/
+         iPod im UA ODER `platform === "MacIntel" && maxTouchPoints > 1` für
+         iPadOS im Desktop-Modus; robust gegen fehlende/Nicht-String-Werte,
+         Default false), `withMaximumScale(content)` (ergänzt/ersetzt
+         `maximum-scale=1` in einem `viewport`-`content`-String, erhält die
+         Reihenfolge der übrigen Einträge, idempotent, setzt NIEMALS
+         `user-scalable=no`) und `applyIOSInputZoomGuard(doc, nav)` (nur auf
+         einem iOS-artigen Gerät MIT vorhandenem
+         `meta[name="viewport"]` wird dessen `content` ersetzt; wirft nie,
+         auch nicht bei einem kaputten `doc`/`nav`). `src/main.jsx` ruft
+         `applyIOSInputZoomGuard()` EINMAL vor dem ersten Render auf.
+         Begründung: iOS Safari zoomt beim Fokussieren eines Eingabefelds
+         unter 16px automatisch in die Seite hinein – `maximum-scale=1`
+         unterdrückt GENAU diesen Auto-Zoom; Pinch-Zoom bleibt auf iOS ab
+         Version 10 trotzdem möglich, weil Safari `maximum-scale` dort NUR
+         für den Fokus-Auto-Zoom respektiert, nicht für echte
+         Zwei-Finger-Gesten. Android/Desktop bekommen den Eingriff bewusst
+         NICHT (`isIOSLike` liefert dort `false`): den Auto-Zoom gibt es dort
+         nicht, und `maximum-scale` würde auf Android den Pinch-Zoom ECHT
+         sperren. Nebeneffekt (gewollt): der Schutz wirkt automatisch auch
+         für die bereits vorher 14px großen Felder im Einstellungsdialog,
+         ohne dass diese einzeln angefasst werden mussten. Tests
+         (`tests/viewport.test.js`, `@vitest-environment jsdom`): UA-Matrix
+         (iPhone, alter iPad-UA, iPadOS-Desktop-Modus, echtes macOS Safari,
+         Android Chrome, Windows Chrome, leere/fehlende/nicht-String-Werte,
+         `maxTouchPoints`-Grenzfall bei genau 1), `withMaximumScale`
+         (Ergänzen, Ersetzen von `maximum-scale=5`, Idempotenz,
+         Leerzeichen-Varianten, leerer/Nicht-String-Input, `user-scalable`
+         bleibt unangetastet), `applyIOSInputZoomGuard` (mit/ohne `meta`,
+         iOS/nicht-iOS, ein absichtlich werfendes `doc`-Mock, Default-
+         Parameter gegen das echte jsdom-`document`/`navigator`).
+       - **B' 🟡 – Nudge mit eigener Websuche: Quellen/Prosa passten
+         weiterhin nicht zum Index-Raum des Modells (Runde 3 hatte nur den
+         `freshStart`-Sonderfall behoben).** `doPost()` liefert jetzt
+         zusätzlich `srcBeforeLast`/`txtBeforeLast` zurück – den Stand von
+         `sources`/`textBlocks` UNMITTELBAR VOR dem `postOnce()`, das die
+         zurückgegebene (ggf. gleich wieder verworfene) `data` erzeugt hat.
+         Sucht ein Nudge-Turn SELBST (`sources` wächst gegenüber dem
+         Vor-Nudge-Stand `srcMark`), wird NICHT mehr pauschal alles seit
+         Nudge-Beginn verworfen bzw. (nur bei `lastConvo === msgs`) alles vor
+         `srcMark` gesplict, sondern GEZIELT nur der von der VERWORFENEN
+         letzten Antwort beigetragene Bereich
+         (`[srcBeforeLast, srcMark)`/`[txtBeforeLast, textMark)`) entfernt –
+         die eigene, vom Modell tatsächlich zitierte Nudge-Prosa bleibt
+         erhalten (v7.6-Verhalten gilt jetzt auch für den Nudge-Turn selbst).
+         Der `freshStart`-Sonderfall (`sources.splice(0, srcMark)`) war nur
+         der Spezialfall `srcBeforeLast === 0` und wurde durch diese
+         allgemeine Formel ERSETZT. Derselbe Fix UND dieselbe Korrektur
+         gelten im eingebetteten Nachfassen (b) von `retryWith()` –
+         `r.srcBeforeLast`/`r.txtBeforeLast` aus dem `doPost()`-Aufruf, der
+         das jetzt verworfene `r.data` erzeugt hat, markieren dort den
+         entsprechenden Bereich. **Korrektur:** Runde 3s Aussage "Kein
+         Analogon in (b) nötig … r.convo ist die TATSÄCHLICH gesendete, vom
+         Modell gesehene Konversation" war FALSCH – `r.convo` ist die
+         Konversation, MIT DER `r.data` angefragt wurde, `r.data` SELBST ist
+         NICHT Teil davon; dieselbe Lücke wie in (a) bestand also auch in
+         (b), unabhängig von einem "verdeckten freshStart". Fünf neue
+         `describe.each`(Fable 5.1/Opus 5.5)-Tests decken die im Review
+         dokumentierten Datenlagen ab: P1 (freshStart MIT bereits zitierter,
+         jetzt verworfener Erstversuch-Prosa – die verschwindet jetzt
+         SPURLOS statt fehlzugeordnet an der falschen Quelle zu hängen), P3
+         (Nudge sucht selbst NACH einer Lookup-Runde, `lastConvo !== msgs`),
+         P5 (dasselbe im eingebetteten Nachfassen (b) von `retryWith()`), P6
+         (Nudge sucht selbst UND liefert die eigentliche, zitierte Antwort
+         als Text vor dem Tool-Aufruf – kein Inhaltsverlust mehr, v7.6-Fall)
+         sowie ein fünfter Test als P6-Analogon FÜR (b) (dieselbe
+         Inhaltsverlust-Gefahr im eingebetteten Nachfassen von
+         `retryWith()`). Jeder der fünf Tests wurde per Mutationsprobe verifiziert (alte,
+         pauschale `textBlocks.length = textMark`-Zeile bzw. der alte
+         `freshStart`-Splice wiederhergestellt) und schlug dabei gezielt
+         fehl – kein Pro-forma-Test. Die fünf bestehenden Nudge-/
+         `retryWith`-Tests aus Runde 2/3 bleiben unverändert grün (u. a. der
+         `freshStart`-Test OHNE Erstversuch-Prosa, der die neuen, präziseren
+         Tests nicht ersetzt, sondern ergänzt).
+       - **C' 🔵 – bei einer Sonnet-5-Ablehnung fehlte jeder
+         Modell-Hinweis.** Runde 3s "kein Vorschlag auf Sonnet 5, wenn
+         Sonnet 5 selbst abgelehnt hat" ließ den GESAMTEN Modell-Hinweis
+         entfallen, statt nur das genannte Beispielmodell zu tauschen – ein
+         echter Bug (gerade nach einer Sonnet-5-Ablehnung ist ein
+         Wechsel-Hinweis sinnvoll, siehe die serverseitigen Fallbacks von
+         Fable 5.1/Opus 5.5). Fix: `refusalMessage()` nennt jetzt IMMER ein
+         Beispielmodell – "Sonnet 5", außer wenn Sonnet 5 selbst abgelehnt
+         hat, dann "Opus 5.5" (nie das ablehnende Modell selbst). Bestehender
+         Test angepasst (echter Fund beim Testen: der alte Test prüfte NUR
+         die Abwesenheit von "Sonnet 5", nicht mehr die Anwesenheit
+         irgendeines Vorschlags – hätte den Bug NICHT auffangen können).
+       - **DECISIONS-Korrekturen (blau, aus Runde 3 übernommen).** (1) "reine
+         Anhänge-Operation" (weiter oben, Runde-1-Absatz) ergänzt um die
+         Ausnahme "aufeinanderfolgende `pause_turn`-Antworten werden in die
+         letzte `assistant`-Nachricht zusammengeführt". (2) "die
+         Präfix-Eigenschaft hält über alle Requests eines Laufs" (Tests-
+         Absatz, Runde 1) korrigiert zu "über die getesteten Pfade" –
+         `expectStablePrefix` prüft den Merge zweier aufeinanderfolgender
+         Pausen NICHT als eigene Bedingung (vorbestehende Lücke im
+         Test-Helfer, nicht im Produktivcode). (3) Die Platzhalter-
+         Entscheidung aus Runde 1 ist durch A'/A'' oben überholt, mit einem
+         Verweis markiert statt gelöscht (Historie bleibt nachvollziehbar).
+       - **Tests/Verifikation.** `tests/viewport.test.js` (neu, 23 Tests).
+         `tests/anthropic.test.js`: 5 neue Tests (P1/P3/P5/P6 + P6-Analogon
+         für (b), siehe B' oben) plus ein angepasster Test (C',
+         Sonnet-5-Modellvorschlag).
+         `npx vitest run --maxWorkers=3` (voller Lauf): 2752/2752 grün.
+         `npm run test:coverage -- --maxWorkers=3`: weiterhin grün, Gate
+         (60 %) deutlich überschritten – "All files"
+         Statements 93,41 % / Branches 87,54 % / Funktionen 93,07 % /
+         Lines 95,77 %; `viewport.js` 100/91,42/100/100,
+         `anthropic.js` 96,22/87,85/100/97,97.
+       - **Restrisiken (unverändert aus Runde 1–3, hier nicht wiederholt
+         gelöst).** Die API-Fakten wurden weiterhin NICHT per Web
+         nachgeprüft (siehe Runde-1-Restrisiko 1); `refusalMessage`s
+         80-Zeichen-Deckel bleibt eine bewusste, nicht aus der API-Doku
+         abgeleitete Schranke; das frische Lookup-/Pause-Budget für einen
+         Nudge-Turn (Runde-3-Restrisiko) und der fehlende Nudge beim
+         Neustart "von vorn ab `msgs`" OHNE vorherigen Nudge-Versuch
+         (ebenfalls Runde 3) bleiben bewusst unangetastet – außerhalb des
+         jeweiligen Nachbesserungs-Rahmens.
+     - **Review-Fix Runde 5 (Nachbesserung, Version bleibt bewusst `v7.57`
+       – reine Korrekturen, kein neues Feature).** Ein viertes Code-Review
+       (drei unabhängige Linsen, alle drei mit derselben Kernbeobachtung)
+       fand eine weitere, von Runde 4s B'-Fix NICHT abgedeckte Lücke
+       derselben Fehlerfamilie, PLUS eine Test-Lücke im Runde-4-Fix selbst.
+       - **🟡 `retryWith()` NACH einem erfolgreichen Nudge (a) OHNE eigene
+         Nudge-Suche: eine NEUE Suche im Retry (oder dessen eigener
+         eingebetteter Nachfass-Nudge (b)) zitierte die FALSCHE, bereits
+         verworfene Quelle.** Runde 4s B'-Fix lässt die Suchtreffer einer
+         verworfenen Zwischenantwort BEWUSST in `sources` stehen, wenn die
+         BEIBEHALTENE Prosa dieser Antwort sie zitiert (v7.6-Verhalten) –
+         korrekt für DIESES Ergebnis. `finalConvo`/`sentConvo` (worauf ein
+         späterer, externer `retryWith()` aufsetzt, siehe B2/Verify-then-
+         Commit-Gate) enthält diese verworfene Antwort aber NIE (dieselbe
+         Struktur wie beim `freshStart`-Cite-Fix aus Runde 3/4). Sucht der
+         Retry-Request selbst erneut, sah das Modell in SEINER Konversation
+         nur seine eigenen neuen Treffer (zählt sie deshalb ab Index 1),
+         während `sources` clientseitig noch die alten, für das Modell
+         unsichtbaren Treffer DAVOR stehen hatte – Index 1 zeigte dadurch
+         weiterhin auf die alte, verworfene Quelle statt auf die neue,
+         tatsächlich zitierte (auch dauerhaft im gespeicherten Dokument).
+         Betrifft NUR Fable 5.1/Opus 5.5 (der Sonnet-5/Haiku-Pfad kann im
+         Retry nicht mehr suchen, `finalMode` ist dort weiterhin `"forced"`).
+         Fix: `retryWith()` baut `sources` jetzt UNMITTELBAR vor dem
+         Retry-Request aus `withAssistant` neu auf (`sources.length = 0`,
+         danach `collectSources()` über alle `assistant`-Blöcke von
+         `withAssistant` – exakt die Konversation, die das Modell im
+         GLEICH FOLGENDEN Request sieht). `withAssistant` ist zu diesem
+         Zeitpunkt bereits vollständig aufgebaut (`finalConvo` + die
+         tatsächlich beibehaltene Antwort); "msgs" (die Chat-Historie
+         früherer Turns) enthält laut Konstruktion NIE
+         `web_search_tool_result`-Blöcke (reiner Text je historischer
+         Nachricht, siehe die `msgs`-Zuordnung am Anfang von `callClaude()`)
+         – der Neuaufbau trifft also garantiert nur Treffer AUS DIESEM
+         Turn, in unveränderter Reihenfolge. Für Sonnet 5/Haiku 4.5
+         (`supportsForcedToolChoice === true`) bleibt der Pfad dadurch Byte
+         für Byte unverändert (eigener Guard `if
+         (!supportsForcedToolChoice(modelId))`). Zwei neue
+         `describe.each`(Fable 5.1/Opus 5.5)-Tests decken beide betroffenen
+         Unterpfade ab: eine direkt erfolgreiche Retry-Antwort mit eigener
+         neuer Suche, UND dieselbe Situation, wenn stattdessen das
+         eingebettete Nachfassen (b) innerhalb desselben `retryWith()`-Laufs
+         sucht. Beide Tests wurden per Mutationsprobe verifiziert (Fix
+         auskommentiert/`if (false && …)`) – schlugen dabei gezielt und
+         ausschließlich dort fehl (`- Retry-Fakt[0](https://erst.example)`
+         bzw. `- NB-Fakt[0](https://erst.example)` statt der jeweils
+         korrekten neuen Quelle), danach zurückgesetzt.
+       - **🟡 Test-Lücke im Runde-4-B'-Fix: alle vier bestehenden Tests
+         (P1/P3/P5/P6) hatten `lastSrcBeforeLast`/`lastTxtBeforeLast`
+         (bzw. `r.srcBeforeLast`/`r.txtBeforeLast`) IMMER auf 0 – eine
+         schmalere Mutation ("diese Werte pauschal durch 0 ersetzt", statt
+         des vollständigen Fix-Reverts, mit dem Runde 4 selbst getestet
+         hatte) blieb dadurch in GENAU diesen vier Tests unbemerkt (sie
+         deckt sich dort zufällig mit dem echten Wert 0).** Kein
+         Produktivcode-Fehler – der bestehende Code war bereits korrekt,
+         siehe die Herleitung im Review; die Lücke betraf ausschließlich
+         die Testabsicherung UND einen dadurch zu optimistischen Kommentar/
+         DECISIONS-Absatz. Fix: zwei neue Tests ("B' allgemein (a)"/"(b)")
+         mit einem NICHT-LEEREN, selbst suchenden Vorlauf VOR der verworfenen
+         Zwischenantwort (der Vorlauf-Treffer ist Teil der Nudge-Konversation
+         und MUSS bei Index 1 bleiben, während NUR der Treffer der
+         verworfenen Zwischenantwort verschwindet) – per Mutationsprobe
+         verifiziert: dieselbe schmale Mutation lässt jetzt genau diese
+         beiden neuen Tests gezielt fehlschlagen, die bestehenden vier
+         bleiben unverändert grün. Den irreführenden Testkommentar (behauptete
+         pauschal, die 0-Ersetzung schlage bei "jedem der vier Tests" fehl)
+         entsprechend präzisiert.
+       - **Bereits erledigt, im Review erneut bestätigt (KEINE Änderung
+         nötig).** Die C'-Korrektur ("bei einer Sonnet-5-Ablehnung einen
+         Hinweis auf ein ANDERES Modell geben") ist bereits vollständig
+         umgesetzt (siehe `refusalMessage()`/`throwRefusal()` und
+         "Review-Fix Runde 4" oben) – im Review erneut geprüft, keine
+         offene Lücke gefunden; die zugehörige Test-Assertion wurde in
+         dieser Runde trotzdem verschärft (siehe Optional/blau unten).
+       - **Optional/blau umgesetzt (billig, risikolos).** (1)
+         `normalizeModelId({ id: … })`-Test unterschied bisher nicht, ob der
+         `fallback`-Parameter wirklich greift, oder ob das (falsch
+         behandelte) Objekt zufällig denselben String wie `MODELS[0].id`
+         trägt – jetzt mit abweichendem `fallback` UND einer anderen
+         `id` im Objekt; dazu ein neuer Test für `"constructor"`/
+         `"hasOwnProperty"`/`"__proto__"` (der `Object.prototype.
+         hasOwnProperty.call(LEGACY_MODEL_IDS, …)`-Guard war bereits vorher
+         korrekt, jetzt zusätzlich ausdrücklich abgesichert). (2) Der
+         Sonnet-5-Refusal-Integrationstest prüft jetzt zusätzlich positiv
+         `toContain("Opus 5.5")`/`"ein anderes Modell wählen"` statt nur die
+         Abwesenheit von "Sonnet 5" (hätte den Runde-3-Bug – Vorschlag
+         entfällt komplett – allein nicht gefunden). (3) `src/lib/
+         viewport.js`: `isIOSLike()` nimmt jetzt `nav` direkt entgegen
+         (`nav || {}` statt eines Destrukturierungs-Default `= {}`, der NUR
+         bei `undefined` griff – ein expliziter `null`-Aufruf hätte vorher
+         geworfen); `applyIOSInputZoomGuard(doc, nav)` löst seine Defaults
+         (`document`/`navigator`) jetzt INNERHALB des `try`-Blocks auf,
+         statt als Parameter-Default (der VOR dem `try` ausgewertet würde –
+         ein Aufruf ganz ohne Argumente in einer Umgebung ganz ohne globales
+         `document` hätte trotz des dokumentierten "wirft nie"-Vertrags
+         geworfen). Neue Tests: `isIOSLike(null)`, `applyIOSInputZoomGuard`
+         mit einem ECHTEN `meta[name="viewport"]`-Element in `document.head`
+         (bisher nur ein handgebautes Mock-Objekt) und mit `nav === null`,
+         sowie eine eigene Node-Umgebungs-Testdatei (`tests/
+         viewport.node.test.js`, ohne globales `document` – `navigator`
+         existiert seit Node 21 global, siehe "Review-Fix Runde
+         'Nachbesserung'" unten) für den Default-Parameter-Fall. (4)
+         Kopfzeilen-Modell-Dropdown
+         (`src/App.jsx`): `max-w-24` (96px) schnitt "Fable 5.1" auf
+         Bildschirmen < `sm` je nach Schriftbreite auf "Fable 5." ab –
+         nicht mehr von "Fable 5" unterscheidbar; jetzt `max-w-28` (112px).
+         (5) Kommentare korrigiert: `src/main.jsx`, `src/lib/viewport.js`
+         und `tests/viewport.test.js` behaupteten, die
+         Chat-/Einstellungsfelder seien "seit v7.57" beide `text-sm` – die
+         Einstellungsfelder waren es bereits VORHER (nur das Chat-Feld ist
+         seit v7.57 neu `text-sm`). Der Platzhalter-Kommentar in `App.jsx`
+         nannte den (nicht mehr verwendeten) Klassennamen
+         "placeholder:text-sm" wörtlich im Kommentartext – Tailwind v4s
+         Textscanner erkennt Klassenkandidaten unabhängig davon, ob sie in
+         echtem Code oder einem Kommentar stehen, und hatte dafür eine
+         ungenutzte CSS-Regel erzeugt (per Build nachgeprüft). **Korrektur
+         (Review, blau/optional):** aus `App.jsx` entfernt, die Regel bleibt
+         aber, solange DECISIONS.md selbst den Klassennamen nennt (Tailwind
+         scannt standardmäßig auch `.md`-Dateien) – dieser Absatz und die
+         beiden Erwähnungen weiter oben (Runde 1/4) tun das bewusst
+         weiterhin, damit die Historie nachvollziehbar bleibt; funktional
+         ist die ungenutzte Regel harmlos. Der
+         "~6/~10 Zeilen"-Kommentar dort war seit dem `text-sm`-Wechsel
+         (kleinere Zeilenhöhe) ungenau, jetzt auf "~7 Zeilen; ab `sm` passen
+         die vollen 10 Zeilen ohne Deckelung" korrigiert. `docs/
+         TESTFAELLE.md` C8b: Rundenbezeichnung ("Runde 2") an DECISIONS
+         ("Runde 4") angeglichen (jetzt "Nachtrag"), plus ein Hinweis, beim
+         manuellen iOS-Test zusätzlich zu prüfen, dass Zwei-Finger-Pinch-Zoom
+         weiterhin funktioniert (Safari UND die vom Home-Bildschirm
+         gestartete App).
+       - **Bewusst NICHT umgesetzt (blau/optional, Restrisiken).** (1) Eine
+         Websuche OHNE jeden Treffer (`sources` wächst nicht, obwohl
+         gesucht wurde) wertet der Nudge-Zweig weiterhin als "hat nicht
+         selbst gesucht" (`sources.length > srcMark` bleibt `false`) – die
+         eigene, tatsächlich zitierte Nudge-Prosa würde in diesem seltenen
+         Grenzfall verworfen statt behalten zu werden. Ein korrekter Fix
+         bräuchte einen eigenen, über `collectSources()` mitgezählten
+         "Suchblock stattgefunden"-Zähler (unabhängig von der Trefferzahl)
+         an BEIDEN Nudge-Stellen (a)/(b) – das hätte den engen
+         Nachbesserungs-Rahmen dieser Runde gesprengt und geht über die
+         PFLICHT-Findings hinaus. (2) `retryWith()`s bestehender (nicht in
+         dieser Runde eingeführter) `if (!usedSearch) textBlocks.length = 0;`
+         -Guard vor dem eingebetteten Nachfassen (b) prüft das TURN-WEITE
+         `usedSearch`-Flag statt eines lokalen "hat der ERSTVERSUCH DIESES
+         Retries gesucht"-Markers – hat der ANFÄNGLICHE Erstversuch (vor
+         JEDEM `retryWith()`) irgendwann gesucht, bleibt ein Retry-Entwurf
+         ohne Tool UND ohne eigene neue Suche fälschlich stehen, obwohl das
+         Modell ihn im Nachfass-Kontext nie gesehen hat. Betrifft
+         nachweislich auch Sonnet 5 (kein Fable/Opus-Sonderfall) und ist
+         vom aktuellen Nachbesserungs-Rahmen (Modell-Generationswechsel,
+         `tool_choice`, Refusal/Fallbacks) unabhängig – nicht ohne
+         Rückfrage angefasst.
+       - **Tests/Verifikation.** `tests/anthropic.test.js`: vier neue Tests
+         (zwei für den `retryWith()`-`sources`-Neuaufbau, zwei für die
+         B'-Test-Lücke) plus zwei verschärfte Assertions
+         (`normalizeModelId`, Sonnet-5-Refusal-Integrationstest) plus ein
+         neuer `"constructor"`/Prototyp-Guard-Test. `tests/viewport.test.js`:
+         drei neue Tests (`isIOSLike(null)`, echtes jsdom-`meta`-Element,
+         `nav === null`). Neu: `tests/viewport.node.test.js` (Node-Umgebung
+         ohne globales `document` – `navigator` existiert unter Node 24
+         weiterhin global, der Rand "`navigator` fehlt" wird dort separat per
+         `vi.stubGlobal("navigator", undefined)` abgedeckt, siehe Korrektur
+         in "Review-Fix Runde 'Nachbesserung'" unten). Jeder der beiden PFLICHT-Fixes
+         wurde per Mutationsprobe verifiziert (Fix zurückgenommen bzw. die
+         schmalere Mutation eingespielt) – die jeweils neuen Tests schlugen
+         gezielt fehl, alle anderen Tests blieben unverändert grün; danach
+         zurückgesetzt. `npx vitest run --maxWorkers=3` (voller Lauf):
+         2765/2765 grün (55 Testdateien). `npm run test:coverage --
+         --maxWorkers=3`: weiterhin grün, Gate (60 %) deutlich überschritten
+         – "All files" Statements 93,42 % / Branches 87,55 % / Funktionen
+         93,07 % / Lines 95,78 %; `viewport.js` 100/90/100/100,
+         `anthropic.js` 96,25/87,97/100/97,98.
+     - **Review-Fix Runde "Nachbesserung" (Version bleibt bewusst `v7.57` –
+       reine Korrekturen, kein neues Feature).** Ein fünftes Code-Review (drei
+       Linsen) fand ein PFLICHT-Finding (UI-Regression) und eine Reihe
+       optionaler/blauer Doku- und Test-Lücken.
+       - **🟡 PFLICHT – `max-w-28` am Modell-Dropdown sprengte den
+         verbundenen 360-px-Header erneut (Regression von QA-Finding A3).**
+         Runde 5s `max-w-24` → `max-w-28` (Fix für abgeschnittene
+         Modellnamen wie "Fable 5.1") ließ den Header im VERBUNDENEN Zustand
+         (Menü statt "Notizbuch"-Span, plus das jetzt breitere Select) bei
+         genau 360 px um 4 px über den Rand ragen – der
+         Einstellungen-Button wurde dadurch abgeschnitten
+         (`overflow-x: hidden` verdeckt statt scrollen zu lassen). Fix:
+         `header`s `gap-2` → `gap-1.5 sm:gap-2` (`src/App.jsx`) – die
+         Select-Breite (`max-w-28`, damit "Fable 5.1" nicht abgeschnitten
+         wird) bleibt unverändert, nur der Zeilenabstand auf Mobil schrumpft
+         um 4 px, exakt genug, um die 360 px wieder einzuhalten. `docs/
+         TESTFAELLE.md` A3 um eine ausdrückliche 360-px-Prüfung ergänzt
+         (`header.scrollWidth === header.clientWidth` im verbundenen
+         Zustand), damit diese Regressionsklasse künftig auffällt.
+       - **Optional/blau umgesetzt (billig, risikolos).** (1) Test-Lücke aus
+         der Vorrunde geschlossen: in JEDEM bisherigen (b)-Test war
+         `r.txtBeforeLast` zufällig 0 (textBlocks wird direkt vor dem
+         Retry-`doPost()` geleert, die Retry-Antwort war immer dessen ERSTER
+         `postOnce()`) – eine Mutation, die `r.txtBeforeLast` pauschal durch
+         0 ersetzt, blieb dadurch unbemerkt. Neuer Test ("B' allgemein (b),
+         Prosa") mit einem NICHT-LEEREN Vorlauf INNERHALB desselben
+         Retry-`doPost()`-Aufrufs (Suche+zitierte Prosa+`lookup_wissen`,
+         intern fortgesetzt, ERST DANACH die verworfene Zwischenantwort, dann
+         der Nudge (b) mit eigener neuer Suche) – per Mutationsprobe
+         verifiziert (`r.txtBeforeLast` durch `0` ersetzt): schlägt gezielt
+         und ausschließlich dort fehl, alle anderen 385 Tests bleiben grün.
+         Zusätzlich `expectStablePrefix`/`expectNoForcedChoice` an P1/P3/P5/
+         P6, beide "B' allgemein"-Tests und die beiden `retryWith`-Tests nach
+         einem erfolgreichen Nudge (a) ohne eigene Nudge-Suche angehängt –
+         bisher prüften diese sieben Tests nur den Ergebniswert, nicht die
+         Präfix-/`tool_choice`-Eigenschaft mit. (2) `tests/
+         viewport.node.test.js`: Kommentar korrigiert ("ohne globales
+         `document`" statt "`document`/`navigator`" – `navigator` existiert
+         seit Node 21 global, nachgeprüft mit Node v24.16.0 in dieser
+         Umgebung); neuer Test entfernt `navigator` EXPLIZIT per
+         `vi.stubGlobal("navigator", undefined)`, damit der Zweig `typeof
+         navigator === "undefined"` in `viewport.js` tatsächlich einmal
+         durchlaufen wird. (3) `tests/viewport.test.js`: zwei neue Tests –
+         `withMaximumScale` mit Leerzeichen um das Gleichheitszeichen UND
+         Großschreibung des Schlüssels (`"Maximum-Scale = 2"` →
+         `"maximum-scale=1"`), und `applyIOSInputZoomGuard` mit einer
+         iPadOS-Desktop-Modus-`nav` (`MacIntel`, `maxTouchPoints: 5`) – bisher
+         durchlief nur der iPhone-UA den DOM-Helfer selbst, der zweite von
+         `isIOSLike()` erkannte Fall erreichte `applyIOSInputZoomGuard()` in
+         keinem Test. (4) `DECISIONS.md`-Korrekturen: der Querverweis "siehe
+         'Bewusst NICHT umgesetzt' unten" (Tests-Absatz, Runde 1) lief ins
+         Leere – der Punkt steht tatsächlich unter "DECISIONS-Korrekturen"
+         in "Review-Fix Runde 4", jetzt korrekt verlinkt; die dort genannte
+         Testzahl "2750/2750" war falsch (der tatsächliche Lauf der Runde
+         ergab 2752/2752, jetzt korrigiert); hinter Runde 3s
+         "textBlocks.length wird nach JEDEM Nudge-doPost() … exakte Parität
+         zu postOnce()"-Aussage fehlte ein Korrekturvermerk (gilt seit B'/P6
+         nur noch, wenn der Nudge NICHT selbst gesucht hat), jetzt ergänzt;
+         die Aussage "(per Build nachgeprüft, jetzt weg)" zur ungenutzten
+         `placeholder:text-sm`-CSS-Regel war unpräzise – die Regel bleibt
+         BESTEHEN, solange `DECISIONS.md` selbst den Klassennamen nennt
+         (Tailwind v4 scannt standardmäßig auch `.md`-Dateien; die Regel ist
+         funktional harmlos, ein Entfernen aus den historischen Absätzen
+         würde die Nachvollziehbarkeit der Historie beschädigen – bewusst
+         NICHT über `@source not`-Ausschlüsse in `index.css` gelöst, siehe
+         "Bewusst NICHT umgesetzt" unten). (5) `docs/TESTFAELLE.md`: C8b
+         schrieb das WebKit-Zoomverhalten fälschlich "Anthropic" zu (jetzt
+         "laut DECISIONS #117 (Safari-Verhalten seit iOS 10)") und überzog
+         die Unit-Test-Aussage (der Test prüft NUR das Setzen des
+         meta-content, nicht das Zoom-Verhalten selbst – jetzt präzisiert);
+         C1b ergänzt, dass die Info-Zeile "[fallback] Serverseitiger
+         Fallback aktiv — geantwortet hat …" KEIN Finding ist.
+       - **Bewusst NICHT umgesetzt (blau/optional, Restrisiken).** (1) Die
+         "sauberere" Variante gegen die tote `placeholder:text-sm`-CSS-Regel
+         (`@source not "../DECISIONS.md";`/`@source not "../docs";` in
+         `src/index.css`, Tailwind v4s Scan-Ausschluss) wurde NICHT
+         umgesetzt – sie hätte einen echten Produktions-Build samt erneuter
+         CSS-Prüfung erfordert, um sicherzustellen, dass die Direktive in der
+         installierten Tailwind-Version (4.3.2) tatsächlich greift; für eine
+         rein kosmetische, funktional folgenlose Regel (kein Selektor nutzt
+         die Klasse) war das Risiko/Aufwand-Verhältnis gegenüber der
+         gewählten Doku-Korrektur (siehe oben) nicht gerechtfertigt. (2) Zwei
+         bereits in Runde 5 als Restrisiko dokumentierte Punkte (Websuche
+         ohne Treffer wertet der Nudge-Zweig weiterhin als "nicht selbst
+         gesucht"; `retryWith()`s `!usedSearch`-Guard vor dem eingebetteten
+         Nachfassen (b) prüft das TURN-WEITE Flag statt eines lokalen
+         Retry-Markers) bestehen unverändert fort – im Review dieser Runde
+         erneut bestätigt, weiterhin außerhalb des Nachbesserungs-Rahmens.
+       - **Tests/Verifikation.** `tests/anthropic.test.js`: ein neuer Test
+         ("B' allgemein (b), Prosa") plus `expectStablePrefix`/
+         `expectNoForcedChoice` an sieben bestehenden Tests angehängt.
+         `tests/viewport.test.js`: zwei neue Tests. `tests/
+         viewport.node.test.js`: ein neuer Test. `npx vitest run
+         --maxWorkers=3` (voller Lauf): 2770/2770 grün (55 Testdateien).
+         `npm run test:coverage -- --maxWorkers=3`: weiterhin grün, Gate
+         (60 %) deutlich überschritten – "All files" Statements 93,42 % /
+         Branches 87,58 % / Funktionen 93,07 % / Lines 95,78 %;
+         `viewport.js` 100/92,5/100/100 (Branch-Anteil durch die drei
+         neuen Tests von 90 % auf 92,5 % gestiegen), `anthropic.js`
+         96,25/87,97/100/97,98 (unverändert gegenüber Runde 5 – die neuen
+         Assertions sichern bereits ausgeführten Code zusätzlich ab, ohne
+         neue Zeilen zu benötigen).
+     - **Review-Fix Runde "Nachbesserung 2" (Version bleibt bewusst `v7.57` –
+       reine Test-Nachbesserung, kein neues Feature, laut Review KEIN
+       Produktivcode-Fehler).** Ein weiteres Code-Review fand nur noch ein
+       gelbes Finding (reine Testlücke) plus eine Reihe optionaler/blauer
+       Doku-Korrekturen.
+       - **🟡 PFLICHT (Testlücke, KEIN Produktivcode-Fehler) – `sentConvo =
+         r.convo` im Nachfassen (a) (`src/lib/anthropic.js`, ca. Z. 1917) war
+         bisher nur für einen Nudge OHNE eigene Fortsetzung abgesichert.**
+         Der bestehende Test "retryWith NACH erfolgreichem Nachfassen (a)"
+         (siehe oben) deckte ausschließlich den Fall ab, in dem die
+         Nudge-Antwort SOFORT ein `update_notebook` liefert – dort gilt
+         `r.convo === nudged`, `r.convo` und `nudged` unterscheiden sich also
+         gar nicht, die Mutante `sentConvo = nudged` überlebte deshalb
+         unbemerkt. Neuer Test (`describe.each` für Fable 5.1/Opus 5.5,
+         bestehendes Muster: Erstversuch ohne Tool → Nudge-Antwort mit
+         `thinking`(`s2`) + `lookup_wissen` → intern fortgesetzte
+         Lookup-Runde → `thinking`(`s3`) + `update_notebook` mit Ops, die im
+         echten Ablauf von `verify.js`/dem Turn-Guard verworfen würden (hier
+         nicht simuliert, nur Auslöser für den externen `retryWith()`-Aufruf)
+         → `retryWith()`-Aufruf mit gültiger Folgeantwort) prüft per exakter
+         Objektgleichheit, dass der Retry-Request GENAU auf der tatsächlich
+         gesendeten Konversation aufsetzt – Systemnachricht, Lookup-Runde
+         (`assistant` mit `lk1` + `user`-`tool_result`) UND der
+         `thinking`-Block `s3`, in dieser Reihenfolge. Per Mutationsprobe
+         verifiziert (`sentConvo = nudged` eingespielt): der neue Test
+         schlägt an genau dieser Stelle gezielt fehl (fehlende Lookup-Runde,
+         falscher Inhalt), nach dem Zurücksetzen wieder grün.
+       - **Optional/blau umgesetzt (billig, risikolos).** (1) Neuer Test:
+         Ursprungsmodus "none" (Tools bereits ZWEIMAL serverseitig abgelehnt:
+         search UND forced) plus fehlendem Tool-Aufruf löst KEINEN
+         Nudge-Pfad aus (siehe `mode !== "none"`-Guard im Nachfassen (a)) –
+         prüft über ALLE Request-Bodies, dass keiner eine `role: "system"`-
+         Nachricht enthält; per Mutationsprobe verifiziert (Guard entfernt):
+         schlägt gezielt fehl. (2) `src/App.jsx#buildSendErrorText`:
+         veralteten Kommentar korrigiert – `refusalMessage()` nennt NICHT
+         für jede Ablehnung "Sonnet 5" als Beispielmodell, sondern IMMER ein
+         ANDERES Modell als das gerade abgelehnte (Opus 5.5, falls Sonnet 5
+         selbst ablehnte, sonst Sonnet 5). (3) `DECISIONS.md` #117,
+         Tests/Verifikation-Absatz der "Review-Fix Runde 5": die Aussage
+         "ohne globales `document`/`navigator`" korrigiert – unter Node 24
+         existiert `navigator` weiterhin global, nur der Rand "`navigator`
+         fehlt" wird per `vi.stubGlobal("navigator", undefined)` separat
+         getestet (siehe bereits "Review-Fix Runde 'Nachbesserung'" oben,
+         wo dieselbe Korrektur am Testdatei-Kommentar bereits vorgenommen
+         wurde – hier fehlte sie nur noch in der DECISIONS-eigenen
+         Nacherzählung). (4) `docs/TESTFAELLE.md` A3: die 360-px-
+         Header-Probe als eigenen, ausdrücklich `[VERBUNDEN]`-markierten
+         Zusatzcheck formuliert (Weg zu 360 px: `resize_window 360x800`),
+         inkl. Verhalten ohne Verbindung (Probe liefe ins Leere, in diesem
+         Fall als ÜBERSPRUNGEN vermerken statt sie unverbunden auszuführen).
+       - **Tests/Verifikation.** `tests/anthropic.test.js`: zwei neue Tests
+         (je einmal für Fable 5.1/Opus 5.5 via `describe.each`, macht vier
+         neue Testfälle insgesamt). Beide Mutationsproben durchgeführt (Fix
+         jeweils zurückgenommen): die zugehörigen neuen Tests schlugen
+         gezielt fehl, alle anderen Tests blieben grün; danach zurückgesetzt.
+         `npx vitest run --maxWorkers=3` (voller Lauf): 2774/2774 grün (55
+         Testdateien). `npm run test:coverage -- --maxWorkers=3`: weiterhin
+         grün, Gate (60 %) deutlich überschritten – "All files" Statements
+         93,42 % / Branches 87,61 % / Funktionen 93,07 % / Lines 95,78 %;
+         `anthropic.js` 96,25/88,14/100/97,98 (Branch-Anteil gegenüber
+         Runde 5 von 87,97 % auf 88,14 % gestiegen – die neue
+         Lookup-Fortsetzungs-Kombination im Nachfassen (a) deckt eine
+         Verzweigung ab, die vorher nur isoliert, nicht in dieser
+         Kombination getestet war).

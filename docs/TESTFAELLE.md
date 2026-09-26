@@ -104,6 +104,19 @@ verschwindet; im Dokument-Modus öffnet der Gliederungs-Knopf den Drawer
 von rechts; Abschnitts-Tipp springt und schließt den Drawer; kein
 horizontales Scrollen der Seite.
 
+Zusatzcheck **[VERBUNDEN] 360-px-Header-Probe (Regressionsschutz,
+DECISIONS #117).** NUR mit bestehender Verbindung aussagekräftig – erst
+dann zeigt der Header das Menü statt des kürzeren „Notizbuch“-Spans und
+wird dadurch breiter. Fenster exakt auf 360×800 px stellen (z. B.
+`resize_window 360x800`). Erwartet: Historie- und Einstellungen-Button
+bleiben vollständig sichtbar, per Konsole prüfbar mit
+`document.querySelector('header').scrollWidth === document.querySelector('header').clientWidth`
+(muss `true` sein – sonst ragt der Einstellungen-Button über den Rand).
+Ohne Verbindung zeigt der Header weiterhin den schmaleren „Notizbuch“-Span
+statt des Menüs – die Probe liefe dort ins Leere (kein Regressionssignal);
+in diesem Fall als ÜBERSPRUNGEN vermerken, statt sie unverbunden
+auszuführen.
+
 **A4 [VERBUNDEN] Link-Provider verwalten.** Einstellungen-Dialog öffnen.
 Erwartet: Abschnitt „Link-Provider“ unterhalb des Modell-Dropdowns, mit
 Hinweistext, dass Zugangsdaten nur auf diesem Gerät bleiben, und einem
@@ -244,6 +257,35 @@ Modell dabei einen neuen Abschnitt/ein neues Kapitel an, darf zusätzlich
 eine ℹ️-Pille „Abschnitt … neu angelegt“ (blau/sky) erscheinen – das ist
 KEIN Finding, siehe C26.
 
+**C1b [VERBUNDEN][API] Chat-Turn mit Fable 5.1 und mit Opus 5.5 (v7.57,
+Modell-Generationswechsel).** VORHER den aktuell eingestellten Modellwert
+notieren (für den Rückstell-Schritt am Ende). Im QA-Notizbuch je EINMAL das
+Modell-Dropdown auf „Fable 5.1 · maximale Tiefe“ stellen und eintragen:
+„Notiere: QA-Testeintrag Fable am 2026-01-01“ (1–3 API-Aufrufe – ein zweiter,
+interner Nachfass-Aufruf ist bei diesen beiden Modellen normal, ein dritter
+(Neustart nach einem gescheiterten Nachfassen) ebenfalls, siehe DECISIONS
+#117, KEIN Finding), danach auf „Opus 5.5“ umstellen und
+eintragen: „Notiere: QA-Testeintrag Opus am 2026-01-01“ (ebenfalls
+1–3 API-Aufrufe). Erwartet: BEIDE Turns verlaufen wie C1 (Bestätigungsantwort,
+Commit-Zeile, Eintrag erscheint im Dokument) – KEIN Fehler-Banner, KEINE
+Fehlermeldung im Chat. Am Ende das Dropdown wieder auf den VORHER notierten
+Wert zurückstellen (NICHT pauschal auf „Sonnet 5 · Standard“ – im
+Konservativ-Modus könnte dort bewusst ein anderes Modell eingestellt gewesen
+sein). Hintergrund: diese beiden Modelle akzeptieren laut Anthropic-API kein
+erzwungenes `tool_choice` mehr (siehe DECISIONS #117) – ein 🔴-Finding hier
+deutet auf einen Fehler in der neuen Nachfass-Logik hin. 🔴 bei einer
+Fehlermeldung im Chat oder einem Fehler in der Browser-Konsole; 🟡 wenn ein
+Turn ungewöhnlich lange braucht oder eine unerwartete ⚠️/ℹ️-Pille erscheint,
+der Eintrag aber trotzdem korrekt gespeichert wird. Zusätzlich Browser-
+Konsole prüfen: erscheint dort „[fallback] Serverseitige Fallbacks
+abgelehnt“ oder „[cache] Diagnostics-Beta abgelehnt“, das live NICHT als
+Fehler werten, sondern als 🟡 melden (eine Beta wurde vom Server abgelehnt,
+die Graceful-Degradation hat gegriffen – der Turn sollte trotzdem
+erfolgreich abschließen, siehe DECISIONS #117). Eine Info-Zeile
+„[fallback] Serverseitiger Fallback aktiv — geantwortet hat <Modell>“ ist
+dagegen KEIN Fehler und KEIN Finding: ein Sicherheitsfilter hat abgelehnt,
+und ein Ersatzmodell hat erfolgreich geantwortet – nur als Hinweis melden.
+
 **C2 [VERBUNDEN][API] Frage ohne Speicherung.** „Was steht in diesem
 Notizbuch?“ Erwartet: Antwort fasst Inhalt zusammen, KEIN neuer Commit,
 Dokument unverändert.
@@ -301,6 +343,51 @@ Klick stellt die kompakte Größe wieder her. Umschalt+Enter fügt in
 beiden Größen weiterhin einen Zeilenumbruch ein; Enter (ohne Umschalt)
 löst weiterhin denselben Sende-Versuch aus wie vorher (ohne Verbindung
 öffnet es die Einstellungen statt zu senden).
+
+**C8b [OFFEN] Eingabefeld-Schriftgröße im Chat (v7.57, Nachtrag: getippter
+Text UND Platzhalter jetzt beide 14px, iOS-Zoom-Schutz via viewport-Meta-Tag,
+DECISIONS #117).** Prüft NUR die
+Optik, kein API-Aufruf nötig. Chat-Eingabefeld unten per DevTools
+untersuchen (Rechtsklick → „Untersuchen“) ODER per Konsole. Selektor mit dem
+Platzhalter-Text statt eines nackten `textarea` verwenden (im DOM gibt es
+mehrere `textarea`-Elemente, z. B. auch die Schnellnotiz – ein nackter
+`document.querySelector('textarea')` träfe je nach Ansicht/Layout das
+FALSCHE Feld):
+```
+getComputedStyle(document.querySelector('textarea[placeholder^="Notiz eintippen"]'), '::placeholder').fontSize
+```
+(leeres Eingabefeld vorausgesetzt,
+sonst Platzhalter nicht sichtbar/berechnet). Erwartet: `font-size` des
+Platzhalters ist `14px` (entspricht der Schriftgröße der Chat-Blasen).
+Danach etwas in das Feld eintippen und
+```
+getComputedStyle(document.querySelector('textarea[placeholder^="Notiz eintippen"]')).fontSize
+```
+prüfen: JETZT ebenfalls `14px` (ersetzt die frühere 16px-Vorgabe – der
+getippte Text ist bewusst genauso groß wie der Platzhalter). Eingetippten
+Text wieder löschen.
+Zusätzlich (Desktop-Chrome ODER Android, NICHT auf einem iOS-Gerät): per
+Konsole
+```
+document.querySelector('meta[name="viewport"]').content
+```
+prüfen – der Wert darf KEIN `maximum-scale` enthalten (der iOS-Zoom-Schutz
+(`src/lib/viewport.js`) greift NUR auf iOS-artigen Geräten, siehe
+`isIOSLike()`; auf Android würde `maximum-scale` den Pinch-Zoom sperren,
+deshalb bewusst NICHT gesetzt).
+Nur als Hinweis, NICHT selbst nachstellbar (der Tester hat kein iOS-Gerät):
+Auf einem echten iOS-Gerät (iPhone/iPad-Safari) darf das Fokussieren dieses
+Eingabefelds (14px) NICHT mehr automatisch in die Seite hineinzoomen – das
+ist der eigentliche Zweck von `maximum-scale=1`; der Unit-Test
+(`tests/viewport.test.js`) prüft dazu NUR, dass der meta-content gesetzt
+wird – das Zoom-Verhalten selbst ist ausschließlich manuell auf einem
+echten iOS-Gerät prüfbar, hier nur der Vollständigkeit halber
+dokumentiert. Zusätzlich prüfen, dass Zwei-Finger-Pinch-Zoom WEITERHIN
+funktioniert (sowohl in Safari selbst als auch in der vom Home-Bildschirm
+gestarteten App, siehe `apple-mobile-web-app-capable` in `index.html`) –
+`maximum-scale=1` darf laut DECISIONS #117 (Safari-Verhalten seit iOS 10)
+nur den automatischen Fokus-Zoom unterdrücken, echte Nutzergesten bleiben
+auf iOS ab Version 10 unberührt.
 
 **C9a [VERBUNDEN][API] Formel im Chat (reine Frage, kein Speicherauftrag).** Im
 QA-Notizbuch per Chat: „Erkläre kurz den Satz des Pythagoras mit Formel –
@@ -2124,9 +2211,18 @@ im Dokumentkopf. Erwartet: kein Fehler; Download liefert eine .md-Datei.
 
 ## H. Robustheit
 
-**H1 [OFFEN] Modellwahl.** Modell-Dropdown umschalten. Erwartet: Auswahl
-bleibt nach Reload erhalten (verbunden) bzw. mindestens ohne Fehler
-(offen).
+**H1 [OFFEN] Modellwahl.** Modell-Dropdown umschalten – Kopfzeile UND im
+Einstellungs-Dialog (beide zeigen dieselbe Liste; NICHT nur die
+Kopfzeile testen). Erwartet: die
+Auswahl zeigt GENAU vier Einträge in dieser Reihenfolge: „Sonnet 5 ·
+Standard“, „Fable 5.1 · maximale Tiefe“, „Opus 5.5“, „Haiku 4.5 · schnell“
+(v7.57, Modell-Generationswechsel, DECISIONS #117 – „Fable 5“/„Opus 4.8“
+sind nicht mehr in der Liste). Auswahl bleibt nach Reload erhalten
+(verbunden) bzw. mindestens ohne Fehler (offen). Hinweis: Die automatische
+Migration einer in `state.json` gespeicherten alten Modell-ID (z. B.
+„claude-fable-5“ → „Fable 5.1“) ist ein Unit-Test-Thema
+(`normalizeModelId`, `tests/anthropic.test.js`) und hier NICHT gesondert
+E2E-testbar, ohne `state.json` manuell zu manipulieren.
 
 **H2 [OFFEN] Keine Konsolen-Fehler.** Während des gesamten Laufs:
 Browser-Konsole am Ende auf Fehler prüfen und diese als Findings melden.

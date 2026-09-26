@@ -43,15 +43,63 @@ import { stripCiteTags, citeTagsToDocLinks } from "./citations.jsx";
 import { lookupInExtract } from "./knowledge.js";
 import { memoryTooLarge, MEMORY_HARD_LIMIT } from "./memory.js";
 
+// v7.57 (Modell-Generationswechsel, DECISIONS #117, Nutzerwunsch): "Fable 5"
+// und "Opus 4.8" wurden durch ihre Nachfolger ERSETZT statt ergänzt (kein
+// veraltetes Modell im Dropdown stehen lassen) – forcedToolChoice/
+// refusalFallback bilden die beiden neuen, modellabhängigen API-Eigenheiten
+// dieser Generation ab (siehe supportsForcedToolChoice/buildRequest#forced
+// bzw. den FALLBACKS-Abschnitt bei callClaude): Fable 5.1 und Opus 5.5
+// lehnen ein erzwungenes tool_choice mit HTTP 400 ab und unterstützen
+// serverseitige Fallbacks bei einer Sicherheits-Ablehnung (refusal) –
+// Sonnet 5/Haiku 4.5 verhalten sich wie die bisherige Generation.
 export const MODELS = [
-  { id: "claude-sonnet-5", label: "Sonnet 5 · Standard" },
-  { id: "claude-fable-5", label: "Fable 5 · maximale Tiefe" },
-  { id: "claude-opus-4-8", label: "Opus 4.8" },
-  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5 · schnell" },
+  { id: "claude-sonnet-5", label: "Sonnet 5 · Standard", forcedToolChoice: true, refusalFallback: false },
+  { id: "claude-fable-5-1", label: "Fable 5.1 · maximale Tiefe", forcedToolChoice: false, refusalFallback: true },
+  { id: "claude-opus-5-5", label: "Opus 5.5", forcedToolChoice: false, refusalFallback: true },
+  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5 · schnell", forcedToolChoice: true, refusalFallback: false },
 ];
 
+// Reine, exportierte Auswertung von MODELS[...].forcedToolChoice – EINE
+// Fundstelle statt eines MODELS.find(...) an jeder Aufrufstelle (buildRequest
+// unten UND die beiden Nachfass-Pfade in callClaude). Eine unbekannte/
+// fremde modelId liefert bewusst false: "auto" ist bei JEDEM Modell gültig,
+// ein erzwungenes tool_choice könnte dagegen bei einem unbekannten (z. B.
+// künftigen) Modell einen 400 auslösen – im Zweifel also der sicherere Wert.
+export function supportsForcedToolChoice(modelId) {
+  const m = MODELS.find((x) => x.id === modelId);
+  return !!(m && m.forcedToolChoice);
+}
+
+// Legacy-Modell-IDs (Stand vor v7.57) auf ihre Nachfolger abbilden – siehe
+// normalizeModelId unten. "claude-opus-5" (ohne Datums-/Versions-Suffix) war
+// nie eine ID dieser App, ist aber als plausible Fehlschreibung/künftiger
+// Kurzname mit aufgenommen (Auftrag).
+const LEGACY_MODEL_IDS = {
+  "claude-fable-5": "claude-fable-5-1",
+  "claude-opus-4-8": "claude-opus-5-5",
+  "claude-opus-5": "claude-opus-5-5",
+  "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+};
+
+// v7.57 (DECISIONS #117): in state.json/Backups gespeicherte Modell-IDs
+// überleben einen Modell-Generationswechsel künftig automatisch, statt beim
+// nächsten Laden STILLSCHWEIGEND auf MODELS[0] (Sonnet 5) zu verspringen
+// (bisheriges Verhalten der drei MODELS.some(...)-Prüfungen in App.jsx) –
+// ein gespeichertes "claude-fable-5" wählt jetzt "claude-fable-5-1" statt
+// den Nutzer unbemerkt auf ein anderes Modell umzustellen. "fallback" ist
+// ein Parameter (nicht MODELS[0].id fest verdrahtet), weil die drei
+// Aufrufstellen in App.jsx unterschiedliche Fallback-Semantiken brauchen
+// (Erstladen: MODELS[0].id; Remote-Refresh/Import: der bisherige/aktuelle
+// Modellwert bleibt bei einer unbekannten ID einfach stehen).
+export function normalizeModelId(raw, fallback = MODELS[0].id) {
+  if (typeof raw !== "string" || !raw) return fallback;
+  if (MODELS.some((m) => m.id === raw)) return raw;
+  if (Object.prototype.hasOwnProperty.call(LEGACY_MODEL_IDS, raw)) return LEGACY_MODEL_IDS[raw];
+  return fallback;
+}
+
 // Server-seitige Websuche: Tool-Variante ist modellabhängig.
-// Sonnet 5 / Opus 4.8 / Fable 5 unterstützen die 20260209-Variante
+// Sonnet 5 / Fable 5.1 / Opus 5.5 unterstützen die 20260209-Variante
 // (mit dynamischem Filtern); Haiku 4.5 nur die Basis-Variante.
 export function webSearchToolFor(modelId) {
   const basic = String(modelId).startsWith("claude-haiku");
@@ -62,11 +110,14 @@ export function webSearchToolFor(modelId) {
   };
 }
 
-// Max. Antwortlänge pro API-Aufruf. Sonnet 5/Fable 5 vertragen deutlich mehr
-// Output als das frühere Limit von 4000 Tokens – große Dokument-Umbauten
-// (Rewrites ganzer Abschnitte) liefen regelmäßig in die Abschneide-Warnung.
-// 16000 deckt auch große rewrite-Ops ab und hält Kosten/Latenz trotzdem im
-// Rahmen (die Truncation-Behandlung unten bleibt als Sicherheitsnetz).
+// Max. Antwortlänge pro API-Aufruf. Sonnet 5/Fable 5.1/Opus 5.5 vertragen
+// deutlich mehr Output als das frühere Limit von 4000 Tokens – große
+// Dokument-Umbauten (Rewrites ganzer Abschnitte) liefen regelmäßig in die
+// Abschneide-Warnung. 16000 deckt auch große rewrite-Ops ab und hält Kosten/
+// Latenz trotzdem im Rahmen (die Truncation-Behandlung unten bleibt als
+// Sicherheitsnetz). Gilt unverändert für Opus 5.5 trotz "Preserved
+// Thinking" (thinking zählt in max_tokens hinein, das war mit Fable 5 schon
+// so – siehe DECISIONS #117).
 const MAX_TOKENS = 16000;
 
 // Hintergrundwissen fürs Prompt aufbereiten: aktives Notizbuch komplett
@@ -925,17 +976,27 @@ let lastToolsSignature = null;
 // diagnostics/Beta-Header – Caching selbst (GA) ist davon unberührt.
 let diagnosticsDisabled = false;
 
+// Graceful-Degradation-Zustand für serverseitige Fallbacks (Beta, v7.57,
+// DECISIONS #117) – dieselbe Semantik wie diagnosticsDisabled oben, aber PRO
+// MODELL statt global: ein 400 bei Fable 5.1 sagt nichts über Opus 5.5 aus
+// (unterschiedliche Modelle, unterschiedliche Beta-Verfügbarkeit denkbar).
+// Modul-Set mit den für die aktuelle Sitzung deaktivierten modelId-Werten,
+// gleiche Lebensdauer wie diagnosticsDisabled (kein Persist, siehe dort).
+let fallbacksDisabledFor = new Set();
+
 // Test-Hilfsfunktion (siehe tests/anthropic.test.js), analog zu
 // lib/linkProviders.jsx#setLinkProviders: setzt die Modul-Refs zurück, damit
 // einzelne Tests unabhängig von der Ausführungsreihenfolge anderer Tests
 // in derselben Datei einen sauberen Ausgangszustand haben (die Refs bleiben
 // sonst über die GESAMTE Testdatei hinweg bestehen, genau wie im echten
 // Betrieb über die gesamte Session, siehe Kommentare oben). KEIN
-// Produktions-Aufrufpfad nutzt diese Funktion.
+// Produktions-Aufrufpfad nutzt diese Funktion. v7.57: setzt zusätzlich
+// fallbacksDisabledFor zurück (gleiches Muster wie diagnosticsDisabled).
 export function resetCacheDiagnosticsForTests() {
   lastMessageId = null;
   lastToolsSignature = null;
   diagnosticsDisabled = false;
+  fallbacksDisabledFor = new Set();
 }
 
 // Defensive Erkennung eines diagnostics-/Beta-bezogenen 400-Fehlers (Beta,
@@ -1001,6 +1062,96 @@ const DIAG_CLAMP_MAX = 800;
 function clampDiag(s) {
   const noNul = String(s ?? "").split("\u0000").join("");
   return noNul.length > DIAG_CLAMP_MAX ? noNul.slice(0, DIAG_CLAMP_MAX - 1) + "…" : noNul;
+}
+
+// v7.57 (DECISIONS #117): Modelle ohne erzwingbares tool_choice (siehe
+// supportsForcedToolChoice) lehnen {type:"tool"}/{type:"any"} mit HTTP 400
+// ab ("tool_choice: type 'tool' and 'any' are not supported for this
+// model."). Ersatz im Nachfass-Pfad (siehe callClaude unten): Modus UND
+// Konversation UNVERÄNDERT lassen (ein Toolset-/Moduswechsel würde system/
+// tools gegenüber vorangegangenen Requests derselben Konversation ändern
+// und damit – bei "Preserved Thinking" – die thinking-Blöcke der bisherigen
+// Antworten ungültig machen, HTTP 400 "Invalid signature in thinking
+// block") und stattdessen eine Mid-Conversation-Systemnachricht ALS LETZTES
+// Element anhängen, die den Tool-Aufruf für GENAU DIESEN Turn einfordert.
+// Bewusst NICHT mit dem "[SYSTEM-HINWEIS: …]"-Rahmen der Chat-Historie
+// (siehe msgs-Mapping oben) verwechselbar – andere Rolle ("system" statt
+// Teil einer "user"/"assistant"-Nachricht), andere Senke (hier: direkt als
+// eigene Nachricht in "messages", nicht angehängt an eine bestehende).
+export const FORCE_TOOL_NUDGE =
+  "Für diesen Turn ist ein Aufruf des Tools update_notebook erforderlich. " +
+  "Rufe es jetzt genau einmal auf und beginne deine Antwort damit.";
+
+// D) Refusal-Behandlung (v7.57, DECISIONS #117, ALLE Modelle): Sicherheits-
+// klassifikatoren können eine Antwort mit HTTP 200 und stop_reason
+// "refusal" ablehnen; stop_details ist rein informativ und kann null sein.
+// isRefusal ist die einzige Stelle, die stop_reason interpretiert – jeder
+// Aufrufer (callClaude-Hauptpfad UND retryWith) nutzt sie, statt den String
+// "refusal" selbst zu wiederholen.
+export function isRefusal(data) {
+  return !!(data && data.stop_reason === "refusal");
+}
+
+// Deckel gegen einen übermäßig langen oder unsinnigen category-Wert im
+// gerenderten Fehlertext (der String landet als Chat-Fehlermeldung – React
+// rendert ihn als Text, kein HTML-Escaping nötig, trotzdem eine bewusste
+// Längenschranke direkt an der Quelle).
+const REFUSAL_CATEGORY_MAX = 80;
+
+// reply-Text für eine abgelehnte Antwort. Die Kategorie wird NUR genannt,
+// wenn stop_details?.category ein nicht-leerer String ist (null/fehlend/
+// falscher Typ -> Text ohne Klammerzusatz, siehe Tests). "modelId" ist
+// OPTIONAL – fehlt er (bestehende Aufrufer/Tests), bleibt der Rat "(z. B.
+// Sonnet 5)" wie bisher erhalten.
+// Review-Fix (Runde 4, 🔵, DECISIONS #117): Runde 3 ließ den GESAMTEN
+// Modell-Vorschlag entfallen, wenn Sonnet 5 selbst abgelehnt hatte ("ein
+// Vorschlag auf das gerade abgelehnte Modell wäre sinnlos") – damit fehlte
+// nach einer Sonnet-5-Ablehnung JEDER Hinweis auf einen Modellwechsel,
+// obwohl gerade dann einer sinnvoll ist (Fable 5.1/Opus 5.5 unterstützen
+// serverseitige Fallbacks). Fix: der Vorschlag wird JETZT IMMER gegeben,
+// nur das genannte Beispielmodell wechselt – NIE das Modell, das selbst
+// abgelehnt hat.
+export function refusalMessage(data, modelId) {
+  const rawCategory =
+    data && data.stop_details && typeof data.stop_details.category === "string"
+      ? data.stop_details.category.trim()
+      : "";
+  const category = rawCategory.slice(0, REFUSAL_CATEGORY_MAX);
+  const exampleModel = modelId === "claude-sonnet-5" ? "Opus 5.5" : "Sonnet 5";
+  // Review-Fix (Runde 2, gelb, DECISIONS #117): KEIN Satzpunkt am Ende (wie
+  // bei den übrigen callClaude-Fehlertexten, z. B. "…bitte einfach noch
+  // einmal senden") – App.jsx hängt an e.message bereits selbst ". Deine
+  // Nachricht …" an; mit einem eigenen Schlusspunkt hier entstand dort ein
+  // doppelter Punkt ("…Sonnet 5).. Deine Nachricht…").
+  return (
+    "Das Modell hat die Anfrage über seinen Sicherheitsfilter abgelehnt" +
+    (category ? " (Kategorie: " + category + ")" : "") +
+    " – es wurde nichts gespeichert. Bitte anders formulieren" +
+    " oder ein anderes Modell wählen (z. B. " + exampleModel + ")"
+  );
+}
+
+// Review-Fix (Runde 2, gelb, DECISIONS #117): einziger Wurf-Punkt für eine
+// refusal-Antwort – markiert den Error zusätzlich mit `refusal: true`
+// (App.jsx#buildSendErrorText unterscheidet danach den Hinweistext: ein
+// erneuter Versand hilft laut API-Fakten bei einer Sicherheits-Ablehnung
+// NICHT, anders als bei den übrigen callClaude-Fehlern). "modelId"
+// durchgereicht (Review-Fix Runde 3, blau/optional) für den Sonnet-5-
+// Sonderfall in refusalMessage() oben.
+function throwRefusal(data, modelId) {
+  const err = new Error(refusalMessage(data, modelId));
+  err.refusal = true;
+  throw err;
+}
+
+// E) Serverseitige Fallbacks (Beta, v7.57, DECISIONS #117, NUR bei
+// MODELS[...].refusalFallback === true): Graceful Degradation analog zu
+// isDiagnosticsRelatedError oben – NUR ein HTTP 400 mit ERKENNBAR fallback-
+// bezogener Fehlermeldung gilt als "durch Abschalten der Fallbacks
+// behebbar"; jeder andere 400 bleibt unverändert ohne zusätzlichen Retry.
+export function isFallbackRelatedError(error) {
+  const text = String((error && (error.message || error.type)) || "");
+  return /fallback/i.test(text);
 }
 
 // nbContext: { notebooks: [{ name, doc }], activeName }
@@ -1215,18 +1366,28 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     { type: "text", text: dynamicBlock, cache_control: cacheControl },
   ];
 
+  // v7.57 (DECISIONS #117): nur EINMAL pro callClaude()-Aufruf ermittelt,
+  // ob dieses Modell überhaupt serverseitige Fallbacks unterstützt
+  // (MODELS[...].refusalFallback) – buildRequest/postOnce nutzen diesen
+  // Wert unten, statt bei jedem Request erneut MODELS.find(...) aufzurufen.
+  const modelDef = MODELS.find((m) => m.id === modelId);
+  const supportsFallback = !!(modelDef && modelDef.refusalFallback);
+
   // Modi: "search"  = Websuche + lookup_wissen + update_notebook, tool_choice auto
-  //       "forced"  = nur update_notebook, erzwungen (ohne Recherche)
+  //       "forced"  = nur update_notebook, erzwungen (ohne Recherche) –
+  //                    NUR bei supportsForcedToolChoice(modelId); sonst
+  //                    "auto" (siehe unten, DECISIONS #117)
   //       "none"    = ganz ohne Tools (JSON aus Text, letzte Rettung)
   // Erzwungenes tool_choice verhindert Server-Tool-Aufrufe – deshalb "auto"
   // im Suchmodus, abgesichert über den Prompt und die Fallback-Kette.
-  // Baut body+headers für EINEN Request; includeDiagnostics steuert sowohl
-  // das diagnostics-Body-Feld als auch den Beta-Header ZUSAMMEN (Graceful
-  // Degradation, v7.29-Nachtrag – siehe diagnosticsDisabled/postOnce unten):
-  // ein Retry OHNE Diagnostics muss BEIDES gleichzeitig weglassen, sonst
-  // würde die API denselben 400 nur aus dem jeweils anderen Grund erneut
-  // liefern. Reiner Baustein, kein eigener Netzwerk-Aufruf.
-  const buildRequest = (messages, mode, includeDiagnostics) => {
+  // Baut body+headers für EINEN Request; includeDiagnostics/includeFallbacks
+  // steuern jeweils ZUSAMMEN Body-Feld UND Beta-Header (Graceful
+  // Degradation, v7.29-Nachtrag bzw. v7.57 – siehe diagnosticsDisabled/
+  // fallbacksDisabledFor/postOnce unten): ein Retry OHNE eines der beiden
+  // muss Feld UND Header-Wert gleichzeitig weglassen, sonst würde die API
+  // denselben 400 nur aus dem jeweils anderen Grund erneut liefern. Reiner
+  // Baustein, kein eigener Netzwerk-Aufruf.
+  const buildRequest = (messages, mode, includeDiagnostics, includeFallbacks) => {
     const body = {
       model: modelId,
       max_tokens: MAX_TOKENS,
@@ -1244,6 +1405,16 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
       // allerersten Request der Session (Opt-in ohne Vergleichsbasis, siehe
       // lastMessageId-Deklaration).
       body.diagnostics = { previous_message_id: lastMessageId };
+    }
+    if (includeFallbacks) {
+      // Serverseitige Fallbacks (Beta, v7.57, DECISIONS #117): lehnt ein
+      // Sicherheitsklassifikator die Anfrage ab (refusal), beantwortet der
+      // Server denselben Request mit einem Ersatzmodell (z. B. Opus 4.8/5) –
+      // NUR sinnvoll bei Modellen mit eigenen Klassifikatoren (Fable 5.1/
+      // Opus 5.5, siehe supportsFallback oben); für Sonnet 5/Haiku 4.5 gibt
+      // es laut API-Doku keine erlaubten Fallback-Ziele (400-Risiko), diese
+      // Modelle setzen supportsFallback deshalb nie, das Feld fehlt dann.
+      body.fallbacks = "default";
     }
     if (mode === "search") {
       const toolsList = [
@@ -1263,7 +1434,14 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
       body.tool_choice = { type: "auto" };
     } else if (mode === "forced") {
       body.tools = [{ ...NOTEBOOK_TOOL, cache_control: cacheControl }];
-      body.tool_choice = { type: "tool", name: "update_notebook" };
+      // v7.57 (DECISIONS #117): Fable 5.1/Opus 5.5 lehnen {type:"tool"} mit
+      // HTTP 400 ab (siehe supportsForcedToolChoice) – dort bleibt "tools"
+      // unverändert deklariert (das Tool bleibt verfügbar), nur tool_choice
+      // weicht auf "auto" aus. Der Nachfass-Pfad in callClaude gleicht das
+      // über die Mid-Conversation-Systemnachricht FORCE_TOOL_NUDGE aus.
+      body.tool_choice = supportsForcedToolChoice(modelId)
+        ? { type: "tool", name: "update_notebook" }
+        : { type: "auto" };
     }
     // "messages" bekommt BEWUSST KEIN cache_control (Auftrag v7.20, Teil B.3):
     // Die App sendet ein gleitendes 12-Nachrichten-Fenster (priorChat.slice(-12)
@@ -1278,17 +1456,23 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
       "anthropic-version": "2023-06-01",
       "anthropic-dangerous-direct-browser-access": "true",
     };
+    // EIN anthropic-beta-Header, kommagetrennt aus allen für DIESEN Request
+    // aktiven Beta-Werten (Anthropic-API verlangt genau einen Header-
+    // Eintrag, keine doppelten Schlüssel – siehe Kommentare an den
+    // jeweiligen includeDiagnostics/includeFallbacks-Zweigen oben).
+    const betaValues = [];
     if (includeDiagnostics) {
       // Cache-Diagnostics (Beta, v7.29): Opt-in-Header, MUSS auf jedem
       // Request stehen (nicht nur dem ersten), sonst liefert die API kein
-      // diagnostics-Feld. Aktuell der EINZIGE anthropic-beta-Header
-      // dieser App (geprüft: kein anderer Aufrufpfad setzt bereits einen)
-      // – käme künftig ein zweiter Beta-Header dazu, MUSS er hier
-      // kommagetrennt ergänzt werden (ein Header-Schlüssel darf laut
-      // Anthropic-API nicht doppelt gesendet werden), nicht als
-      // zusätzlicher eigener "anthropic-beta"-Eintrag im selben Objekt.
-      headers["anthropic-beta"] = "cache-diagnosis-2026-04-07";
+      // diagnostics-Feld.
+      betaValues.push("cache-diagnosis-2026-04-07");
     }
+    if (includeFallbacks) {
+      // Serverseitige Fallbacks (Beta, v7.57): Opt-in-Header, analog zu
+      // Cache-Diagnostics – MUSS zusammen mit body.fallbacks stehen.
+      betaValues.push("server-side-fallback-2026-07-01");
+    }
+    if (betaValues.length) headers["anthropic-beta"] = betaValues.join(",");
     return { body, headers };
   };
 
@@ -1296,8 +1480,8 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
   // postOnce() darum herum). Wirft bei einem echten Netzwerkfehler weiterhin
   // wie bisher; liefert sonst IMMER { response, data } zurück (data ggf.
   // null bei kaputtem JSON-Body).
-  const doFetch = async (messages, mode, includeDiagnostics) => {
-    const { body, headers } = buildRequest(messages, mode, includeDiagnostics);
+  const doFetch = async (messages, mode, includeDiagnostics, includeFallbacks) => {
+    const { body, headers } = buildRequest(messages, mode, includeDiagnostics, includeFallbacks);
     let response;
     try {
       response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -1322,20 +1506,42 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     // gerade erst geschriebenen.
     const requestToolsSig = toolsSignatureFor(mode);
     const priorToolsSignature = lastToolsSignature;
-    let { response, data } = await doFetch(messages, mode, !diagnosticsDisabled);
-    // Graceful Degradation (Beta, v7.29-Nachtrag/Re-Review 🔵, siehe
-    // DECISIONS): NUR bei einem HTTP 400 MIT erkennbar diagnostics-/Beta-
-    // bezogener Fehlermeldung (isDiagnosticsRelatedError, siehe oben) – NIE
+    let includeDiag = !diagnosticsDisabled;
+    let includeFallbacks = supportsFallback && !fallbacksDisabledFor.has(modelId);
+    let { response, data } = await doFetch(messages, mode, includeDiag, includeFallbacks);
+    // Graceful Degradation (Beta, v7.29-Nachtrag/Re-Review 🔵, erweitert
+    // v7.57 Review-Fix Runde 2 🟡, siehe DECISIONS): NUR bei einem HTTP 400
+    // MIT erkennbar diagnostics-/Beta- bzw. fallback-bezogener Fehlermeldung
+    // (isDiagnosticsRelatedError/isFallbackRelatedError, siehe oben) – NIE
     // bei anderen 400ern (z. B. ein kaputtes Tool-Schema verhält sich exakt
-    // wie bisher, KEIN zusätzlicher Retry). Ausgelöst höchstens EINMAL pro
-    // Session: diagnosticsDisabled bleibt danach für alle weiteren
-    // postOnce()-Aufrufe (auch künftiger Turns) gesetzt – die aktuelle
-    // Anfrage wird SOFORT einmal ohne diagnostics/Beta-Header wiederholt,
-    // damit dieser Chat-Turn nicht mit einem vermeidbaren Fehler scheitert.
-    if (!diagnosticsDisabled && response.status === 400 && data && data.error && isDiagnosticsRelatedError(data.error)) {
-      diagnosticsDisabled = true;
-      console.warn("[cache] Diagnostics-Beta abgelehnt — für diese Sitzung deaktiviert");
-      ({ response, data } = await doFetch(messages, mode, false));
+    // wie bisher, KEIN zusätzlicher Retry). Beide Degradationen können im
+    // selben postOnce()-Aufruf nacheinander nötig werden – die REIHENFOLGE,
+    // in der der Server die beiden Beta-Werte validiert, ist von hier aus
+    // nicht bekannt (könnte zuerst diagnostics ODER zuerst fallbacks
+    // ablehnen). Eine Schleife statt zweier fester if-Blöcke prüft deshalb
+    // NACH JEDEM Retry erneut BEIDE Bedingungen, statt nur eine feste
+    // Reihenfolge abzudecken (Review-Fund: die vorherige "erst Diagnostics,
+    // dann Fallbacks"-Reihenfolge ließ einen Fallback-400 gefolgt von einem
+    // Diagnostics-400 unbehandelt durchschlagen). Jede Degradation schaltet
+    // ihr Modul-Flag höchstens EINMAL um (diagnosticsDisabled bzw. ein
+    // Eintrag in fallbacksDisabledFor bleiben danach für den Rest der
+    // Sitzung gesetzt) – "guard" deckelt die Schleife zusätzlich auf max.
+    // zwei weitere Versuche (eine Degradation pro Durchlauf), ein Endlos-
+    // Loop ist damit ausgeschlossen, auch wenn der Server unerwartet
+    // wiederholt beide Fehler gleichzeitig meldet.
+    for (let guard = 0; guard < 2 && response.status === 400 && data && data.error; guard++) {
+      if (includeDiag && isDiagnosticsRelatedError(data.error)) {
+        diagnosticsDisabled = true;
+        includeDiag = false;
+        console.warn("[cache] Diagnostics-Beta abgelehnt — für diese Sitzung deaktiviert");
+      } else if (includeFallbacks && isFallbackRelatedError(data.error)) {
+        fallbacksDisabledFor.add(modelId);
+        includeFallbacks = false;
+        console.warn("[fallback] Serverseitige Fallbacks abgelehnt — für " + modelId + " in dieser Sitzung deaktiviert");
+      } else {
+        break;
+      }
+      ({ response, data } = await doFetch(messages, mode, includeDiag, includeFallbacks));
     }
     if (!response.ok && (!data || !data.error)) {
       // z. B. HTML-Fehlerseite eines Proxys – nicht als Formatfehler tarnen
@@ -1367,6 +1573,17 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     // Treffer ausblieb. Läuft für JEDEN Request dieser Funktion (siehe
     // Kommentar oben zu den Aufrufpfaden).
     if (data && data.usage) {
+      // Serverseitige Fallbacks (Beta, v7.57, DECISIONS #117): ein Eintrag
+      // {type:"fallback_message"} in usage.iterations zeigt, dass für DIESEN
+      // Request ein Ersatzmodell geantwortet hat (data.model nennt es) –
+      // reine Diagnose-Zeile, kein UI, kein Verhaltens-Einfluss (fallback-
+      // Content-Blöcke werden überall typbasiert ignoriert/unverändert
+      // durchgereicht, siehe collectSources/collectText/extractParsed/
+      // retryWith unten).
+      if (Array.isArray(data.usage.iterations) &&
+          data.usage.iterations.some((it) => it && it.type === "fallback_message")) {
+        console.info("[fallback] Serverseitiger Fallback aktiv — geantwortet hat " + data.model);
+      }
       console.debug("[cache] " + formatCacheDebug(data.usage, data.diagnostics));
       // Warn-Politik (v7.33 Root-Cause-Fix, siehe DECISIONS #76): NUR bei
       // "tools_changed" wird überhaupt unterschieden. Die FRÜHERE Annahme
@@ -1452,6 +1669,18 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
   // pause_turn-/lookup-Zweig auf assistant bzw. user, siehe Schleife unten) –
   // nie die um "data" selbst erweiterte Folge-Konversation.
   const doPost = async (mode, startConvo = msgs) => {
+    // Review-Fix (Runde 4, 🟡, DECISIONS #117): "srcBeforeLast"/"txtBeforeLast"
+    // markieren, WO in "sources"/"textBlocks" die LETZTE (zurückgegebene)
+    // Antwort dieses doPost()-Aufrufs ihre Treffer/Prosa beigetragen hat –
+    // alles DAVOR gehört entweder zu VORHERIGEN doPost()-Aufrufen (außerhalb
+    // dieser Funktion) oder zu pause_turn-/lookup_wissen-Fortsetzungen, die
+    // bereits Teil von "convo" sind (das Modell hat sie in seiner nächsten
+    // Anfrage GESEHEN). Wird die zurückgegebene "data" später verworfen
+    // (z. B. weil ein Nudge-Nachfassen darauf aufsetzt), lässt sich damit
+    // GENAU der von ihr beigetragene Bereich entfernen, statt pauschal
+    // alles seit Aufrufbeginn (siehe Nudge-Stellen (a)/(b) unten).
+    let srcBeforeLast = sources.length;
+    let txtBeforeLast = textBlocks.length;
     let data = await postOnce(startConvo, mode);
     collectSources(data);
     if (mode === "search") collectText(data);
@@ -1466,7 +1695,16 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     let cont = 0;
     let lookups = 0;
     for (;;) {
-      if (!data || data.error) break;
+      // Review-Fix (Runde 2, 🔴, DECISIONS #117): stop_reason "refusal" MUSS
+      // hier abbrechen, BEVOR content gelesen wird – eine Ablehnung kann laut
+      // API-Fakten eine TEILAUSGABE enthalten (z. B. einen bereits
+      // begonnenen lookup_wissen-tool_use). Ohne diesen Guard würde die
+      // Schleife den Lookup lokal ausführen und den abgelehnten Teil-Content
+      // als assistant-Turn erneut an die API schicken – genau das verbietet
+      // Auftrag D ("Bei refusal auch keine lookups mehr ausführen", "Teil-
+      // Content wird verworfen"). Der äußere isRefusal()-Check in callClaude
+      // (nach doPost()) sieht sonst nur noch die unauffällige Folgeantwort.
+      if (!data || data.error || isRefusal(data)) break;
       const isPause = data.stop_reason === "pause_turn" && cont < 3;
       const lookupCalls = !isPause
         ? (data.content || []).filter((b) => b.type === "tool_use" && b.name === "lookup_wissen")
@@ -1495,18 +1733,25 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
       } else {
         cont++;
       }
+      srcBeforeLast = sources.length;
+      txtBeforeLast = textBlocks.length;
       data = await postOnce(convo, mode);
       collectSources(data);
       if (mode === "search") collectText(data);
     }
     // convo mitliefern: endet der Turn ohne update_notebook (z. B. Lookup-
     // Budget erschöpft), kann die Forced-Nachfrage darauf aufsetzen, statt
-    // die bereits geholten Inhalte zu verwerfen.
-    return { data, convo };
+    // die bereits geholten Inhalte zu verwerfen. srcBeforeLast/txtBeforeLast
+    // siehe Kommentar oben.
+    return { data, convo, srcBeforeLast, txtBeforeLast };
   };
 
   let mode = "search";
-  let { data, convo: lastConvo } = await doPost("search");
+  // lastSrcBeforeLast/lastTxtBeforeLast: siehe Kommentar an doPost() oben –
+  // markieren den Beitrag der zuletzt erhaltenen (potenziell noch zu
+  // verwerfenden) "data" in "sources"/"textBlocks", für den Nudge-Zweig (a)
+  // weiter unten (Review-Fix Runde 4, DECISIONS #117).
+  let { data, convo: lastConvo, srcBeforeLast: lastSrcBeforeLast, txtBeforeLast: lastTxtBeforeLast } = await doPost("search");
   if (data && data.error && /web_search|tool/i.test(String(data.error.message || data.error.type || ""))) {
     // Websuche nicht verfügbar (Modell/Org): ohne Recherche, Tool erzwungen.
     // textBlocks gehört zum gescheiterten Versuch (bei einem harten API-Fehler
@@ -1514,12 +1759,12 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     // aus einem verworfenen Versuch in die finale Antwort durchsickern.
     textBlocks.length = 0;
     mode = "forced";
-    ({ data, convo: lastConvo } = await doPost("forced"));
+    ({ data, convo: lastConvo, srcBeforeLast: lastSrcBeforeLast, txtBeforeLast: lastTxtBeforeLast } = await doPost("forced"));
   }
   if (data && data.error && /tool/i.test(String(data.error.message || data.error.type || ""))) {
     textBlocks.length = 0;
     mode = "none";
-    ({ data, convo: lastConvo } = await doPost("none"));
+    ({ data, convo: lastConvo, srcBeforeLast: lastSrcBeforeLast, txtBeforeLast: lastTxtBeforeLast } = await doPost("none"));
   }
   if (!data || data.error) {
     const type = data && data.error && data.error.type;
@@ -1527,6 +1772,13 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
       throw new Error("Anthropic-API-Key ungültig – bitte in den Einstellungen prüfen");
     }
     throw new Error((data && data.error && data.error.message) || "API-Fehler");
+  }
+  // D) Refusal-Behandlung (v7.57, DECISIONS #117, ALLE Modelle): ein
+  // Sicherheitsklassifikator kann mit HTTP 200 und stop_reason "refusal"
+  // ablehnen – KEIN weiteres Nachfassen, KEIN forced/none-Umweg, Teil-
+  // Content wird verworfen (nichts wird angewendet).
+  if (isRefusal(data)) {
+    throwRefusal(data, modelId);
   }
 
   // v7.55 (B2, DECISIONS #113): finalMode/finalConvo/finalData verfolgen den
@@ -1581,27 +1833,148 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     // nur noch die kurze Bestätigung plus bis zu 6 „konsultierte Quellen“
     // ohne den dazugehörigen Text).
     if (!usedSearch) textBlocks.length = 0;
+    // v7.57 (DECISIONS #117): Modelle ohne erzwingbares tool_choice (Fable
+    // 5.1/Opus 5.5) lehnen {type:"tool"} mit 400 ab – dort NICHT auf "forced"
+    // umschalten (Modus/Konversation bleiben unverändert, siehe
+    // FORCE_TOOL_NUDGE), sondern eine Mid-Conversation-Systemnachricht ALS
+    // LETZTES Element anhängen. Modus "none" bleibt bewusst außen vor (kein
+    // Tool deklariert, ein Nudge wäre dort wirkungslos) – dafür gilt weiter
+    // das bisherige Verhalten. Modelle MIT erzwingbarem tool_choice bleiben
+    // Byte für Byte unverändert (canForceChoice-Zweig unten).
+    const canForceChoice = supportsForcedToolChoice(modelId);
     let next = null;
+    let sentConvo = lastConvo;
     const tail = lastConvo[lastConvo.length - 1];
-    if (lastConvo !== msgs && tail && tail.role === "user") {
+    const eligibleTail = !!(tail && tail.role === "user");
+    if (canForceChoice) {
+      if (lastConvo !== msgs && eligibleTail) {
+        try {
+          next = await postOnce(lastConvo, "forced");
+          if (next && next.error) next = null;
+        } catch (e) { next = null; }
+      }
+    } else if (mode !== "none" && eligibleTail) {
+      // lastConvo === msgs ist hier – anders als im canForceChoice-Zweig
+      // oben – ausdrücklich ERLAUBT: der Tail ist dann der aktuelle Nutzer-
+      // Turn selbst, was hier besser ist als der Neustart "von vorn ohne
+      // Recherche" im else-Zweig unten (der würde das Toolset wechseln und
+      // damit die Präfixbindung eventueller thinking-Blöcke brechen).
+      const nudged = [...lastConvo, { role: "system", content: FORCE_TOOL_NUDGE }];
+      // Review-Fix (Runde 2 Folgeprüfung, 🟡, DECISIONS #117): doPost()
+      // sammelt im Modus "search" per collectText()/collectSources() AUCH
+      // den Text/die Quellen der Nudge-Antwort SELBST – anders als der
+      // canForceChoice-Zweig oben (postOnce() sammelt dort NICHTS). Ohne die
+      // folgenden Marker/das Rollback unten würde (1) bei einem
+      // gescheiterten Nudge dessen eigene, dann verworfene Quellen/Prosa in
+      // "sources"/"textBlocks" hängen bleiben und in den anschließenden "von
+      // vorn"-Neustart bzw. res.sources durchsickern, und (2) bei einem
+      // ERFOLGREICHEN Nudge OHNE eigene neue Suche dessen reine Präambel
+      // ("Ich rufe das Tool jetzt auf.") in die finale Chat-Antwort
+      // durchsickern (Parität zu postOnce, Live-Symptom: "Ich rufe das Tool
+      // jetzt auf.\n\nNotiert." statt nur "Notiert.").
+      //
+      // Review-Fix (Runde 4, 🟡/🔵, DECISIONS #117): sucht der Nudge-Turn
+      // SELBST (sources wächst gegenüber srcMark), gilt laut Prompt (Z. 339)
+      // eine ANDERE Zählbasis für seine (cite index="…">-Marker: das Modell
+      // sieht in "nudged" NICHT die verworfene letzte Antwort (data bei (a)
+      // bzw. r.data bei (b) weiter unten) – deren Treffer/Prosa stecken aber
+      // bereits in "sources"/"textBlocks" (gesammelt beim vorangegangenen
+      // doPost()-Aufruf, der "lastConvo"/"data" erzeugt hat). lastSrcBeforeLast/
+      // lastTxtBeforeLast (siehe doPost()-Kommentar oben) markieren GENAU den
+      // Bereich, den diese verworfene letzte Antwort beigetragen hat – NUR
+      // dieser Bereich fliegt raus, alles davor (aus früheren pause_turn-/
+      // lookup_wissen-Runden DESSELBEN Erstversuchs, bereits Teil von
+      // "nudged") bleibt stehen. Der frühere freshStart-Sonderfall
+      // (sources.splice(0, srcMark)) war nur der Spezialfall
+      // lastSrcBeforeLast === 0 (lastConvo === msgs, kein Fortsetzungs-
+      // Vorlauf) und wird durch diese generelle Formel ersetzt. Ohne diesen
+      // Fix zeigte ein cite-Index nach einer eigenen Nudge-Suche auf die
+      // FALSCHE (verworfene) Quelle, und die eigene, tatsächlich zitierte
+      // Recherche-Prosa des Nudge-Turns wurde fälschlich verworfen (siehe
+      // DECISIONS #117, Runde 4).
+      const textMark = textBlocks.length;
+      const srcMark = sources.length;
+      const searchBefore = usedSearch;
       try {
-        next = await postOnce(lastConvo, "forced");
-        if (next && next.error) next = null;
-      } catch (e) { next = null; }
+        // Review-Fix (Runde 2, 🟡, DECISIONS #117): doPost() statt
+        // postOnce() – im Modus "search" bleiben web_search/lookup_wissen
+        // deklariert, eine Nudge-Antwort mit pause_turn (Websuche-
+        // Unterbrechung) oder erneutem lookup_wissen wird dadurch wie im
+        // normalen Turn fortgesetzt (inkl. collectSources()/collectText(),
+        // die INNERHALB von doPost() laufen), statt sofort als Formatfehler
+        // zu enden. tool_choice bleibt "auto" (buildRequest) – laut API-
+        // Fakten garantiert "auto" KEINEN Aufruf: eine Nudge-Antwort OHNE
+        // update_notebook UND ohne refusal/max_tokens gilt deshalb weiterhin
+        // als Fehlschlag (next bleibt null) – derselbe Neustart "von vorn"
+        // greift dann wie bei einem 400/Netzwerkfehler.
+        const r = await doPost(mode, nudged);
+        const usable = r.data && !r.data.error && (
+          isRefusal(r.data) || r.data.stop_reason === "max_tokens" ||
+          (() => { const p = extractParsed(r.data); return p && typeof p === "object"; })()
+        );
+        if (usable) {
+          next = r.data;
+          sentConvo = r.convo;
+          if (sources.length > srcMark) {
+            // Nudge hat selbst gesucht: verworfene Treffer/Prosa der
+            // letzten (nicht in "nudged" enthaltenen) Antwort gezielt
+            // entfernen, die eigene, zitierte Nudge-Prosa bleibt.
+            sources.splice(lastSrcBeforeLast, srcMark - lastSrcBeforeLast);
+            const t0 = Math.min(lastTxtBeforeLast, textMark);
+            textBlocks.splice(t0, textMark - t0);
+          } else {
+            // Keine eigene Suche: reine Präambel verwerfen (Parität zu
+            // postOnce, v7.6-Verhalten für davor bereits echt recherchierte
+            // Prosa bleibt unberührt, weil die NUR vor textMark steht).
+            textBlocks.length = textMark;
+          }
+        } else {
+          // Gescheiterter Nudge: auch neu gefundene Quellen/Text/usedSearch
+          // verwerfen – sie gehören zu einer Antwort, die gleich komplett
+          // verworfen wird.
+          textBlocks.length = textMark;
+          sources.length = srcMark;
+          usedSearch = searchBefore;
+        }
+      } catch (e) {
+        textBlocks.length = textMark;
+        sources.length = srcMark;
+        usedSearch = searchBefore;
+        next = null;
+      }
     }
     if (next) {
       data = next;
-      // (K-🔴3) dieselbe Konversation wie zuvor, nur im forced-Modus erneut
-      // angefragt – kein neuer convo-Zustand entstanden.
-      finalMode = "forced";
-      finalConvo = lastConvo;
+      // (K-🔴3) canForceChoice: dieselbe Konversation wie zuvor, nur erneut
+      // angefragt – kein neuer convo-Zustand entstanden. Ohne erzwingbares
+      // tool_choice (Review-Fix Runde 2): "sentConvo" ist die TATSÄCHLICH
+      // gesendete Konversation (Nudge-Systemnachricht + ggf. weitere
+      // pause_turn-/lookup_wissen-Fortsetzungen INNERHALB des Nudge-Turns,
+      // siehe doPost()-Rückgabe "r.convo" oben) – ein späterer retryWith()
+      // muss GENAU darauf aufsetzen, damit das gesendete Präfix (inkl.
+      // etwaiger thinking-Blöcke) erhalten bleibt.
+      finalMode = canForceChoice ? "forced" : mode;
+      finalConvo = canForceChoice ? lastConvo : sentConvo;
       finalData = data;
     } else {
+      // Review-Fix (Runde 2 Folgeprüfung, 🟡, DECISIONS #117): textBlocks/
+      // sources/usedSearch wurden bereits UNMITTELBAR nach einem
+      // gescheiterten Nudge-Versuch oben auf ihren Vor-Nudge-Stand
+      // zurückgerollt (siehe Marker/Rollback beim Nudge-Zweig) bzw. bleiben
+      // beim canForceChoice-Zweig (postOnce, sammelt gar nichts) ohnehin
+      // unangetastet – hier ist nichts mehr zu tun. Eine ECHTE, VOR dem
+      // Nudge bereits gefundene Recherche-Prosa (usedSearch war schon
+      // vorher true) bleibt dadurch erhalten (v7.6-Verhalten), während ein
+      // verworfener Nudge-Versuch selbst (Text UND ggf. eigene neue
+      // Quellen) spurlos verschwindet.
       // "von vorn" OHNE Recherche: doPost() liefert eine NEUE Konversation
       // ab msgs zurück – die MUSS übernommen werden (K-🔴3, Review-Fund:
       // vorher wurde nur "data" destrukturiert und "convo" verworfen, ein
       // späterer Retry hätte dann mit der VERALTETEN lastConvo (aus dem
-      // gescheiterten Suchversuch) fortgesetzt).
+      // gescheiterten Suchversuch) fortgesetzt). Für Modelle ohne
+      // erzwingbares tool_choice deklariert buildRequest(…, "forced") hier
+      // automatisch tool_choice "auto" (siehe dort) – OHNE Nudge, da die
+      // Konversation ohnehin neu (und kurz) beginnt.
       ({ data, convo: lastConvo } = await doPost("forced"));
       finalMode = "forced";
       finalConvo = lastConvo;
@@ -1609,6 +1982,11 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
     }
     if (!data || data.error) {
       throw new Error((data && data.error && data.error.message) || "API-Fehler");
+    }
+    // D) Refusal-Behandlung: gilt auch nach diesem Nachfassen – kein weiterer
+    // Umweg, Teil-Content wird verworfen.
+    if (isRefusal(data)) {
+      throwRefusal(data, modelId);
     }
     parsed = extractParsed(data);
   }
@@ -1779,6 +2157,36 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
         }],
       };
     }
+    // Review-Fix (Runde 5, 🟡, DECISIONS #117): "sources" wurde in DIESEM
+    // callClaude()-Lauf inkrementell über ALLE bisherigen doPost()-Aufrufe
+    // gesammelt – auch über eine verworfene Zwischenantwort, deren Treffer
+    // absichtlich STEHEN BLEIBEN, weil eine BEIBEHALTENE Prosa (das v7.6-
+    // Verhalten: Text vor einem erfolgreichen Nudge-Tool-Aufruf, siehe B'
+    // oben) sie zitiert. "withAssistant" ist dagegen EXAKT die Konversation,
+    // die das Modell im GLEICH FOLGENDEN Retry-Request SIEHT (finalConvo +
+    // die tatsächlich beibehaltene Antwort) – Treffer außerhalb dieses
+    // Präfix existieren für das Modell dort nicht, seine eigenen
+    // (cite index="…">-Marker im Retry zählen aber TROTZDEM strikt ab 1
+    // *innerhalb dieser Konversation* (Prompt Z. 339). Ohne Neuaufbau bliebe
+    // die zu lange "sources"-Liste stehen: eine neue Suche im Retry (oder
+    // dessen eigener Nachfass-Nudge (b) weiter unten) würde HINTER den für
+    // das Modell unsichtbaren Alt-Treffern landen -> ein Zitat-Index zeigt
+    // dann auf die FALSCHE Quelle, dauerhaft auch im gespeicherten Dokument
+    // (Review-Finding Runde 5, gelb). Betrifft NUR Modelle ohne erzwingbares
+    // tool_choice (Fable 5.1/Opus 5.5, Modus "search" bleibt im Retry aktiv
+    // und kann erneut suchen) – der Sonnet-5/Haiku-Pfad ("forced", kann im
+    // Retry NICHT suchen) bleibt dadurch Byte für Byte unverändert.
+    // "msgs" (priorChat, siehe oben) enthält NIE web_search_tool_result-
+    // Blöcke (reiner Text je historischer Nachricht) – collectSources() über
+    // die assistant-Blöcke von "withAssistant" trifft deshalb GARANTIERT nur
+    // Treffer aus DIESEM Turn, in derselben Reihenfolge wie ursprünglich
+    // gesammelt.
+    if (!supportsForcedToolChoice(modelId)) {
+      sources.length = 0;
+      for (const m of withAssistant) {
+        if (m.role === "assistant" && Array.isArray(m.content)) collectSources(m);
+      }
+    }
     const convo = [...withAssistant, userMsg];
     // textBlocks gehört zur Erstantwort (bereits in result.reply verarbeitet)
     // – für den Retry-Versuch verwerfen, sonst könnte Prosa der VERWORFENEN
@@ -1792,7 +2200,10 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
       console.warn("[retry] " + (e && e.message));
       return null;
     }
-    if (!r.data || r.data.error || r.data.stop_reason === "max_tokens") return null;
+    // D) Refusal-Behandlung: wie jeder andere Retry-Fehlschlag -> null (KEIN
+    // throw – retryWith() liefert bei Fehlschlägen konventionsgemäß null,
+    // der Aufrufer behält dann B1s bereits vorliegendes Erstergebnis).
+    if (!r.data || r.data.error || r.data.stop_reason === "max_tokens" || isRefusal(r.data)) return null;
     let parsed2 = extractParsed(r.data);
     if (!parsed2 || typeof parsed2 !== "object") {
       // (c) einmaliges forced-Nachfassen (wie der bestehende Pfad oben) –
@@ -1815,9 +2226,81 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
       // Signaturwechsel.
       const tail = r.convo[r.convo.length - 1];
       if (finalMode !== "none" && tail && tail.role === "user") {
+        // v7.57 (DECISIONS #117): dieselbe Ersatz-Logik wie beim Nachfassen
+        // (a) weiter oben – Modelle ohne erzwingbares tool_choice bekommen
+        // KEIN "forced" (400-Risiko), sondern denselben Modus (finalMode)
+        // PLUS die Nudge-Systemnachricht als letztes Element; Modelle MIT
+        // erzwingbarem tool_choice bleiben unverändert (postOnce(r.convo,
+        // "forced")).
+        const canForceChoice = supportsForcedToolChoice(modelId);
         try {
-          const n = await postOnce(r.convo, "forced");
-          if (n && !n.error && n.stop_reason !== "max_tokens") { r.data = n; parsed2 = extractParsed(n); }
+          if (canForceChoice) {
+            const n = await postOnce(r.convo, "forced");
+            // Refusal auch hier: parsed2 bleibt null -> return null unten
+            // (wie jeder andere Nachfass-Fehlschlag, siehe D).
+            if (n && !n.error && n.stop_reason !== "max_tokens" && !isRefusal(n)) {
+              r.data = n;
+              parsed2 = extractParsed(n);
+            }
+          } else {
+            // Review-Fix (Runde 2, 🟡, DECISIONS #117): doPost() statt
+            // postOnce() – dieselbe Begründung wie beim Nachfassen (a) weiter
+            // oben (pause_turn-/lookup_wissen-Fortsetzung der Nudge-Antwort,
+            // Quellen-/Text-Sammlung, "auto" garantiert keinen Aufruf). r.convo
+            // wird bei Erfolg auf die TATSÄCHLICH gesendete Konversation
+            // (inkl. etwaiger Fortsetzungen) aktualisiert.
+            //
+            // Review-Fix (Runde 2 Folgeprüfung, 🟡, DECISIONS #117): dieselbe
+            // Marker-/Rollback-Logik wie beim Nachfassen (a) oben – doPost()
+            // sammelt im Modus "search" auch den Text/die Quellen DIESES
+            // Nudge-Requests selbst; ohne Rollback würde er (Erfolg wie
+            // Misserfolg) in die retried Chat-Antwort durchsickern (Live-
+            // Symptom: "Okay, hier der Aufruf.\n\nKorrigiert." statt nur
+            // "Korrigiert."). Die Marker werden bewusst ERST hier (statt vor
+            // dem try) gesetzt und NICHT im catch zurückgerollt: bei einer
+            // Exception (Netzwerk/400) bleibt "parsed2" ohnehin null ->
+            // return null unten -> der bereits fertige B1-Retry-Zwischenstand
+            // von oben (vor diesem Nachfassen) wird von finalize() nie mehr
+            // gelesen (kein Aufrufer liest sources/textBlocks/usedSearch nach
+            // einem null-Rückgabewert erneut), ein Rollback dort wäre
+            // unbeobachtbarer toter Code.
+            //
+            // Review-Fix (Runde 4, 🟡, DECISIONS #117): entgegen der
+            // ursprünglichen Annahme ("r.convo repräsentiert bereits die
+            // TATSÄCHLICH gesendete, vom Modell gesehene Konversation, keine
+            // freshStart-Korrektur nötig") gilt hier DASSELBE Problem wie bei
+            // (a): "r.convo" ist die Konversation, MIT der r.data ANGEFRAGT
+            // wurde – r.data SELBST ist NICHT Teil von r.convo. Sucht der
+            // Nudge-Turn selbst, sieht das Modell in "[...r.convo, system]"
+            // die Treffer/Prosa des (jetzt verworfenen) r.data NICHT, obwohl
+            // sie bereits in "sources"/"textBlocks" stehen (aus dem doPost()-
+            // Aufruf weiter oben, der r.data erzeugt hat). r.srcBeforeLast/
+            // r.txtBeforeLast (siehe doPost()-Kommentar oben) markieren genau
+            // den von r.data beigetragenen Bereich.
+            const textMark = textBlocks.length;
+            const srcMark = sources.length;
+            const searchBefore = usedSearch;
+            const nn = await doPost(finalMode, [...r.convo, { role: "system", content: FORCE_TOOL_NUDGE }]);
+            const n = nn.data;
+            if (n && !n.error && n.stop_reason !== "max_tokens" && !isRefusal(n)) {
+              if (sources.length > srcMark) {
+                // Nudge hat selbst gesucht: verworfene Treffer/Prosa von
+                // r.data gezielt entfernen, eigene Nudge-Prosa bleibt.
+                sources.splice(r.srcBeforeLast, srcMark - r.srcBeforeLast);
+                const t0 = Math.min(r.txtBeforeLast, textMark);
+                textBlocks.splice(t0, textMark - t0);
+              } else {
+                textBlocks.length = textMark;
+              }
+              r.data = n;
+              r.convo = nn.convo;
+              parsed2 = extractParsed(n);
+            } else {
+              textBlocks.length = textMark;
+              sources.length = srcMark;
+              usedSearch = searchBefore;
+            }
+          }
         } catch (e) { /* parsed2 bleibt null */ }
       }
       if (!parsed2 || typeof parsed2 !== "object") return null;

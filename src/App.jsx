@@ -26,7 +26,7 @@ import {
   prepareImage, newImgId, extForMime, mimeForName, dataUrlParts, blobToDataURL,
   makeNotebookIcon, uploadEditorImage,
 } from "./lib/images.js";
-import { MODELS, callClaude, POINTER_ONLY_RETRY_DIAGNOSIS, shouldRetryPointerOnly } from "./lib/anthropic.js";
+import { MODELS, callClaude, POINTER_ONLY_RETRY_DIAGNOSIS, shouldRetryPointerOnly, normalizeModelId } from "./lib/anthropic.js";
 import { buildFeedbackTrigger, isNoFeedback, dedupeFeedbackParagraphs } from "./lib/feedback.js";
 import {
   ShaConflictError, utf8ToB64, ghGetFile, ghGetBlob, ghListDir, ghPutFile,
@@ -413,6 +413,36 @@ export function buildRestoreInfo(name, ts) {
   // unabhängig eindeutig.
   return "Notizbuch „" + name + "“: Stand vom " + fmtStamp(ts) +
     " wiederhergestellt – der aktuelle Dokumentstand ist maßgeblich, frühere Chat-Aussagen dazu sind überholt.";
+}
+
+// v7.57 Review-Fix (Runde 2, gelb, DECISIONS #117): reiner Text-Builder für
+// die Fehler-Pille nach einem gescheiterten Chat-Turn (send()#catch weiter
+// unten) – ausgelagert, weil der bisherige feste Anhängetext bei einer
+// Sicherheits-Ablehnung (anthropic.js#callClaude wirft dann mit
+// `e.refusal === true`, siehe dort) zwei Probleme hatte: (1) refusalMessage()
+// endete selbst mit einem Satzpunkt, zusammen mit dem hier angehängten "."
+// entstand ein doppelter Punkt ("…Sonnet 5).. Deine Nachricht…"); (2) der
+// Rat "sende sie einfach noch einmal" widerspricht der API-Doku ("Denselben
+// Request erneut senden hilft nicht") UND refusalMessage()s eigenem Rat
+// ("Bitte anders formulieren oder ein anderes Modell wählen"). Für alle
+// ANDEREN Fehler (Netzwerk, Format, API-Fehler, …) bleibt der bisherige
+// Wortlaut Byte für Byte unverändert. Reine Funktion (kein State-Zugriff),
+// exportiert für tests/appOps.test.js.
+export function buildSendErrorText(e) {
+  const msg = (e && typeof e.message === "string" && e.message) || "unbekannter Fehler";
+  // Review-Fix (Runde 3, blau/optional, DECISIONS #117): bei einer refusal
+  // nennt refusalMessage() (in "msg" bereits enthalten) bereits den
+  // vollständigen Rat ("Bitte anders formulieren oder ein anderes Modell
+  // wählen (z. B. …)") – ein hier zusätzlich angehängter, gleichlautender
+  // Hinweis wäre eine Wiederholung. Nacharbeit (Runde 4): das dort genannte
+  // Beispielmodell ist NICHT immer "Sonnet 5" – refusalMessage() nennt IMMER
+  // ein ANDERES Modell als das gerade abgelehnte (Opus 5.5 statt Sonnet 5,
+  // wenn Sonnet 5 selbst abgelehnt hat, sonst Sonnet 5), siehe dort. Für alle
+  // ANDEREN Fehler bleibt der bisherige Wortlaut Byte für Byte unverändert.
+  if (e && e.refusal) {
+    return "Anfrage fehlgeschlagen: " + msg + ". Deine Nachricht steht wieder im Eingabefeld.";
+  }
+  return "Anfrage fehlgeschlagen: " + msg + ". Deine Nachricht steht wieder im Eingabefeld – sende sie einfach noch einmal.";
 }
 
 /* ------------------------------------------------------------------ */
@@ -1062,7 +1092,13 @@ export default function NotizbuchApp() {
         try {
           const data = JSON.parse(st.text);
           if (Array.isArray(data.chat) && data.chat.length) nChat = data.chat;
-          if (typeof data.model === "string" && MODELS.some((m) => m.id === data.model)) nModel = data.model;
+          // v7.57 (DECISIONS #117): normalizeModelId statt MODELS.some(...) –
+          // eine gespeicherte Legacy-ID (z. B. "claude-fable-5" vor dem
+          // Modell-Generationswechsel) wählt jetzt automatisch ihren
+          // Nachfolger, statt beim Laden stillschweigend auf MODELS[0] zu
+          // verspringen (bisheriges Verhalten bei einer unbekannten ID –
+          // "nModel" ist bereits mit MODELS[0].id vorbelegt, siehe oben).
+          nModel = normalizeModelId(data.model, nModel);
           if (data.collapsed && typeof data.collapsed === "object") {
             // v1: flache Map mit "s:"-Keys → dem Root-Notizbuch zuordnen
             const keys = Object.keys(data.collapsed);
@@ -1767,8 +1803,11 @@ export default function NotizbuchApp() {
             try {
               const data = JSON.parse(st.text);
               const nChat = Array.isArray(data.chat) && data.chat.length ? data.chat : [WELCOME];
-              const nModel = typeof data.model === "string" && MODELS.some((x) => x.id === data.model)
-                ? data.model : stateRef.current.model;
+              // v7.57 (DECISIONS #117): normalizeModelId statt MODELS.some(...)
+              // – siehe Begründung beim Erstladen oben; Fallback bleibt der
+              // bisherige lokale Modellwert (unverändert übernehmen statt auf
+              // MODELS[0] zu springen).
+              const nModel = normalizeModelId(data.model, stateRef.current.model);
               let nCollapsedAll = {};
               if (data.collapsed && typeof data.collapsed === "object") {
                 const keys = Object.keys(data.collapsed);
@@ -2403,9 +2442,7 @@ export default function NotizbuchApp() {
         role: "assistant",
         error: true,
         ts: Date.now(),
-        text:
-          "Anfrage fehlgeschlagen: " + (e && e.message ? e.message : "unbekannter Fehler") +
-          ". Deine Nachricht steht wieder im Eingabefeld – sende sie einfach noch einmal.",
+        text: buildSendErrorText(e),
       };
       setChat([...cleaned, aMsg].slice(-80));
     } finally {
@@ -3664,8 +3701,10 @@ export default function NotizbuchApp() {
 
     const nh = Array.isArray(data.history) ? data.history : [];
     const nc = Array.isArray(data.chat) && data.chat.length ? data.chat.slice(-80) : [WELCOME];
-    const nm = typeof data.model === "string" && MODELS.some((x) => x.id === data.model)
-      ? data.model : model;
+    // v7.57 (DECISIONS #117): normalizeModelId statt MODELS.some(...) – siehe
+    // Begründung beim Erstladen oben; Fallback bleibt das aktuell aktive
+    // Modell (unverändert übernehmen statt auf MODELS[0] zu springen).
+    const nm = normalizeModelId(data.model, model);
     // Klappzustände: v2 = Map pro Notizbuch, v1 = flach → Root-Notizbuch
     // (dorthin geht auch das v1-Dokument)
     let ncolAll = stateRef.current.collapsedAll || {};
@@ -3811,7 +3850,13 @@ export default function NotizbuchApp() {
     <div className="h-screen w-full flex flex-col bg-slate-100 text-slate-900 font-sans">
 
       {/* Kopfzeile */}
-      <header className="flex items-center gap-2 px-2 sm:px-3 h-14 bg-white border-b border-slate-200">
+      {/* Review-Fix (Runde "Nachbesserung", PFLICHT/gelb): gap-2 sprengte bei
+          360px Breite im verbundenen Zustand (NotebookMenu + max-w-28-Select)
+          den Header um 4px trotz overflow-x:hidden – der Einstellungen-Button
+          wurde rechts abgeschnitten. gap-1.5 auf Mobil (< sm) reicht, um die
+          360px wieder einzuhalten (gemessen: rechte Kante 352px statt 364px),
+          ab sm bleibt der gewohnte, großzügigere Abstand. */}
+      <header className="flex items-center gap-1.5 sm:gap-2 px-2 sm:px-3 h-14 bg-white border-b border-slate-200">
         <img
           src={nbIcons[activeNb] || "icons/logo.png"}
           alt="Notizbuch"
@@ -3832,7 +3877,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.56</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.57</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -3846,7 +3891,12 @@ export default function NotizbuchApp() {
           <select
             value={model}
             onChange={(e) => changeModel(e.target.value)}
-            className="appearance-none text-xs font-mono bg-slate-50 border border-slate-300 rounded-lg pl-2 pr-6 py-1 text-slate-700 max-w-24 sm:max-w-none"
+            // Review-Fix (Runde 5, blau/optional, DECISIONS #117): max-w-24
+            // (96px) schnitt "Fable 5.1" je nach Schriftbreite auf
+            // "Fable 5." ab – nicht mehr von "Fable 5" unterscheidbar.
+            // max-w-28 (112px) schafft auf schmalen Bildschirmen (< sm)
+            // wieder genug Platz für den vollen Modellnamen.
+            className="appearance-none text-xs font-mono bg-slate-50 border border-slate-300 rounded-lg pl-2 pr-6 py-1 text-slate-700 max-w-28 sm:max-w-none"
             title="Modell für die Strukturierung"
           >
             {MODELS.map((m) => (
@@ -4234,10 +4284,27 @@ export default function NotizbuchApp() {
                   }}
                   rows={inputExpanded ? 10 : 2}
                   placeholder="Notiz eintippen, diktieren oder Screenshot einfügen …"
-                  className={"w-full resize-none rounded-xl border border-slate-300 bg-white px-3 py-2 pr-9 text-base text-slate-800 " +
-                    // rows=10 wäre auf schmalen Bildschirmen zu hoch (sprengt den
-                    // sichtbaren Bereich) – max-h deckelt dort auf ~6 Zeilen,
-                    // ab sm auf die vollen ~10 Zeilen; überschüssiger Text scrollt.
+                  // v7.57 (Nutzerwunsch, Nachtrag): getippter Text UND
+                  // Platzhalter jetzt beide text-sm (14px) – so groß wie die
+                  // Chat-Blasen. Eine eigene, größere Platzhalter-Utility-
+                  // Klasse entfällt (der Platzhalter erbt die Größe bereits
+                  // vom Element selbst, siehe className unten – KEINEN
+                  // eigenen Klassennamen dafür in diesem Kommentar nennen,
+                  // sonst hält der naive Tailwind-v4-Textscanner ihn für
+                  // eine echte, verwendete Klasse und erzeugt totes CSS).
+                  // Der frühere Grund, den getippten Text bei text-base
+                  // (16px) zu belassen (iOS Safari zoomt beim Fokussieren
+                  // eines Eingabefelds mit einer Schriftgröße unter 16px
+                  // automatisch in die Seite hinein), entfällt NICHT – er
+                  // wird stattdessen zentral über src/lib/viewport.js
+                  // (maximum-scale=1 im viewport-Meta-Tag, siehe
+                  // src/main.jsx) abgedeckt, statt einzelne Eingabefelder
+                  // künstlich groß zu halten (DECISIONS #117).
+                  className={"w-full resize-none rounded-xl border border-slate-300 bg-white px-3 py-2 pr-9 text-sm text-slate-800 " +
+                    // rows=10 wäre auf schmalen Bildschirmen zu hoch (sprengt
+                    // den sichtbaren Bereich) – max-h deckelt dort auf ca. 7
+                    // Zeilen (text-sm-Zeilenhöhe); ab sm passen die vollen 10
+                    // Zeilen ohne Deckelung, überschüssiger Text scrollt.
                     (inputExpanded ? "max-h-40 sm:max-h-64 overflow-y-auto" : "")}
                 />
                 <button

@@ -4,6 +4,8 @@ import {
   LOOKUP_TOOL, parseLooseJson, isSubstantialReply, SUBSTANTIAL_REPLY_MIN_LENGTH,
   isPointerOnlyReply, POINTER_ONLY_RETRY_DIAGNOSIS, shouldRetryPointerOnly,
   formatCacheDebug, resetCacheDiagnosticsForTests,
+  supportsForcedToolChoice, normalizeModelId, FORCE_TOOL_NUDGE,
+  isRefusal, refusalMessage, isFallbackRelatedError,
 } from "../src/lib/anthropic.js";
 import { MEMORY_SOFT_LIMIT, MEMORY_HARD_LIMIT } from "../src/lib/memory.js";
 import { applyOpsDetailed } from "../src/lib/ops.js";
@@ -274,7 +276,99 @@ describe("webSearchToolFor", () => {
     expect(webSearchToolFor("claude-haiku-4-5-20251001").type).toBe("web_search_20250305");
     expect(webSearchToolFor("claude-sonnet-5").type).toBe("web_search_20260209");
     expect(MODELS[0].id).toBe("claude-sonnet-5"); // Standard-Modell der App
-    expect(webSearchToolFor("claude-fable-5").type).toBe("web_search_20260209");
+    // v7.57 (DECISIONS #117): Fable 5.1/Opus 5.5 statt der abgelösten IDs
+    // "claude-fable-5"/"claude-opus-4-8" – dieselbe 20260209er-Variante.
+    expect(webSearchToolFor("claude-fable-5-1").type).toBe("web_search_20260209");
+    expect(webSearchToolFor("claude-opus-5-5").type).toBe("web_search_20260209");
+  });
+});
+
+// v7.57 (Modell-Generationswechsel, DECISIONS #117): "Fable 5"/"Opus 4.8"
+// wurden durch "Fable 5.1"/"Opus 5.5" ERSETZT (kein veraltetes Modell im
+// Dropdown) – MODELS trägt jetzt zusätzlich die beiden API-Fähigkeits-Flags,
+// normalizeModelId übersetzt gespeicherte Legacy-IDs auf ihre Nachfolger.
+describe("MODELS (v7.57, Modell-Generationswechsel, DECISIONS #117)", () => {
+  it("MODELS[0] ist weiterhin claude-sonnet-5 (Standard-Fallback der App)", () => {
+    expect(MODELS[0].id).toBe("claude-sonnet-5");
+  });
+
+  it("enthält GENAU die vier aktuellen Modelle in der vorgegebenen Reihenfolge, KEINE Legacy-IDs", () => {
+    expect(MODELS.map((m) => m.id)).toEqual([
+      "claude-sonnet-5", "claude-fable-5-1", "claude-opus-5-5", "claude-haiku-4-5-20251001",
+    ]);
+    expect(MODELS.some((m) => m.id === "claude-fable-5")).toBe(false);
+    expect(MODELS.some((m) => m.id === "claude-opus-4-8")).toBe(false);
+  });
+
+  it("forcedToolChoice/refusalFallback: Sonnet 5/Haiku 4.5 erzwingbar ohne Fallback, Fable 5.1/Opus 5.5 NICHT erzwingbar mit Fallback", () => {
+    const byId = Object.fromEntries(MODELS.map((m) => [m.id, m]));
+    expect(byId["claude-sonnet-5"]).toMatchObject({ forcedToolChoice: true, refusalFallback: false });
+    expect(byId["claude-haiku-4-5-20251001"]).toMatchObject({ forcedToolChoice: true, refusalFallback: false });
+    expect(byId["claude-fable-5-1"]).toMatchObject({ forcedToolChoice: false, refusalFallback: true });
+    expect(byId["claude-opus-5-5"]).toMatchObject({ forcedToolChoice: false, refusalFallback: true });
+  });
+});
+
+describe("supportsForcedToolChoice", () => {
+  it("liefert je Modell die MODELS-Flags", () => {
+    expect(supportsForcedToolChoice("claude-sonnet-5")).toBe(true);
+    expect(supportsForcedToolChoice("claude-haiku-4-5-20251001")).toBe(true);
+    expect(supportsForcedToolChoice("claude-fable-5-1")).toBe(false);
+    expect(supportsForcedToolChoice("claude-opus-5-5")).toBe(false);
+  });
+
+  it("unbekannte/fehlende modelId -> false (sicherer Default: 'auto' löst nie einen 400 aus)", () => {
+    expect(supportsForcedToolChoice("claude-irgendwas-9000")).toBe(false);
+    expect(supportsForcedToolChoice("claude-fable-5")).toBe(false); // Legacy-ID selbst ist KEIN MODELS-Eintrag
+    expect(supportsForcedToolChoice(undefined)).toBe(false);
+    expect(supportsForcedToolChoice("")).toBe(false);
+  });
+});
+
+describe("normalizeModelId", () => {
+  it("gültige IDs bleiben unverändert", () => {
+    for (const m of MODELS) expect(normalizeModelId(m.id)).toBe(m.id);
+  });
+
+  it("alle vier Legacy-Mappings (Stand vor v7.57)", () => {
+    expect(normalizeModelId("claude-fable-5")).toBe("claude-fable-5-1");
+    expect(normalizeModelId("claude-opus-4-8")).toBe("claude-opus-5-5");
+    expect(normalizeModelId("claude-opus-5")).toBe("claude-opus-5-5");
+    expect(normalizeModelId("claude-haiku-4-5")).toBe("claude-haiku-4-5-20251001");
+  });
+
+  it("unbekannt, leer oder falscher Typ -> Default-Fallback MODELS[0].id", () => {
+    expect(normalizeModelId("claude-nicht-existent")).toBe(MODELS[0].id);
+    expect(normalizeModelId("")).toBe(MODELS[0].id);
+    expect(normalizeModelId(null)).toBe(MODELS[0].id);
+    expect(normalizeModelId(undefined)).toBe(MODELS[0].id);
+    expect(normalizeModelId(42)).toBe(MODELS[0].id);
+    // Review-Fix (Runde 5, blau/optional): MODELS[0].id ist hier ZUFÄLLIG
+    // identisch mit dem String, den das Objekt trägt ("claude-sonnet-5") –
+    // die Assertion konnte bisher nicht unterscheiden, ob wirklich der
+    // fallback-Parameter greift oder das Objekt (fälschlich) durchgereicht
+    // wird. Mit einem ABWEICHENDEN fallback-Parameter UND einem Objekt mit
+    // einer ANDEREN id wird das eindeutig.
+    expect(normalizeModelId({ id: "claude-opus-5-5" }, "claude-haiku-4-5-20251001")).toBe("claude-haiku-4-5-20251001");
+  });
+
+  it("'constructor' fällt auf den fallback zurück (Object.prototype.hasOwnProperty-Guard gegen Prototyp-Einträge in LEGACY_MODEL_IDS)", () => {
+    expect(normalizeModelId("constructor")).toBe(MODELS[0].id);
+    expect(normalizeModelId("hasOwnProperty")).toBe(MODELS[0].id);
+    expect(normalizeModelId("__proto__")).toBe(MODELS[0].id);
+  });
+
+  it("eigener fallback-Parameter greift bei unbekannter ID (App.jsx: Remote-Refresh/Import behalten den bisherigen Wert)", () => {
+    expect(normalizeModelId("kaputt", "claude-sonnet-5")).toBe("claude-sonnet-5");
+    expect(normalizeModelId(undefined, "claude-haiku-4-5-20251001")).toBe("claude-haiku-4-5-20251001");
+  });
+
+  it("eine gültige ID gewinnt immer gegen den fallback-Parameter", () => {
+    expect(normalizeModelId("claude-opus-5-5", "claude-sonnet-5")).toBe("claude-opus-5-5");
+  });
+
+  it("ein Legacy-Treffer gewinnt gegen den fallback-Parameter (Auto-Migration hat Vorrang)", () => {
+    expect(normalizeModelId("claude-fable-5", "claude-sonnet-5")).toBe("claude-fable-5-1");
   });
 });
 
@@ -3684,5 +3778,1465 @@ describe("formatCacheDebug (Cache-Diagnostics-Auswertung, v7.29)", () => {
     expect(formatCacheDebug(USAGE, { cache_miss_reason: "kaputt" })).toBe("read=17215 write=556"); // falscher Typ
     expect(formatCacheDebug(USAGE, "auch kaputt")).toBe("read=17215 write=556");
     expect(formatCacheDebug(USAGE, 42)).toBe("read=17215 write=556");
+  });
+});
+
+// v7.57 (DECISIONS #117): isRefusal/refusalMessage sind reine, exportierte
+// Funktionen (unabhängig von callClaude/fetch testbar) – die Integration in
+// callClaude()/retryWith() wird weiter unten geprüft.
+describe("isRefusal / refusalMessage (Refusal-Behandlung, v7.57, DECISIONS #117)", () => {
+  describe("isRefusal", () => {
+    it("stop_reason 'refusal' -> true", () => {
+      expect(isRefusal({ stop_reason: "refusal" })).toBe(true);
+    });
+    it("andere stop_reason-Werte -> false", () => {
+      expect(isRefusal({ stop_reason: "end_turn" })).toBe(false);
+      expect(isRefusal({ stop_reason: "max_tokens" })).toBe(false);
+      expect(isRefusal({ stop_reason: "pause_turn" })).toBe(false);
+    });
+    it("fehlendes/null/undefined data wirft nie, liefert false", () => {
+      expect(isRefusal(null)).toBe(false);
+      expect(isRefusal(undefined)).toBe(false);
+      expect(isRefusal({})).toBe(false);
+    });
+  });
+
+  describe("refusalMessage", () => {
+    it("mit nicht-leerer Kategorie: Text enthält '(Kategorie: <wert>)'", () => {
+      const msg = refusalMessage({ stop_reason: "refusal", stop_details: { type: "refusal", category: "bio" } });
+      expect(msg).toContain("(Kategorie: bio)");
+      expect(msg).toContain("Sicherheitsfilter");
+      expect(msg).toContain("es wurde nichts gespeichert");
+      expect(msg).toContain("Sonnet 5");
+    });
+
+    it("stop_details === null -> Text OHNE Klammerzusatz", () => {
+      const msg = refusalMessage({ stop_reason: "refusal", stop_details: null });
+      expect(msg).not.toContain("Kategorie");
+    });
+
+    it("stop_details fehlt komplett -> Text OHNE Klammerzusatz", () => {
+      const msg = refusalMessage({ stop_reason: "refusal" });
+      expect(msg).not.toContain("Kategorie");
+    });
+
+    it("category ist kein String (Unsinn/falscher Typ) -> Text OHNE Klammerzusatz", () => {
+      expect(refusalMessage({ stop_details: { category: 42 } })).not.toContain("Kategorie");
+      expect(refusalMessage({ stop_details: { category: null } })).not.toContain("Kategorie");
+      expect(refusalMessage({ stop_details: { category: {} } })).not.toContain("Kategorie");
+    });
+
+    it("category leer/nur Whitespace -> Text OHNE Klammerzusatz (getrimmt)", () => {
+      expect(refusalMessage({ stop_details: { category: "" } })).not.toContain("Kategorie");
+      expect(refusalMessage({ stop_details: { category: "   " } })).not.toContain("Kategorie");
+    });
+
+    it("category mit Whitespace drumherum wird getrimmt", () => {
+      const msg = refusalMessage({ stop_details: { category: "  cyber  " } });
+      expect(msg).toContain("(Kategorie: cyber)");
+    });
+
+    it("überlange category wird gedeckelt (kein unbegrenzt langer Fehlertext)", () => {
+      const long = "x".repeat(500);
+      const msg = refusalMessage({ stop_details: { category: long } });
+      expect(msg.length).toBeLessThan(300); // deutlich unter der ungekappten Länge
+      expect(msg).not.toContain(long);
+    });
+
+    // Review-Fix (Runde 2, blau): der bisherige Test oben legt die Deckel-
+    // Grenze nicht fest (bliebe auch bei 150 Zeichen oder ohne trim() grün) –
+    // hier die EXAKTE Grenze (80 Zeichen, REFUSAL_CATEGORY_MAX) UND das
+    // Zusammenspiel mit trim() (führende/nachgestellte Leerzeichen zählen
+    // NICHT zu den 80 gedeckelten Zeichen).
+    it("Kategorie-Deckel liegt exakt bei 80 Zeichen (nach dem Trimmen)", () => {
+      const msg = refusalMessage({ stop_details: { category: "  " + "x".repeat(500) } });
+      expect(msg).toContain("(Kategorie: " + "x".repeat(80) + ")");
+      expect(msg).not.toContain("x".repeat(81));
+    });
+
+    // Review-Fix (Runde 2, gelb): App.jsx#buildSendErrorText hängt selbst
+    // ". Deine Nachricht …" an e.message an – ein eigener Schlusspunkt hier
+    // hätte dort einen doppelten Punkt erzeugt (siehe tests/appOps.test.js).
+    it("endet NICHT mit einem Satzpunkt (App.jsx hängt selbst einen an)", () => {
+      expect(refusalMessage({ stop_details: { category: "bio" } }).endsWith(".")).toBe(false);
+      expect(refusalMessage({ stop_details: null }).endsWith(".")).toBe(false);
+    });
+
+    it("data selbst fehlt/ist null -> wirft nie, Text ohne Klammerzusatz", () => {
+      expect(() => refusalMessage(null)).not.toThrow();
+      expect(refusalMessage(null)).not.toContain("Kategorie");
+      expect(refusalMessage(undefined)).not.toContain("Kategorie");
+    });
+
+    // Review-Fix (Runde 4, 🔵, DECISIONS #117): ein Vorschlag auf "Sonnet 5"
+    // wäre sinnlos, wenn Sonnet 5 SELBST abgelehnt hat – Runde 3 ließ dann
+    // aber den GESAMTEN Modell-Hinweis entfallen (echter Bug: gerade nach
+    // einer Sonnet-5-Ablehnung ist ein Wechselhinweis sinnvoll, siehe
+    // API-Fakten zu serverseitigen Fallbacks). Fix: es wird IMMER ein
+    // ANDERES Modell genannt, bei Sonnet 5 jetzt "Opus 5.5" statt gar
+    // keines. modelId ist weiterhin OPTIONAL – fehlt er (bestehende
+    // Aufrufer, siehe alle Tests oben), bleibt der bisherige Wortlaut MIT
+    // Sonnet-5-Vorschlag unverändert.
+    it("modelId === 'claude-sonnet-5': Vorschlag auf ein ANDERES Modell (Opus 5.5), NIE auf Sonnet 5 selbst", () => {
+      const msg = refusalMessage({ stop_details: { category: "bio" } }, "claude-sonnet-5");
+      expect(msg).not.toContain("Sonnet 5");
+      expect(msg).toContain("ein anderes Modell wählen");
+      expect(msg).toContain("Opus 5.5");
+      expect(msg).toContain("Bitte anders formulieren");
+      expect(msg.endsWith(".")).toBe(false);
+    });
+
+    it("modelId fehlt ODER ist ein ANDERES Modell: Vorschlag auf Sonnet 5 bleibt (bisheriges Verhalten)", () => {
+      expect(refusalMessage({ stop_details: { category: "bio" } })).toContain("Sonnet 5");
+      expect(refusalMessage({ stop_details: { category: "bio" } }, "claude-fable-5-1")).toContain("Sonnet 5");
+      expect(refusalMessage({ stop_details: { category: "bio" } }, "claude-opus-5-5")).toContain("Sonnet 5");
+      expect(refusalMessage({ stop_details: { category: "bio" } }, "claude-haiku-4-5-20251001")).toContain("Sonnet 5");
+    });
+  });
+});
+
+// v7.57 (DECISIONS #117): Refusal-Integration in callClaude()/retryWith() –
+// eigener describe-Block mit frischem fetch-Stub (dasselbe respond()-Muster
+// wie die übrigen callClaude-Blöcke).
+describe("callClaude – Refusal-Behandlung (v7.57, DECISIONS #117)", () => {
+  const NB_CTX = { notebooks: [{ name: "W", doc: "# W" }], activeName: "W", knowledge: null };
+
+  beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); resetCacheDiagnosticsForTests(); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  const respond = (body, ok = true, status = 200) =>
+    fetch.mockResolvedValueOnce({ ok, status, json: async () => body });
+
+  it("Erstversuch mit stop_reason 'refusal': wirft mit Kategorie im Text, GENAU EIN Request (kein Nachfassen/Fallback-Umweg), err.refusal===true", async () => {
+    respond({ stop_reason: "refusal", stop_details: { type: "refusal", category: "bio" }, content: [] });
+    let err = null;
+    try { await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toContain("Kategorie: bio");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    // Review-Fix (Runde 2, gelb): App.jsx#buildSendErrorText unterscheidet
+    // anhand DIESES Flags den Hinweistext (siehe tests/appOps.test.js).
+    expect(err.refusal).toBe(true);
+    // Review-Fix (Runde 3, blau/optional): modelId wird bis in throwRefusal()
+    // durchgereicht – Sonnet 5 hat hier SELBST abgelehnt, ein Vorschlag "z. B.
+    // Sonnet 5" wäre sinnlos.
+    expect(err.message).not.toContain("Sonnet 5");
+    // Review-Fix (Runde 5, blau/optional): die reine Abwesenheits-Prüfung
+    // oben hätte den Runde-3-Bug (Vorschlag entfällt KOMPLETT statt nur das
+    // Beispielmodell zu tauschen) nicht gefunden – zusätzlich die tatsächlich
+    // erwartete Anwesenheit von "Opus 5.5"/dem Hinweistext prüfen (die reine
+    // Funktion refusalMessage() selbst ist bereits oben getestet, hier geht
+    // es um die Durchreichung von modelId bis in throwRefusal()).
+    expect(err.message).toContain("Opus 5.5");
+    expect(err.message).toContain("ein anderes Modell wählen");
+  });
+
+  it("Erstversuch mit stop_details null: wirft mit Text OHNE Klammerzusatz", async () => {
+    respond({ stop_reason: "refusal", stop_details: null, content: [] });
+    let err = null;
+    try { await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).not.toContain("Kategorie");
+    expect(err.message).toContain("Sicherheitsfilter");
+  });
+
+  it("Nachfassen (a, Sonnet 5): Erstversuch ohne Tool-Aufruf, forced-Nachfassen liefert eine refusal -> wirft, danach KEIN weiterer Request", async () => {
+    respond({ stop_reason: "end_turn", content: [{ type: "text", text: "nur Prosa ohne Tool" }] });
+    respond({ stop_reason: "refusal", stop_details: { category: "cyber" }, content: [] });
+    let err = null;
+    try { await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toContain("Kategorie: cyber");
+    expect(fetch).toHaveBeenCalledTimes(2); // Erstversuch + forced-Nachfassen, DANACH nichts mehr
+  });
+
+  it("Nachfassen (a, Fable 5.1) über die Nudge-Systemnachricht: refusal in der Nachfass-Antwort -> wirft (KEIN 'next=null'-Fallback-Neustart), err.refusal===true, Vorschlag 'Sonnet 5' bleibt (ein ANDERES Modell hat abgelehnt)", async () => {
+    respond({ stop_reason: "end_turn", content: [{ type: "text", text: "nur Prosa ohne Tool" }] });
+    respond({ stop_reason: "refusal", stop_details: { category: "reasoning_extraction" }, content: [] });
+    let err = null;
+    try { await callClaude("key", "x", NB_CTX, [], "claude-fable-5-1", null, null); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toContain("Kategorie: reasoning_extraction");
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(err.refusal).toBe(true);
+    expect(err.message).toContain("Sonnet 5"); // Fable 5.1 hat abgelehnt, Sonnet 5 bleibt ein sinnvoller Vorschlag
+  });
+
+  it("retryWith: eine refusal als Retry-Antwort -> null (wie jeder andere Retry-Fehlschlag), B1-Ergebnis bleibt unverändert", async () => {
+    respond({
+      id: "msg_1", stop_reason: "end_turn",
+      content: [{ type: "tool_use", id: "tu_1", name: "update_notebook", input: { reply: "Erste.", ops: [] } }],
+    });
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+    const snap = { reply: res.reply, ops: res.ops };
+    respond({ stop_reason: "refusal", stop_details: { category: "bio" }, content: [] });
+    const res2 = await res.retryWith("VERWORFEN – Grund");
+    expect(res2).toBeNull();
+    expect({ reply: res.reply, ops: res.ops }).toEqual(snap);
+    expect(fetch).toHaveBeenCalledTimes(2); // Erst + Retry, KEIN eingebettetes Nachfassen danach
+  });
+
+  it("retryWith Nachfassen (b): Retry ohne Tool-Aufruf, eingebettetes Nachfassen liefert eine refusal -> null", async () => {
+    respond({
+      id: "msg_1", stop_reason: "end_turn",
+      content: [{ type: "tool_use", id: "tu_1", name: "update_notebook", input: { reply: "Erste.", ops: [] } }],
+    });
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+    respond({ stop_reason: "end_turn", content: [{ type: "text", text: "kein Tool-Aufruf im Retry" }] });
+    respond({ stop_reason: "refusal", stop_details: { category: "bio" }, content: [] });
+    const res2 = await res.retryWith("VERWORFEN – Grund");
+    expect(res2).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(3); // Erst + Retry + eingebettetes Nachfassen
+  });
+});
+
+// Review-Fix (Runde 2 Folgeprüfung, 🟡, DECISIONS #117): der einzige bisherige
+// Test für den "!isRefusal(n)"-Guard in retryWith() (siehe oben, "content: []")
+// blieb auch nach ENTFERNEN des Guards grün, weil extractParsed() bei leerem
+// content ohnehin null liefert – der Guard selbst war dadurch ungetestet. Per
+// Mutationsprobe verifiziert: mit einem update_notebook-TEIL-Content in der
+// refusal wendet die Mutante (Guard entfernt) den abgelehnten Inhalt an
+// ("ABGELEHNT" + dessen ops), der Originalcode liefert korrekt null. describe.each
+// deckt sowohl den Sonnet-5-Pfad (postOnce, Z. ~2160) als auch den Fable-5.1/
+// Opus-5.5-Pfad (doPost+Nudge, Z. ~2189) mit demselben Testkörper ab.
+describe("callClaude – retryWith: Refusal-Guard mit Teil-Content wird NICHT übernommen (v7.57 Review-Fix Runde 2 Folgeprüfung, 🟡, DECISIONS #117)", () => {
+  const NB_CTX = { notebooks: [{ name: "W", doc: "# W" }], activeName: "W", knowledge: null };
+  const toolUse = (input, id) => ({ type: "tool_use", id, name: "update_notebook", input });
+
+  beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); resetCacheDiagnosticsForTests(); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  const respond = (body, ok = true, status = 200) =>
+    fetch.mockResolvedValueOnce({ ok, status, json: async () => body });
+
+  describe.each(["claude-sonnet-5", "claude-fable-5-1", "claude-opus-5-5"])("%s", (modelId) => {
+    it("Haupt-Retry-Antwort ist selbst eine refusal MIT update_notebook-Teil-Content (inkl. ops) -> null, GENAU 2 Requests, Teil-Content wird NICHT angewendet", async () => {
+      respond({ id: "m1", stop_reason: "end_turn", content: [toolUse({ reply: "Erste.", ops: [] }, "tu1")] });
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      respond({
+        stop_reason: "refusal", stop_details: { category: "bio" },
+        content: [toolUse({
+          reply: "ABGELEHNT",
+          ops: [{ type: "append_to_section", heading: "## X", content: "- y" }],
+        }, "tu2")],
+      });
+      const res2 = await res.retryWith("DIAG");
+      expect(res2).toBeNull();
+      expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it("eingebettetes Nachfassen (b) liefert eine refusal MIT update_notebook-Teil-Content (inkl. ops) -> null, GENAU 3 Requests, Teil-Content wird NICHT angewendet", async () => {
+      respond({ id: "m1", stop_reason: "tool_use", content: [toolUse({ reply: "Erste.", ops: [] }, "tu1")] });
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      respond({ stop_reason: "end_turn", content: [{ type: "text", text: "kein Tool" }] });
+      respond({
+        stop_reason: "refusal", stop_details: { category: "bio" },
+        content: [toolUse({
+          reply: "ABGELEHNT",
+          ops: [{ type: "append_to_section", heading: "## X", content: "- y" }],
+        }, "tu3")],
+      });
+      const res2 = await res.retryWith("DIAG");
+      expect(res2).toBeNull();
+      expect(fetch).toHaveBeenCalledTimes(3);
+    });
+  });
+});
+
+// v7.57 Review-Fix (Runde 2, 🔴, DECISIONS #117): stop_reason "refusal" kann
+// laut API-Fakten eine TEILAUSGABE im "content" mitliefern (z. B. einen
+// bereits begonnenen Tool-Aufruf). doPost()s Fortsetzungs-Schleife (siehe
+// anthropic.js, "for (;;) { if (!data || data.error || isRefusal(data))
+// break; … }") MUSS deshalb VOR dem Lesen von "content" abbrechen – sonst
+// würde ein lookup_wissen-Aufruf im abgelehnten Teil-Content lokal
+// ausgeführt und der verworfene Content erneut an die API geschickt. Der Bug
+// saß in der GEMEINSAMEN Schleife (nicht im Nudge-/forcedToolChoice-Pfad),
+// deshalb describe.each über alle drei betroffenen Modell-Pfade.
+describe("callClaude – Refusal mit Teil-Content in der doPost-Schleife (v7.57 Review-Fix Runde 2, 🔴)", () => {
+  const ctxWithKnow = {
+    notebooks: [{ name: "W", doc: "# W" }],
+    activeName: "W",
+    knowledge: { activeFiles: [{ name: "handbuch.pdf", text: "## Seite 1\n\nInhalt " + "x".repeat(90000) }], others: [] },
+  };
+
+  beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); resetCacheDiagnosticsForTests(); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  const respond = (body, ok = true, status = 200) =>
+    fetch.mockResolvedValueOnce({ ok, status, json: async () => body });
+
+  describe.each(["claude-sonnet-5", "claude-fable-5-1", "claude-opus-5-5"])("%s", (modelId) => {
+    it("refusal mit lookup_wissen-tool_use im Teil-Content: KEIN Lookup, KEIN Folge-Request, wirft mit Kategorie", async () => {
+      respond({
+        stop_reason: "refusal",
+        stop_details: { category: "bio" },
+        content: [{ type: "tool_use", id: "lk1", name: "lookup_wissen", input: { datei: "handbuch.pdf", suchbegriffe: "Inhalt" } }],
+      });
+      let err = null;
+      try { await callClaude("key", "x", ctxWithKnow, [], modelId, null, null); } catch (e) { err = e; }
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toContain("Kategorie: bio");
+      expect(err.refusal).toBe(true);
+      expect(fetch).toHaveBeenCalledTimes(1); // KEIN Lookup-Folge-Request
+    });
+
+    it("refusal mit update_notebook-tool_use (inkl. ops) im Teil-Content: wirft, KEIN Ergebnis wird zurückgegeben", async () => {
+      respond({
+        stop_reason: "refusal",
+        stop_details: { category: "cyber" },
+        content: [{
+          type: "tool_use", id: "tu1", name: "update_notebook",
+          input: { reply: "Trotzdem.", ops: [{ type: "append_to_section", heading: "## X", content: "- y" }] },
+        }],
+      });
+      let result = "NICHT_GESETZT";
+      let err = null;
+      try { result = await callClaude("key", "x", ctxWithKnow, [], modelId, null, null); } catch (e) { err = e; }
+      expect(result).toBe("NICHT_GESETZT"); // callClaude() kehrt NIE zurück, wenn es wirft
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toContain("Kategorie: cyber");
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("retryWith: refusal mit lookup_wissen-tool_use im Teil-Content -> null, KEIN Lookup-Folge-Request", async () => {
+    respond({
+      id: "msg_1", stop_reason: "end_turn",
+      content: [{ type: "tool_use", id: "tu_1", name: "update_notebook", input: { reply: "Erste.", ops: [] } }],
+    });
+    const res = await callClaude("key", "x", ctxWithKnow, [], "claude-fable-5-1", null, null);
+    respond({
+      stop_reason: "refusal",
+      stop_details: { category: "bio" },
+      content: [{ type: "tool_use", id: "lk1", name: "lookup_wissen", input: { datei: "handbuch.pdf", suchbegriffe: "Inhalt" } }],
+    });
+    const res2 = await res.retryWith("VERWORFEN – Grund");
+    expect(res2).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(2); // Erst + Retry, KEIN Lookup-Folge-Request
+  });
+});
+
+// v7.57 (DECISIONS #117): serverseitige Fallbacks (Beta) – nur bei
+// MODELS[...].refusalFallback === true (Fable 5.1/Opus 5.5). isFallbackRelatedError
+// wird zusätzlich pur getestet (analog zu isDiagnosticsRelatedError, das aus
+// callClaude selbst nicht exportiert ist).
+describe("Serverseitige Fallbacks (Beta, v7.57, DECISIONS #117)", () => {
+  describe("isFallbackRelatedError (pur)", () => {
+    it("erkennt eine erkennbar fallback-bezogene Meldung", () => {
+      expect(isFallbackRelatedError({ message: "Extra inputs are not permitted: fallbacks" })).toBe(true);
+      expect(isFallbackRelatedError({ type: "invalid_request_error", message: "unknown beta: server-side-fallback" })).toBe(true);
+    });
+    it("liefert false bei einer NICHT fallback-bezogenen Meldung", () => {
+      expect(isFallbackRelatedError({ message: "model not found" })).toBe(false);
+      expect(isFallbackRelatedError({ message: "Extra inputs are not permitted: diagnostics" })).toBe(false);
+    });
+    it("fehlendes/leeres error-Objekt wirft nie, liefert false", () => {
+      expect(isFallbackRelatedError(null)).toBe(false);
+      expect(isFallbackRelatedError(undefined)).toBe(false);
+      expect(isFallbackRelatedError({})).toBe(false);
+    });
+  });
+
+  describe("callClaude-Integration", () => {
+    const NB_CTX = { notebooks: [{ name: "W", doc: "# W" }], activeName: "W", knowledge: null };
+    const toolUse = (input, id) => ({ type: "tool_use", id, name: "update_notebook", input });
+
+    beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); resetCacheDiagnosticsForTests(); });
+    afterEach(() => { vi.unstubAllGlobals(); });
+
+    const respond = (body, ok = true, status = 200) =>
+      fetch.mockResolvedValueOnce({ ok, status, json: async () => body });
+
+    it("Fable 5.1: body.fallbacks='default', anthropic-beta enthält BEIDE Beta-Werte kommagetrennt", async () => {
+      respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] }, "tu_1")] });
+      await callClaude("key", "x", NB_CTX, [], "claude-fable-5-1", null, null);
+      const [, init] = fetch.mock.calls[0];
+      const body = JSON.parse(init.body);
+      expect(body.fallbacks).toBe("default");
+      expect(init.headers["anthropic-beta"]).toBe("cache-diagnosis-2026-04-07,server-side-fallback-2026-07-01");
+    });
+
+    it("Opus 5.5: dieselbe Fallback-Unterstützung wie Fable 5.1", async () => {
+      respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] }, "tu_1")] });
+      await callClaude("key", "x", NB_CTX, [], "claude-opus-5-5", null, null);
+      const [, init] = fetch.mock.calls[0];
+      expect(JSON.parse(init.body).fallbacks).toBe("default");
+      expect(init.headers["anthropic-beta"]).toContain("server-side-fallback-2026-07-01");
+    });
+
+    it("Sonnet 5: KEIN fallbacks-Feld, anthropic-beta NUR cache-diagnosis (kein Fallback-Wert)", async () => {
+      respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] }, "tu_1")] });
+      await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+      const [, init] = fetch.mock.calls[0];
+      expect(JSON.parse(init.body).fallbacks).toBeUndefined();
+      expect(init.headers["anthropic-beta"]).toBe("cache-diagnosis-2026-04-07");
+    });
+
+    it("Haiku 4.5: KEIN fallbacks-Feld (kein erlaubtes Fallback-Ziel laut API-Doku)", async () => {
+      respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] }, "tu_1")] });
+      await callClaude("key", "x", NB_CTX, [], "claude-haiku-4-5-20251001", null, null);
+      const [, init] = fetch.mock.calls[0];
+      expect(JSON.parse(init.body).fallbacks).toBeUndefined();
+    });
+
+    it("400 mit fallback-bezogener Meldung: GENAU EIN Retry ohne fallbacks/Header, danach für DIESES Modell dauerhaft ohne, für ein ANDERES Modell weiterhin mit", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        respond({ error: { type: "invalid_request_error", message: "Extra inputs are not permitted: fallbacks" } }, false, 400);
+        respond({ id: "msg_ok", stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] }, "tu_1")] });
+        const res = await callClaude("key", "x", NB_CTX, [], "claude-fable-5-1", null, null);
+        expect(res.reply).toBe("ok");
+        expect(fetch.mock.calls.length).toBe(2); // GENAU ein Retry, kein Endlos-Loop
+
+        const first = JSON.parse(fetch.mock.calls[0][1].body);
+        expect(first.fallbacks).toBe("default");
+        const retry = JSON.parse(fetch.mock.calls[1][1].body);
+        expect(retry.fallbacks).toBeUndefined();
+        // Diagnostics-Beta bleibt unberührt (unabhängige Degradation)
+        expect(fetch.mock.calls[1][1].headers["anthropic-beta"]).toBe("cache-diagnosis-2026-04-07");
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("claude-fable-5-1"));
+
+        // Folge-Turn DESSELBEN Modells bleibt dauerhaft ohne fallbacks
+        respond({ id: "msg_2", stop_reason: "end_turn", content: [toolUse({ reply: "ok2", ops: [] }, "tu_2")] });
+        await callClaude("key", "y", NB_CTX, [], "claude-fable-5-1", null, null);
+        expect(JSON.parse(fetch.mock.calls[2][1].body).fallbacks).toBeUndefined();
+
+        // Ein ANDERES Modell (Opus 5.5) ist von der Fable-Degradation UNBERÜHRT
+        respond({ id: "msg_3", stop_reason: "end_turn", content: [toolUse({ reply: "ok3", ops: [] }, "tu_3")] });
+        await callClaude("key", "z", NB_CTX, [], "claude-opus-5-5", null, null);
+        expect(JSON.parse(fetch.mock.calls[3][1].body).fallbacks).toBe("default");
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("400 mit ANDERER (nicht fallback-bezogener) Meldung: KEIN Fallback-Retry, Fehler wie bisher durchgereicht", async () => {
+      respond({ error: { type: "invalid_request_error", message: "model overloaded" } }, false, 400);
+      await expect(callClaude("key", "x", NB_CTX, [], "claude-fable-5-1", null, null))
+        .rejects.toThrow("model overloaded");
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("Kombination: Diagnostics-400 gefolgt von Fallback-400 im SELBEN postOnce -> je EIN Retry, 3 Requests, dann Erfolg", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        respond({ error: { type: "invalid_request_error", message: "Extra inputs are not permitted: diagnostics" } }, false, 400);
+        respond({ error: { type: "invalid_request_error", message: "Extra inputs are not permitted: fallbacks" } }, false, 400);
+        respond({ id: "msg_ok", stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] }, "tu_1")] });
+        const res = await callClaude("key", "x", NB_CTX, [], "claude-fable-5-1", null, null);
+        expect(res.reply).toBe("ok");
+        expect(fetch).toHaveBeenCalledTimes(3);
+
+        const first = JSON.parse(fetch.mock.calls[0][1].body);
+        expect(first.diagnostics).toBeDefined();
+        expect(first.fallbacks).toBe("default");
+
+        const second = JSON.parse(fetch.mock.calls[1][1].body);
+        expect(second.diagnostics).toBeUndefined();
+        expect(second.fallbacks).toBe("default");
+
+        const third = JSON.parse(fetch.mock.calls[2][1].body);
+        expect(third.diagnostics).toBeUndefined();
+        expect(third.fallbacks).toBeUndefined();
+        expect(fetch.mock.calls[2][1].headers["anthropic-beta"]).toBeUndefined();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    // Review-Fix (Runde 2, 🟡, DECISIONS #117): Gegenprobe zur Kombination
+    // oben mit VERTAUSCHTER Reihenfolge – welcher der beiden Beta-Werte der
+    // Server zuerst validiert, ist von hier aus nicht bekannt. Die alte
+    // Implementierung prüfte Diagnostics und Fallbacks je genau EINMAL (in
+    // fester Reihenfolge) und ließ einen zweiten 400 in der jeweils anderen
+    // Reihenfolge unbehandelt durchschlagen.
+    it("Kombination (umgekehrte Reihenfolge): Fallback-400 gefolgt von Diagnostics-400 im SELBEN postOnce -> je EIN Retry, 3 Requests, dann Erfolg", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        respond({ error: { type: "invalid_request_error", message: "Extra inputs are not permitted: fallbacks" } }, false, 400);
+        respond({ error: { type: "invalid_request_error", message: "Extra inputs are not permitted: diagnostics" } }, false, 400);
+        respond({ id: "msg_ok", stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] }, "tu_1")] });
+        const res = await callClaude("key", "x", NB_CTX, [], "claude-fable-5-1", null, null);
+        expect(res.reply).toBe("ok");
+        expect(fetch).toHaveBeenCalledTimes(3);
+
+        const first = JSON.parse(fetch.mock.calls[0][1].body);
+        expect(first.diagnostics).toBeDefined();
+        expect(first.fallbacks).toBe("default");
+
+        const second = JSON.parse(fetch.mock.calls[1][1].body);
+        expect(second.diagnostics).toBeDefined(); // Diagnostics war noch NICHT abgelehnt
+        expect(second.fallbacks).toBeUndefined(); // Fallbacks bereits abgeschaltet
+
+        const third = JSON.parse(fetch.mock.calls[2][1].body);
+        expect(third.diagnostics).toBeUndefined();
+        expect(third.fallbacks).toBeUndefined();
+        expect(fetch.mock.calls[2][1].headers["anthropic-beta"]).toBeUndefined();
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Diagnostics-Beta"));
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("claude-fable-5-1"));
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("Antwort mit einem {type:'fallback'}-Audit-Block plus update_notebook: normal verarbeitet, console.info nennt das tatsächlich antwortende Modell", async () => {
+      const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+      try {
+        respond({
+          id: "msg_1", stop_reason: "end_turn", model: "claude-opus-5",
+          content: [
+            { type: "fallback", from: { model: "claude-fable-5-1" }, to: { model: "claude-opus-5" } },
+            toolUse({ reply: "Trotzdem gespeichert.", ops: [] }, "tu_1"),
+          ],
+          usage: { iterations: [{ type: "fallback_message" }] },
+        });
+        const res = await callClaude("key", "x", NB_CTX, [], "claude-fable-5-1", null, null);
+        expect(res.reply).toBe("Trotzdem gespeichert.");
+        expect(res.ops).toEqual([]);
+        expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining("claude-opus-5"));
+      } finally {
+        infoSpy.mockRestore();
+      }
+    });
+
+    it("Antwort OHNE fallback_message-Iteration: kein console.info-Aufruf (keine Falschmeldung)", async () => {
+      const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+      try {
+        respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "ok", ops: [] }, "tu_1")], usage: { iterations: [] } });
+        await callClaude("key", "x", NB_CTX, [], "claude-fable-5-1", null, null);
+        expect(infoSpy).not.toHaveBeenCalled();
+      } finally {
+        infoSpy.mockRestore();
+      }
+    });
+
+    it("ein fallback-Content-Block bleibt in einer Konversations-Fortsetzung (retryWith) unverändert erhalten", async () => {
+      respond({
+        id: "msg_1", stop_reason: "end_turn",
+        content: [
+          { type: "fallback", from: { model: "claude-fable-5-1" }, to: { model: "claude-opus-5" } },
+          toolUse({ reply: "Erste.", ops: [] }, "tu_1"),
+        ],
+      });
+      const res = await callClaude("key", "x", NB_CTX, [], "claude-fable-5-1", null, null);
+      respond({ id: "msg_2", stop_reason: "end_turn", content: [toolUse({ reply: "Korrigiert.", ops: [] }, "tu_2")] });
+      await res.retryWith("VERWORFEN – Grund");
+      const second = JSON.parse(fetch.mock.calls[1][1].body);
+      const assistantMsg = second.messages.find((m) => m.role === "assistant");
+      expect(assistantMsg.content.some((b) => b.type === "fallback")).toBe(true);
+    });
+  });
+});
+
+// v7.57 (DECISIONS #117): Fable 5.1/Opus 5.5 lehnen ein erzwungenes
+// tool_choice ({type:"tool"}/{type:"any"}) mit HTTP 400 ab
+// (supportsForcedToolChoice === false, siehe MODELS) – callClaude() weicht im
+// Nachfass-Pfad stattdessen auf eine Mid-Conversation-Systemnachricht
+// (FORCE_TOOL_NUDGE) aus, OHNE Modus/Toolset zu wechseln (Präfixbindung für
+// "Preserved Thinking" bei diesen beiden Modellen). Eigener describe-Block,
+// dieselbe respond()/toolUse()-Konvention wie "callClaude – B2 In-Turn-Retry"
+// oben (id-fähiges toolUse, da retryWith tool_result-Blöcke über
+// tool_use_id referenziert). describe.each deckt BEIDE betroffenen Modelle
+// mit identischem Testkörper ab (dieselben Flags, dasselbe Verhalten).
+describe("callClaude – Modelle ohne erzwingbares tool_choice (Fable 5.1/Opus 5.5, v7.57, DECISIONS #117)", () => {
+  const NB_CTX = { notebooks: [{ name: "W", doc: "# W" }], activeName: "W", knowledge: null };
+  const toolUse = (input, id) => ({ type: "tool_use", id, name: "update_notebook", input });
+
+  beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); resetCacheDiagnosticsForTests(); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  const respond = (body, ok = true, status = 200) =>
+    fetch.mockResolvedValueOnce({ ok, status, json: async () => body });
+
+  // Reiner Test-Helfer: prüft für eine Folge aufeinanderfolgender Request-
+  // Bodies (in Sendereihenfolge) die Präfix-Eigenschaft, die "Preserved
+  // Thinking" verlangt – system/tools müssen JSON-identisch bleiben (ein
+  // Toolset-/Modus-Wechsel würde bereits gesendete thinking-Blöcke
+  // ungültig machen), "messages" darf nur wachsen (jeder vorherige Request
+  // ist ein exaktes Präfix des nächsten). "restartAt" markiert Indizes, an
+  // denen laut Spezifikation ein bewusster Neustart "von vorn ab msgs"
+  // stattfindet (dort ist eine Abweichung zulässig).
+  const expectStablePrefix = (bodies, restartAt = []) => {
+    for (let i = 1; i < bodies.length; i++) {
+      if (restartAt.includes(i)) continue;
+      expect(bodies[i].system).toEqual(bodies[i - 1].system);
+      expect(bodies[i].tools).toEqual(bodies[i - 1].tools);
+      const prevLen = bodies[i - 1].messages.length;
+      expect(bodies[i].messages.length).toBeGreaterThanOrEqual(prevLen);
+      expect(bodies[i].messages.slice(0, prevLen)).toEqual(bodies[i - 1].messages);
+    }
+  };
+  const expectNoForcedChoice = (bodies) => {
+    for (const b of bodies) {
+      if (b.tool_choice) expect(b.tool_choice.type).not.toMatch(/^(tool|any)$/);
+    }
+  };
+
+  describe.each(["claude-fable-5-1", "claude-opus-5-5"])("%s", (modelId) => {
+    it("Websuche-Fehler -> 'forced' wird intern verwendet, tool_choice bleibt 'auto' (kein 400-Risiko)", async () => {
+      respond({ error: { type: "invalid_request_error", message: "web_search tool is not available" } });
+      respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "ohne Suche", ops: [] }, "tu_1")] });
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      expect(res.reply).toBe("ohne Suche");
+      const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+      expectNoForcedChoice(bodies);
+      expect(bodies[1].tool_choice).toEqual({ type: "auto" });
+      expect(bodies[1].tools.map((t) => t.name)).toEqual(["update_notebook"]);
+    });
+
+    // Optional/blau (Nachbesserung, DECISIONS #117): Auftragsregel "Modus
+    // 'none' NICHT in den Nudge-Pfad" (siehe "mode !== 'none'"-Guard im
+    // Nachfassen (a)) – ohne diesen Guard würde ein fehlender Tool-Aufruf im
+    // Ursprungsmodus "none" (Tools bereits ZWEIMAL serverseitig abgelehnt:
+    // search UND forced) trotzdem eine Nudge-Systemnachricht anhängen, obwohl
+    // im Modus "none" gar kein Tool mehr deklariert ist (siehe buildRequest) –
+    // ein wirkungsloser, aber sichtbarer Fremdkörper in der Konversation.
+    // search UND forced scheitern hier absichtlich mit derselben
+    // tool-bezogenen Fehlermeldung (identisches Muster wie Test "3)
+    // none-Ursprung" oben im allgemeinen retryWith-Block), die anschließende
+    // "none"-Antwort ist absichtlich OHNE Tool/JSON, damit der Code
+    // überhaupt in den hier zu prüfenden "kein Tool-Aufruf"-Zweig läuft.
+    it("Ursprungsmodus 'none' (Tools zweimal abgelehnt) + fehlender Tool-Aufruf: KEIN Nudge-Pfad, KEINE role:'system'-Nachricht in irgendeinem Request", async () => {
+      const toolErr = { error: { type: "invalid_request_error", message: "tool use failed" } };
+      respond(toolErr); // 1: search scheitert (Websuche/Tool nicht verfügbar)
+      respond(toolErr); // 2: forced scheitert ebenfalls -> mode wird "none"
+      respond({ stop_reason: "end_turn", content: [{ type: "text", text: "kein JSON hier, nur Prosa" }] }); // 3: none, kein Tool/JSON
+      respond({ id: "msg_neu", stop_reason: "end_turn", content: [toolUse({ reply: "Ohne Nudge.", ops: [] }, "tu_1")] }); // 4: "von vorn" (forced, ohne Nudge)
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      expect(res.reply).toBe("Ohne Nudge.");
+      expect(fetch).toHaveBeenCalledTimes(4);
+      const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+      expectNoForcedChoice(bodies);
+      // Kernprüfung: in KEINEM der vier Request-Bodies taucht die Nudge-
+      // Systemnachricht (oder irgendeine andere role:"system"-Nachricht) auf.
+      for (const b of bodies) {
+        expect(b.messages.some((m) => m.role === "system")).toBe(false);
+      }
+    });
+
+    it("Erstantwort ohne update_notebook NACH einer Lookup-Runde: Nudge auf der UNVERÄNDERTEN Such-Konversation, kein Moduswechsel", async () => {
+      const ctxWithKnow = {
+        ...NB_CTX,
+        knowledge: { activeFiles: [{ name: "handbuch.pdf", text: "## Seite 1\n\nInhalt " + "x".repeat(90000) }], others: [] },
+      };
+      respond({
+        id: "msg_1", stop_reason: "end_turn",
+        content: [{ type: "tool_use", id: "lk1", name: "lookup_wissen", input: { datei: "handbuch.pdf", suchbegriffe: "Inhalt" } }],
+      });
+      respond({ id: "msg_2", stop_reason: "end_turn", content: [{ type: "text", text: "kein Tool-Aufruf" }] });
+      respond({ id: "msg_3", stop_reason: "end_turn", content: [toolUse({ reply: "Laut Handbuch erledigt.", ops: [] }, "tu_1")] });
+      const res = await callClaude("key", "x", ctxWithKnow, [], modelId, null, null);
+      expect(res.reply).toBe("Laut Handbuch erledigt.");
+      expect(fetch).toHaveBeenCalledTimes(3);
+      const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+      expectNoForcedChoice(bodies);
+      expect(bodies[2].tool_choice).toEqual({ type: "auto" });
+      expect(bodies[2].tools.map((t) => t.name)).toContain("web_search"); // Modus bleibt "search"
+      const lastMsg = bodies[2].messages[bodies[2].messages.length - 1];
+      expect(lastMsg).toEqual({ role: "system", content: FORCE_TOOL_NUDGE });
+      expect(bodies[2].messages[bodies[2].messages.length - 2].role).toBe("user");
+      expectStablePrefix(bodies);
+    });
+
+    it("Erstantwort ohne update_notebook OHNE vorherige Lookup-Runde (lastConvo === msgs): Nudge greift TROTZDEM", async () => {
+      respond({ stop_reason: "end_turn", content: [{ type: "text", text: "nur Prosa ohne Tool" }] });
+      respond({ id: "msg_2", stop_reason: "end_turn", content: [toolUse({ reply: "Jetzt strukturiert.", ops: [] }, "tu_1")] });
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      expect(res.reply).toBe("Jetzt strukturiert.");
+      expect(fetch).toHaveBeenCalledTimes(2); // KEIN dritter Request ("von vorn"), Nudge greift direkt
+      const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+      expectNoForcedChoice(bodies);
+      expect(bodies[1].tool_choice).toEqual({ type: "auto" });
+      const lastMsg = bodies[1].messages[bodies[1].messages.length - 1];
+      expect(lastMsg).toEqual({ role: "system", content: FORCE_TOOL_NUDGE });
+      expectStablePrefix(bodies);
+    });
+
+    // Review-Fix (Runde 2, 🟡, DECISIONS #117): der Nudge-Request lief bisher
+    // über postOnce() statt doPost() – eine Nudge-Antwort MIT lookup_wissen
+    // (typisch genau in dem Fall, für den dieses Nachfassen existiert: das
+    // Lookup-Budget des Erstversuchs war erschöpft) endete dadurch sofort im
+    // Formatfehler statt fortgesetzt zu werden. doPost() im Nudge-Zweig
+    // setzt intra-Turn-Fortsetzungen jetzt genauso fort wie im Haupt-Turn.
+    it("Nudge-Antwort ruft lookup_wissen auf: wird INTERN fortgesetzt (Modus bleibt 'search'), danach update_notebook erfolgreich", async () => {
+      const ctxWithKnow = {
+        ...NB_CTX,
+        knowledge: { activeFiles: [{ name: "handbuch.pdf", text: "## Seite 1\n\nInhalt " + "x".repeat(90000) }], others: [] },
+      };
+      respond({ stop_reason: "end_turn", content: [{ type: "text", text: "nur Prosa ohne Tool" }] }); // 1: Erstversuch ohne Lookup, ohne Tool
+      respond({ // 2: Nudge-Antwort ruft lookup_wissen (KEIN update_notebook)
+        id: "msg_nudge", stop_reason: "end_turn",
+        content: [{ type: "tool_use", id: "lk1", name: "lookup_wissen", input: { datei: "handbuch.pdf", suchbegriffe: "Inhalt" } }],
+      });
+      respond({ id: "msg_3", stop_reason: "end_turn", content: [toolUse({ reply: "Laut Handbuch erledigt.", ops: [] }, "tu_1")] }); // 3: Fortsetzung nach dem lokalen Lookup
+      const res = await callClaude("key", "x", ctxWithKnow, [], modelId, null, null);
+      expect(res.reply).toBe("Laut Handbuch erledigt.");
+      expect(fetch).toHaveBeenCalledTimes(3); // KEIN Formatfehler, KEIN zusätzlicher Neustart
+      const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+      expectNoForcedChoice(bodies);
+      expect(bodies[2].tools.map((t) => t.name)).toEqual(expect.arrayContaining(["web_search", "lookup_wissen", "update_notebook"]));
+      // Die Nudge-Systemnachricht bleibt im Präfix erhalten (append-only)
+      expect(bodies[1].messages[bodies[1].messages.length - 1]).toEqual({ role: "system", content: FORCE_TOOL_NUDGE });
+      expectStablePrefix(bodies);
+    });
+
+    // Analog für die zweite Server-Tool-Unterbrechung (pause_turn/Websuche) –
+    // dieselbe Begründung, plus Nachweis, dass Quellen aus dem Nudge-Turn
+    // NICHT verloren gehen (collectSources() läuft jetzt innerhalb doPost()
+    // auch für den Nudge-Request mit).
+    it("Nudge-Antwort pausiert (Websuche, pause_turn): wird INTERN fortgesetzt, danach update_notebook erfolgreich, Quelle wird übernommen", async () => {
+      respond({ stop_reason: "end_turn", content: [{ type: "text", text: "nur Prosa ohne Tool" }] }); // 1
+      respond({ // 2: Nudge-Antwort pausiert mit einem Websuche-Treffer
+        id: "msg_pause", stop_reason: "pause_turn",
+        content: [
+          { type: "server_tool_use", id: "st1", name: "web_search", input: { query: "Eiffelturm" } },
+          {
+            type: "web_search_tool_result", tool_use_id: "st1",
+            content: [{ type: "web_search_result", url: "https://a.example", title: "A" }],
+          },
+        ],
+      });
+      respond({ id: "msg_3", stop_reason: "end_turn", content: [toolUse({ reply: "Laut Recherche erledigt.", ops: [] }, "tu_1")] }); // 3
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      expect(res.reply).toBe("Laut Recherche erledigt.");
+      // Review-Fix (Runde 2 Folgeprüfung, blau/optional): der Testname
+      // versprach die Übernahme der Quelle, prüfte sie aber bisher nicht.
+      expect(res.sources).toEqual([{ url: "https://a.example", title: "A" }]);
+      expect(fetch).toHaveBeenCalledTimes(3);
+      const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+      expectNoForcedChoice(bodies);
+      expectStablePrefix(bodies);
+    });
+
+    // Kehrseite: "auto" garantiert laut API-Fakten KEINEN Aufruf – antwortet
+    // das Modell auch auf den Nudge OHNE update_notebook (hier: wieder nur
+    // Prosa), MUSS der bestehende Neustart "von vorn ab msgs" greifen statt
+    // eines Formatfehlers (vorher wurde JEDE Nudge-Antwort ohne HTTP-Fehler
+    // ungeprüft als "next" übernommen).
+    it("Nudge-Antwort erneut OHNE Tool-Aufruf (nur Prosa): geordneter Neustart 'von vorn' ab msgs statt Formatfehler", async () => {
+      respond({ stop_reason: "end_turn", content: [{ type: "text", text: "nur Prosa ohne Tool" }] }); // 1
+      respond({ stop_reason: "end_turn", content: [{ type: "text", text: "Nudge ignoriert, wieder nur Prosa" }] }); // 2: Nudge ohne Tool
+      respond({ id: "msg_neu", stop_reason: "end_turn", content: [toolUse({ reply: "Von vorn erledigt.", ops: [] }, "tu_1")] }); // 3
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      expect(res.reply).toBe("Von vorn erledigt.");
+      expect(fetch).toHaveBeenCalledTimes(3);
+      const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+      expectNoForcedChoice(bodies);
+      expect(bodies[2].messages).toEqual(bodies[0].messages); // Neustart ab msgs, NICHT die Nudge-Konversation
+      expect(bodies[2].messages.some((m) => m.role === "system")).toBe(false);
+    });
+
+    it("Nudge-Request wirft einen echten Netzwerkfehler (fetch schlägt fehl): geordneter Neustart 'von vorn' ab msgs (Exception-Zweig des try/catch)", async () => {
+      respond({ stop_reason: "end_turn", content: [{ type: "text", text: "nur Prosa ohne Tool" }] });
+      fetch.mockRejectedValueOnce(new Error("network down")); // Nudge-Request selbst schlägt fehl (kein HTTP-Response)
+      respond({ id: "msg_neu", stop_reason: "end_turn", content: [toolUse({ reply: "Von vorn erledigt.", ops: [] }, "tu_1")] });
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      expect(res.reply).toBe("Von vorn erledigt.");
+      expect(fetch).toHaveBeenCalledTimes(3);
+      const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+      expectNoForcedChoice(bodies);
+      expect(bodies[2].messages).toEqual(bodies[0].messages); // Neustart ab msgs
+      expectStablePrefix(bodies, [2]); // Index 2 ist ein bewusster Neustart, siehe restartAt
+    });
+
+    it("Nudge-Request scheitert mit 400: geordneter Neustart 'von vorn' ab msgs, OHNE tool_choice 'tool', OHNE die Nudge-Nachricht", async () => {
+      respond({ stop_reason: "end_turn", content: [{ type: "text", text: "nur Prosa ohne Tool" }] });
+      respond({ error: { type: "invalid_request_error", message: "irgendein anderer 400er" } }, false, 400);
+      respond({ id: "msg_neu", stop_reason: "end_turn", content: [toolUse({ reply: "Von vorn erledigt.", ops: [] }, "tu_1")] });
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      expect(res.reply).toBe("Von vorn erledigt.");
+      expect(fetch).toHaveBeenCalledTimes(3);
+      const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+      expectNoForcedChoice(bodies);
+      expect(bodies[2].tool_choice).toEqual({ type: "auto" }); // "forced"-Modus, aber weiterhin auto
+      expect(bodies[2].messages).toEqual(bodies[0].messages); // Neustart ab msgs – NICHT die Nudge-Konversation
+      expect(bodies[2].messages.some((m) => m.role === "system")).toBe(false);
+      expectStablePrefix(bodies, [2]); // Index 2 ist ein bewusster Neustart, siehe restartAt
+    });
+
+    // Review-Fix (Runde 2, 🟡, DECISIONS #117): Kern-Eigenschaft, die bisher
+    // KEIN Test absicherte – finalConvo = sentConvo (die TATSÄCHLICH
+    // gesendete Nudge-Konversation inkl. Systemnachricht) NACH einem
+    // ERFOLGREICHEN Nachfassen (a). Eine Mutation auf finalConvo = lastConvo
+    // (ohne Nudge) würde hier NICHT aus den bestehenden retryWith-Tests
+    // auffallen (die starteten alle mit einer sofort erfolgreichen
+    // Erstantwort) – live wäre die Folge ein 400 "Invalid signature in
+    // thinking block", weil die thinking-Signatur der Nudge-Antwort an ein
+    // Präfix INKLUSIVE der Systemnachricht gebunden ist.
+    it("retryWith NACH erfolgreichem Nachfassen (a): Retry baut auf der TATSÄCHLICH gesendeten Nudge-Konversation (inkl. Systemnachricht + thinking) auf", async () => {
+      respond({ stop_reason: "end_turn", content: [{ type: "text", text: "nur Prosa ohne Tool" }] }); // 1: Erstversuch ohne Tool
+      respond({ // 2: Nudge-Antwort MIT thinking-Block + update_notebook
+        id: "msg_nudge", stop_reason: "end_turn",
+        content: [
+          { type: "thinking", thinking: "", signature: "sig" },
+          toolUse({ reply: "Erste.", ops: [] }, "tu_1"),
+        ],
+      });
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      expect(res.reply).toBe("Erste.");
+      respond({ id: "msg_3", stop_reason: "end_turn", content: [toolUse({ reply: "Korrigiert.", ops: [] }, "tu_2")] }); // 3: retryWith-Antwort
+      const res2 = await res.retryWith("VERWORFEN – Grund");
+      expect(res2).not.toBeNull();
+      expect(res2.reply).toBe("Korrigiert.");
+      expect(fetch).toHaveBeenCalledTimes(3);
+      const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+      expectNoForcedChoice(bodies);
+      // Der Retry (bodies[2]) setzt DIREKT auf der Nudge-Konversation
+      // (bodies[1].messages, inkl. Systemnachricht) auf – NICHT auf lastConvo
+      // (ohne Nudge).
+      expect(bodies[2].messages.slice(0, bodies[1].messages.length)).toEqual(bodies[1].messages);
+      expect(bodies[2].messages[bodies[1].messages.length]).toEqual({
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "", signature: "sig" },
+          toolUse({ reply: "Erste.", ops: [] }, "tu_1"),
+        ],
+      });
+      expect(bodies[2].messages[bodies[2].messages.length - 1].role).toBe("user");
+      expectStablePrefix(bodies);
+    });
+
+    // Review-Fix (Runde "Nachbesserung 2", 🟡, DECISIONS #117 – Testlücke,
+    // KEIN Produktivcode-Fehler): der Test direkt oben deckt "sentConvo =
+    // r.convo" nur für einen Nudge OHNE Fortsetzung ab (dort gilt r.convo
+    // === nudged, die Mutante "sentConvo = nudged" überlebt also unbemerkt).
+    // Dieser Test erzwingt eine ECHTE lookup_wissen-Fortsetzung INNERHALB des
+    // Nudge-Turns (siehe doPost()-Kommentar oben) – NUR dann unterscheiden
+    // sich "r.convo" (nudged + Lookup-Runde) und "nudged" (ohne Lookup-Runde)
+    // überhaupt. Mit der Mutante würde der Retry-Request die Lookup-Runde
+    // (assistant mit lk1 + user-tool_result) verlieren und live einen 400
+    // "Invalid signature in thinking block" auslösen, weil die
+    // thinking-Signatur "s3" der Fortsetzungsantwort an ein Präfix INKLUSIVE
+    // der Lookup-Runde gebunden ist.
+    it("retryWith NACH erfolgreichem Nachfassen (a) MIT Lookup-Fortsetzung: sentConvo/finalConvo enthalten die Lookup-Runde, der Retry-Request setzt GENAU DARAUF auf", async () => {
+      const ctxWithKnow = {
+        ...NB_CTX,
+        knowledge: { activeFiles: [{ name: "handbuch.pdf", text: "## Seite 1\n\nInhalt " + "x".repeat(90000) }], others: [] },
+      };
+      respond({ stop_reason: "end_turn", content: [{ type: "text", text: "nur Prosa ohne Tool" }] }); // 1: Erstversuch ohne Tool
+      respond({ // 2: Nudge-Antwort MIT thinking s2 + lookup_wissen (KEIN update_notebook)
+        id: "msg_nudge", stop_reason: "end_turn",
+        content: [
+          { type: "thinking", thinking: "", signature: "s2" },
+          { type: "tool_use", id: "lk1", name: "lookup_wissen", input: { datei: "handbuch.pdf", suchbegriffe: "Inhalt" } },
+        ],
+      });
+      respond({ // 3: Fortsetzung NACH dem lokalen Lookup – thinking s3 + update_notebook
+        // mit Ops, die im echten Ablauf von verify.js/dem Turn-Guard verworfen
+        // würden (hier NICHT simuliert – nur der Auslöser für den externen
+        // retryWith()-Aufruf unten, callClaude() selbst prüft Op-Semantik nicht).
+        id: "msg_cont", stop_reason: "end_turn",
+        content: [
+          { type: "thinking", thinking: "", signature: "s3" },
+          toolUse({
+            reply: "Zwischenstand.",
+            ops: [{ type: "replace_section", heading: "## Unbekannt", content: "geändert" }],
+          }, "tu_2"),
+        ],
+      });
+      const res = await callClaude("key", "x", ctxWithKnow, [], modelId, null, null);
+      expect(fetch).toHaveBeenCalledTimes(3); // KEIN Formatfehler, KEIN zusätzlicher Neustart
+      respond({ id: "msg_retry", stop_reason: "end_turn", content: [toolUse({ reply: "Korrigiert.", ops: [] }, "tu_3")] }); // 4: retryWith-Antwort
+      const res2 = await res.retryWith("VERWORFEN – Abschnitt „## Unbekannt“ existiert nicht");
+      expect(res2).not.toBeNull();
+      expect(res2.reply).toBe("Korrigiert.");
+      expect(fetch).toHaveBeenCalledTimes(4);
+      const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+      expectNoForcedChoice(bodies);
+      expectStablePrefix(bodies);
+      // Kernprüfung (Pflicht-Finding): der Retry-Request (bodies[3]) baut GENAU
+      // auf der TATSÄCHLICH gesendeten Nudge-Konversation auf – Systemnachricht
+      // UND Lookup-Runde (assistant mit lk1 + user-tool_result) UND danach der
+      // thinking-Block "s3" der Fortsetzungsantwort, in exakt dieser Reihenfolge.
+      // Mit "sentConvo = nudged" (Mutante) fehlten die beiden Lookup-Runden-
+      // Nachrichten hier ersatzlos.
+      const msgsBase = bodies[0].messages;
+      expect(bodies[3].messages).toEqual([
+        ...msgsBase,
+        { role: "system", content: FORCE_TOOL_NUDGE },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "", signature: "s2" },
+            { type: "tool_use", id: "lk1", name: "lookup_wissen", input: { datei: "handbuch.pdf", suchbegriffe: "Inhalt" } },
+          ],
+        },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "lk1", content: expect.any(String) }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "", signature: "s3" },
+            toolUse({
+              reply: "Zwischenstand.",
+              ops: [{ type: "replace_section", heading: "## Unbekannt", content: "geändert" }],
+            }, "tu_2"),
+          ],
+        },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "tu_2", is_error: true, content: expect.any(String) }] },
+      ]);
+    });
+
+    it("retryWith: Nudge steht als letztes Element der Folgekonversation, direkt nach der user-tool_result-Nachricht", async () => {
+      respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "Erste.", ops: [] }, "tu_1")] });
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      respond({ stop_reason: "end_turn", content: [{ type: "text", text: "kein Tool-Aufruf im Retry" }] });
+      respond({ id: "msg_3", stop_reason: "end_turn", content: [toolUse({ reply: "Nachgefasst.", ops: [] }, "tu_3")] });
+      const res2 = await res.retryWith("VERWORFEN – Grund");
+      expect(res2).not.toBeNull();
+      expect(res2.reply).toBe("Nachgefasst.");
+      expect(fetch).toHaveBeenCalledTimes(3);
+      const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+      expectNoForcedChoice(bodies);
+      const lastMsg = bodies[2].messages[bodies[2].messages.length - 1];
+      expect(lastMsg).toEqual({ role: "system", content: FORCE_TOOL_NUDGE });
+      expect(bodies[2].messages[bodies[2].messages.length - 2].role).toBe("user");
+      expectStablePrefix(bodies);
+    });
+
+    // Review-Fix (Runde 2 Folgeprüfung, 🟡, DECISIONS #117): doPost() sammelt
+    // im Modus "search" AUCH Text/Quellen der Nudge-Antwort SELBST – die
+    // folgenden fünf Tests belegen die Marker-/Rollback-Gegenmaßnahme dazu
+    // (siehe anthropic.js, Nudge-Zweig (a) und der eingebettete Nachfass-Zweig
+    // (b) in retryWith). Jeder Test wurde gegen die JEWEILS zurückgenommene
+    // Gegenmaßnahme geprüft (Mutationsprobe) und schlägt dort gezielt fehl.
+    it("Nudge sucht SELBST bei freshStart (lastConvo === msgs): Cite-Index zeigt auf die EIGENE Nudge-Quelle, NICHT auf die der verworfenen Erstantwort", async () => {
+      respond({
+        stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://erst.example", title: "Erst" }] },
+          // KEIN Text, KEIN update_notebook -> extractParsed schlägt fehl, lastConvo bleibt msgs (freshStart)
+        ],
+      });
+      respond({
+        id: "msg_nudge", stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://nudge.example", title: "Nudge" }] },
+          toolUse({
+            reply: "Notiert.",
+            ops: [{ type: "append_to_section", heading: "## X", content: '- (cite index="1">NUDGE-Fakt</cite>' }],
+          }, "tu_1"),
+        ],
+      });
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(res.reply).toBe("Notiert.");
+      expect(res.ops[0].content).toBe("- NUDGE-Fakt[0](https://nudge.example)");
+      expect(res.ops[0].content).not.toContain("erst.example");
+    });
+
+    it("Nudge erfolgreich OHNE eigene Websuche (nur Präambel-Text vor dem Tool-Aufruf): Präambel landet NICHT im reply (Parität zu postOnce)", async () => {
+      respond({ stop_reason: "end_turn", content: [{ type: "text", text: "nur Prosa ohne Tool" }] });
+      respond({
+        id: "msg_nudge", stop_reason: "end_turn",
+        content: [
+          { type: "text", text: "Ich rufe das Tool jetzt auf." },
+          toolUse({ reply: "Notiert.", ops: [] }, "tu_1"),
+        ],
+      });
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(res.reply).toBe("Notiert.");
+    });
+
+    it("gescheiterter Nudge NACH echter Recherche im Erstversuch: die eigene (verworfene) Nudge-Prosa erscheint NICHT, die ECHTE Recherche-Prosa des Erstversuchs bleibt erhalten", async () => {
+      respond({
+        stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://erst.example", title: "Erst" }] },
+          { type: "text", text: "ANTWORT-A." },
+          // KEIN update_notebook
+        ],
+      });
+      respond({ stop_reason: "end_turn", content: [{ type: "text", text: "NUDGE-PROSA-B." }] }); // Nudge: erneut kein Tool
+      respond({ id: "msg_neu", stop_reason: "end_turn", content: [toolUse({ reply: "R-kurz.", ops: [] }, "tu_1")] }); // Neustart "von vorn"
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(res.reply).toContain("ANTWORT-A.");
+      expect(res.reply).not.toContain("NUDGE-PROSA-B");
+    });
+
+    it("gescheiterter Nudge mit EIGENER neuer Websuche (Erstversuch OHNE Suche): weder die Nudge-Quelle noch ihr Text tauchen im Ergebnis auf", async () => {
+      respond({ stop_reason: "end_turn", content: [{ type: "text", text: "nur Prosa ohne Tool" }] }); // 1: kein Tool, keine Suche
+      respond({ // 2: Nudge sucht SELBST, endet aber wieder ohne Tool
+        stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://nudge-only.example", title: "N" }] },
+          { type: "text", text: "NUDGE-RECHERCHE-B." },
+        ],
+      });
+      respond({ id: "msg_neu", stop_reason: "end_turn", content: [toolUse({ reply: "R-kurz2.", ops: [] }, "tu_1")] }); // 3: Neustart "von vorn"
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(res.reply).toBe("R-kurz2.");
+      expect(res.sources).toEqual([]);
+    });
+
+    it("retryWith Nachfassen (b) erfolgreich MIT eigener Präambel vor dem Tool-Aufruf: Präambel landet NICHT im retried reply", async () => {
+      respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "Erste.", ops: [] }, "tu_1")] });
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      respond({ stop_reason: "end_turn", content: [{ type: "text", text: "kein Tool-Aufruf im Retry" }] }); // Retry ohne Tool
+      respond({ // eingebettetes Nachfassen (b): Präambel + Tool
+        stop_reason: "end_turn",
+        content: [
+          { type: "text", text: "Okay, hier der Aufruf." },
+          toolUse({ reply: "Korrigiert.", ops: [] }, "tu_3"),
+        ],
+      });
+      const res2 = await res.retryWith("VERWORFEN – Grund");
+      expect(res2).not.toBeNull();
+      expect(res2.reply).toBe("Korrigiert.");
+      expect(fetch).toHaveBeenCalledTimes(3);
+    });
+
+    // Review-Fix (Runde 4, 🟡, DECISIONS #117): die Runde-3-Fixes oben lösten
+    // das Cite-Index-/Inhaltsverlust-Problem NUR für den freshStart-Sonderfall
+    // OHNE Erstversuch-Prosa (Test "Nudge sucht SELBST bei freshStart" oben).
+    // Sucht der Nudge-Turn SELBST, während bereits VOR dem Nudge eine
+    // Antwort verworfen wurde, deren Treffer/Prosa NICHT Teil der
+    // Nudge-Konversation sind (Lookup-Vorlauf, retryWith (b), oder eine
+    // Erstantwort-Prosa bei freshStart), zeigten Cite-Indizes bisher auf die
+    // FALSCHE, verworfene Quelle bzw. verschwand die eigene, tatsächlich
+    // zitierte Nudge-Prosa spurlos. Die folgenden vier Tests decken die im
+    // Review dokumentierten Datenlagen P1/P3/P5/P6 ab, jeder wurde gegen den
+    // VOLLSTÄNDIGEN Revert des Fixes geprüft (alte, pauschale
+    // "textBlocks.length = textMark"-Zeile bzw. der alte freshStart-Splice
+    // wiederhergestellt) und schlug dabei gezielt fehl.
+    // Review-Fix (Runde 5, 🟡, DECISIONS #117 – Testlücke, KEIN Produktivcode-
+    // Fehler): in P1/P3/P5/P6 ist "lastSrcBeforeLast"/"lastTxtBeforeLast"
+    // (bzw. "r.srcBeforeLast"/"r.txtBeforeLast") IMMER 0 – die schmalere
+    // Mutation "srcBeforeLast/txtBeforeLast pauschal durch 0 ersetzt" (statt
+    // des vollständigen Reverts oben) bleibt in DIESEN vier Tests deshalb
+    // UNBEMERKT (sie deckt sich dort zufällig mit dem echten Wert). Die
+    // beiden Tests "B' allgemein (a)/(b)" direkt im Anschluss ergänzen genau
+    // diese Lücke mit einem NICHT-LEEREN Vorlauf (Suchtreffer VOR dem
+    // verworfenen Zwischenschritt, der im Nudge-Kontext sichtbar bleibt) und
+    // schlagen bei dieser schmaleren Mutation gezielt fehl.
+    it("P1 – Nudge sucht SELBST bei freshStart, ERSTVERSUCH hatte bereits eigene (jetzt verworfene) Recherche-Prosa: die verworfene Prosa/Quelle verschwindet SPURLOS, NICHT fehlzugeordnet", async () => {
+      respond({ // Erstversuch: sucht, schreibt zitierte Prosa, KEIN Tool -> wird verworfen
+        stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://erst.example", title: "Erst" }] },
+          { type: "text", text: 'ANTWORT-A (cite index="1">Erst-Fakt</cite>.' },
+        ],
+      });
+      respond({ // Nudge sucht SELBST erneut (eigene, neue Quelle)
+        id: "msg_nudge", stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://nudge.example", title: "Nudge" }] },
+          toolUse({
+            reply: "Notiert.",
+            ops: [{ type: "append_to_section", heading: "## X", content: '- (cite index="1">Nudge-Fakt</cite>' }],
+          }, "tu_1"),
+        ],
+      });
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(res.ops[0].content).toBe("- Nudge-Fakt[0](https://nudge.example)");
+      expect(res.reply).not.toContain("Erst-Fakt");
+      expect(res.reply).not.toContain("ANTWORT-A");
+      // Die verworfene Quelle darf auch NICHT als "konsultierte Quelle" auftauchen
+      expect(res.sources).toEqual([{ url: "https://nudge.example", title: "Nudge" }]);
+      // Review-Fix (Runde "Nachbesserung", blau/optional): bisher prüfte
+      // KEINER der P1/P3/P5/P6-Tests die Präfix-/tool_choice-Eigenschaft mit.
+      const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+      expectStablePrefix(bodies);
+      expectNoForcedChoice(bodies);
+    });
+
+    it("P3 – Nudge sucht SELBST NACH einer Lookup-Runde (lastConvo !== msgs): Cite-Index zeigt auf die EIGENE Nudge-Quelle, NICHT auf die der verworfenen (lookup-nachgelagerten) Antwort", async () => {
+      const ctxWithKnow = {
+        ...NB_CTX,
+        knowledge: { activeFiles: [{ name: "handbuch.pdf", text: "## Seite 1\n\nInhalt " + "x".repeat(90000) }], others: [] },
+      };
+      respond({ // 1: Lookup-Anforderung
+        id: "msg_1", stop_reason: "end_turn",
+        content: [{ type: "tool_use", id: "lk1", name: "lookup_wissen", input: { datei: "handbuch.pdf", suchbegriffe: "Inhalt" } }],
+      });
+      respond({ // 2: NACH dem Lookup – sucht selbst, KEIN Tool -> wird verworfen
+        stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://verworfen.example", title: "V" }] },
+          { type: "text", text: "VERWORFENE-ANTWORT" },
+        ],
+      });
+      respond({ // 3: Nudge sucht SELBST erneut
+        id: "msg_nudge", stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://nudge.example", title: "N" }] },
+          toolUse({
+            reply: "Notiert.",
+            ops: [{ type: "append_to_section", heading: "## X", content: '- (cite index="1">Nudge-Fakt</cite>' }],
+          }, "tu_1"),
+        ],
+      });
+      const res = await callClaude("key", "x", ctxWithKnow, [], modelId, null, null);
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(res.ops[0].content).toBe("- Nudge-Fakt[0](https://nudge.example)");
+      expect(res.ops[0].content).not.toContain("verworfen.example");
+      expect(res.reply).not.toContain("VERWORFENE-ANTWORT");
+      const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+      expectStablePrefix(bodies);
+      expectNoForcedChoice(bodies);
+    });
+
+    it("P5 – retryWith (b): Nudge sucht SELBST, Retry-Antwort davor hatte bereits eigene (jetzt verworfene) Recherche: Cite-Index zeigt auf die Nudge-Quelle, NICHT auf die der Retry-Antwort", async () => {
+      respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "Erste.", ops: [] }, "tu_1")] });
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      respond({ // Retry-Antwort: sucht, schreibt Prosa, KEIN Tool -> wird verworfen
+        stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://retry.example", title: "R" }] },
+          { type: "text", text: "RETRY-PROSA" },
+        ],
+      });
+      respond({ // eingebettetes Nachfassen (b): Nudge sucht SELBST erneut
+        stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://nudgeb.example", title: "NB" }] },
+          toolUse({
+            reply: "Korrigiert.",
+            ops: [{ type: "append_to_section", heading: "## X", content: '- (cite index="1">NB-Fakt</cite>' }],
+          }, "tu_3"),
+        ],
+      });
+      const res2 = await res.retryWith("VERWORFEN – Grund");
+      expect(res2).not.toBeNull();
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(res2.ops[0].content).toBe("- NB-Fakt[0](https://nudgeb.example)");
+      expect(res2.ops[0].content).not.toContain("retry.example");
+      expect(res2.reply).not.toContain("RETRY-PROSA");
+      const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+      expectStablePrefix(bodies);
+      expectNoForcedChoice(bodies);
+    });
+
+    it("P6 – Nudge sucht SELBST und schreibt die eigentliche, zitierte Antwort VOR dem Tool-Aufruf (v7.6-Fall): die recherchierte Prosa bleibt im reply erhalten, KEIN Inhaltsverlust", async () => {
+      respond({ stop_reason: "end_turn", content: [{ type: "text", text: "nur Prosa ohne Tool" }] }); // 1: Erstversuch ohne Suche, ohne Tool
+      respond({ // 2: Nudge sucht SELBST und schreibt die vollständige, zitierte Antwort
+        id: "msg_nudge", stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://quelle.example", title: "Q" }] },
+          { type: "text", text: 'Laut Quelle (cite index="1">liegt der Wert bei 42</cite>, ausführliche Antwort.' },
+          toolUse({ reply: "Notiert.", ops: [] }, "tu_1"),
+        ],
+      });
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(res.reply).toContain("liegt der Wert bei 42");
+      const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+      expectStablePrefix(bodies);
+      expectNoForcedChoice(bodies);
+    });
+
+    // T3-Analogon für (b): dieselbe Inhaltsverlust-Gefahr wie P6, aber im
+    // eingebetteten Nachfassen von retryWith() statt im Hauptpfad (a).
+    it("retryWith (b): Nudge sucht SELBST und schreibt die eigentliche, zitierte Antwort VOR dem Tool-Aufruf – die recherchierte Prosa bleibt im retried reply erhalten", async () => {
+      respond({ id: "msg_1", stop_reason: "end_turn", content: [toolUse({ reply: "Erste.", ops: [] }, "tu_1")] });
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      respond({ stop_reason: "end_turn", content: [{ type: "text", text: "kein Tool-Aufruf im Retry" }] }); // Retry OHNE Suche, ohne Tool
+      respond({ // eingebettetes Nachfassen (b): sucht SELBST, schreibt die zitierte Antwort
+        stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://quelle-b.example", title: "QB" }] },
+          { type: "text", text: 'Laut Quelle (cite index="1">liegt der Wert bei 55</cite>, ausführliche Antwort.' },
+          toolUse({ reply: "Korrigiert.", ops: [] }, "tu_3"),
+        ],
+      });
+      const res2 = await res.retryWith("VERWORFEN – Grund");
+      expect(res2).not.toBeNull();
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(res2.reply).toContain("liegt der Wert bei 55");
+    });
+
+    // Review-Fix (Runde 5, 🟡, DECISIONS #117 – Testlücke): siehe Kommentar
+    // vor P1 oben. Anders als P1/P3/P5/P6 hat hier bereits die VORLAUF-Runde
+    // (VOR der verworfenen Zwischenantwort) selbst gesucht/zitiert – ihr
+    // Treffer bleibt Teil der Nudge-Konversation (das Modell hat ihn im
+    // Kontext gesehen) und MUSS deshalb bei Index 1 stehen bleiben, während
+    // NUR der von der verworfenen Zwischenantwort beigetragene Treffer
+    // verschwindet.
+    it("B' allgemein (a): ein bereits VOR der verworfenen Zwischenantwort gesehener Suchtreffer bleibt im Index-Raum des Nudge-Turns stehen (lastSrcBeforeLast > 0)", async () => {
+      const ctxWithKnow = {
+        ...NB_CTX,
+        knowledge: { activeFiles: [{ name: "handbuch.pdf", text: "## Seite 1\n\nInhalt " + "x".repeat(90000) }], others: [] },
+      };
+      respond({ // 1: Vorlauf – sucht + zitierte Prosa + lookup_wissen (Fortsetzung)
+        id: "msg_1", stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://vorlauf.example", title: "V" }] },
+          { type: "text", text: 'VORLAUF (cite index="1">V-Fakt</cite>.' },
+          { type: "tool_use", id: "lk1", name: "lookup_wissen", input: { datei: "handbuch.pdf", suchbegriffe: "Inhalt" } },
+        ],
+      });
+      respond({ // 2: NACH dem Lookup – sucht erneut, KEIN Tool -> wird verworfen
+        stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://verworfen.example", title: "X" }] },
+          { type: "text", text: "VERWORFEN-PROSA" },
+        ],
+      });
+      respond({ // 3: Nudge sucht SELBST erneut
+        id: "msg_nudge", stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://nudge.example", title: "N" }] },
+          toolUse({
+            reply: "Notiert.",
+            ops: [
+              { type: "append_to_section", heading: "## Vorlauf", content: '- (cite index="1">V-Fakt</cite>' },
+              { type: "append_to_section", heading: "## Nudge", content: '- (cite index="2">Nudge-Fakt</cite>' },
+            ],
+          }, "tu_1"),
+        ],
+      });
+      const res = await callClaude("key", "x", ctxWithKnow, [], modelId, null, null);
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(res.ops[0].content).toBe("- V-Fakt[0](https://vorlauf.example)");
+      expect(res.ops[1].content).toBe("- Nudge-Fakt[0](https://nudge.example)");
+      expect(res.ops[0].content).not.toContain("verworfen.example");
+      expect(res.reply).toContain("VORLAUF");
+      expect(res.reply).not.toContain("VERWORFEN-PROSA");
+      const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+      expectStablePrefix(bodies);
+      expectNoForcedChoice(bodies);
+    });
+
+    // (b)-Analogon: die ERSTE (erfolgreiche) Antwort hat bereits gesucht und
+    // zitiert (kein Nudge nötig) – ihr Treffer bleibt Teil der Historie, die
+    // Retry-Antwort sucht ohne Tool (verworfen), das eingebettete Nachfassen
+    // (b) sucht erneut selbst. r.srcBeforeLast/r.txtBeforeLast sind hier
+    // NICHT 0.
+    it("B' allgemein (b): ein bereits VOR dem Retry gesehener Suchtreffer (aus der ERSTEN, erfolgreichen Antwort) bleibt im Index-Raum des eingebetteten Nachfassens stehen (r.srcBeforeLast > 0)", async () => {
+      respond({ // Erstantwort: sucht + ruft update_notebook direkt (kein Nudge nötig)
+        id: "msg_1", stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://s0-erst.example", title: "S0" }] },
+          toolUse({ reply: "Erste.", ops: [] }, "tu_1"),
+        ],
+      });
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      respond({ // Retry-Antwort: sucht, KEIN Tool -> wird verworfen
+        stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://r-verworfen.example", title: "R" }] },
+          { type: "text", text: "R-VERWORFEN-PROSA" },
+        ],
+      });
+      respond({ // eingebettetes Nachfassen (b): sucht SELBST erneut
+        stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://n-nudge.example", title: "N" }] },
+          toolUse({
+            reply: "Korrigiert.",
+            ops: [
+              { type: "append_to_section", heading: "## S0", content: '- (cite index="1">S0-Fakt</cite>' },
+              { type: "append_to_section", heading: "## Nudge", content: '- (cite index="2">N-Fakt</cite>' },
+            ],
+          }, "tu_3"),
+        ],
+      });
+      const res2 = await res.retryWith("VERWORFEN – Grund");
+      expect(res2).not.toBeNull();
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(res2.ops[0].content).toBe("- S0-Fakt[0](https://s0-erst.example)");
+      expect(res2.ops[1].content).toBe("- N-Fakt[0](https://n-nudge.example)");
+      expect(res2.ops[0].content).not.toContain("r-verworfen.example");
+      expect(res2.ops[1].content).not.toContain("r-verworfen.example");
+      const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+      expectStablePrefix(bodies);
+      expectNoForcedChoice(bodies);
+    });
+
+    // Review-Fix (Runde "Nachbesserung", blau/optional): Mutationsprobe
+    // zeigte, dass "r.txtBeforeLast" in JEDEM bisherigen (b)-Test oben IMMER
+    // 0 war – textBlocks wird in retryWith() UNMITTELBAR vor "r = await
+    // doPost(finalMode, convo)" auf [] zurückgesetzt (Zeile "textBlocks.length
+    // = 0;"), und die Retry-Antwort war in allen bisherigen Tests bereits der
+    // ERSTE postOnce() ihres doPost()-Aufrufs. Eine Mutation, die
+    // "r.txtBeforeLast" pauschal durch 0 ersetzt, blieb dadurch unbemerkt
+    // (deckt sich zufällig mit dem echten Wert). Diese Datenlage hat einen
+    // NICHT-LEEREN Vorlauf INNERHALB desselben Retry-doPost()-Aufrufs: die
+    // erste Retry-Teilantwort sucht, schreibt zitierte Prosa UND ruft
+    // lookup_wissen auf (wird intern fortgesetzt, bleibt Teil der
+    // r.convo-Historie) – ERST DANACH kommt die verworfene Zwischenantwort,
+    // dann das eingebettete Nachfassen (b) mit eigener neuer Suche.
+    it("B' allgemein (b), Prosa: Retry-Vorlauf mit Suche+Prosa+Lookup bleibt erhalten, nur die verworfene Retry-Prosa fliegt raus (r.txtBeforeLast > 0)", async () => {
+      const ctxWithKnow = {
+        ...NB_CTX,
+        knowledge: { activeFiles: [{ name: "handbuch.pdf", text: "## Seite 1\n\nInhalt " + "x".repeat(90000) }], others: [] },
+      };
+      respond({ // Erstantwort: sucht + ruft update_notebook direkt (kein Nudge nötig)
+        id: "msg_1", stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://s0.example", title: "S0" }] },
+          toolUse({ reply: "Erste.", ops: [] }, "tu_1"),
+        ],
+      });
+      const res = await callClaude("key", "x", ctxWithKnow, [], modelId, null, null);
+      respond({ // Retry-Vorlauf: sucht, schreibt zitierte Prosa, UND ruft lookup_wissen -> intern fortgesetzt
+        id: "msg_r1", stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://rseg.example", title: "RSEG" }] },
+          { type: "text", text: "RSEG-PROSA" },
+          { type: "tool_use", id: "lk1", name: "lookup_wissen", input: { datei: "handbuch.pdf", suchbegriffe: "Inhalt" } },
+        ],
+      });
+      respond({ // NACH dem Lookup: sucht erneut, KEIN Tool -> wird verworfen
+        stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://rverw.example", title: "RV" }] },
+          { type: "text", text: "R-VERWORFEN" },
+        ],
+      });
+      respond({ // eingebettetes Nachfassen (b): sucht SELBST erneut
+        stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://nb.example", title: "NB" }] },
+          toolUse({
+            reply: "Korrigiert.",
+            ops: [{ type: "append_to_section", heading: "## X", content: '- (cite index="2">B</cite> (cite index="3">C</cite>' }],
+          }, "tu_3"),
+        ],
+      });
+      const res2 = await res.retryWith("VERWORFEN – Grund");
+      expect(res2).not.toBeNull();
+      expect(fetch).toHaveBeenCalledTimes(4);
+      expect(res2.reply).toContain("RSEG-PROSA");
+      expect(res2.reply).not.toContain("R-VERWORFEN");
+      expect(res2.ops[0].content).toBe("- B[0](https://rseg.example) C[0](https://nb.example)");
+      const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+      expectStablePrefix(bodies);
+      expectNoForcedChoice(bodies);
+    });
+
+    // Review-Fix (Runde 5, 🟡, DECISIONS #117): retryWith() nach einem
+    // ERFOLGREICHEN Nudge (a) OHNE eigene Nudge-Suche baut "finalConvo" aus
+    // "sentConvo" (der Nudge-Konversation, siehe finalMode/finalConvo oben) –
+    // die verworfene ERSTANTWORT ist darin NIE enthalten (dieselbe Lücke wie
+    // beim freshStart-Cite-Fix oben), ihre Suchtreffer bleiben aber
+    // ABSICHTLICH in "sources" stehen, weil die BEIBEHALTENE Erstantwort-
+    // Prosa sie zitiert (v7.6-Verhalten). Ruft ein SPÄTERER retryWith()
+    // (externe Ablehnung des angewendeten Ergebnisses) seinerseits eine NEUE
+    // Suche auf, sah die alte "sources"-Liste bisher noch die Treffer der
+    // Erstantwort VOR den neuen Retry-Treffern – der Retry-Request selbst
+    // enthält diese Treffer aber gar nicht mehr (nicht Teil von
+    // "withAssistant"), das Modell zählt seine eigenen Indizes deshalb NUR
+    // über seine eigenen neuen Treffer ab 1 -> Index 1 zeigte auf die
+    // FALSCHE (verworfene) Erstantwort-Quelle statt auf die neue.
+    it("retryWith NACH erfolgreichem Nudge (a) OHNE eigene Nudge-Suche: eine NEUE Suche im Retry zitiert die RICHTIGE (neue) Quelle, nicht die verworfene Erstantwort-Quelle", async () => {
+      respond({ // Erstversuch: sucht, schreibt zitierte Prosa, KEIN Tool -> wird verworfen (freshStart)
+        stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://erst.example", title: "Erst" }] },
+          { type: "text", text: 'ANTWORT-A (cite index="1">Erst-Fakt</cite>.' },
+        ],
+      });
+      respond({ // Nudge: ruft update_notebook DIREKT, OHNE eigene Suche
+        id: "msg_nudge", stop_reason: "end_turn",
+        content: [toolUse({ reply: "Notiert.", ops: [] }, "tu_1")],
+      });
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      expect(res.reply).toContain("ANTWORT-A");
+      respond({ // Retry-Antwort: sucht EINE NEUE Quelle und ruft update_notebook direkt
+        stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://retry.example", title: "Retry" }] },
+          toolUse({
+            reply: "Notiert.",
+            ops: [{ type: "append_to_section", heading: "## X", content: '- (cite index="1">Retry-Fakt</cite>' }],
+          }, "tu_2"),
+        ],
+      });
+      const res2 = await res.retryWith("VERWORFEN – Grund");
+      expect(res2).not.toBeNull();
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(res2.ops[0].content).toBe("- Retry-Fakt[0](https://retry.example)");
+      expect(res2.ops[0].content).not.toContain("erst.example");
+      expect(res2.sources).toEqual([{ url: "https://retry.example", title: "Retry" }]);
+      const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+      expectStablePrefix(bodies);
+      expectNoForcedChoice(bodies);
+    });
+
+    // Dieselbe Lücke, aber die Retry-Antwort selbst liefert KEIN Tool und
+    // das EINGEBETTETE Nachfassen (b) sucht SELBST erneut – deckt ab, dass
+    // der Reset auch für den verschachtelten Nudge-Pfad innerhalb desselben
+    // retryWith()-Aufrufs wirkt (nicht nur für eine direkt erfolgreiche
+    // Retry-Antwort wie im Test oben).
+    it("retryWith NACH erfolgreichem Nudge (a) OHNE eigene Nudge-Suche: eingebettetes Nachfassen (b) sucht selbst und zitiert die RICHTIGE (eigene) Quelle, nicht die verworfene Erstantwort-Quelle", async () => {
+      respond({ // Erstversuch: sucht, schreibt zitierte Prosa, KEIN Tool -> wird verworfen (freshStart)
+        stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://erst.example", title: "Erst" }] },
+          { type: "text", text: 'ANTWORT-A (cite index="1">Erst-Fakt</cite>.' },
+        ],
+      });
+      respond({ // Nudge: ruft update_notebook DIREKT, OHNE eigene Suche
+        id: "msg_nudge", stop_reason: "end_turn",
+        content: [toolUse({ reply: "Notiert.", ops: [] }, "tu_1")],
+      });
+      const res = await callClaude("key", "x", NB_CTX, [], modelId, null, null);
+      expect(res.reply).toContain("ANTWORT-A");
+      respond({ stop_reason: "end_turn", content: [{ type: "text", text: "kein Tool-Aufruf im Retry" }] }); // Retry OHNE Suche, ohne Tool
+      respond({ // eingebettetes Nachfassen (b): sucht SELBST erneut
+        stop_reason: "end_turn",
+        content: [
+          { type: "server_tool_use", name: "web_search" },
+          { type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://nudgeb.example", title: "NB" }] },
+          toolUse({
+            reply: "Korrigiert.",
+            ops: [{ type: "append_to_section", heading: "## X", content: '- (cite index="1">NB-Fakt</cite>' }],
+          }, "tu_3"),
+        ],
+      });
+      const res2 = await res.retryWith("VERWORFEN – Grund");
+      expect(res2).not.toBeNull();
+      // 2 Requests für den Erstversuch (Erstantwort + Nudge (a)) + 2 Requests
+      // für retryWith (Retry ohne Tool + eingebettetes Nachfassen (b)) = 4.
+      expect(fetch).toHaveBeenCalledTimes(4);
+      expect(res2.ops[0].content).toBe("- NB-Fakt[0](https://nudgeb.example)");
+      expect(res2.ops[0].content).not.toContain("erst.example");
+      const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+      expectStablePrefix(bodies);
+      expectNoForcedChoice(bodies);
+    });
+  });
+
+  // Gegenprobe: Sonnet 5 (forcedToolChoice) bleibt Byte für Byte unverändert
+  // – dieselben Erst-Antworten wie oben, aber tool_choice IST {type:"tool"}
+  // und die "von vorn"-Fallbacks laufen wie bisher (kein Nudge).
+  it("Gegenprobe Sonnet 5: fehlender Tool-Aufruf OHNE Lookup-Runde -> weiterhin 'von vorn ohne Recherche' (KEIN Nudge, KEIN tool_choice 'auto' im Nachfass-Request)", async () => {
+    respond({ stop_reason: "end_turn", content: [{ type: "text", text: "nur Prosa ohne Tool" }] });
+    respond({ id: "msg_2", stop_reason: "end_turn", content: [toolUse({ reply: "Jetzt strukturiert.", ops: [] }, "tu_1")] });
+    const res = await callClaude("key", "x", NB_CTX, [], "claude-sonnet-5", null, null);
+    expect(res.reply).toBe("Jetzt strukturiert.");
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
+    expect(bodies[1].tool_choice).toEqual({ type: "tool", name: "update_notebook" });
+    expect(bodies[1].messages.some((m) => m.role === "system")).toBe(false);
   });
 });

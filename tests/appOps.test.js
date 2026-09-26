@@ -7,7 +7,7 @@ import { describe, it, expect } from "vitest";
 import {
   splitOps, serializeState, buildOpsWarning, buildOpsInfo, parseConnectPrefill, findSensitiveUrlParams,
   resolveConnectDialogInitial, overrideButtonLabel, overrideKurzform, buildOverrideWarning, buildRetryInfo,
-  buildRestoreInfo, fmtStamp,
+  buildRestoreInfo, fmtStamp, buildSendErrorText,
 } from "../src/App.jsx";
 import { applyOpsDetailed } from "../src/lib/ops.js";
 import { evaluateTurn, buildRejectWarning, overrideOpsFor } from "../src/lib/turn.js";
@@ -1028,5 +1028,58 @@ describe("buildRestoreInfo: Wortlaut der restore()-Info-Pille (v7.55.1, E2E-Fall
     expect(a).toContain("Buch A");
     expect(a).toContain(fmtStamp(ts1));
     expect(c).toContain(fmtStamp(ts2));
+  });
+});
+
+// v7.57 Review-Fix (Runde 2, gelb, DECISIONS #117): buildSendErrorText() ist
+// der reine Wortlaut-Builder für die Fehler-Pille eines gescheiterten Chat-
+// Turns (App.jsx#send, catch-Zweig). Live-Symptom, das der Test hier fixiert:
+// eine refusal (anthropic.js#callClaude wirft mit e.refusal===true und einer
+// Nachricht OHNE Schlusspunkt, siehe tests/anthropic.test.js) erzeugte mit
+// dem bisherigen festen Anhängetext einen doppelten Satzpunkt UND den
+// irreführenden Rat "sende sie einfach noch einmal" (laut API-Fakten hilft
+// ein erneuter Versand bei einer Sicherheits-Ablehnung NICHT).
+describe("buildSendErrorText: Wortlaut der Fehler-Pille nach einem gescheiterten Chat-Turn (v7.57 Review-Fix Runde 2)", () => {
+  it("normaler Fehler (kein refusal): bisheriger Wortlaut BYTE FÜR BYTE unverändert, genau EIN Punkt zwischen Meldung und Hinweis", () => {
+    const e = new Error("Anthropic-API-Fehler 500");
+    expect(buildSendErrorText(e)).toBe(
+      "Anfrage fehlgeschlagen: Anthropic-API-Fehler 500. Deine Nachricht steht wieder im Eingabefeld – sende sie einfach noch einmal."
+    );
+  });
+
+  it("refusal-Fehler (e.refusal===true): KEIN doppelter Punkt, KEIN 'sende sie einfach noch einmal', KEIN wiederholter Modell-Rat (steht bereits in e.message)", () => {
+    const e = new Error(
+      "Das Modell hat die Anfrage über seinen Sicherheitsfilter abgelehnt (Kategorie: bio) – es wurde nichts " +
+      "gespeichert. Bitte anders formulieren oder ein anderes Modell wählen (z. B. Sonnet 5)"
+    );
+    e.refusal = true;
+    const text = buildSendErrorText(e);
+    expect(text).toBe(
+      "Anfrage fehlgeschlagen: Das Modell hat die Anfrage über seinen Sicherheitsfilter abgelehnt " +
+      "(Kategorie: bio) – es wurde nichts gespeichert. Bitte anders formulieren oder ein anderes Modell " +
+      "wählen (z. B. Sonnet 5). Deine Nachricht steht wieder im Eingabefeld."
+    );
+    expect(text).not.toContain("..");
+    expect(text).not.toContain("sende sie einfach noch einmal");
+    // Review-Fix (Runde 3, blau/optional): der Rat "ein anderes Modell
+    // wählen" darf nach dem Fix NUR EINMAL vorkommen (aus refusalMessage()),
+    // nicht ein zweites Mal aus dem hier angehängten Hinweis.
+    expect(text.match(/ein anderes Modell wählen/g)).toHaveLength(1);
+  });
+
+  it("e.refusal ist falsy (undefined/false): bisheriger Hinweis, wie ein normaler Fehler behandelt", () => {
+    const e1 = new Error("x");
+    const e2 = new Error("y");
+    e2.refusal = false;
+    expect(buildSendErrorText(e1)).toContain("sende sie einfach noch einmal.");
+    expect(buildSendErrorText(e2)).toContain("sende sie einfach noch einmal.");
+  });
+
+  it("fehlendes/leeres e.message -> 'unbekannter Fehler', Funktion wirft nie (auch bei null/undefined/Nicht-Error)", () => {
+    expect(buildSendErrorText({})).toContain("unbekannter Fehler");
+    expect(buildSendErrorText({ message: "" })).toContain("unbekannter Fehler");
+    expect(() => buildSendErrorText(null)).not.toThrow();
+    expect(() => buildSendErrorText(undefined)).not.toThrow();
+    expect(buildSendErrorText(null)).toContain("unbekannter Fehler");
   });
 });
