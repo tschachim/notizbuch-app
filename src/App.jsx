@@ -4113,7 +4113,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.57.1</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.57.2</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -4536,7 +4536,13 @@ export default function NotizbuchApp() {
                   // (maximum-scale=1 im viewport-Meta-Tag, siehe
                   // src/main.jsx) abgedeckt, statt einzelne Eingabefelder
                   // künstlich groß zu halten (DECISIONS #117).
-                  className={"w-full resize-none rounded-xl border border-slate-300 bg-white px-3 py-2 pr-9 text-sm text-slate-800 " +
+                  // v7.57.2 (Nutzerbefund "Eingabefeld sitzt zu weit oben", DECISIONS
+                  // #132): "block" – eine textarea ist per Browser-Default
+                  // inline-block und sitzt auf der Text-Grundlinie ihres Wrappers;
+                  // die Unterlängen-Lücke (6 px) machte den Wrapper höher als das
+                  // Feld, und die per items-end ausgerichteten Buttons standen
+                  // dadurch 6 px unter der textarea-Unterkante.
+                  className={"block w-full resize-none rounded-xl border border-slate-300 bg-white px-3 py-2 pr-9 text-sm text-slate-800 " +
                     // rows=10 wäre auf schmalen Bildschirmen zu hoch (sprengt
                     // den sichtbaren Bereich) – max-h deckelt dort auf ca. 7
                     // Zeilen (text-sm-Zeilenhöhe); ab sm passen die vollen 10

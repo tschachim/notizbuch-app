@@ -402,6 +402,22 @@ gestarteten App, siehe `apple-mobile-web-app-capable` in `index.html`) –
 nur den automatischen Fokus-Zoom unterdrücken, echte Nutzergesten bleiben
 auf iOS ab Version 10 unberührt.
 
+**C8c [OFFEN] Chat-Eingabefeld bündig mit Buttons (v7.57.2, Nutzerbefund
+„Eingabefeld sitzt zu weit oben“, DECISIONS #132).** Prüft NUR die Optik, kein
+API-Aufruf nötig. Chat-Ansicht öffnen, dann per DevTools-Konsole:
+```
+const ta = document.querySelector('textarea[placeholder^="Notiz eintippen"]');
+const btn = document.querySelector('button[title="Senden"]');
+Math.abs(ta.getBoundingClientRect().bottom - btn.getBoundingClientRect().bottom) < 1
+```
+Erwartet: `true` – Differenz der Unterkanten unter 1 px (Subpixel-Rundung bei
+DPR ≠ 1 erlaubt; vorher lag die textarea 6 px höher als die Buttons).
+Zusätzlich Sichtprüfung im Mobil-Viewport (375×812) UND im Desktop-Fenster:
+Textfeld, Archiv- (title „Chat archivieren …“), Bild-anhängen- (title „Bild
+oder Datei anhängen“) und Senden-Button schließen unten auf einer Linie ab,
+kein Leerraum unter dem Textfeld. Auch mit
+aufgeklapptem Eingabefeld (Vergrößern-Button im Feld) prüfen.
+
 **C9a [VERBUNDEN][API] Formel im Chat (reine Frage, kein Speicherauftrag).** Im
 QA-Notizbuch per Chat: „Erkläre kurz den Satz des Pythagoras mit Formel –
 nur erklären, nichts speichern.“ (genau 1 API-Aufruf). Erwartet: Die

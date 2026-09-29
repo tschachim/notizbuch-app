@@ -17538,3 +17538,29 @@ aus `referenz-app.jsx` übernommen.
        #131-Ergänzungen zu Strukturzeilen und zum Live-Fall-Test). Die
        bewusst nicht behobenen Punkte oben (MAX_FACTS-Deckel ohne Hinweis,
        `raw`-Fallback in `buildFeedbackFacts()`) bleiben offen.
+
+132. **v7.57.2, Nutzerbefund „Das Chat-Eingabefeld sitzt zu weit oben“
+     (Windows und Android): textarea bündig mit den Buttons.**
+     - **Root Cause** (in der Live-App per DevTools verifiziert): Die
+       `<textarea>` liegt in `<div className="relative flex-1 min-w-0">`
+       und ist per Browser-Default `display: inline-block`. Sie sitzt damit
+       auf der Text-Grundlinie des Wrappers; darunter bleibt die
+       Unterlängen-Lücke (6 px), der Wrapper wird 64 statt 58 px hoch. Die
+       Zeile ist `flex items-end`, die Buttons richten sich also an der
+       Wrapper-Unterkante (712 px) aus, die textarea endete bei 706 px.
+     - **Fix:** Klasse `block` an der textarea (`src/App.jsx`, Eingabe-
+       Bereich). Gemessen: Wrapper = textarea = 58 px, textarea-Unterkante
+       = Button-Unterkante = 712 px. Keine weiteren Layout-Änderungen.
+     - **Warum `block`** und nicht `align-bottom` an der textarea oder
+       `flex` am Wrapper: `block` beseitigt die Ursache (Inline-Formatierung
+       samt Zeilenbox) minimal und browserunabhängig, wirkt auf Desktop,
+       Android und iOS gleich und ändert die Höhe der textarea selbst nicht
+       (`rows`, `max-h`, Padding bleiben). `align-bottom` würde nur die
+       Grundlinien-Ausrichtung umgehen, `flex` am Wrapper würde die
+       absolut positionierte Aufklapp-Schaltfläche und `w-full` des Felds
+       unnötig neu ins Spiel bringen.
+     - **Tests:** reine CSS-Klasse, keine Logik in `src/lib` – kein
+       Unit-Test möglich/sinnvoll; abgedeckt durch den manuellen
+       Testfall C8c in `docs/TESTFAELLE.md`.
+     - **Restrisiko:** keines bekannt; die Optik wird erst per E2E (C8c)
+       in der deployten App bestätigt.
