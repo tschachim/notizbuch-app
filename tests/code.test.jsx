@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   FENCE_OPEN_RE, FENCE_CLOSE_RE, matchFenceBlock, splitFenceSegments,
-  CodeBlockView, expandFencedCodeInNodes, computeFenceLineMask,
+  CodeBlockView, expandFencedCodeInNodes, computeFenceLineMask, stripFenceIndent,
 } from "../src/lib/code.jsx";
 import { renderMathText, expandMathInNodes } from "../src/lib/math.jsx";
 
@@ -54,27 +54,27 @@ describe("FENCE_OPEN_RE / FENCE_CLOSE_RE", () => {
 describe("matchFenceBlock", () => {
   it("findet einen einfachen Block mit Sprach-Label", () => {
     const r = matchFenceBlock(["```js", "const x = 1;", "```"], 0);
-    expect(r).toEqual({ lang: "js", code: "const x = 1;", endIdx: 2 });
+    expect(r).toEqual({ lang: "js", code: "const x = 1;", endIdx: 2, indent: 0 });
   });
 
   it("findet einen Block ohne Sprach-Label", () => {
     const r = matchFenceBlock(["```", "plain", "```"], 0);
-    expect(r).toEqual({ lang: "", code: "plain", endIdx: 2 });
+    expect(r).toEqual({ lang: "", code: "plain", endIdx: 2, indent: 0 });
   });
 
   it("Info-String mit Leerzeichen: nur das ERSTE Wort wird als Sprach-Label übernommen (wie markdown-it, Re-Review-Fix W1/P2)", () => {
     const r = matchFenceBlock(["```python title=x", "code", "```"], 0);
-    expect(r).toEqual({ lang: "python", code: "code", endIdx: 2 });
+    expect(r).toEqual({ lang: "python", code: "code", endIdx: 2, indent: 0 });
   });
 
   it("sammelt mehrzeiligen Inhalt inkl. Leerzeilen", () => {
     const r = matchFenceBlock(["```py", "a", "", "b", "```"], 0);
-    expect(r).toEqual({ lang: "py", code: "a\n\nb", endIdx: 4 });
+    expect(r).toEqual({ lang: "py", code: "a\n\nb", endIdx: 4, indent: 0 });
   });
 
   it("ein leerer Codeblock (Zaun direkt gefolgt vom Schluss-Zaun) liefert leeren String", () => {
     const r = matchFenceBlock(["```", "```"], 0);
-    expect(r).toEqual({ lang: "", code: "", endIdx: 1 });
+    expect(r).toEqual({ lang: "", code: "", endIdx: 1, indent: 0 });
   });
 
   it("unterminiert (kein schließender Zaun) liefert null statt den Rest zu verschlucken", () => {
@@ -87,7 +87,7 @@ describe("matchFenceBlock", () => {
 
   it("Leerzeilen/Überschriften INNERHALB des Blocks brechen die Suche NICHT ab (anders als matchDisplayBlock)", () => {
     const r = matchFenceBlock(["```bash", "## Kommentar-artige Zeile", "", "echo hi", "```"], 0);
-    expect(r).toEqual({ lang: "bash", code: "## Kommentar-artige Zeile\n\necho hi", endIdx: 4 });
+    expect(r).toEqual({ lang: "bash", code: "## Kommentar-artige Zeile\n\necho hi", endIdx: 4, indent: 0 });
   });
 
   it("startIdx muss selbst FENCE_OPEN_RE erfüllen, sonst null", () => {
@@ -97,7 +97,7 @@ describe("matchFenceBlock", () => {
   describe("Re-Review-Fix K1: Schluss-Zaun muss MINDESTENS so lang sein wie der öffnende (CommonMark-Regel)", () => {
     it("ein 4-Backtick-Öffnungszaun wird NICHT von einer 3-Backtick-Zeile geschlossen – die zählt als Inhalt", () => {
       const r = matchFenceBlock(["````js", "Beispiel:", "```", "inner", "```", "````"], 0);
-      expect(r).toEqual({ lang: "js", code: "Beispiel:\n```\ninner\n```", endIdx: 5 });
+      expect(r).toEqual({ lang: "js", code: "Beispiel:\n```\ninner\n```", endIdx: 5, indent: 0 });
     });
 
     it("ein 4-Backtick-Öffnungszaun OHNE passenden 4+-Backtick-Schluss bis Dokumentende bleibt unterminiert", () => {
@@ -107,13 +107,66 @@ describe("matchFenceBlock", () => {
 
     it("ein LÄNGERER Schluss-Zaun als der öffnende ist zulässig", () => {
       const r = matchFenceBlock(["```js", "code", "`````"], 0);
-      expect(r).toEqual({ lang: "js", code: "code", endIdx: 2 });
+      expect(r).toEqual({ lang: "js", code: "code", endIdx: 2, indent: 0 });
     });
 
     it("der ERSTE ausreichend lange Schluss-Zaun gewinnt (kein Weitersuchen über ihn hinaus)", () => {
       const r = matchFenceBlock(["```js", "a", "```", "b", "````"], 0);
-      expect(r).toEqual({ lang: "js", code: "a", endIdx: 2 });
+      expect(r).toEqual({ lang: "js", code: "a", endIdx: 2, indent: 0 });
     });
+  });
+
+  // v7.57.3 (DECISIONS #133): indent = führende Leerzeichen der ÖFFNENDEN
+  // Zaun-Zeile; code bleibt dabei unverändert (Einrückung wird erst in der
+  // Ansicht über stripFenceIndent abgezogen).
+  describe("indent (v7.57.3)", () => {
+    it("liefert 0, 2 und 3 je nach Einrückung des öffnenden Zauns", () => {
+      expect(matchFenceBlock(["```", "x", "```"], 0).indent).toBe(0);
+      expect(matchFenceBlock(["  ```", "  x", "  ```"], 0).indent).toBe(2);
+      expect(matchFenceBlock(["   ```js", "x", "```"], 0).indent).toBe(3);
+    });
+
+    it("nur die ÖFFNENDE Zeile zählt (Schluss-Zaun anders eingerückt), code bleibt unverändert", () => {
+      const r = matchFenceBlock(["  ```", "  qa code zeile", "```"], 0);
+      expect(r).toEqual({ lang: "", code: "  qa code zeile", endIdx: 2, indent: 2 });
+    });
+
+    it("startIdx > 0: indent stammt aus lines[startIdx], nicht aus Zeile 0", () => {
+      const r = matchFenceBlock(["   Text", "  ```", "x", "  ```"], 1);
+      expect(r.indent).toBe(2);
+    });
+
+    it("vier Leerzeichen sind kein Zaun mehr (CommonMark-Grenze): null statt indent 4", () => {
+      expect(matchFenceBlock(["    ```", "x", "    ```"], 0)).toBeNull();
+    });
+  });
+});
+
+describe("stripFenceIndent (v7.57.3)", () => {
+  it("indent 0 (und undefined) liefert den Code identisch zurück", () => {
+    const code = "  a\n\n    b";
+    expect(stripFenceIndent(code, 0)).toBe(code);
+    expect(stripFenceIndent(code, undefined)).toBe(code);
+  });
+
+  it("entfernt genau indent führende Leerzeichen je Zeile", () => {
+    expect(stripFenceIndent("  a\n  b", 2)).toBe("a\nb");
+  });
+
+  it("Zeile mit WENIGER Leerzeichen als indent verliert nur ihre vorhandenen", () => {
+    expect(stripFenceIndent(" a\nb", 3)).toBe("a\nb");
+  });
+
+  it("Leerzeilen bleiben leer, Zeilenanzahl bleibt erhalten", () => {
+    expect(stripFenceIndent("  a\n\n  b\n", 2)).toBe("a\n\nb\n");
+  });
+
+  it("Zeile mit MEHR Leerzeichen: überschüssige gehören zum Code und bleiben", () => {
+    expect(stripFenceIndent("  a\n      b", 2)).toBe("a\n    b");
+  });
+
+  it("entfernt nur Leerzeichen am Zeilenanfang, keine inneren und keine Tabs", () => {
+    expect(stripFenceIndent("  a  b\n\tc", 2)).toBe("a  b\n\tc");
   });
 });
 
@@ -166,6 +219,17 @@ describe("splitFenceSegments", () => {
     const segs = splitFenceSegments(text);
     expect(segs).toEqual([
       { code: true, lang: "js", text: "Beispiel:\n```\ninner\n```", raw: text },
+    ]);
+    expect(reconstruct(text)).toBe(text);
+  });
+
+  it("eingerückter Zaun (v7.57.3): raw bleibt byte-gleich inkl. Einrückung, text = Inhalt unverändert", () => {
+    const text = "- QA-Punkt\n\n  ```\n  qa code zeile\n  ```\nDanach";
+    const segs = splitFenceSegments(text);
+    expect(segs).toEqual([
+      { code: false, raw: "- QA-Punkt\n" },
+      { code: true, lang: "", text: "  qa code zeile", raw: "  ```\n  qa code zeile\n  ```" },
+      { code: false, raw: "Danach" },
     ]);
     expect(reconstruct(text)).toBe(text);
   });
@@ -243,6 +307,15 @@ describe("CodeBlockView", () => {
   it("keine Zäune (```) sind im gerenderten Output sichtbar", () => {
     const out = html(<CodeBlockView lang="js" code="const x = 1;" />);
     expect(out).not.toContain("```");
+  });
+});
+
+describe("CodeBlockView: style-Prop (v7.57.3)", () => {
+  it("style landet auf dem ÄUSSEREN div (kein Wrapper), ohne style kein style-Attribut", () => {
+    const withStyle = html(<CodeBlockView code="x" style={{ marginLeft: "1.5rem" }} />);
+    expect(withStyle).toMatch(/^<div style="margin-left:1.5rem" class="my-2 /);
+    expect((withStyle.match(/<div/g) || []).length).toBe(1);
+    expect(html(<CodeBlockView code="x" />)).not.toContain("style=");
   });
 });
 

@@ -1235,7 +1235,8 @@ Erwartet: Nach allen drei Zyklen zeigt der Codeblock im Listenpunkt
 weiterhin GENAU „qa code zeile“ – KEINE zusätzliche Leerzeile zwischen
 dem Code und dem unteren Rand des Kastens, unabhängig davon, wie oft
 geöffnet/gespeichert wurde, UND weiterhin sichtbar eingerückt als Teil
-von „QA-Punkt“.
+von „QA-Punkt“. (v7.57.3: Ansicht rückt den Block jetzt ein und entfernt
+die Zaun-Einrückung aus dem Code-Text, DECISIONS #133)
 
 **D7 [VERBUNDEN] Link-Dialog im Editor.** Editor öffnen, etwas Text
 markieren, Link-Knopf (Kettensymbol) in der Toolbar anklicken. Erwartet:

@@ -17564,3 +17564,38 @@ aus `referenz-app.jsx` übernommen.
        Testfall C8c in `docs/TESTFAELLE.md`.
      - **Restrisiko:** keines bekannt; die Optik wird erst per E2E (C8c)
        in der deployten App bestätigt.
+
+133. **v7.57.3, E2E-Befund D6b (🟡): Codeblock in einem Listenpunkt wird in
+     der Dokument-ANSICHT eingerückt und ohne Zaun-Einrückung im Code-Text
+     dargestellt.**
+     - **Root Cause:** Im Fence-Zweig von `renderBlocks`
+       (`src/lib/markdown.jsx`) bekam der `CodeBlockView` – anders als
+       Tabellen, Display-Math, Bilder, hr und Absätze – kein
+       `indentStyle(indentLevel(line))`; außerdem übernahm `matchFenceBlock`
+       (`src/lib/code.jsx`) die Inhaltszeilen unverändert. Ein um 2
+       Leerzeichen eingerückter Zaun (vom Chat/KI erzeugt, vom Editor
+       byte-gleich zurückgeschrieben) erschien so bündig am linken Rand
+       nach der Liste, der Code-Text enthielt die 2 führenden Leerzeichen.
+       Der Editor (TipTap) war nicht betroffen.
+     - **Fix:** `matchFenceBlock` liefert zusätzlich `indent` (führende
+       Leerzeichen der ÖFFNENDEN Zaun-Zeile, 0-3). Neue Funktion
+       `stripFenceIndent(code, indent)` entfernt je Zeile bis zu `indent`
+       führende Leerzeichen (CommonMark; überschüssige bleiben, Leerzeilen
+       bleiben leer). Der Fence-Zweig rendert
+       `code={stripFenceIndent(...)}` mit `style={indentStyle(indentLevel(line))}`;
+       `CodeBlockView` hat dafür eine optionale `style`-Prop auf dem
+       äußeren div (kein Wrapper). Zaun ohne Einrückung: unverändert.
+     - **Bewusst nicht angefasst:** `matchFenceBlock().code`, `raw` in
+       `splitFenceSegments`, `computeFenceLineMask`, ops.js, verify.js,
+       math.jsx und der Editor-Ladepfad bleiben byte-gleich – nur die
+       Ansicht zieht die Einrückung ab (Roundtrip-Sicherheit).
+     - **Restgrenze:** Ein Codeblock in einem Listenpunkt der 2. Ebene
+       (4 Leerzeichen) matcht `FENCE_OPEN_RE` nicht (CommonMark-Limit 3)
+       und wird weiterhin als Text gerendert. Das zu ändern beträfe
+       `computeFenceLineMask`, ops.js und den Editor-Ladepfad und ist ein
+       eigener Auftrag. Ebenso zieht der Chat-Pfad
+       (`expandFencedCodeInNodes`) die Zaun-Einrückung weiterhin NICHT ab.
+     - **Tests:** `tests/code.test.jsx` (indent 0/2/3, 4 Leerzeichen = null,
+       `stripFenceIndent`-Randfälle, `raw` byte-gleich, `style`-Prop),
+       `tests/markdown.test.jsx` (Einzug 1,5rem + exakter Code-Text,
+       überschüssige Einrückung, Regression ohne Einrückung, 4-Space-Grenze).

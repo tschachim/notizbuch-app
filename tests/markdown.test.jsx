@@ -1537,6 +1537,34 @@ describe("renumberCitations & CITE_LINK_RE: fassen TeX-Inhalte nicht an", () => 
 });
 
 describe("DocView: monospaced Codeblöcke (```-Fences, v7.7)", () => {
+  // v7.57.3 (DECISIONS #133, E2E D6b): Codeblock in einem Listenpunkt
+  const codeOf = (h) => /<code>([\s\S]*?)<\/code>/.exec(h)[1];
+
+  it("um 2 Leerzeichen eingerückter Zaun (Listenpunkt): Block eingerückt, Code ohne führende Leerzeichen", () => {
+    const html = render("# T\n\n## A\n\n- QA-Punkt\n\n  ```\n  qa code zeile\n  ```");
+    expect(html).toContain("QA-Punkt");
+    // Einzug liegt direkt auf dem äußeren Codeblock-div, nicht auf einem Wrapper
+    expect(html).toMatch(/<div style="margin-left:1\.5rem" class="my-2 [^"]*overflow-x-auto/);
+    expect(codeOf(html)).toBe("qa code zeile");
+  });
+
+  it("eingerückter Zaun: überschüssige Code-Einrückung bleibt, Zaun-Einrückung fällt weg", () => {
+    const html = render("# T\n\n## A\n\n- p\n\n  ```js\n  if (x) {\n    y();\n  }\n  ```");
+    expect(codeOf(html)).toBe("if (x) {\n  y();\n}");
+    expect(html).toContain("js");
+  });
+
+  it("Zaun OHNE Einrückung (Regression): kein margin-left, Code unverändert inkl. eigener Einrückung", () => {
+    const html = render("# T\n\n## A\n\n```\n  qa code zeile\n```");
+    expect(html).not.toContain("margin-left");
+    expect(codeOf(html)).toBe("  qa code zeile");
+  });
+
+  it("Bekannte Grenze (DECISIONS #133): Zaun mit 4 Leerzeichen (2. Listenebene) wird nicht als Codeblock erkannt", () => {
+    const html = render("# T\n\n## A\n\n- p\n  - q\n\n    ```\n    x\n    ```");
+    expect(html).not.toMatch(/<pre[^>]*>/);
+  });
+
   it("rendert einen Codeblock monospaced, ohne sichtbare Zäune", () => {
     const html = render("# T\n\n## A\n\n```js\nconst x = 1;\n```");
     expect(html).toContain("const x = 1;");

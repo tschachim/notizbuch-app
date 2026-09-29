@@ -53,8 +53,12 @@ export const FENCE_CLOSE_RE = /^ {0,3}`{3,}[ \t]*$/;
 // DocEditor.jsx, das beim Speichern exakt umgekehrt den Zaun bei
 // Backtick-Serien im Inhalt VERLÄNGERT; nur wenn Lesen und Schreiben
 // dieselbe Längen-Regel anwenden, bleibt der Roundtrip stabil). Gibt bei
-// Erfolg { lang, code, endIdx } zurück (code = Inhalt ZWISCHEN den
-// Zaun-Zeilen, byte-genau inkl. eventueller Leerzeilen), sonst null –
+// Erfolg { lang, code, endIdx, indent } zurück (code = Inhalt ZWISCHEN den
+// Zaun-Zeilen, byte-genau inkl. eventueller Leerzeilen – die Einrückung
+// des Zauns wird hier NICHT entfernt, damit splitFenceSegments/raw und alle
+// anderen Konsumenten unverändert bleiben; die Ansicht zieht sie über
+// stripFenceIndent ab. indent = Anzahl führender Leerzeichen der öffnenden
+// Zaun-Zeile, 0-3, v7.57.3 / DECISIONS #133), sonst null –
 // NULL bedeutet "kein Block", nicht "Fehler": Der Aufrufer lässt die
 // öffnende Zeile dann unverändert/normal weiterlaufen (sie matcht ohnehin
 // keine der übrigen Block-Regeln), statt den Rest des Dokuments/
@@ -68,14 +72,27 @@ export function matchFenceBlock(lines, startIdx) {
   const openM = FENCE_OPEN_RE.exec(lines[startIdx]);
   if (!openM) return null;
   const openLen = openM[1].length;
+  const indent = /^ */.exec(lines[startIdx])[0].length;
   const lang = openM[2].trim().split(/\s+/)[0] || "";
   const closeRe = new RegExp("^ {0,3}`{" + openLen + ",}[ \\t]*$");
   for (let j = startIdx + 1; j < lines.length; j++) {
     if (closeRe.test(lines[j])) {
-      return { lang, code: lines.slice(startIdx + 1, j).join("\n"), endIdx: j };
+      return { lang, code: lines.slice(startIdx + 1, j).join("\n"), endIdx: j, indent };
     }
   }
   return null; // unterminiert
+}
+
+// CommonMark: Bei einem eingerückten öffnenden Zaun werden von jeder
+// Inhaltszeile bis zu so viele führende Leerzeichen entfernt, wie der Zaun
+// eingerückt war (weniger, wenn die Zeile weniger hat; überschüssige
+// Einrückung gehört zum Code und bleibt). Nur für die ANZEIGE gedacht
+// (markdown.jsx) – matchFenceBlock/splitFenceSegments liefern den Inhalt
+// weiter unverändert. Nur Leerzeichen, keine Tabs (wie FENCE_OPEN_RE).
+export function stripFenceIndent(code, indent) {
+  if (!indent) return code;
+  const re = new RegExp("^ {0," + indent + "}");
+  return String(code).split("\n").map((l) => l.replace(re, "")).join("\n");
 }
 
 // Zerlegt einen (ggf. mehrzeiligen) Text in Segmente außerhalb/innerhalb
@@ -167,9 +184,9 @@ export function computeFenceLineMask(lines) {
 // ohne dass lange Zeilen den Rest des Layouts verschieben. Kein Syntax-
 // Highlighting (bewusst schlicht, keine neue Abhängigkeit); das
 // Sprach-Label wird nur angezeigt, wenn vorhanden.
-export function CodeBlockView({ lang, code, className }) {
+export function CodeBlockView({ lang, code, className, style }) {
   return (
-    <div className={"my-2 max-w-full overflow-x-auto rounded-lg border border-slate-200 bg-slate-50" + (className ? " " + className : "")}>
+    <div style={style} className={"my-2 max-w-full overflow-x-auto rounded-lg border border-slate-200 bg-slate-50" + (className ? " " + className : "")}>
       {lang && (
         <div className="px-3 pt-1 font-mono text-[10px] uppercase tracking-wide text-slate-400">{lang}</div>
       )}

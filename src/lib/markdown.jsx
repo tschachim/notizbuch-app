@@ -12,7 +12,7 @@ import {
   MATH_TOKEN_RE, renderMathToken, renderKatexHtml,
   DISPLAY_MATH_START_RE, matchDisplayBlock,
 } from "./math.jsx";
-import { FENCE_OPEN_RE, matchFenceBlock, splitFenceSegments, CodeBlockView, computeFenceLineMask } from "./code.jsx";
+import { FENCE_OPEN_RE, matchFenceBlock, splitFenceSegments, CodeBlockView, computeFenceLineMask, stripFenceIndent } from "./code.jsx";
 import { providerFor, getLinkProviders, ProviderIcon, trimBareUrl } from "./linkProviders.jsx";
 import { FILE_URL_RE, fileUrlToWinPath, buildProtocolUrl } from "./filelinks.js";
 
@@ -1174,7 +1174,18 @@ function renderBlocks(lines, imgMap, onImgClick, keyPrefix, onToggleTask) {
       // Inhalt bleibt byte-genau erhalten: KEIN renderInline, keine
       // Math-/Bild-/Fußnoten-/Checklisten-Logik innerhalb eines Codeblocks.
       flush();
-      blocks.push(<CodeBlockView key={kp + key++} lang={fenceM.lang} code={fenceM.code} />);
+      // v7.57.3 (DECISIONS #133, E2E D6b): ein um 1-3 Leerzeichen
+      // eingerückter Zaun (Codeblock in einem Listenpunkt) wird wie Tabellen/
+      // Bilder/Formeln eingerückt und verliert die Zaun-Einrückung im
+      // Code-Text (CommonMark). Ohne Einrückung: kein Style, Code unverändert.
+      blocks.push(
+        <CodeBlockView
+          key={kp + key++}
+          lang={fenceM.lang}
+          code={stripFenceIndent(fenceM.code, fenceM.indent)}
+          style={indentStyle(indentLevel(line))}
+        />
+      );
       li = fenceM.endIdx;
     } else if (TABLE_LINE_RE.test(line)) {
       flush();
