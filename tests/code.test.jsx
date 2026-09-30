@@ -180,7 +180,7 @@ describe("splitFenceSegments", () => {
 
   it("ein einzelner Codeblock ohne umgebenden Text", () => {
     const segs = splitFenceSegments("```js\nx\n```");
-    expect(segs).toEqual([{ code: true, lang: "js", text: "x", raw: "```js\nx\n```" }]);
+    expect(segs).toEqual([{ code: true, lang: "js", text: "x", indent: 0, raw: "```js\nx\n```" }]);
   });
 
   it("Text, Codeblock, Text – Rekonstruktion ist byte-identisch", () => {
@@ -218,7 +218,7 @@ describe("splitFenceSegments", () => {
     const text = "````js\nBeispiel:\n```\ninner\n```\n````";
     const segs = splitFenceSegments(text);
     expect(segs).toEqual([
-      { code: true, lang: "js", text: "Beispiel:\n```\ninner\n```", raw: text },
+      { code: true, lang: "js", text: "Beispiel:\n```\ninner\n```", indent: 0, raw: text },
     ]);
     expect(reconstruct(text)).toBe(text);
   });
@@ -228,10 +228,43 @@ describe("splitFenceSegments", () => {
     const segs = splitFenceSegments(text);
     expect(segs).toEqual([
       { code: false, raw: "- QA-Punkt\n" },
-      { code: true, lang: "", text: "  qa code zeile", raw: "  ```\n  qa code zeile\n  ```" },
+      { code: true, lang: "", text: "  qa code zeile", indent: 2, raw: "  ```\n  qa code zeile\n  ```" },
       { code: false, raw: "Danach" },
     ]);
     expect(reconstruct(text)).toBe(text);
+  });
+
+  // v7.58 (DECISIONS #137, Nachzug zu #133): "indent" ist ADDITIV – raw/text/lang
+  // bleiben byte-gleich (Konsumenten wie unescapeMd, linkifyFilePaths,
+  // renumberCitations lesen nur code/raw).
+  describe("indent-Feld (v7.58, rein additiv)", () => {
+    it("trägt je Codeblock die Einrückung SEINER öffnenden Zeile (0, 1, 3) – Text-Segmente bekommen keins", () => {
+      const text = "```\na\n```\nZwischen\n ```js\n b\n ```\nNoch mehr\n   ```\n   c\n   ```";
+      const segs = splitFenceSegments(text);
+      expect(segs.map((s) => s.code)).toEqual([true, false, true, false, true]);
+      expect(segs.filter((s) => s.code).map((s) => s.indent)).toEqual([0, 1, 3]);
+      expect(segs.filter((s) => !s.code).every((s) => !("indent" in s))).toBe(true);
+    });
+
+    it("nur die ÖFFNENDE Zeile zählt: anders eingerückter Schluss-Zaun ändert indent nicht", () => {
+      const segs = splitFenceSegments("  ```\n  x\n```");
+      expect(segs).toEqual([{ code: true, lang: "", text: "  x", indent: 2, raw: "  ```\n  x\n```" }]);
+    });
+
+    it("Rekonstruktion bleibt byte-genau, auch mit eingerückten Zäunen und Leerzeilen", () => {
+      for (const text of [
+        "  ```\n  a\n\n  b\n  ```",
+        "Text\n\n   ```py\n   x = 1\n   ```\n\n - Liste\n ```\n y\n ```\nEnde\n",
+        " ```\n a\n ```\n ```\n b\n ```",
+      ]) {
+        expect(reconstruct(text)).toBe(text);
+      }
+    });
+
+    it("vier Leerzeichen sind (CommonMark) kein Zaun: kein Code-Segment, kein indent", () => {
+      const segs = splitFenceSegments("    ```\nx\n    ```");
+      expect(segs.some((s) => s.code)).toBe(false);
+    });
   });
 });
 
@@ -404,5 +437,65 @@ describe("expandFencedCodeInNodes (Chat-Segmentierer: erst Fences, dann Math auf
     expect(rendered).toContain("Beispiel:");
     expect(rendered).toContain("inner");
     expect((rendered.match(/<pre/g) || []).length).toBe(1); // EIN Codeblock, kein Zerfall in mehrere
+  });
+
+  // v7.58 (DECISIONS #137, Nachzug zu #133): der Chat-Pfad zieht die Einrückung des
+  // öffnenden Zauns wie die Dokument-Ansicht ab (stripFenceIndent) – vorher
+  // behielt der Code einer eingerückten Chat-Antwort seine führenden
+  // Leerzeichen. Inhalt der <code>-Elemente (React escaped, hier nur ASCII).
+  describe("eingerückter Zaun im Chat-Pfad (v7.58)", () => {
+    const keep = (t) => [t];
+    const codes = (nodes) =>
+      [...html(nodes).matchAll(/<pre[^>]*><code>([\s\S]*?)<\/code><\/pre>/g)].map((m) => m[1]);
+
+    it("1 Leerzeichen: Zaun-Einrückung fällt weg, überschüssige Einrückung im Code bleibt", () => {
+      const out = expandFencedCodeInNodes([" ```js\n a\n   b\n ```"], keep);
+      expect(codes(out)).toEqual(["a\n  b"]);
+    });
+
+    it("3 Leerzeichen: Zaun-Einrückung fällt weg, überschüssige Einrückung bleibt", () => {
+      const out = expandFencedCodeInNodes(["   ```\n   x\n     y\n   ```"], keep);
+      expect(codes(out)).toEqual(["x\n  y"]);
+    });
+
+    it("Zeile mit WENIGER Einrückung als der Zaun verliert nur, was sie hat", () => {
+      const out = expandFencedCodeInNodes(["   ```\n a\nb\n   c\n   ```"], keep);
+      expect(codes(out)).toEqual(["a\nb\nc"]);
+    });
+
+    it("Leerzeilen bleiben leer, Zeilenanzahl bleibt; Tabs werden nicht angefasst", () => {
+      const out = expandFencedCodeInNodes(["  ```\n  a\n\n  b\n\tc\n  ```"], keep);
+      expect(codes(out)).toEqual(["a\n\nb\n\tc"]);
+    });
+
+    it("NICHT eingerückter Zaun rendert byte-gleich wie vorher (führende Leerzeichen im Code bleiben)", () => {
+      const out = expandFencedCodeInNodes(["```js\n  a\n b\n```"], keep);
+      expect(html(out)).toBe(html(<CodeBlockView lang="js" code={"  a\n b"} />));
+    });
+
+    it("Live-Fall: eingerückter Zaun nach einem Listenpunkt, Text davor/danach bleibt unverändert", () => {
+      const out = expandFencedCodeInNodes(["- QA-Punkt\n\n  ```\n  qa code zeile\n  ```\nDanach"], keep);
+      expect(codes(out)).toEqual(["qa code zeile"]);
+      const rendered = html(out);
+      expect(rendered).toContain("- QA-Punkt");
+      expect(rendered).toContain("Danach");
+      expect(rendered).not.toContain("```");
+    });
+
+    it("zwei Blöcke mit UNTERSCHIEDLICHER Einrückung: jeder zieht nur seine eigene ab", () => {
+      const out = expandFencedCodeInNodes(["  ```\n  a\n  ```\nZwischen\n```\n  b\n```"], keep);
+      expect(codes(out)).toEqual(["a", "  b"]);
+    });
+
+    it("vier Leerzeichen sind kein Zaun: kein Codeblock, Text bleibt literal", () => {
+      const out = expandFencedCodeInNodes(["    ```\nx\n    ```"], keep);
+      expect(html(out)).not.toMatch(/<pre/);
+    });
+
+    it("unterminierter eingerückter Zaun bleibt literaler Text (keine Einrückungs-Manipulation)", () => {
+      const out = expandFencedCodeInNodes(["  ```js\n  offen"], keep);
+      expect(html(out)).not.toMatch(/<pre/);
+      expect(html(out)).toContain("  offen");
+    });
   });
 });

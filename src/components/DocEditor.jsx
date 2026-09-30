@@ -3841,6 +3841,23 @@ export default function DocEditor({
     setPicker(null);
   };
 
+  // Setzt den DOM-Fokus SYNCHRON zurück in den Editor (v7.58, docs/TODO.md,
+  // E2E-Beobachtung bei D7/D7b: nach "Einfügen" lag der Fokus nicht im
+  // Editor). Ursache: editor.chain().focus() (@tiptap/core#focus) setzt den
+  // DOM-Fokus nicht selbst, sondern erst per requestAnimationFrame
+  // (delayedFocus). Bis dahin hält der geklickte Knopf bzw. das Eingabefeld
+  // den Fokus – und sobald React das Popover entfernt, fällt er auf <body>;
+  // in einem verdeckten Browser-Tab feuert requestAnimationFrame gar nicht,
+  // der Fokus käme dort nie an. view.focus() dagegen fokussiert sofort und
+  // zieht die Browser-Selection auf die ProseMirror-Selektion. Der Aufruf
+  // steht im Event-Handler VOR dem React-Rerender, der das Popover
+  // entfernt: der Fokus wandert vom Knopf direkt in den Editor. Nur für
+  // Aktionen, die das Popover SCHLIESSEN (Einfügen/Übernehmen/Entfernen);
+  // "Öffnen"/"Titel ermitteln" lassen es offen und behalten den Fokus.
+  const returnFocusToEditor = () => {
+    if (!editor.isDestroyed) editor.view.focus();
+  };
+
   // Öffnet das Link-Popover und belegt Titel/URL vor: Steht der Cursor in
   // einem bestehenden Link, wird die Selektion per extendMarkRange auf die
   // GESAMTE Mark-Spanne ausgedehnt (Titel+URL kommen dann von dort, und
@@ -3938,23 +3955,67 @@ export default function DocEditor({
     if (t.error) { setLinkForm((f) => ({ ...f, error: t.error })); return; }
     const u = normalizeLinkUrl(linkForm.url);
     if (u.error) { setLinkForm((f) => ({ ...f, error: u.error })); return; }
-    editor.chain().focus().extendMarkRange("link").insertContent({
+    // KEIN ".focus()" in der Kette (v7.58, siehe returnFocusToEditor oben):
+    // der Fokus wird unten synchron gesetzt, ein zusätzlicher, per
+    // requestAnimationFrame verzögerter TipTap-Fokus bliebe nur als
+    // Nachzügler hängen (in einem verdeckten Tab feuert er erst beim
+    // Zurückwechseln und risse den Fokus dann aus einem inzwischen
+    // angeklickten Feld zurück in den Editor).
+    // ".unsetMark('link')" NACH dem Einfügen (v7.58): Link ist wegen
+    // autolink:true eine INKLUSIVE Mark (siehe Link.configure oben) – ohne
+    // diesen Schritt trüge der Cursor hinter dem neuen Link weiterhin die
+    // Link-Mark, und sofort weitergetippter Text würde Teil des Links. Bei
+    // leerer Selektion entfernt unsetMark nur die "gespeicherte" Mark
+    // (tr.removeStoredMark), am Dokument ändert sich nichts.
+    editor.chain().extendMarkRange("link").insertContent({
       type: "text",
       text: t.title,
       marks: [{ type: "link", attrs: { href: u.url } }],
+    }).unsetMark("link").run();
+    cancelAutoFetch();
+    setPicker(null);
+    setLinkForm(null);
+    setTitleFetching(false);
+    returnFocusToEditor();
+  };
+
+  const removeLink = () => {
+    // Nach dem Entfernen wird die Selektion auf das ENDE des ehemaligen
+    // Linktexts zusammengezogen (v7.58): extendMarkRange markiert die
+    // komplette Spanne, und mit dem Fokus zurück im Editor würde der nächste
+    // Tastendruck den (jetzt link-losen) Text ERSETZEN statt dahinter
+    // weiterzuschreiben.
+    editor.chain().extendMarkRange("link").unsetLink().command(({ tr }) => {
+      tr.setSelection(TextSelection.create(tr.doc, tr.selection.to));
+      return true;
     }).run();
     cancelAutoFetch();
     setPicker(null);
     setLinkForm(null);
     setTitleFetching(false);
+    returnFocusToEditor();
   };
 
-  const removeLink = () => {
-    editor.chain().focus().extendMarkRange("link").unsetLink().run();
-    cancelAutoFetch();
-    setPicker(null);
-    setLinkForm(null);
-    setTitleFetching(false);
+  // Enter im Titel- ODER URL-Feld = derselbe Weg wie der Knopf (v7.58):
+  // applyLink() prüft selbst Titel UND URL und lässt bei einem Fehler
+  // Popover/Fokus unangetastet (Fehlertext erscheint, Cursor bleibt im
+  // Feld) – EIN Regelwerk für Klick und Enter, keine zweite Validierung.
+  // Bewusst KEIN <form>: dieser Handler soll die EINZIGE Enter-Behandlung
+  // sein – ein zusätzlicher, impliziter Submit-Pfad des Browsers (Klick auf
+  // den Standardknopf) könnte parallel ein zweites Mal auslösen und ließe
+  // sich in jsdom nicht nachstellen.
+  // - isComposing/keyCode 229: das Enter, das eine IME-Komposition (z. B.
+  //   japanisch/chinesisch) bestätigt, gehört der Komposition und darf
+  //   nichts absenden (Safari meldet isComposing dort teils schon als
+  //   false, dann bleibt der Wert 229 als Erkennungsmerkmal).
+  // - preventDefault: verhindert, dass die Enter-Folgeereignisse (keypress/
+  //   beforeinput) nach dem Fokuswechsel in den Editor noch einen
+  //   Absatzumbruch dort erzeugen, und ein etwaiges äußeres Submit.
+  const onLinkFieldKeyDown = (e) => {
+    if (e.key !== "Enter") return;
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+    e.preventDefault();
+    applyLink();
   };
 
   const openLinkUrl = () => {
@@ -4061,6 +4122,9 @@ export default function DocEditor({
   //   stehende Selektion, kein Node-Austausch an der Cursor-Position).
   // - Link einfügen/bearbeiten: Öffner-Knopf UND alle Knöpfe/Eingabefelder
   //   im Popover (die Eingabefelder MÜSSEN echten Fokus bekommen können).
+  //   Umgekehrt (v7.58): Einfügen/Übernehmen/Entfernen geben den Fokus beim
+  //   Schließen ausdrücklich zurück – synchron über returnFocusToEditor(),
+  //   NICHT über TipTaps rAF-verzögertes focus() (siehe dort).
   // - Tabelle einfügen: Öffner-Knopf UND das Größen-Raster (reine <div>s
   //   ohne tabIndex – bekommen ohnehin nie Fokus per mousedown).
   // - "Bild einfügen": der sichtbare Knopf löst nur imageFileInputRef
@@ -4276,7 +4340,15 @@ export default function DocEditor({
             oben) – die Eingabefelder brauchen echten Fokus, applyLink()
             selbst löst keinen Struktur-Befehl auf einer FRISCH VERÄNDERTEN
             Cursor-Position aus (die Selektion steht bereits seit
-            openLinkPicker() fest). */}
+            openLinkPicker() fest).
+            v7.58: Einfügen/Übernehmen/Entfernen geben den Fokus über
+            returnFocusToEditor() zurück (synchron, nicht per TipTaps
+            requestAnimationFrame-Fokus), Enter im Titel-/URL-Feld löst
+            applyLink() aus (onLinkFieldKeyDown). Alle Knöpfe im Popover
+            tragen explizit type="button" – es gibt hier KEIN <form> (der
+            Editor hängt in App.jsx in keinem umgebenden <form>), Enter
+            wird ausschließlich vom Key-Handler behandelt, ein implizites
+            Submit kann also nie zusätzlich auslösen. */}
         <div className="relative shrink-0">
           <button
             onClick={() => (picker === "link" ? closeLinkPicker() : openLinkPicker())}
@@ -4295,6 +4367,7 @@ export default function DocEditor({
                 type="text"
                 value={linkForm.title}
                 onChange={(e) => setLinkForm((f) => ({ ...f, title: e.target.value, error: null }))}
+                onKeyDown={onLinkFieldKeyDown}
                 placeholder="Sprechender Titel"
                 className="w-full mb-2 px-2 py-1 text-sm border border-slate-300 rounded"
               />
@@ -4309,6 +4382,7 @@ export default function DocEditor({
                   // scheduleAutoFetch oben.
                   scheduleAutoFetch(url);
                 }}
+                onKeyDown={onLinkFieldKeyDown}
                 placeholder="https://…"
                 className="w-full mb-2 px-2 py-1 text-sm border border-slate-300 rounded"
               />
@@ -4327,17 +4401,17 @@ export default function DocEditor({
               )}
               {linkForm.error && <div className="mb-2 text-xs text-rose-700">{linkForm.error}</div>}
               <div className="flex items-center gap-1.5">
-                <button onClick={applyLink}
+                <button type="button" onClick={applyLink}
                   className="px-2 py-1 rounded bg-indigo-700 text-white text-xs hover:bg-indigo-800">
                   {linkForm.existing ? "Übernehmen" : "Einfügen"}
                 </button>
                 {linkForm.existing && (
                   <>
-                    <button onClick={removeLink}
+                    <button type="button" onClick={removeLink}
                       className="px-2 py-1 rounded border border-rose-200 text-rose-700 text-xs hover:bg-rose-50">
                       Entfernen
                     </button>
-                    <button onClick={openLinkUrl}
+                    <button type="button" onClick={openLinkUrl}
                       className="px-2 py-1 rounded border border-slate-300 text-slate-600 text-xs hover:bg-slate-50">
                       Öffnen
                     </button>

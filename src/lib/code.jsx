@@ -100,7 +100,12 @@ export function stripFenceIndent(code, indent) {
 // Original-Teilstrecke inkl. Zeilenumbrüche) – eine byte-genaue
 // Rekonstruktion ist damit immer segments.map(s => s.raw).join("\n").
 // Codeblock-Segmente tragen zusätzlich "lang"/"text" (Inhalt OHNE die
-// Zaun-Zeilen) für die Anzeige. Unterminierte Zäune zählen NICHT als Code
+// Zaun-Zeilen) für die Anzeige sowie "indent" (0-3 führende Leerzeichen der
+// öffnenden Zaun-Zeile, v7.58, DECISIONS #137, Nachzug zu #133: der Chat-Pfad
+// zieht sie über stripFenceIndent ab wie die Dokument-Ansicht). "indent" ist rein
+// ADDITIV – raw/text/lang bleiben byte-gleich, alle Konsumenten, die nur
+// raw/code lesen (Editor-Ladepfad, Fußnoten, Dateilinks, Linkprovider),
+// sind davon nicht berührt. Unterminierte Zäune zählen NICHT als Code
 // (sie werden vom Renderer literal dargestellt, siehe matchFenceBlock)
 // und bleiben Teil des umgebenden Text-Segments – konsistent mit der
 // Dokument-Ansicht/dem Editor-Ladepfad.
@@ -121,6 +126,7 @@ export function splitFenceSegments(text) {
           code: true,
           lang: block.lang,
           text: block.code,
+          indent: block.indent,
           raw: lines.slice(i, block.endIdx + 1).join("\n"),
         });
         i = block.endIdx + 1;
@@ -232,7 +238,11 @@ export function expandFencedCodeInNodes(nodes, expandRest) {
     if (typeof n !== "string") { out.push(n); continue; }
     for (const seg of splitFenceSegments(n)) {
       if (seg.code) {
-        out.push(<CodeBlockView key={"cx" + k++} lang={seg.lang} code={seg.text} />);
+        // Einrückung des öffnenden Zauns abziehen (CommonMark, v7.58): sonst
+        // behielte der Code eines eingerückten Zauns in einer Chat-Antwort
+        // führende Leerzeichen – die Dokument-Ansicht macht es seit v7.57.3
+        // genauso (markdown.jsx). Ohne Einrückung (indent 0) unverändert.
+        out.push(<CodeBlockView key={"cx" + k++} lang={seg.lang} code={stripFenceIndent(seg.text, seg.indent)} />);
         continue;
       }
       seg.raw.split(INLINE_CODE_SPLIT_RE).forEach((part, i) => {

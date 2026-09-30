@@ -4113,7 +4113,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.57.3</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.58</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -5177,6 +5177,7 @@ export default function NotizbuchApp() {
       {/* ---------------- Schnellnotizen (Post-its) ---------------- */}
       <QuickNotes
         notes={quickNotes}
+        autocorrect={autocorrect}
         onChange={updateQuickNote}
         onRemove={removeQuickNote}
         onSubmit={submitQuickNote}

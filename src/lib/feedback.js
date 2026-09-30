@@ -215,7 +215,10 @@ function locateLine(lines, at, mask) {
 // Höchstens so viele EIGENSTÄNDIGE Fakten werden ermittelt/formatiert –
 // analog zum DIFF_CAP-Gedanken oben (Kosten/Latenz). Ein Edit mit mehr als
 // 20 unterschiedlichen neuen Zeilen ist ohnehin kein "kleiner manueller
-// Zusatz" mehr, für den dieser Pfad gedacht ist.
+// Zusatz" mehr, für den dieser Pfad gedacht ist. v7.58 (DECISIONS #138): Wird
+// gekappt, nennt collectFeedbackFacts() zusätzlich die EXAKTE Zahl der nicht
+// aufgeführten Zeilen und formatFeedbackFacts() sagt sie dem Modell – vorher
+// erfuhr es vom Abschneiden nichts.
 const MAX_FACTS = 20;
 
 // Ermittelt pro EINDEUTIGER hinzugefügter, NICHT-LEERER Zeile (diff =
@@ -240,10 +243,24 @@ const MAX_FACTS = 20;
 // Farbe, Link, Formel, Tabellenzelle) als "verschieden" gezählt werden;
 // formatFeedbackFacts() macht dem Modell diese Einschränkung deshalb
 // explizit, statt sie zu verschweigen.
+//
+// v7.58 (DECISIONS #138): collectFeedbackFacts() ist die eigentliche
+// Ermittlung und liefert ZUSÄTZLICH "omitted" – die Zahl weiterer
+// eigenständiger hinzugefügter Zeilen, die wegen MAX_FACTS nicht mehr als Fakt
+// aufgeführt sind (DIESELBE Zählregel wie für Fakten: nicht-leer, nach trim()
+// dedupliziert, auch gegen die bereits aufgeführten). Für sie wird bewusst
+// NICHTS ermittelt (kein activeCount, keine Fundorte) – nur gezählt.
+// buildFeedbackFacts() bleibt als schmale Hülle mit unveränderter Signatur
+// (nur das Fakten-Array) bestehen.
 export function buildFeedbackFacts(diff, notebooks, activeName) {
-  if (!Array.isArray(diff) || !Array.isArray(notebooks)) return [];
+  return collectFeedbackFacts(diff, notebooks, activeName).facts;
+}
+
+export function collectFeedbackFacts(diff, notebooks, activeName) {
+  const none = { facts: [], omitted: 0 };
+  if (!Array.isArray(diff) || !Array.isArray(notebooks)) return none;
   const active = notebooks.find((nb) => nb && nb.name === activeName);
-  if (!active) return [];
+  if (!active) return none;
   const newLines = String(active.doc || "").split("\n");
   const fenceMask = computeFenceLineMask(newLines);
   const activeTrimmed = newLines.map((l) => l.trim());
@@ -256,6 +273,7 @@ export function buildFeedbackFacts(diff, notebooks, activeName) {
 
   const facts = [];
   const seen = new Set();
+  let omitted = 0;
   let pos = 0;
   for (let i = 0; i < diff.length; i++) {
     const d = diff[i];
@@ -270,6 +288,10 @@ export function buildFeedbackFacts(diff, notebooks, activeName) {
     // ohnehin bereits vollständig.
     if (!trimmed || seen.has(trimmed)) continue;
     seen.add(trimmed);
+    // Deckel erreicht: KEIN Abbruch mehr (v7.58), der Scan läuft weiter und
+    // zählt nur die übrigen eigenständigen Zeilen – "pos" muss dafür ohnehin
+    // bis zum Diff-Ende mitlaufen, die teure Fundort-Ermittlung entfällt.
+    if (facts.length >= MAX_FACTS) { omitted++; continue; }
 
     const activeCount = activeTrimmed.filter((t) => t === trimmed).length;
     const loc = locateLine(newLines, idx, fenceMask);
@@ -283,9 +305,8 @@ export function buildFeedbackFacts(diff, notebooks, activeName) {
     }
 
     facts.push({ text: trimmed, chapter: loc.chapter, section: loc.section, lineNo: loc.lineNo, activeCount, elsewhere });
-    if (facts.length >= MAX_FACTS) break;
   }
-  return facts;
+  return { facts, omitted };
 }
 
 // Formatiert das Ergebnis von buildFeedbackFacts() als Prompt-Text (leerer
@@ -295,7 +316,14 @@ export function buildFeedbackFacts(diff, notebooks, activeName) {
 // Einordnung (auch eine semantische, anders formulierte Dublette) bleibt
 // vollständig dem Modell überlassen (siehe Kommentar bei
 // buildFeedbackFacts() und den Fakten-Block-Kopf in buildFeedbackTrigger()).
-export function formatFeedbackFacts(facts, activeName) {
+// "omitted" (optional, v7.58, DECISIONS #138): Zahl der wegen MAX_FACTS nicht
+// aufgeführten eigenständigen Zeilen (collectFeedbackFacts). Nur bei einer
+// echten positiven Ganzzahl endet der Text mit EINER zusätzlichen
+// Hinweiszeile, die genau diese Zahl nennt – sonst (0, undefined, NaN,
+// negativ, Bruch, String) bleibt die Ausgabe BYTE-IDENTISCH zu vor v7.58.
+// Ohne Fakten gibt es weiterhin keinen Text (ein Hinweis ohne Fakten wäre
+// nicht erreichbar: omitted > 0 setzt MAX_FACTS aufgeführte Fakten voraus).
+export function formatFeedbackFacts(facts, activeName, omitted = 0) {
   if (!Array.isArray(facts) || !facts.length) return "";
   const lines = facts.map((f) => {
     const path = [f.chapter, f.section].filter(Boolean).join(" → ") || "Vorspann";
@@ -314,6 +342,20 @@ export function formatFeedbackFacts(facts, activeName) {
     }
     return s;
   });
+  if (!Number.isInteger(omitted) || omitted < 1) return lines.join("\n");
+  // Nackte, wahre Aussage (DECISIONS #130: keine Bewertung/Toleranzlogik):
+  // wie viele eigenständige Zeilen es zusätzlich gibt und dass für sie keine
+  // Vorkommen ermittelt wurden. Wortlaut bewusst NICHT "wurden nicht gezählt":
+  // neben der genannten Zahl las sich das widersprüchlich (Review 🔵, #138) –
+  // gemeint ist, dass für die Überzähligen kein activeCount/Fundort vorliegt.
+  // Singular/Plural getrennt, damit "1" grammatisch stimmt.
+  const rest = omitted === 1
+    ? "1 weitere eigenständige hinzugefügte Zeile wurden keine Vorkommen ermittelt, sie ist"
+    : omitted + " weitere eigenständige hinzugefügte Zeilen wurden keine Vorkommen ermittelt, sie sind";
+  lines.push(
+    "Hinweis: Aufgeführt sind nur die ersten " + facts.length + " eigenständigen hinzugefügten Zeilen; " +
+    "für " + rest + " hier nicht aufgeführt."
+  );
   return lines.join("\n");
 }
 
@@ -332,8 +374,13 @@ export function formatFeedbackFacts(facts, activeName) {
 // diffLines()-Rückgabewert (oder null), "notebooks" der NACH-dem-Commit-
 // Stand aller Notizbücher (buildNbCtx()-Ergebnis), "nbName" das aktive
 // Notizbuch.
+// v7.58 (DECISIONS #138): liefert zusätzlich "omitted" (Zahl der wegen des
+// Fakten-Deckels nicht aufgeführten Zeilen) – die Hinweiszeile dazu steckt
+// bereits im Trigger-Text. App.jsx liest weiter nur { trigger }.
 export function buildFeedbackRequest(diff, diffText, notebooks, nbName) {
-  const facts = Array.isArray(diff) ? buildFeedbackFacts(diff, notebooks, nbName) : [];
-  const trigger = buildFeedbackTrigger(nbName, diffText, formatFeedbackFacts(facts, nbName));
-  return { trigger, facts };
+  const { facts, omitted } = Array.isArray(diff)
+    ? collectFeedbackFacts(diff, notebooks, nbName)
+    : { facts: [], omitted: 0 };
+  const trigger = buildFeedbackTrigger(nbName, diffText, formatFeedbackFacts(facts, nbName, omitted));
+  return { trigger, facts, omitted };
 }

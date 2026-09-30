@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   buildFeedbackTrigger, isNoFeedback, dedupeFeedbackParagraphs,
-  buildFeedbackFacts, formatFeedbackFacts, buildFeedbackRequest,
+  buildFeedbackFacts, formatFeedbackFacts, buildFeedbackRequest, collectFeedbackFacts,
 } from "../src/lib/feedback.js";
 import { diffLines } from "../src/lib/diff.js";
 
@@ -638,5 +638,191 @@ describe("buildFeedbackRequest", () => {
     expect(facts).toEqual([]);
     expect(trigger).toContain("Die Änderung ist umfangreich (kein kompakter Diff verfügbar) – prüfe das Gesamtdokument.");
     expect(trigger).not.toContain("Vom Code ermittelte Fakten");
+  });
+});
+
+// v7.58 (DECISIONS #138): der MAX_FACTS-Deckel (20) wird dem Modell jetzt
+// gesagt. Vertrag: ohne Kappung bleibt die Ausgabe BYTE-IDENTISCH zu vor
+// v7.58; mit Kappung endet der Fakten-Block mit EINER Hinweiszeile, die die
+// EXAKTE Zahl der nicht aufgeführten eigenständigen hinzugefügten Zeilen
+// nennt (Zählregel wie bei Fakten: nicht-leer, nach trim() dedupliziert).
+describe("MAX_FACTS-Deckel: Hinweis im Fakten-Block (v7.58, DECISIONS #138)", () => {
+  const HEAD = ["# N", "", "## Inbox", ""];
+  const punkte = (from, to) => Array.from({ length: to - from }, (_, i) => "- Punkt " + (from + i));
+  // Diff/Notizbücher für "HEAD + hinzugefügte Zeilen" gegen den reinen HEAD-Stand.
+  const setup = (added, beforeExtra = []) => {
+    const before = [...HEAD, ...beforeExtra].join("\n");
+    const after = [...HEAD, ...added].join("\n");
+    return { diff: diffLines(before, after), notebooks: [{ name: "N", doc: after }] };
+  };
+  // Erste Zeile "- Punkt 0" steht in Dokumentzeile 5 (HEAD hat 4 Zeilen).
+  const factLine = (i) =>
+    "„- Punkt " + i + "“: im Notizbuch „N“ nach der Änderung 1× (diese hinzugefügte Zeile mitgezählt; Inbox, Zeile " + (5 + i) + ")";
+  const factLines = (n) => Array.from({ length: n }, (_, i) => factLine(i));
+  const HINT_1 = "Hinweis: Aufgeführt sind nur die ersten 20 eigenständigen hinzugefügten Zeilen; " +
+    "für 1 weitere eigenständige hinzugefügte Zeile wurden keine Vorkommen ermittelt, sie ist hier nicht aufgeführt.";
+  const hintN = (n) => "Hinweis: Aufgeführt sind nur die ersten 20 eigenständigen hinzugefügten Zeilen; " +
+    "für " + n + " weitere eigenständige hinzugefügte Zeilen wurden keine Vorkommen ermittelt, sie sind hier nicht aufgeführt.";
+
+  describe("ohne Kappung (<= 20): kein Hinweis, Ausgabe BYTE-IDENTISCH zu vor v7.58", () => {
+    it("genau 20 eigenständige Zeilen: omitted 0, Text exakt die 20 Fakten-Zeilen", () => {
+      const { diff, notebooks } = setup(punkte(0, 20));
+      const { facts, omitted } = collectFeedbackFacts(diff, notebooks, "N");
+      expect(facts).toHaveLength(20);
+      expect(omitted).toBe(0);
+      const expected = factLines(20).join("\n");
+      expect(formatFeedbackFacts(facts, "N")).toBe(expected); // alter 2-Argument-Aufruf
+      expect(formatFeedbackFacts(facts, "N", omitted)).toBe(expected);
+      expect(expected).not.toContain("Hinweis");
+    });
+
+    it("Trigger bei 20 Fakten: exakt buildFeedbackTrigger mit den unveränderten Fakten-Zeilen, kein Hinweis", () => {
+      const { diff, notebooks } = setup(punkte(0, 20));
+      const { trigger, omitted } = buildFeedbackRequest(diff, "+ x", notebooks, "N");
+      expect(omitted).toBe(0);
+      expect(trigger).toBe(buildFeedbackTrigger("N", "+ x", factLines(20).join("\n")));
+      expect(trigger).not.toContain("Hinweis: Aufgeführt");
+    });
+
+    it("wenige Fakten (3): ebenfalls ohne Hinweis", () => {
+      const { diff, notebooks } = setup(punkte(0, 3));
+      const { facts, omitted } = collectFeedbackFacts(diff, notebooks, "N");
+      expect(omitted).toBe(0);
+      expect(formatFeedbackFacts(facts, "N", omitted)).toBe(factLines(3).join("\n"));
+    });
+  });
+
+  describe("mit Kappung: EXAKTE Zahl der nicht aufgeführten Zeilen", () => {
+    it("21 eigenständige Zeilen: Hinweis mit '1' (Singular), die 20 Fakten-Zeilen davor unverändert", () => {
+      const { diff, notebooks } = setup(punkte(0, 21));
+      const { facts, omitted } = collectFeedbackFacts(diff, notebooks, "N");
+      expect(facts).toHaveLength(20);
+      expect(facts[19].text).toBe("- Punkt 19");
+      expect(omitted).toBe(1);
+      const lines = formatFeedbackFacts(facts, "N", omitted).split("\n");
+      expect(lines).toHaveLength(21); // 20 Fakten + genau EINE Hinweiszeile
+      expect(lines.slice(0, 20)).toEqual(factLines(20));
+      expect(lines[20]).toBe(HINT_1);
+    });
+
+    it("20 Fakten + 10 überzählige Zeilen, darunter Duplikate und Leerzeilen: nur die 3 eigenständigen zählen (exakt 3)", () => {
+      const overflow = [
+        "- Punkt 20",
+        "",                // Leerzeile: nie eine eigenständige Zeile
+        "- Punkt 20",      // exaktes Duplikat einer überzähligen Zeile
+        "   - Punkt 20  ", // nach trim() dasselbe
+        "- Punkt 3",       // gleicher Wortlaut wie ein AUFGEFÜHRTER Fakt
+        "  ",              // nur Leerraum
+        "- Punkt 21",
+        "- Punkt 22",
+        "",
+        "- Punkt 21",
+      ];
+      const { diff, notebooks } = setup([...punkte(0, 20), ...overflow]);
+      const { facts, omitted } = collectFeedbackFacts(diff, notebooks, "N");
+      expect(facts).toHaveLength(20);
+      expect(omitted).toBe(3);
+      const lines = formatFeedbackFacts(facts, "N", omitted).split("\n");
+      expect(lines).toHaveLength(21);
+      expect(lines[20]).toBe(hintN(3));
+    });
+
+    it("Duplikate INNERHALB der ersten 20 verbrauchen keinen Platz: 22 Zeilen mit 2 Duplikaten = 20 Fakten, omitted 0", () => {
+      const { diff, notebooks } = setup([...punkte(0, 10), "- Punkt 3", ...punkte(10, 20), "- Punkt 0"]);
+      const { facts, omitted } = collectFeedbackFacts(diff, notebooks, "N");
+      expect(facts).toHaveLength(20);
+      expect(omitted).toBe(0);
+    });
+
+    it("unveränderte und entfernte Zeilen zählen nicht mit", () => {
+      const { diff, notebooks } = setup(["- Bestand", ...punkte(0, 21)], ["- Bestand", "- Alt"]);
+      expect(diff.some((d) => d.t === "d" && d.l === "- Alt")).toBe(true);
+      expect(diff.some((d) => d.t === "s" && d.l === "- Bestand")).toBe(true);
+      const { facts, omitted } = collectFeedbackFacts(diff, notebooks, "N");
+      expect(facts).toHaveLength(20);
+      expect(omitted).toBe(1);
+    });
+
+    it("große Überzahl (120 eigenständige Zeilen): exakt 100 nicht aufgeführt, Text bleibt bei 21 Zeilen", () => {
+      const { diff, notebooks } = setup(punkte(0, 120));
+      const { facts, omitted } = collectFeedbackFacts(diff, notebooks, "N");
+      expect(omitted).toBe(100);
+      const lines = formatFeedbackFacts(facts, "N", omitted).split("\n");
+      expect(lines).toHaveLength(21);
+      expect(lines[20]).toBe(hintN(100));
+    });
+
+    it("buildFeedbackFacts behält Signatur und Ergebnis (nur das Array, KEIN Zusatz-Property)", () => {
+      const { diff, notebooks } = setup(punkte(0, 25));
+      const facts = buildFeedbackFacts(diff, notebooks, "N");
+      expect(Array.isArray(facts)).toBe(true);
+      expect(facts).toHaveLength(20);
+      expect(Object.keys(facts)).toHaveLength(20); // nur die Indizes 0..19
+    });
+  });
+
+  describe("Verdrahtung: Hinweis steht im fertigen Trigger-Text an der richtigen Stelle", () => {
+    it("Fakten-Block endet mit der Hinweiszeile, direkt davor die 20. Fakten-Zeile, danach der Diff", () => {
+      const { diff, notebooks } = setup(punkte(0, 25));
+      const { trigger, facts, omitted } = buildFeedbackRequest(diff, "+ x", notebooks, "N");
+      expect(facts).toHaveLength(20);
+      expect(omitted).toBe(5);
+      expect(trigger).toContain(factLine(19) + "\n" + hintN(5) + "\n\nDiff der Änderung:");
+      // Reihenfolge: Fakten-Kopf < Hinweis < Diff < Prüfauftrag
+      const at = (s) => trigger.indexOf(s);
+      expect(at("Vom Code ermittelte Fakten")).toBeGreaterThan(-1);
+      expect(at("Vom Code ermittelte Fakten")).toBeLessThan(at("Hinweis: Aufgeführt"));
+      expect(at("Hinweis: Aufgeführt")).toBeLessThan(at("Diff der Änderung:"));
+      expect(at("Diff der Änderung:")).toBeLessThan(at("Prüfe die Änderung im Kontext ALLER Notizbücher"));
+      // genau EINE Hinweiszeile, und die überzähligen Zeilen tauchen nicht als Fakt auf
+      expect(trigger.split("Hinweis: Aufgeführt").length - 1).toBe(1);
+      expect(trigger).not.toContain("„- Punkt 20“");
+      expect(trigger).not.toContain("„- Punkt 24“");
+    });
+
+    it("auch ohne kompakten Diff (Gesamtdokument-Hinweis) steht die Hinweiszeile im Fakten-Block", () => {
+      const { diff, notebooks } = setup(punkte(0, 21));
+      const { trigger } = buildFeedbackRequest(diff, "", notebooks, "N");
+      expect(trigger).toContain(factLine(19) + "\n" + HINT_1 + "\n\nDie Änderung ist umfangreich");
+    });
+
+    it("diff === null: weder Fakten noch Hinweis, omitted 0", () => {
+      const { trigger, facts, omitted } = buildFeedbackRequest(null, "", [{ name: "N", doc: "x" }], "N");
+      expect(facts).toEqual([]);
+      expect(omitted).toBe(0);
+      expect(trigger).not.toContain("Hinweis: Aufgeführt");
+    });
+  });
+
+  describe("collectFeedbackFacts / formatFeedbackFacts: Randfälle", () => {
+    it("Fehlerpfade liefern leere Fakten UND omitted 0 (diff null, unbekanntes Notizbuch, keine Liste)", () => {
+      const none = { facts: [], omitted: 0 };
+      expect(collectFeedbackFacts(null, [{ name: "N", doc: "x" }], "N")).toEqual(none);
+      expect(collectFeedbackFacts(diffLines("a\n", "a\nb\n"), [{ name: "Anderes", doc: "a\nb\n" }], "N")).toEqual(none);
+      expect(collectFeedbackFacts(diffLines("a\n", "a\nb\n"), null, "N")).toEqual(none);
+    });
+
+    it("ungültiges omitted (0, NaN, negativ, Bruch, String, null, undefined, Infinity) erzeugt KEINEN Hinweis", () => {
+      const facts = [{ text: "x", chapter: null, section: null, lineNo: 1, activeCount: 1, elsewhere: [] }];
+      const plain = formatFeedbackFacts(facts, "N");
+      for (const bad of [0, NaN, -3, 1.5, "3", null, undefined, Infinity]) {
+        expect(formatFeedbackFacts(facts, "N", bad)).toBe(plain);
+      }
+    });
+
+    it("ohne Fakten bleibt der Text leer, auch bei omitted > 0 (kein Hinweis ohne Fakten-Block)", () => {
+      expect(formatFeedbackFacts([], "N", 5)).toBe("");
+      expect(formatFeedbackFacts(null, "N", 5)).toBe("");
+    });
+
+    it("die genannte Aufführungs-Zahl kommt aus den TATSÄCHLICH übergebenen Fakten, nicht aus einer festen 20", () => {
+      const f = (t) => ({ text: t, chapter: null, section: null, lineNo: 1, activeCount: 1, elsewhere: [] });
+      const lines = formatFeedbackFacts([f("a"), f("b")], "N", 2).split("\n");
+      expect(lines).toHaveLength(3);
+      expect(lines[2]).toBe(
+        "Hinweis: Aufgeführt sind nur die ersten 2 eigenständigen hinzugefügten Zeilen; " +
+        "für 2 weitere eigenständige hinzugefügte Zeilen wurden keine Vorkommen ermittelt, sie sind hier nicht aufgeführt."
+      );
+    });
   });
 });

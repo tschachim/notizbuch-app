@@ -5,7 +5,7 @@ import {
   isPointerOnlyReply, POINTER_ONLY_RETRY_DIAGNOSIS, shouldRetryPointerOnly,
   formatCacheDebug, resetCacheDiagnosticsForTests,
   supportsForcedToolChoice, normalizeModelId, FORCE_TOOL_NUDGE,
-  isRefusal, refusalMessage, isFallbackRelatedError,
+  isRefusal, refusalMessage, isFallbackRelatedError, stripToolMarkupTail,
 } from "../src/lib/anthropic.js";
 import { MEMORY_SOFT_LIMIT, MEMORY_HARD_LIMIT } from "../src/lib/memory.js";
 import { applyOpsDetailed } from "../src/lib/ops.js";
@@ -2051,6 +2051,295 @@ describe("buildChatReply", () => {
   });
 });
 
+// v7.58 (E2E-Fall C28, DECISIONS #136): Tool-Markup-Reste am Ende des reply-
+// Texts. Live-Befund: eine reine Rückfrage endete wörtlich auf dem schließenden
+// parameter-Tag plus dem ops-Parameter mit leerem Wert. Die Funktion darf NUR
+// genau so einen Rest entfernen – jede Abweichung (echte Ops im Rest, Tags im
+// Fließtext oder im Code) muss den Text unverändert lassen. Die Tags werden
+// über Helfer zusammengesetzt, damit im Quelltext keine wörtlichen Tool-Tag-
+// Ketten stehen (Editor-/Tooling-Fallstrick, derselbe Grund wie im Live-Fall).
+const tmClose = (name, ns = "") => "<" + "/" + ns + name + ">";
+const tmOpen = (name, attrs = "", ns = "") => "<" + ns + name + (attrs ? " " + attrs : "") + ">";
+const tmOps = (value, ns = "") => tmOpen("parameter", 'name="ops"', ns) + value;
+const TM_LIVE_TAIL = tmClose("parameter") + "\n" + tmOps("[]");
+
+describe("stripToolMarkupTail (v7.58, E2E C28, DECISIONS #136)", () => {
+  const ASK = "Meinst du das Kapitel „Ziele“ oder den Abschnitt „Ziele 2026“?";
+
+  it("Live-Fall C28: Rückfrage + Rest wird auf die Rückfrage gekürzt (und ist idempotent)", () => {
+    const out = stripToolMarkupTail(ASK + "\n" + TM_LIVE_TAIL);
+    expect(out).toBe(ASK);
+    expect(stripToolMarkupTail(out)).toBe(out);
+    // ohne Zeilenumbruch zwischen Text und erstem Tag
+    expect(stripToolMarkupTail(ASK + TM_LIVE_TAIL)).toBe(ASK);
+  });
+
+  it.each([
+    ["nur Zeilenumbruch zwischen den Tags", TM_LIVE_TAIL],
+    ["ohne jeden Zeilenumbruch", tmClose("parameter") + tmOps("[]")],
+    ["Leerzeilen davor, Umbruch danach", "\n\n" + TM_LIVE_TAIL + "\n"],
+    ["Windows-Zeilenenden", "\r\n" + tmClose("parameter") + "\r\n" + tmOps("[]")],
+    ["Leerraum im leeren Array", tmClose("parameter") + "\n" + tmOps("[ ]")],
+    ["Umbruch zwischen Tag und Array, danach schließendes Tag",
+      tmClose("parameter") + "\n" + tmOps("\n[]\n") + tmClose("parameter")],
+    ["einfache Anführungszeichen am name-Attribut",
+      tmClose("parameter") + "\n" + tmOpen("parameter", "name='ops'") + "[]"],
+    ["Namensraum-Präfix", tmClose("parameter", "antml:") + "\n" + tmOps("[]", "antml:")],
+    ["Präfix mit Punkt/Bindestrich im Namen", tmClose("parameter", "a.b-c:") + "\n" + tmOps("[]", "a.b-c:")],
+    ["nur ein schließendes parameter-Tag", tmClose("parameter")],
+    ["nur ein schließendes Tag mit Namensraum-Präfix", tmClose("parameter", "antml:")],
+    ["invoke/function_calls-Abschluss", tmClose("parameter") + "\n" + tmClose("invoke") + "\n" + tmClose("function_calls")],
+    ["öffnende Tags mit Attributen (invoke)", tmOpen("function_calls") + tmOpen("invoke", 'name="update_notebook"') + tmOps("[]")],
+    ["ops-Parameter komplett leer (kein Wert)", tmClose("parameter") + tmOps("") + tmClose("parameter")],
+    // Die eingeschränkte Tag-Syntax darf echte Formen nicht verlieren
+    ["Leerraum vor dem '>' im schließenden Tag", tmClose("parameter").slice(0, -1) + "  >"],
+    ["mehrere Attribute mit einfachen und doppelten Anführungszeichen",
+      tmClose("parameter") + "\n" + tmOpen("invoke", "name=\"update_notebook\" id='1' ns:x.y-z = \"2\"")],
+    ["Umbruch und Einrückung zwischen den Attributen",
+      tmClose("parameter") + "\n" + tmOpen("parameter", "\n  name=\"ops\"\n") + "[]"],
+    ["Selbstschluss-Tag mit Attribut", tmClose("parameter") + "\n" + tmOpen("invoke", 'name="x" /')],
+    ["Selbstschluss-Tag direkt hinter dem Namen", tmOpen("parameter", "/")],
+  ])("entfernt den Rest: %s", (_label, tail) => {
+    expect(stripToolMarkupTail(ASK + tail)).toBe(ASK);
+  });
+
+  it("kappt den Leerraum am Ende auch VOR dem Rest (Absatzumbruch bleibt nicht als Schwanz stehen)", () => {
+    expect(stripToolMarkupTail("Absatz eins.\n\nAbsatz zwei.  \n\n  " + TM_LIVE_TAIL))
+      .toBe("Absatz eins.\n\nAbsatz zwei.");
+  });
+
+  it("ein Text, der NUR aus dem Rest besteht, wird leer (der Aufrufer greift dann auf den Default zurück)", () => {
+    expect(stripToolMarkupTail(TM_LIVE_TAIL)).toBe("");
+    expect(stripToolMarkupTail("  \n" + TM_LIVE_TAIL + "\n ")).toBe("");
+    expect(stripToolMarkupTail(tmClose("parameter"))).toBe("");
+  });
+
+  describe("Rest mit anderem Inhalt: Text bleibt UNVERÄNDERT (echte Ops dürfen nicht unsichtbar werden)", () => {
+    const REAL_OP = '[{"type":"append_to_section","heading":"## A","content":"x"}]';
+    it.each([
+      ["echte Op im ops-Wert", tmClose("parameter") + "\n" + tmOps(REAL_OP)],
+      ["Array mit leerem String", tmClose("parameter") + "\n" + tmOps('[""]')],
+      ["verschachtelt leeres Array", tmClose("parameter") + "\n" + tmOps("[[]]")],
+      ["Objekt statt Array", tmClose("parameter") + "\n" + tmOps("{}")],
+      ["null als ops-Wert", tmClose("parameter") + "\n" + tmOps("null")],
+      ["leeres Array plus weiterer Text", tmClose("parameter") + "\n" + tmOps("[] und noch etwas")],
+      ["leeres Array, danach ein zweiter Wert", tmClose("parameter") + "\n" + tmOps("[]") + "[1]"],
+      ["leeres Array OHNE ops-Tag davor", tmClose("parameter") + " []"],
+      ["leeres Array unter einem anderen Parameter (commit)",
+        tmClose("parameter") + "\n" + tmOpen("parameter", 'name="commit"') + "[]"],
+      ["commit-Wert im Rest", tmClose("parameter") + "\n" + tmOpen("parameter", 'name="commit"') + "Eintrag"],
+    ])("%s", (_label, tail) => {
+      const text = ASK + tail + "  \n";
+      expect(stripToolMarkupTail(text)).toBe(text); // byte-identisch, inkl. Leerraum am Ende
+    });
+
+    // Pin-Test zur Teilkürzung (Review 🔵 zu #136, vom Orchestrator entschieden):
+    // Fremdinhalt wird NIE entfernt; steht DAHINTER noch eine REINE Tag-Kette bis
+    // zum Textende, fällt nur diese Kette weg. Die echte Op bleibt sichtbar.
+    // Gegenprobe zu "alles oder nichts": ein Mutant, der bei jedem Fremdinhalt im
+    // Rest den ganzen Text unverändert ließe, bräche hier.
+    it("Teilkürzung: Fremdinhalt bleibt sichtbar, nur die reine Tag-Kette DAHINTER fällt weg", () => {
+      const head = ASK + tmClose("parameter") + "\n" + tmOps(REAL_OP);
+      const full = head + tmClose("parameter") + "\n" + tmClose("invoke");
+      const out = stripToolMarkupTail(full);
+      expect(out).toBe(head);
+      expect(out).toContain(REAL_OP); // die Op geht nie verloren
+      expect(out.endsWith(REAL_OP)).toBe(true); // ... und endet exakt auf ihr
+      expect(stripToolMarkupTail(out)).toBe(out); // idempotent: Fremdinhalt ist jetzt das Ende
+      // Leerraum und function_calls-Abschluss ändern nichts am Ergebnis
+      expect(stripToolMarkupTail(full + "\n" + tmClose("function_calls") + "  \n")).toBe(head);
+      // commit-Text als Fremdinhalt, leerer ops-Wert als Kette dahinter
+      const withCommit = ASK + tmClose("parameter") + "\n" + tmOpen("parameter", 'name="commit"') + "Eintrag";
+      expect(stripToolMarkupTail(withCommit + tmClose("parameter") + "\n" + tmOps("[]"))).toBe(withCommit);
+    });
+  });
+
+  describe("Tags im Fließtext bleiben stehen (der Nutzer darf über XML reden)", () => {
+    it("mitten im Satz", () => {
+      const t = "Das Tag " + tmClose("parameter") + " beendet einen Parameter, danach geht der Satz weiter.";
+      expect(stripToolMarkupTail(t)).toBe(t);
+      const t2 = "So sieht " + tmOps("[]") + " mitten im Text aus, ohne Rest am Ende.";
+      expect(stripToolMarkupTail(t2)).toBe(t2);
+    });
+
+    it("mitten im Text UND ein echter Rest am Ende: nur der Rest geht", () => {
+      const mid = "Das Tag " + tmClose("parameter") + " schließt einen Parameter.";
+      expect(stripToolMarkupTail(mid + "\n" + TM_LIVE_TAIL)).toBe(mid);
+    });
+
+    it("Tag-Erwähnung am Ende, aber MIT Text dahinter, ist kein Rest", () => {
+      const t = "Schließe mit " + tmClose("parameter") + " ab und prüfe danach die Syntax.";
+      expect(stripToolMarkupTail(t)).toBe(t);
+    });
+
+    it("ähnlich aussehende Tags zählen nicht", () => {
+      for (const t of [
+        "Text <parameterized>", "Text <parameters>", "Text <invoker>", "Text " + tmClose("parametrisch"),
+        "Text <function_calls_extra>", "Text <parameter", "Text " + tmClose("parameter").slice(0, -1),
+        "a < b und <b>fett</b>", "Text <div>",
+      ]) expect(stripToolMarkupTail(t)).toBe(t);
+    });
+
+    // Tag-Rumpf nur mit echter Attribut-Syntax (Review 🔵 zu #136): Generics
+    // wie "Foo<parameter T, U>" sehen bis zum ">" wie ein Tag aus, sind aber
+    // keins. Alte Regel ([^<>]* bis zum ">"): all diese Texte wurden gekürzt.
+    it("Generic-Form am Antwortende ('Foo<parameter T, U>') ist kein Tag: Text bleibt vollständig", () => {
+      for (const t of [
+        "Der Typ ist Foo<parameter T, U>",
+        "Der Typ ist Foo<parameter T, U>\n",
+        "Die Signatur lautet Map<invoke K, V>",
+        "Rückgabe: Result<function_calls T>",
+        // Attribut ohne Anführungszeichen bzw. mit offenem Anführungszeichen
+        "Text <parameter name=ops>",
+        'Text <parameter name="ops>',
+        // schließendes Tag mit Fremdtext im Rumpf
+        "Text " + tmClose("parameter").slice(0, -1) + " T, U>",
+      ]) expect(stripToolMarkupTail(t)).toBe(t);
+      // ein echter Rest DAHINTER wird trotzdem entfernt, die Generic-Form bleibt
+      expect(stripToolMarkupTail("Der Typ ist Foo<parameter T, U>\n" + TM_LIVE_TAIL))
+        .toBe("Der Typ ist Foo<parameter T, U>");
+    });
+
+    it("mehrzeiliges Pseudo-Tag am Textende ist kein Tag: Text bleibt vollständig", () => {
+      for (const t of [
+        "Beispiel:\n<parameter\nfoo bar\nbaz>",
+        "Text <invoke\nnoch Prosa ohne Ende\n>",
+        // Attribut korrekt, danach aber Fremdtext über mehrere Zeilen
+        'Text <parameter name="x"\nund dann Prosa>',
+        // Wert mit eingebetteter "<" ist keine Attribut-Syntax
+        'Text <parameter name="a<b">',
+      ]) expect(stripToolMarkupTail(t)).toBe(t);
+    });
+  });
+
+  describe("Tags in Code bleiben stehen", () => {
+    it("Rest steht in einem GESCHLOSSENEN Codeblock am Textende", () => {
+      const t = "Beispiel:\n```xml\n" + TM_LIVE_TAIL + "\n```";
+      expect(stripToolMarkupTail(t)).toBe(t);
+    });
+
+    it("Rest steht in einem bis zum Textende UNTERMINIERTEN Codeblock", () => {
+      const t = "Beispiel:\n```xml\n" + TM_LIVE_TAIL;
+      expect(stripToolMarkupTail(t)).toBe(t);
+    });
+
+    it("unterminierter 4-Backtick-Zaun um einen geschlossenen 3-Backtick-Block: weiterhin Code", () => {
+      const t = "````md\n```\ncode\n```\n" + TM_LIVE_TAIL;
+      expect(stripToolMarkupTail(t)).toBe(t);
+    });
+
+    it("geschlossener Codeblock mit Tags DAVOR, echter Rest danach: Block bleibt, Rest geht", () => {
+      const block = "```xml\n" + tmOps("[]") + "\n```\nSo sieht das aus.";
+      expect(stripToolMarkupTail(block + "\n" + TM_LIVE_TAIL)).toBe(block);
+    });
+
+    // Review-Finding Runde 1: Klebt der Rest OHNE Zeilenumbruch am Schluss-
+    // Zaun, ist der Block geschlossen und der Rest steht DAHINTER – er muss
+    // weg, der Block bleibt (samt Schluss-Zaun) stehen. Die natürliche Form des
+    // Lecks bei einer reinen Antwort mit Code am Ende.
+    describe("Rest klebt direkt am Schluss-Zaun eines geschlossenen Blocks (kein Zeilenumbruch)", () => {
+      const PLAIN = "Hier der Code:\n```js\nx = 1\n```";
+
+      it("Live-Form: Schluss-Zaun + Rest -> Text samt geschlossenem Block, Zaun unverändert", () => {
+        const out = stripToolMarkupTail(PLAIN + TM_LIVE_TAIL);
+        expect(out).toBe(PLAIN);
+        expect(out.endsWith("\n```")).toBe(true);
+        // idempotent: der Block ist wieder ein normaler Text ohne Rest
+        expect(stripToolMarkupTail(out)).toBe(out);
+        // dieselbe Form MIT Zeilenumbruch hinter dem Zaun verhält sich gleich
+        expect(stripToolMarkupTail(PLAIN + "\n" + TM_LIVE_TAIL)).toBe(PLAIN);
+      });
+
+      it("nur ein schließendes Tag und Namensraum-Präfix kleben ebenfalls", () => {
+        expect(stripToolMarkupTail(PLAIN + tmClose("parameter"))).toBe(PLAIN);
+        expect(stripToolMarkupTail(PLAIN + tmClose("parameter", "antml:") + "\n" + tmOps("[]", "antml:"))).toBe(PLAIN);
+      });
+
+      it("Leerraum zwischen Schluss-Zaun und Rest: Zaun bleibt, Leerraum am Ende wird gekappt", () => {
+        expect(stripToolMarkupTail(PLAIN + "  " + TM_LIVE_TAIL)).toBe(PLAIN);
+      });
+
+      it("eingerückter Zaun im Listenpunkt (0-3 Leerzeichen)", () => {
+        const item = "- Punkt:\n  ```js\n  x = 1\n  ```";
+        expect(stripToolMarkupTail(item + TM_LIVE_TAIL)).toBe(item);
+        const deeper = "1. Schritt\n   ```\n   y\n   ```";
+        expect(stripToolMarkupTail(deeper + tmClose("parameter"))).toBe(deeper);
+      });
+
+      it("zweiter Block: erster geschlossen, Rest klebt am Schluss-Zaun des zweiten", () => {
+        const two = "```a\n1\n```\nZwischentext\n```b\n2\n```";
+        expect(stripToolMarkupTail(two + TM_LIVE_TAIL)).toBe(two);
+      });
+
+      it("längerer Zaun (4 Backticks) mit innerem 3-Backtick-Block: Rest am äußeren Schluss-Zaun geht", () => {
+        const outer = "````md\n```\ncode\n```\n````";
+        expect(stripToolMarkupTail(outer + TM_LIVE_TAIL)).toBe(outer);
+      });
+
+      it("Rest klebt an einem öffnenden Zaun OHNE Schluss: unverändert (Rest steht in einem ungeschlossenen Block)", () => {
+        for (const t of [
+          "Text\n```" + TM_LIVE_TAIL,
+          "Text\n```js" + TM_LIVE_TAIL,
+          "Text\n  ```" + tmClose("parameter"),
+          // erster Block zu, zweiter Zaun nie geschlossen
+          "```a\n1\n```\nText\n```" + TM_LIVE_TAIL,
+        ]) expect(stripToolMarkupTail(t)).toBe(t);
+      });
+
+      it("3-Backtick-Zeile schließt einen 4-Backtick-Block NICHT: Rest bleibt (Block unterminiert)", () => {
+        const t = "````md\n```\ncode\n```" + TM_LIVE_TAIL;
+        expect(stripToolMarkupTail(t)).toBe(t);
+      });
+
+      it("Codespan-Parität greift weiter: Rest hinter geschlossenem Block, aber in offenem Codespan der Folgezeile", () => {
+        const t = PLAIN + "\nSchreibe `" + tmClose("parameter");
+        expect(stripToolMarkupTail(t)).toBe(t);
+        // derselbe Text mit geschlossenem Codespan: Rest geht
+        expect(stripToolMarkupTail(PLAIN + "\nSchreibe `x` fertig" + tmClose("parameter"))).toBe(PLAIN + "\nSchreibe `x` fertig");
+      });
+    });
+
+    it("Rest in einem Inline-Codespan (geschlossen oder offen)", () => {
+      const closed = "Schreibe `" + tmClose("parameter") + "`";
+      expect(stripToolMarkupTail(closed)).toBe(closed);
+      const open = "Schreibe `" + tmClose("parameter");
+      expect(stripToolMarkupTail(open)).toBe(open);
+    });
+
+    it("gerade Backtick-Zahl davor (Codespan schon geschlossen): Rest wird entfernt", () => {
+      expect(stripToolMarkupTail("Nutze `x` und dann" + tmClose("parameter"))).toBe("Nutze `x` und dann");
+    });
+  });
+
+  it("Text ohne Rest kommt BYTE-IDENTISCH zurück (auch mit Leerraum am Ende, ohne trim)", () => {
+    for (const t of ["Antwort.  \n", "  führender Leerraum", "", "   ", "a < b", "Formel $a<b$ und Text"]) {
+      expect(stripToolMarkupTail(t)).toBe(t);
+    }
+  });
+
+  it("Nicht-Strings kommen unverändert (gleiche Referenz) zurück und werfen nie", () => {
+    const obj = { reply: "x" };
+    const arr = [1];
+    expect(stripToolMarkupTail(null)).toBeNull();
+    expect(stripToolMarkupTail(undefined)).toBeUndefined();
+    expect(stripToolMarkupTail(42)).toBe(42);
+    expect(stripToolMarkupTail(obj)).toBe(obj);
+    expect(stripToolMarkupTail(arr)).toBe(arr);
+  });
+
+  it("viele Tags im Text: bleibt linear (kein quadratischer Scan) und liefert das richtige Ergebnis", () => {
+    const many = tmClose("parameter").repeat(20000);
+    const t0 = Date.now();
+    // Kette scheitert am letzten Zeichen -> unverändert
+    expect(stripToolMarkupTail(many + "x")).toBe(many + "x");
+    // reine Kette -> komplett weg
+    expect(stripToolMarkupTail(many)).toBe("");
+    // Text vorne, Kette hinten
+    expect(stripToolMarkupTail("Text" + many)).toBe("Text");
+    expect(Date.now() - t0).toBeLessThan(2000);
+  });
+});
+
 describe("callClaude (fetch gemockt)", () => {
   const NB_CTX = { notebooks: [{ name: "W", doc: "# W" }], activeName: "W", knowledge: null };
   const toolUse = (input) => ({ type: "tool_use", name: "update_notebook", input });
@@ -3331,6 +3620,86 @@ describe("callClaude (fetch gemockt)", () => {
         expect(fetch.mock.calls[2][1].headers["anthropic-beta"]).toBe("cache-diagnosis-2026-04-07");
       });
     });
+  });
+});
+
+// v7.58 (E2E C28, DECISIONS #136): Verdrahtung von stripToolMarkupTail im
+// Turn-Pfad. Bereinigt wird das reply-Feld an der Stelle, an der callClaude
+// es übernimmt (finalize) – ops/commit/sources bleiben unberührt. tmClose/
+// tmOps/TM_LIVE_TAIL: siehe Helfer am Block "stripToolMarkupTail" oben.
+describe("callClaude – Tool-Markup-Rest im reply (v7.58, E2E C28, DECISIONS #136)", () => {
+  const NB_CTX = { notebooks: [{ name: "W", doc: "# W" }], activeName: "W", knowledge: null };
+  const toolUse = (input) => ({ type: "tool_use", name: "update_notebook", input });
+
+  beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); resetCacheDiagnosticsForTests(); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  const respond = (body) => fetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => body });
+  const run = (content) => {
+    respond({ stop_reason: "end_turn", content });
+    return callClaude("key", "hallo", NB_CTX, [], "claude-sonnet-5", null, null);
+  };
+
+  it("Live-Fall C28: reine Rückfrage mit Rest im reply -> Blase ohne Rest, ops [] und commit null unverändert", async () => {
+    const res = await run([toolUse({ reply: "Welches Kapitel meinst du?" + TM_LIVE_TAIL, ops: [], commit: null })]);
+    expect(res.reply).toBe("Welches Kapitel meinst du?");
+    expect(res.ops).toEqual([]);
+    expect(res.commit).toBeNull();
+  });
+
+  it("echte ops + commit neben einem Rest im reply bleiben BYTE-GLEICH (reine Textbereinigung)", async () => {
+    const ops = [
+      { type: "append_to_section", heading: "## A", content: "Text mit " + tmClose("parameter") + " im Inhalt" },
+      { type: "append_to_section", heading: "## B", content: "Zweiter Eintrag" },
+    ];
+    const res = await run([toolUse({ reply: "Eingetragen." + TM_LIVE_TAIL, ops, commit: " Eintrag " })]);
+    expect(res.reply).toBe("Eingetragen.");
+    // Tags in einem OP-INHALT sind Nutzdaten und werden nie angefasst
+    expect(res.ops).toEqual(ops);
+    expect(res.commit).toBe("Eintrag");
+  });
+
+  it("Antwort mit Code am Ende, Rest klebt am Schluss-Zaun -> Blase endet sauber auf dem geschlossenen Block", async () => {
+    const code = "Hier der Code:\n```js\nx = 1\n```";
+    const res = await run([toolUse({ reply: code + TM_LIVE_TAIL, ops: [] })]);
+    expect(res.reply).toBe(code);
+    expect(res.ops).toEqual([]);
+  });
+
+  it("reply besteht NUR aus dem Rest -> der Default 'Notiert.' greift wie bei leerem reply", async () => {
+    const res = await run([toolUse({ reply: "\n" + TM_LIVE_TAIL, ops: [] })]);
+    expect(res.reply).toBe("Notiert.");
+  });
+
+  it("Rest mit NICHT-leerem ops-Wert bleibt sichtbar (verlorene Ops dürfen nicht unsichtbar werden)", async () => {
+    const lost = "Ich trage das ein." + tmClose("parameter") + "\n" + tmOps('[{"type":"append_to_section","content":"x"}]');
+    const res = await run([toolUse({ reply: lost, ops: [] })]);
+    expect(res.reply).toBe(lost);
+    expect(res.ops).toEqual([]); // die Bereinigung erfindet keine Ops
+  });
+
+  it("Tags mitten im reply (Nutzer fragt nach XML) bleiben unangetastet", async () => {
+    const reply = "Das Tag " + tmClose("parameter") + " schließt einen Parameter im Tool-Format.";
+    const res = await run([toolUse({ reply, ops: [] })]);
+    expect(res.reply).toBe(reply);
+  });
+
+  it("Substanz-Gate sieht den BEREINIGTEN reply: Markup zählt nicht als Inhalt, der Vorab-Text bleibt erhalten", async () => {
+    // Ohne Bereinigung an der Quelle hätte der 37 Zeichen lange Rest diese
+    // kurze Rückfrage über die 80-Zeichen-Schwelle gehoben (isSubstantialReply)
+    // und das v7.19-Gate hätte den Vorab-Text verworfen.
+    const ask = "Meinst du das Kapitel Ziele oder den Abschnitt Plan?";
+    expect(isSubstantialReply(ask)).toBe(false);
+    expect(isSubstantialReply(ask + TM_LIVE_TAIL)).toBe(true); // die Falle
+    const pre = "Ich habe mir das Notizbuch angesehen.";
+    const res = await run([{ type: "text", text: pre }, toolUse({ reply: ask + TM_LIVE_TAIL, ops: [] })]);
+    expect(res.reply).toBe(pre + "\n\n" + ask);
+  });
+
+  it("Dedup gegen den Vorab-Text vergleicht den BEREINIGTEN reply: keine Doppelung durch den Rest", async () => {
+    const ask = "Welches Kapitel meinst du?";
+    const res = await run([{ type: "text", text: ask }, toolUse({ reply: ask + TM_LIVE_TAIL, ops: [] })]);
+    expect(res.reply).toBe(ask);
   });
 });
 

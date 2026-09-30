@@ -470,6 +470,25 @@ Phantom-Kapitel pro „#“-Zeile im Code, Zäune wurden als sichtbarer Text
 gerendert). Die Gliederung bleibt exakt so, wie sie vor dieser Ergänzung
 war.
 
+**C10b [VERBUNDEN][API] Eingerückter Codeblock in einer Chat-Antwort
+(v7.58, DECISIONS #137).** Im QA-Notizbuch per Chat: „Zeig mir NUR hier im
+Chat (das Dokument nicht ändern) eine Aufzählung mit dem Punkt ‚QA-Punkt‘
+und darunter, um zwei Leerzeichen eingerückt als Teil desselben Punkts,
+einen Codeblock mit der einen Zeile ‚qa code zeile‘.“ (genau 1 API-Aufruf).
+Erwartet: Die Chat-Antwort zeigt den Codeblock als eigenen monospaced
+Kasten ohne sichtbare ```-Zeichen, und der Code-Text ist OHNE die
+Zaun-Einrückung dargestellt – per javascript_tool im letzten Kasten der
+Antwort prüfen, dass `[...document.querySelectorAll('pre code')].at(-1)
+.textContent` exakt „qa code zeile“ ist (KEINE führenden Leerzeichen; vor
+v7.58 standen dort die 2 Leerzeichen der Zaun-Einrückung). ⚠️ Modellabhängig
+(kein Finding, kurz vermerken): Liefert das Modell den Zaun nicht
+eingerückt (nackter Codeblock nach der Liste) oder antwortet es ohne
+Codeblock, gilt der Fall als ÜBERSPRUNGEN – der Fehler ließe sich dann nicht
+provozieren (Fehlerklasse ist zusätzlich durch Unit-Tests in
+`tests/code.test.jsx` abgedeckt). Bekannte Grenze (KEIN Finding): ein um 4
+Leerzeichen eingerückter Zaun (Listenpunkt 2. Ebene) wird nach CommonMark
+nicht als Codeblock erkannt und bleibt Text (DECISIONS #133).
+
 **C11 [VERBUNDEN] Generischer Link in der Dokument-Ansicht.** Voraussetzung:
 Ein Dokument mit einem generischen Link – bei Bedarf über den Editor
 anlegen (siehe D7) mit Titel „Azure-Ticket“ und URL
@@ -869,6 +888,16 @@ Kapitelnennung, 1 API-Aufruf). Bestanden: Modell wählt/erfragt ein Kapitel
 ODER eine ⚠️-Pille „chapter angeben“ mit Kapitelliste und keine Änderung;
 🔴 wenn `## QA-Test Neu` still am Dokumentende/im letzten Kapitel ohne
 ℹ️/⚠️ entsteht. Aufräumen: Abschnitt löschen.
+Zusatzprüfung Tool-Markup (v7.58, DECISIONS #136): Stellt das Modell eine
+Rückfrage, dürfen am ENDE der Antwortblase KEINE Tool-Tag-Reste stehen
+(wörtlich `</parameter>`, `<parameter name="ops">[]` o. Ä. – im v7.57.3-Lauf
+live beobachtet). Seit v7.58 werden solche Reste am Blasenende vor der
+Anzeige entfernt; treten sie weiter auf, ist das ein Finding (den
+wörtlichen Blasentext angeben). Tags MITTEN im Text oder in Codeblöcken
+bleiben absichtlich stehen, und ein Rest mit echtem Inhalt (nicht-leerer
+ops-Wert, „commit“-Text) wird bewusst NIE entfernt, weil dann Ops
+verloren gegangen wären – auch das ist ein Finding, nur mit anderem
+Befund (verlorene Ops).
 
 **C29 [VERBUNDEN][API] Strukturzeilen im Inhalt werden abgewiesen
 (v7.53).** Voraussetzung: Abschnitt „QA-Test Neu“ existiert (z. B. aus
@@ -1318,6 +1347,53 @@ prev.querySelector('a')?.textContent === 'QA-Lin' &&
 last.querySelector('a')?.textContent === 'ktext'`. Editor über
 „Abbrechen“ verlassen (keine der Testeinfügungen wird gespeichert).
 
+**D7c [OFFEN] Link-Popover: Fokus zurück in den Editor und Enter =
+Einfügen (v7.58, DECISIONS #135).** ⚠️ In einem AKTIVEN, sichtbaren Tab im
+Vordergrund ausführen (`document.hasFocus()` muss `true` liefern) – in
+einem verdeckten oder unfokussierten Fenster sagt `document.activeElement`
+nichts aus. Editor öffnen, ans Dokumentende gehen, neuen Absatz anlegen,
+„QA-Link“ tippen, den Text markieren, Link-Knopf klicken, als URL
+`https://example.com/qa` eingeben und „Einfügen“ mit der MAUS klicken.
+Erwartet (javascript_tool, muss `true` liefern):
+`document.activeElement === document.querySelector('.tiptap-doc')` (der
+Fokus liegt im Editor, NICHT auf `body`; vor v7.58 fehlte er dort), und das
+Popover ist geschlossen. OHNE weiteren Klick sofort per computer-tool die
+Tasten „X“ und „Y“ EINZELN senden (echte Tastenanschläge). Erwartet
+(javascript_tool, muss `true` liefern): `const p =
+document.querySelector('.tiptap-doc').lastElementChild;
+p.querySelector('a[href="https://example.com/qa"]')?.textContent ===
+'QA-Link' && p.textContent.endsWith('QA-LinkXY')` – der weitergetippte Text
+steht HINTER dem Link und ist NICHT Teil des Links. **Enter im URL-Feld:**
+neuen Absatz anlegen, „QA-Link2“ tippen und markieren, Link-Knopf klicken,
+URL `https://example.com/qa2` ins URL-Feld tippen und dort die
+computer-tool-Taste „Return“ senden (echtes Tastenereignis). Vorher die
+Zahl der Kinder von `.tiptap-doc` notieren. Erwartet: Link eingefügt,
+Popover zu, Fokus im Editor, die Zahl der Kinder von `.tiptap-doc` ist
+UNVERÄNDERT (Enter erzeugt keinen zusätzlichen Absatz im Editor); ein
+sofort getipptes „Z“ steht hinter dem Link. Ebenso **Enter im Titelfeld**
+(neuer Absatz „QA-Link3“, URL `https://example.com/qa3`, Titel um „b“
+ergänzen, im TITEL-Feld Return): fügt ebenfalls ein. **Enter mit Fehler:**
+neuen Absatz anlegen, „QA-Link4“ tippen und markieren, Link-Knopf klicken,
+als URL `https://example.com/qa4` eintragen, dann den Titel auf „33487“
+(reine Zahl) ändern und im Titelfeld Return senden.
+Erwartet: dieselbe Fehlermeldung wie beim Klick auf „Einfügen“ (D7), es
+wird NICHTS eingefügt, das Popover bleibt offen und der Fokus bleibt im Feld
+(`document.activeElement` ist `input[placeholder="Sprechender Titel"]`);
+ebenso mit leerer URL bzw. `javascript:alert(1)` im URL-Feld (Fehlermeldung,
+kein Einfügen). **Entfernen:** den Cursor in den Link aus dem ersten Schritt
+setzen, Link-Knopf klicken (Knöpfe „Übernehmen“/„Entfernen“/„Öffnen“),
+„Entfernen“ klicken. Erwartet: der Text „QA-Link“ bleibt stehen, ist aber
+kein Link mehr, der Fokus liegt im Editor und die Selektion ist zu einem
+Cursor am Textende kollabiert (`window.getSelection().isCollapsed ===
+true`); ein sofort getipptes „W“ wird ANGEHÄNGT und ersetzt den Text nicht.
+Bekannte, bewusste Eigenheiten (KEIN Finding): Direkt nach dem Einfügen ist
+der Link-Knopf nicht hervorgehoben, und ein sofortiges erneutes Öffnen zeigt
+„Einfügen“ statt „Übernehmen“ (der Cursor steht bewusst außerhalb des Links,
+DECISIONS #135); nach einer Cursorbewegung in den Link verhält es sich wie
+zuvor. Auf Android-Bildschirmtastaturen kann Enter während einer laufenden
+Wortkomposition wirkungslos bleiben (der Knopf funktioniert weiter). Editor
+über „Abbrechen“ verlassen (keine der Testeinfügungen wird gespeichert).
+
 **D8 [VERBUNDEN][API] Automatische Titel-Ermittlung im Link-Dialog (v7.12).**
 NUR ausführen, wenn unter Einstellungen (siehe A4) bereits ein Provider
 MIT Zugangsdaten (PAT bzw. E-Mail+API-Token) hinterlegt ist – der
@@ -1427,7 +1503,8 @@ Symbols (Undo der Ersetzung, Word-Verhalten). Codeblock-Knopf, hinein
 „->“ tippen: Erwartet bleibt buchstäblich „->“ stehen (keine Ersetzung
 in Code). Speichern, Editor erneut öffnen: alle Symbole bleiben
 unverändert stehen (Roundtrip). Danach in den Einstellungen (Zahnrad)
-zum Abschnitt „AutoKorrektur (Editor)“ scrollen: Kategorie „Pfeile“
+zum Abschnitt „AutoKorrektur (Editor & Schnellnotizen)“ (bis v7.57
+„AutoKorrektur (Editor)“) scrollen: Kategorie „Pfeile“
 abwählen, Dialog schließen, Editor erneut öffnen, „->“ tippen – erwartet
 KEINE Ersetzung mehr (Kategorie greift). Kategorie „Pfeile“ wieder
 anhaken. Danach unter „Eigene Ersetzungen“ einen Trigger „qatest“ mit
@@ -2248,6 +2325,81 @@ v7.56-Ständen): `submitQuickNote` (App.jsx) nutzt `trimNoteBlock` statt
 `text.trim()` – das entfernt nur führende Leerzeilen und Whitespace am
 Ende des Blocks, nicht den Einzug der ersten inhaltstragenden Zeile
 (siehe DECISIONS #114).
+
+**E4 [OFFEN] AutoKorrektur im Post-it (v7.58, DECISIONS #134).** Post-it
+anlegen, das `<textarea>` fokussieren (Klick hinein). ⚠️ Eingabemethode: Die
+Zeichen EINZELN als echte Tastenanschläge senden – je Zeichen eine eigene
+computer-Aktion „key“ (Zeichen bzw. Tastenname, z. B. `-`, `>`), NICHT die
+Aktion „type“ (sie fügt den ganzen String als EIN `insertText`-Ereignis ein
+und ersetzt per Design NICHTS) und NICHT den E2-Weg (nativer Setter +
+`new Event('input')`; ein Event ohne `inputType` ersetzt ebenfalls bewusst
+nichts) – beides ist KEIN Finding. Erwartungen jeweils per javascript_tool am
+Wert von `textarea[placeholder="Kurz notieren …"]` (`.value`,
+`.selectionStart`, `.selectionEnd`) prüfen; jede Probe in einer NEUEN, leeren
+Zeile beginnen (Enter, Zeilenanfang), damit Text davor keinen Trigger
+verlängert:
+- „a“, „b“, „-“, „>“ senden -> Wert endet auf „ab→“, `selectionStart` = 3
+  (bei leerem Feld, sonst relativ dazu).
+- Direkt danach Backspace -> Wert „ab->“ (Rücknahme der Ersetzung wie in
+  Word), Cursor 4; ein ZWEITES Backspace -> „ab-“ (löscht normal, ersetzt
+  nichts erneut).
+- „<“, „=“, Leertaste -> „≤ “ (Symbol plus Leerzeichen; „<=“ feuert per
+  Design erst mit dem Folgezeichen, siehe D12).
+- „a -- b“ (Zeichen einzeln, mit Leerzeichen) -> „a – b“.
+- „-“, „-“, „>“ -> „⟶“ (NICHT „–>“ oder „– >“; Ketten-Konflikt-Test wie D12).
+- „(c)“ -> „©“.
+- Nach einer Ersetzung („x“, „-“, „>“ -> „x→“) Strg+Z senden -> Rohtext
+  „x->“ und die Selektion ist KOLLABIERT (`selectionStart ===
+  selectionEnd`; kein markiertes „->“, das der nächste Tastendruck
+  überschriebe); danach Strg+Y -> wieder „x→“. Weicht Chromium hier ab
+  (z. B. Strg+Z wirkungslos oder lässt „->“ markiert), ist das ein Finding
+  (Undo-Verlauf), denn diese Erwartung ist in jsdom NICHT belegbar.
+- Enter als Abschlusszeichen samt Undo/Redo (Chromium-Messung, DECISIONS
+  #134, Entscheidung 5): in einer NEUEN Zeile „a“, Leertaste, „-“, „-“,
+  Enter senden -> Wert dieser Zeile „a –“ plus Zeilenumbruch, Cursor in
+  der neuen Zeile dahinter. Strg+Z -> „a --“ plus Umbruch, Selektion
+  KOLLABIERT (Cursor HINTER dem Umbruch); Strg+Y -> wieder „a –“ plus
+  Umbruch – der Umbruch darf NICHT fehlen (der Wert endet auf `\n`; der
+  frühere Aufbau verlor ihn hier). Ebenso in einer neuen Zeile „\alpha“ +
+  Enter -> „α“ plus Umbruch, Strg+Z -> „\alpha“ plus Umbruch, Strg+Y ->
+  wieder „α“ plus Umbruch (das Symbol darf nicht fehlen). Nach Strg+Y steht
+  der Cursor am Ende der Symbol-Zeile vor dem Umbruch (KEIN Finding); die
+  nächste Probe mit Enter beginnen. Backspace direkt nach der Ersetzung
+  (statt Strg+Z) -> Rohtext samt Umbruch, Cursor dahinter.
+- Gegenprobe: per Aktion „type“ eingefügtes „x->“ bleibt buchstäblich „x->“
+  (kein Finding, Design: nur echtes Tippen löst aus).
+- Danach: Tab-Einzug funktioniert weiter (wie E3), und **Chat-Eingabefeld
+  vorher leeren**, dann OK: die ersetzten Symbole landen unverändert im
+  Chat-Eingabefeld (per javascript_tool: der Wert ENTHÄLT „x→“ und „©“ aus
+  den Schritten oben). Dass der Wert wegen der Gegenprobe auf „x->“ endet
+  und noch weiteren Rohtext aus den Rücknahme-Schritten enthält (z. B.
+  „ab-“), ist erwartet und KEIN Finding – das Chat-Feld ersetzt nichts, der
+  Post-it-Text wird 1:1 übernommen.
+⚠️ Kommen echte Tasten im Post-it nicht an (bekanntes Automationsproblem,
+siehe E2/DECISIONS #119): je Zeichen den Wert per nativem Prototyp-Setter
+setzen, den Cursor DAHINTER setzen (`setSelectionRange`) und `new
+InputEvent('input', {bubbles:true, inputType:'insertText', data:'-'})` mit
+dem jeweiligen Zeichen als `data` auslösen (nur mit `inputType` greift die
+AutoKorrektur) – das im Bericht vermerken. Strg+Z/Strg+Y (auch die Enter-
+Probe) und die Backspace-Rücknahme sind dann NICHT prüfbar und werden als
+ÜBERSPRUNGEN gemeldet.
+Aufräumen wie E2: Post-it löschen und abwarten, bis der Punkt grün ist (nur
+im verbundenen Zustand relevant).
+
+**E4b [VERBUNDEN] AutoKorrektur im Post-it: Einstellung wirkt sofort
+(v7.58, DECISIONS #134).** Eingabemethode wie E4 (einzelne echte
+Tastenanschläge, ersatzweise das InputEvent mit `inputType`). Post-it
+anlegen und OFFEN lassen. In den Einstellungen (Zahnrad) zum Abschnitt
+„AutoKorrektur (Editor & Schnellnotizen)“ scrollen, die Kategorie „Pfeile“
+abwählen, Dialog schließen – OHNE die Seite neu zu laden. Im noch offenen
+Post-it in einer neuen Zeile „-“ und „>“ tippen. Erwartet: der Wert bleibt
+„->“ (Einstellung greift sofort; anders als im Editor, der sie erst beim
+nächsten Öffnen nachzieht, siehe D12). Danach die Kategorie „Pfeile“ wieder
+anhaken, Dialog schließen und in einer weiteren neuen Zeile „-“ und „>“
+tippen. Erwartet: „→“ (ebenfalls ohne Neuladen). Aufräumen wie E2: die
+Kategorie „Pfeile“ MUSS am Ende wieder angehakt sein (Einstellung ist
+geräteübergreifend synchronisiert), Post-it löschen und abwarten, bis der
+Punkt grün ist.
 
 ## F. Anhänge & Wissen
 

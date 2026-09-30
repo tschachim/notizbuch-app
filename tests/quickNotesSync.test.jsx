@@ -917,3 +917,67 @@ describe("CR6 Connect-Basis (Review-Fund 🔵, DECISIONS #125)", () => {
     expect(remoteState().quicknotes.wissensbasis.map((n) => n.text)).not.toContain("Von B (Y)");
   });
 });
+
+/* -------------------------------------------------------------------- */
+/* v7.58 (AutoKorrektur im Post-it): App-Verdrahtung. Die Logik selbst    */
+/* ist in tests/autocorrectInput.test.js (reine Funktionen) und           */
+/* tests/quickNotesAutocorrect.test.jsx (Komponente) gepinnt – diese Tests */
+/* sichern die EINE Prop-Zeile in App.jsx (<QuickNotes autocorrect=…/>)    */
+/* im echten App-Baum ab: ohne sie bekäme QuickNotes nie die Konfiguration */
+/* aus state.json (die Komponententests geben sie von Hand hinein).       */
+/* Getippt wird per InputEvent mit inputType (echtes Tippen) – der        */
+/* Automations-Weg new Event('input') aus E2 löst per Design NICHTS aus.  */
+/* -------------------------------------------------------------------- */
+describe("AutoKorrektur im Post-it: App-Verdrahtung (v7.58)", () => {
+  async function typeViaInput(el, str) {
+    for (const ch of str) {
+      await act(async () => {
+        el.setRangeText(ch, el.selectionStart, el.selectionEnd, "end");
+        el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: ch }));
+      });
+    }
+  }
+
+  it("Standard-Konfiguration: '->' im Post-it des echten App-Baums wird zu '→', Cache und Repo enthalten am Ende '→'", async () => {
+    seedRepo({ wissensbasis: [] });
+    await mountApp();
+    await clickAddNote();
+    await settle(3000);
+    await typeViaInput(textareas()[0], "ab->");
+    expect(textareas()[0].value).toBe("ab→");
+    await settle(400); // 300ms-Cache-Effect
+    expect(lsCache().notes.wissensbasis[0].text).toBe("ab→");
+    await settle(3000); // Debounce -> Repo
+    expect(remoteState().quicknotes.wissensbasis[0].text).toBe("ab→");
+  });
+
+  it("mit vorbelegter state.json autocorrect {enabled:false} bleibt '->' stehen (die Konfiguration kommt wirklich aus dem App-State)", async () => {
+    seedRepo({ wissensbasis: [] });
+    const st = remoteState();
+    st.autocorrect = { enabled: false, categories: {}, custom: [] };
+    fake.set(STATE, JSON.stringify(st, null, 2));
+    await mountApp();
+    await clickAddNote();
+    await typeViaInput(textareas()[0], "ab->");
+    expect(textareas()[0].value).toBe("ab->");
+  });
+
+  it("mit vorbelegter Kategorie-Einstellung (pfeile aus) bleibt '->' stehen, andere Kategorien wirken weiter", async () => {
+    seedRepo({ wissensbasis: [] });
+    const st = remoteState();
+    st.autocorrect = { enabled: true, categories: { pfeile: false }, custom: [] };
+    fake.set(STATE, JSON.stringify(st, null, 2));
+    await mountApp();
+    await clickAddNote();
+    await typeViaInput(textareas()[0], "->(c)");
+    expect(textareas()[0].value).toBe("->©");
+  });
+
+  it("der Automations-Weg new Event('input') (ohne inputType) ersetzt bewusst NICHTS", async () => {
+    seedRepo({ wissensbasis: [] });
+    await mountApp();
+    await clickAddNote();
+    await setViaNativeSetter(textareas()[0], "x->");
+    expect(textareas()[0].value).toBe("x->");
+  });
+});

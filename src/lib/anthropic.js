@@ -42,6 +42,7 @@
 import { stripCiteTags, citeTagsToDocLinks } from "./citations.jsx";
 import { lookupInExtract } from "./knowledge.js";
 import { memoryTooLarge, MEMORY_HARD_LIMIT } from "./memory.js";
+import { FENCE_OPEN_RE, matchFenceBlock } from "./code.jsx";
 
 // v7.57 (Modell-Generationswechsel, DECISIONS #117, Nutzerwunsch): "Fable 5"
 // und "Opus 4.8" wurden durch ihre Nachfolger ERSETZT statt ergänzt (kein
@@ -841,6 +842,110 @@ export const POINTER_ONLY_RETRY_DIAGNOSIS =
 // Ops im Erstversuch", ohne dass diese Funktion turn.js importieren muss.
 export function shouldRetryPointerOnly(plan, res) {
   return !plan && !!res && res.retryReason === "pointer_only" && typeof res.retryWith === "function";
+}
+
+// v7.58 (E2E-Fall C28, DECISIONS #136): Tool-Markup-Reste am ENDE des
+// reply-Texts. Live beobachtet (Sonnet 5, reine Rückfrage): das Modell schrieb
+// Reste seines eigenen Tool-Aufruf-Formats in den reply-STRING, die Blase
+// endete wörtlich auf "</parameter>\n<parameter name=\"ops\">[]". Reine
+// Textbereinigung – ops/commit bleiben unberührt (siehe finalize).
+// Namensraum-Präfix optional ("antml:" o. ä.), Tag-Namen bewusst NUR die drei
+// Format-Tags (parameter/invoke/function_calls). Der Tag-Rumpf ist auf echte
+// Attribut-Syntax beschränkt (name="…" bzw. name='…', Leerraum, optionaler
+// Schrägstrich vor dem ">"), NICHT auf beliebigen Text bis zum ">": sonst
+// würde "Der Typ ist Foo<parameter T, U>" oder ein mehrzeiliges Pseudo-Tag am
+// Antwortende als Tag gekürzt (Review 🔵, Textverlust in Blase und Archiv).
+// Dass "<parameterized>" o. ä. nicht zählt, folgt daraus ebenfalls: direkt
+// hinter dem Tag-Namen dürfen nur Leerraum, ein Attribut, "/" oder ">" stehen.
+const TOOL_TAG_NS = "(?:[A-Za-z][\\w.-]*:)?";
+const TOOL_TAG_SRC =
+  "<\\/?" + TOOL_TAG_NS + "(?:parameter|invoke|function_calls)" +
+  "(?:\\s+[\\w:.-]+\\s*=\\s*(?:\"[^\"<>]*\"|'[^'<>]*'))*\\s*\\/?>";
+// Der ops-Parameter zählt NUR mit LEEREM Wert ("[]") als Rest. Jeder andere
+// Wert (echte Ops!) macht den Rest "nicht rein" -> Text bleibt unverändert,
+// damit verlorene Ops nie unsichtbar werden.
+const TOOL_EMPTY_OPS_SRC =
+  "<" + TOOL_TAG_NS + "parameter\\s+name\\s*=\\s*[\"']ops[\"']\\s*>\\s*\\[\\s*\\]";
+// Ein Token der Rest-Kette: Leerraum | ops-Tag samt leerem Wert | beliebiges
+// Format-Tag. Reihenfolge wichtig (ops-Variante VOR dem allgemeinen Tag).
+const TOOL_TAIL_TOKEN_SRC = "\\s+|" + TOOL_EMPTY_OPS_SRC + "|" + TOOL_TAG_SRC;
+
+// Liegt die Position im Code? Zwei Fälle, die die Rest-Regel (Kette bis zum
+// Textende) NICHT schon selbst ausschließt: ein vor dem Rest NIE
+// geschlossener Zaun und ein nicht geschlossener Inline-Codespan in
+// derselben Zeile (ungerade Backtick-Zahl davor – grob, irrt aber nur in
+// Richtung "unverändert lassen", der vor C28 übliche Zustand).
+// Geprüft wird bewusst NUR der Text VOR dem Schnitt (Review-Finding, Runde 1):
+// Hinter dem Schnitt stehen per Ketten-Regel ohnehin nur Tags und Leerraum,
+// aber klebt der Rest direkt am Schluss-Zaun eines Blocks (kein Zeilenumbruch
+// dazwischen, die natürliche Form des Lecks), wäre die Zeile "Schluss-Zaun +
+// Tag" bei einer Prüfung über den GANZEN Text kein gültiger Schluss-Zaun
+// mehr – der Block gälte als unterminiert und der Rest bliebe stehen.
+function toolTailInsideCode(text, cutIdx) {
+  const lines = text.slice(0, cutIdx).split("\n");
+  const last = lines.length - 1;
+  for (let i = 0; i <= last;) {
+    if (FENCE_OPEN_RE.test(lines[i])) {
+      const block = matchFenceBlock(lines, i);
+      if (!block) return true; // Zaun vor dem Rest nie geschlossen
+      // Der Rest klebt am Schluss-Zaun: der Block ist zu, der Rest steht
+      // dahinter. Früh raus, sonst zählte die Backtick-Parität unten den
+      // Schluss-Zaun (3+ Backticks) als offenen Codespan.
+      if (block.endIdx === last) return false;
+      i = block.endIdx + 1;
+    } else {
+      i++;
+    }
+  }
+  return (lines[last].match(/`/g) || []).length % 2 === 1;
+}
+
+// Entfernt einen Tool-Markup-Rest am ENDE eines reply-Texts: ab dem ersten
+// Format-Tag (parameter/invoke/function_calls, öffnend oder schließend, auch
+// mit Namensraum-Präfix), sofern von dort bis zum Textende AUSSCHLIESSLICH
+// solche Tags, Leerraum und ein leerer ops-Wert ("[]") stehen; danach wird
+// der Leerraum am Ende gekappt (bleibt nichts übrig, greift der "Notiert."-
+// Default wie bei leerem reply). BEWUSST konservativ (ein Fehlgriff würde
+// Nutzertext oder verlorene Ops verschlucken):
+// - Fremdinhalt wird NIE entfernt (z. B. nicht-leerer ops-Wert, "commit"-
+//   Text): dann sind echte Ops verloren gegangen, das darf nicht unsichtbar
+//   werden. Endet der Text auf den Fremdinhalt (oder nach ihm kein Tag mehr
+//   folgt), bleibt er UNVERÄNDERT. Folgt DAHINTER dagegen noch eine REINE
+//   Tag-Kette bis zum Textende, fällt nur diese Kette weg; der Fremdinhalt
+//   samt den Tags davor bleibt sichtbar (Pin-Test: Text + schließendes
+//   parameter-Tag + ops-Tag mit echter Op + schließendes parameter-Tag +
+//   schließendes invoke-Tag ergibt Text + schließendes parameter-Tag + ops-Tag
+//   mit der Op). Es gibt also KEIN "alles oder nichts" über den ganzen Rest:
+//   geschnitten wird ab dem ERSTEN Tag, von dem aus bis zum Textende nur noch
+//   Tags, Leerraum und ein leerer ops-Wert folgen;
+// - Tags mitten im Text bleiben stehen (der Nutzer darf über XML reden);
+// - Rest in einem (unterminierten) Codeblock/Codespan bleibt stehen;
+// - ohne Rest wird der Text byte-identisch zurückgegeben (auch ohne trim);
+// - Nicht-Strings kommen unverändert zurück; wirft nie.
+export function stripToolMarkupTail(text) {
+  if (typeof text !== "string" || !text.includes("<")) return text;
+  const tagRe = new RegExp(TOOL_TAG_SRC, "g");
+  const tokenRe = new RegExp(TOOL_TAIL_TOKEN_SRC, "y");
+  // Scheitert die Kette ab einem Kandidaten an Position p, scheitert sie für
+  // jeden späteren Kandidaten VOR p ebenso (Tags sind atomare Token, die
+  // Kette läuft über dieselben Grenzen) – überspringen hält den Scan linear
+  // statt quadratisch bei vielen Tags im Text.
+  let skipUntil = 0;
+  let m;
+  while ((m = tagRe.exec(text))) {
+    if (m.index < skipUntil) continue;
+    let pos = m.index;
+    while (pos < text.length) {
+      tokenRe.lastIndex = pos;
+      if (!tokenRe.exec(text)) break;
+      pos = tokenRe.lastIndex;
+    }
+    if (pos < text.length) { skipUntil = pos; continue; }
+    // Reine Rest-Kette bis zum Textende ab m.index.
+    if (toolTailInsideCode(text, m.index)) return text;
+    return text.slice(0, m.index).trimEnd();
+  }
+  return text;
 }
 
 // Bei Websuche steht die inhaltliche Antwort meist in den Textblöcken VOR
@@ -2037,7 +2142,17 @@ export async function callClaude(apiKey, userText, nbContext, priorChat, modelId
 
     // Roh-reply übergeben (ohne "Notiert."-Default): der Default soll nicht
     // an eine vollständige Recherche-Antwort angehängt werden.
-    const toolReply = typeof parsedObj.reply === "string" ? parsedObj.reply : "";
+    // v7.58 (E2E C28, DECISIONS #136): Tool-Markup-Rest am Ende des reply-
+    // Strings wird HIER entfernt, an der einen Stelle, an der das reply-Feld
+    // des Modells übernommen wird – nicht erst in buildChatReply/beim Return.
+    // Grund: ALLES Folgende arbeitet mit toolReply (Substanz-Gate unten,
+    // Verweis-Retry, Dedup gegen den Vorab-Text, Anzeige/Speicherung); ein
+    // erst später bereinigter Rest würde zuvor als "Inhalt" mitzählen (37
+    // Zeichen Markup können eine kurze Rückfrage über die 80-Zeichen-
+    // Substanzschwelle heben und dadurch einen Vorab-Text verwerfen lassen)
+    // bzw. den Dedup-Vergleich gegen den Vorab-Text scheitern lassen. ops und
+    // commit bleiben unangetastet; leeres Ergebnis -> "Notiert."-Default.
+    const toolReply = typeof parsedObj.reply === "string" ? stripToolMarkupTail(parsedObj.reply) : "";
     // v7.6 (Sicherheitsnetz zu QA-Finding C9a): Vorab-Textblöcke werden IMMER
     // mit reply kombiniert, nicht mehr nur bei usedSearch===true. Trotz der
     // Prompt-Anweisung (ANTWORTFORMAT/INTERNET-RECHERCHE), ohne Websuche

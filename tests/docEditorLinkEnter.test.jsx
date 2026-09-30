@@ -346,14 +346,16 @@ describe("Ausschluss Variante (c): Auto-Titel-Fetch (v7.12) kann NICHT asynchron
     expect(block).toMatch(/setLinkForm/);
   });
 
-  it("applyLink() – der EINZIGE Ort, an dem ein Fetch-Ergebnis den Editor erreicht – läuft NUR auf expliziten Klick, nicht im Timer-Callback", () => {
+  it("applyLink() – der EINZIGE Ort, an dem ein Fetch-Ergebnis den Editor erreicht – läuft NUR auf expliziter Nutzeraktion (Klick oder Enter im Feld), nicht im Timer-Callback", () => {
     const start = DOC_EDITOR_SRC.indexOf("const applyLink = ");
     const end = DOC_EDITOR_SRC.indexOf("const removeLink = ", start);
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     const block = DOC_EDITOR_SRC.slice(start, end);
-    expect(block).toMatch(/editor\.chain\(\)\.focus\(\)\.extendMarkRange\("link"\)\.insertContent/);
-    // applyLink() selbst wird laut JSX NUR über onClick={applyLink} am
+    // v7.58: ohne ".focus()" in der Kette – der Fokus kommt synchron über
+    // returnFocusToEditor() (siehe tests/docEditorLinkPopover.test.jsx).
+    expect(block).toMatch(/editor\.chain\(\)\.extendMarkRange\("link"\)\.insertContent/);
+    // applyLink() selbst wird laut JSX über onClick={applyLink} am
     // "Einfügen/Übernehmen"-Knopf aufgerufen (siehe Toolbar unten), nicht
     // aus runAutoFetch/scheduleAutoFetch heraus (bereits oben belegt).
     expect(DOC_EDITOR_SRC).toContain("onClick={applyLink}");
@@ -363,10 +365,18 @@ describe("Ausschluss Variante (c): Auto-Titel-Fetch (v7.12) kann NICHT asynchron
     // Runde 2): ein Regex auf "setTimeout(...applyLink" erkennt die übliche
     // Pfeilfunktions-Form setTimeout(() => applyLink(), …) NICHT – deshalb
     // stattdessen Referenzen ZÄHLEN: nach Entfernen aller Kommentare darf
-    // "applyLink" GENAU ZWEIMAL vorkommen (Definition + onClick); jeder
-    // weitere Aufrufort (Timer, zweiter Knopf, Effekt) wäre eine dritte.
+    // "applyLink" GENAU DREIMAL vorkommen (Definition + onClick + der
+    // Aufruf im Enter-Handler onLinkFieldKeyDown, v7.58); jeder weitere
+    // Aufrufort (Timer, zweiter Knopf, Effekt) wäre eine vierte.
     const code = DOC_EDITOR_SRC.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
-    expect(code.match(/\bapplyLink\b/g)).toHaveLength(2);
+    expect(code.match(/\bapplyLink\b/g)).toHaveLength(3);
     expect(code).toMatch(/onClick=\{applyLink\}/);
+    // Die dritte Referenz MUSS im Enter-Handler stehen (eine ausdrückliche
+    // Tastaturaktion des Nutzers, kein Timer) und setzt kein setTimeout ein.
+    const kdStart = code.indexOf("const onLinkFieldKeyDown = ");
+    expect(kdStart).toBeGreaterThan(-1);
+    const kdBlock = code.slice(kdStart, code.indexOf("\n  };", kdStart));
+    expect(kdBlock).toMatch(/applyLink\(\)/);
+    expect(kdBlock).not.toMatch(/setTimeout|setInterval|requestAnimationFrame/);
   });
 });

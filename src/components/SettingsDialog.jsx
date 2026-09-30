@@ -569,14 +569,15 @@ export default function SettingsDialog({
             <div className="mt-5 pt-3 border-t border-slate-200">
               <div className="flex items-center gap-1.5 mb-1">
                 <Sparkles size={14} className="text-indigo-700" />
-                <span className="text-sm font-semibold text-slate-800">AutoKorrektur (Editor)</span>
+                <span className="text-sm font-semibold text-slate-800">AutoKorrektur (Editor &amp; Schnellnotizen)</span>
               </div>
               <p className="text-xs text-slate-400 mb-2">
-                Ersetzt beim Tippen im WYSIWYG-Editor konfigurierte
-                Zeichenketten durch Symbole (z. B. „-&gt;“ → „→“). Gilt auf
-                allen Geräten (wird über das Daten-Repo synchronisiert). Ein
-                bereits geöffneter Editor zieht Änderungen erst beim
-                nächsten Öffnen nach.
+                Ersetzt beim Tippen im WYSIWYG-Editor und in den
+                Schnellnotizen konfigurierte Zeichenketten durch Symbole
+                (z. B. „-&gt;“ → „→“). Gilt auf allen Geräten (wird über das
+                Daten-Repo synchronisiert). Schnellnotizen übernehmen
+                Änderungen sofort, ein bereits geöffneter Editor zieht sie
+                erst beim nächsten Öffnen nach.
               </p>
 
               <label className="flex items-center gap-2 text-sm text-slate-700 mb-2">

@@ -17599,3 +17599,536 @@ aus `referenz-app.jsx` übernommen.
        `stripFenceIndent`-Randfälle, `raw` byte-gleich, `style`-Prop),
        `tests/markdown.test.jsx` (Einzug 1,5rem + exakter Code-Text,
        überschüssige Einrückung, Regression ohne Einrückung, 4-Space-Grenze).
+
+134. **v7.58, Nutzerbefund „AutoKorrektur fehlt im Schnellnotiz-Post-it“:
+     dieselbe Zeichenersetzung beim Tippen wie im Dokument-Editor.**
+     - **Anlass:** Die AutoKorrektur (#67/#78) wirkte bisher nur im
+       WYSIWYG-Editor; im `<textarea>` des Post-its (`QuickNotes.jsx`) blieb
+       „->“ roh stehen. Gewünscht war das Word-Verhalten mit denselben
+       Regeln und denselben Einstellungen: beim Tippen ersetzen, direkt
+       danach Backspace = Rücknahme, Strg+Z nimmt genau die Ersetzung
+       zurück, alles davor bleibt einzeln rückgängig machbar.
+     - **Architektur (zwei neue Blatt-Module, keine neue Abhängigkeit):**
+       `src/lib/autocorrectInput.js` (importiert NICHTS, kennt weder DOM
+       noch React noch TipTap, wirft nie) mit `typedTextFromInputEvent`
+       (Positivliste), `autocorrectTypedText(text, caret, typed, rules)`
+       (reine Funktion: Regeln auf Text + Cursor anwenden),
+       `revertAutocorrect` (Rücknahme) und `isAutocorrectTriggerRange`;
+       `src/lib/nativeTextEdit.js` (winziger DOM-Helfer, Präzedenz
+       `images.js`) mit `replaceRangeNative`/`undoNative` über
+       `document.execCommand`. `QuickNotes.jsx` verdrahtet beides
+       (`handleChange`, `handleKeyDown`, nativer `beforeinput`-Listener);
+       `App.jsx` gibt genau eine Prop-Zeile dazu (`autocorrect={autocorrect}`).
+       Der Einstellungs-Text lautet jetzt „AutoKorrektur (Editor &
+       Schnellnotizen)“ und nennt das unterschiedliche Nachzieh-Verhalten
+       (siehe unten).
+     - **Entscheidung 1 – gleiche Regeln, gleiche Konfiguration.** Die
+       Regeln kommen aus `buildActiveRules(config)` (`autocorrect.js`),
+       es gibt bewusst KEINE zweite Trigger-Liste. Die Semantik ist die der
+       TipTap-InputRules (`InputRule.ts`/`textInputRule.ts`) auf reinen
+       Text + Cursor übertragen: Regeln in Array-Reihenfolge, die ERSTE
+       passende gewinnt, genau EINE Regel pro Eingabe (ein Ersatz, der
+       selbst auf einen Trigger endet, wird nicht weiter ersetzt), bei
+       terminator/word/backslash bleibt das Abschlusszeichen stehen
+       (`match[1]`-Mechanik). Einzige Doppelung: die Zusammensetzung der
+       multiply-Regel (nur das „x“ wird zu „×“) – eine zweite Kopie der
+       Stelle in `DocEditor.jsx`, per Test gepinnt. Beleg der Gleichheit:
+       `tests/quickNotesAutocorrect.test.jsx` spielt dieselben Eingaben
+       Zeichen für Zeichen gegen den ECHTEN TipTap-Editor und gegen das
+       Post-it und vergleicht die Ergebnisse (auch für Konfigurationen mit
+       Custom-Regeln).
+     - **Entscheidung 2 – Positivliste für ECHTES Tippen (fail closed).**
+       Nur ein `input`-Event mit `inputType === "insertText"` und GENAU
+       einem Codepoint in `data` (ein Emoji-Surrogatpaar zählt als eins)
+       oder `insertLineBreak`/`insertParagraph` (= "\n") und
+       `isComposing !== true` löst aus. Alles andere bleibt roh:
+       Einfügen, Drop, Rechtschreib-/Wortvorschlag-Ersetzung, Diktat und
+       Automation (Mehrzeichen-`data`), Komposition, Löschen, Undo/Redo und
+       jedes Event OHNE `inputType` (`new Event("input")`, der E2-Weg aus
+       #119, ersetzt damit per Design nichts). Zusätzlich muss die Auswahl
+       kollabiert sein, und `autocorrectTypedText` prüft gegen den
+       tatsächlichen Text, dass der gemeldete getippte Text wirklich direkt
+       vor dem Cursor steht. Bewusst KEIN Vergleich alt/neu: ein Diff kann
+       ein Ein-Zeichen-Einfügen/Undo nicht vom Tippen unterscheiden. Auch
+       programmatische Änderungen (Remote-Merge, Tab-Einzug) laufen nie
+       durch die Regeln.
+     - **Entscheidung 3 – Zeile = Absatz.** Das Suchfenster reicht vom
+       Zeilenanfang der Einfügestelle bis zum Cursor, davor höchstens 500
+       Zeichen (`AUTOCORRECT_LOOKBACK`, wie `maxMatch` im Editor). Trigger
+       greifen nie über eine Zeilengrenze – wichtig für die multiply-Regel
+       (`\s*` würde sonst „2⏎x3“ verbinden). Ein getipptes Enter zählt wie
+       im Editor als Abschlusszeichen („a --“ + Enter -> „a –“ + Umbruch).
+       Text HINTER dem Cursor bleibt unberührt.
+     - **Entscheidung 4 – ein No-op-Treffer beendet die Kette.** Ergibt die
+       erste passende Regel denselben Text (Abschalt-Trick aus
+       `autocorrect.js`: Custom-Regel „-->“ -> „-->“), endet die Suche
+       OHNE Änderung – wie im Editor. Der erste Entwurf setzte mit
+       `continue` fort; dann rutschte der kürzere Suffix-Trigger durch
+       („-->“ wurde zu „-→“, „<=>“ zu „<⇒“, „==>“ zu „=⇒“, „<->“ zu „<→“).
+       Im Review (Runde 1, 🟡) belegt: mit `continue` wird der Paritätstest
+       gegen den echten Editor rot, mit `return null` grün.
+     - **Entscheidung 5 – nativer Pfad über `execCommand`, mit Zustands-
+       Fallback.** Ein programmatischer `value`-Wechsel (React oder
+       `setRangeText`) leert in Chrome/Firefox den nativen Undo-Stack des
+       Felds. Deshalb setzt der Hauptpfad die Auswahl auf den Trigger und
+       ersetzt per `document.execCommand("insertText")` – der Browser
+       verbucht das als eigene Änderung, Strg+Z nimmt genau sie zurück (MDN
+       nennt „preserve the undo buffer“ als verbleibenden gültigen
+       Anwendungsfall trotz „deprecated“). Das dabei SYNCHRON ausgelöste,
+       verschachtelte `input`-Event erkennt `applyingRef` als „eigen“ und
+       reicht es nur weiter (kein Matching); JEDES input-Event muss beim
+       Aufrufer ankommen, sonst setzt React das DOM auf den alten Prop-Wert
+       zurück und die Änderung wäre weg. Der rohe Zwischenstand („a->“)
+       erreicht den App-State nie. FALLBACK, wenn der native Weg nicht
+       sicher zum erwarteten Ergebnis führt (`execCommand` fehlt wie in
+       jsdom, liefert `false`, wirft, Feld ohne Fokus, Wert weicht ab):
+       Zustandsweg über `onChange` + `pendingSelection` mit dem aus dem
+       Zustand NACH dem Tastendruck berechneten Zieltext (immer richtig).
+       Dort ist der native Undo-Stack leer, deshalb fängt der Fallback
+       Strg/Cmd+Z bei gültigem Merker selbst ab; auf dem nativen Pfad wird
+       Strg+Z nie abgefangen.
+       **Ausnahme: ein getipptes Enter bleibt aus dem nativen Befehl
+       heraus (Gesamt-Review, Runde 1, 🔴, in Chromium 154 mit der echten
+       Komponente gemessen).** Steckt der Umbruch im
+       `insertText`-Befehl („–⏎“), wiederholt Chromiums Redo ihn falsch:
+       „a --“ + Enter -> „a –⏎“; Strg+Z -> „a --⏎“; Strg+Y -> „a –“
+       (Umbruch verloren). Bei „foo⏎“ + „\alpha“ + Enter -> „foo⏎α⏎“;
+       Strg+Z -> „foo⏎\alpha⏎“; Strg+Y -> „foo⏎⏎“ (Symbol verloren,
+       `selectionStart` hinter dem Textende) – und `handleChange` reicht
+       das Redo-Ergebnis 1:1 weiter, der falsche Text hätte den
+       State/das Repo erreicht. Betroffen war nur: terminator-/word-/
+       backslash-Trigger + Enter am Textende + direktes Undo -> Redo
+       (Leerzeichen als Abschluss, Text hinter dem Cursor und mehrstufiges
+       Undo mit vollständigem Redo waren korrekt). Fix in `handleChange`:
+       endet `raw` UND `insert` auf „\n“ (= das getippte Enter, der Ersatz
+       behält es), ersetzt der Befehl nur den Bereich OHNE Umbruch
+       (`to - 1`, `insert` ohne das letzte Zeichen); der Umbruch steht
+       schon im Feld, danach wird der Cursor hinter ihn gesetzt
+       (`edit.caret`). Im selben Aufbau verifiziert: alle Fälle korrekt,
+       Undo/Redo/Backspace-Rücknahme bleiben nativ. Enthält der Ersatz
+       selbst einen inneren Umbruch (nur über eine Custom-Regel aus
+       `state.json` möglich), läuft er nie nativ, sondern über den
+       Zustandsweg (mehrzeiliger `insertText` = dasselbe Redo-Risiko).
+       Ein Ersatz, der auf einen Umbruch ENDET, ohne dass ein Enter getippt
+       wurde, ist über die Konfiguration nicht erreichbar
+       (`sanitizeAutocorrectConfig` trimmt custom-Ersetzungen);
+       `handleChange` behandelt ihn dennoch nicht als getipptes Enter (`nl`
+       verlangt, dass auch `raw` auf „\n“ endet), sondern als mehrzeiligen
+       Fall: nie nativ (der Test schleust die Regel über den
+       `buildActiveRules`-Spy ein).
+       Der Fallback-Zweig und der Merker (`rev.text`/`rev.caret`) bleiben
+       unverändert. Die jsdom-Stubs können den Redo-Fehler selbst nicht
+       zeigen; die Tests pinnen die Ursache (was der Befehl umfasst,
+       Cursor, Kollaps), der E2E-Fall E4 enthält die Enter-Probe mit
+       Strg+Z/Strg+Y.
+     - **Entscheidung 6 – Rücknahme per Backspace (Vorbild
+       `undoInputRule`).** Direkt nach einer Ersetzung stellt Backspace den
+       Rohtext samt Abschlusszeichen wieder her („a→|“ -> „a->|“), ein
+       zweites Backspace löscht normal. Umschalt/Strg/Meta+Backspace zählen
+       mit (wie im Editor), Alt+Backspace und Komposition nicht. Zwei
+       Auslöser: `keydown` UND ein nativer `beforeinput`-Listener für
+       `deleteContentBackward` (React kennt dort nur ein Polyfill;
+       Android-Bildschirmtastaturen melden Backspace im `keydown` oft als
+       „Unidentified“, `beforeinput` kommt trotzdem). Der Merker (`recordRef`,
+       pro Post-it, nichts davon in `state.json`) gilt nur, solange Text UND
+       kollabierter Cursor exakt dem Zustand direkt nach der Ersetzung
+       entsprechen (`revertAutocorrect` lehnt jede Abweichung ab), und
+       verfällt bei: jedem input-Event, das nicht aus dem eigenen
+       `execCommand` stammt; `keydown` bei abweichendem Text/Cursor;
+       Navigationstasten; Tab; blur; pointerdown; von außen geändertem
+       `note.text`; nach der Rücknahme. Ein `keydown` mit key
+       „Unidentified“ lässt ihn BEWUSST bestehen (sonst wäre der Ausweg auf
+       Android zerstört). Nativ nimmt `execCommand("undo")` die Ersetzung
+       zurück und lässt Strg+Y intakt; danach wird der von Chromium
+       markierte Rohtext zu einem Cursor dahinter kollabiert. Ein NICHT
+       abbrechbares `beforeinput` (`cancelable: false`) löst keine Rücknahme
+       aus und verbraucht den Merker nicht: `preventDefault` bliebe
+       wirkungslos, der Browser löschte trotzdem – es liefe Rücknahme UND
+       Browser-Löschung.
+     - **Entscheidung 7 – historyUndo-Kollaps.** Nach einem nativen Strg+Z
+       markiert Chromium den zurückgeholten Rohtext („->“ selektiert), das
+       nächste getippte Zeichen würde ihn überschreiben. Ist die Markierung
+       exakt eine Trigger-Spanne (`isAutocorrectTriggerRange`, zustandslos,
+       hält also auch Wochen später), wird sie zu einem Cursor
+       kollabiert. Strg+Y bringt das Symbol zurück – bei Enter als
+       Abschlusszeichen erst seit der Korrektur in Entscheidung 5 (vorher
+       verlor Chromiums Redo dort Umbruch bzw. Symbol). Weil der Umbruch
+       dort nicht Teil des nativen Befehls ist, markiert Chromium nach dem
+       Undo nur „--“ bzw. „\alpha“; steht direkt dahinter ein „\n“ und ist
+       Markierung PLUS Umbruch eine Trigger-Spanne, kollabiert der Cursor
+       hinter den Umbruch (`v[selectionEnd] === "\n"` +
+       `isAutocorrectTriggerRange(…, selectionEnd + 1, …)`). Nach Strg+Y
+       einer Enter-Ersetzung steht der Cursor hinter dem Symbol VOR dem
+       Umbruch (Chromium setzt ihn ans Ende des wiederholten Befehls);
+       hingenommen.
+     - **Entscheidung 8 – `useLayoutEffect` OHNE deps-Array.** Der Effekt
+       (setzt die Ziel-Selektion nach dem Re-Render) lief bisher mit
+       `[note.text]`. Gleicht der Ergebnistext einer Ersetzung dem vorigen
+       Prop-Wert (markiertes „ durch " überschrieben, Regel macht wieder
+       „), lief der Effekt nicht: React schrieb das DOM auf den Prop-Wert
+       zurück, der Cursor sprang ans Textende und `pendingSelection` blieb
+       liegen. Ohne deps läuft er nach jedem Render und kehrt ohne
+       `pendingSelection` sofort zurück (billig). Bei Tab konnte das nie
+       auftreten (Abbruch bei unverändertem Text).
+     - **Entscheidung 9 – Einstellungen wirken sofort.** `QuickNotes` baut
+       die Regeln per `useMemo` über die Identität der Prop `autocorrect`
+       (Hook VOR dem frühen `return`, sonst wechselte die Hook-Anzahl
+       zwischen 0 und 1 Post-it); eine Änderung im Einstellungs-Dialog gilt
+       ohne Neuladen. Der Editor baut die Regeln dagegen nur beim Öffnen.
+     - **Bewusste Abweichungen vom Editor:** (a) KEIN Code-Schutz – ein
+       Klartextfeld kennt keinen Codekontext; „--force“ wird zu „–force“,
+       Ausweg ist die Rücknahme oder das Abschalten der Kategorie.
+       (b) Zeile statt Absatz als Fenster. (c) Kein Feuern nach einer
+       IME-Komposition (`compositionend`); komponierter Text bleibt roh.
+       (d) Einstellungen wirken sofort (siehe 9).
+     - **Alternativen (verworfen):** reiner Zustandsweg ohne `execCommand`
+       (leert den nativen Undo-Stack: Strg+Z nach der Ersetzung wäre
+       wirkungslos); Erkennung per Diff alt/neu statt `inputType` (s. o.);
+       Merker-Verfall bei JEDEM fremden `keydown` (zerstört den Ausweg auf
+       Android); eine eigene Trigger-Liste für das Post-it (Drift-Risiko).
+     - **Restrisiken:** (1) Der native Pfad ist nur in Chromium gemessen.
+       Firefox, Safari und Android sind über den Zustands-Fallback bzw. die
+       fail-closed-Fallbacks abgesichert, aber nicht am Gerät geprüft.
+       (2) `document.execCommand` ist als „deprecated“ markiert; verschwindet
+       es, greift automatisch der Fallback (Strg+Z-Verhalten dann wie dort).
+       (3) Touch-Tastaturen (Android/Gboard, iOS): Wortvorschläge und
+       Komposition zählen per Positivliste nie als Tippen; die Rücknahme
+       per Backspace hängt dort an `beforeinput`. Ob der native Undo-Verlauf
+       nach `execCommand` in Chromium erhalten bleibt und Strg+Z „wie in
+       Word“ wirkt, ist in jsdom nicht belegbar (E2E-Fall E4). (4) Der
+       Tab-Einzug leert weiterhin den nativen Undo-Stack (#114) – nur der
+       native Pfad der AutoKorrektur ist davon ausgenommen. (5) Im Chat-
+       Eingabefeld ist die AutoKorrektur NICHT angebunden (die Funktionen
+       sind feldunabhängig, das Cursor-Setzen bräuchte dort einen eigenen
+       Weg, siehe docs/TODO.md).
+     - **Nebenbefund Editor (nicht Teil dieses Eintrags, docs/TODO.md):**
+       Im Review wurde per Wegwerf-Test gegen den echten Editor bestätigt,
+       dass Enter direkt nach einem terminator-/word-/backslash-Trigger dort
+       den Absatzwechsel verschluckt („a --“ + Enter -> ein Absatz „a –\n“).
+       Das Post-it verhält sich hier richtig.
+     - **Tests:** `tests/autocorrectInput.test.js` (133; Positivliste,
+       Paritäts-Korpus zu `docEditorAutocorrect.test.jsx`, Zeilen/Enter/
+       Cursor mitten im Text/Fenster, Guards, Rücknahme, Trigger-Spanne,
+       Abschalt-Trick mit den vier No-op-Triggern), `tests/
+       nativeTextEdit.test.js` (22; Erfolg, alle Fehlschlagspfade samt
+       Wiederherstellung der Auswahl), `tests/quickNotesAutocorrect.test.jsx`
+       (91; Zustandsweg, nativer Pfad mit gestubbtem `execCommand`,
+       Nicht-Tippen bleibt roh, Rücknahme und Merker-Verfall, Strg+Z im
+       Fallback, `beforeinput` (auch nicht abbrechbar: nimmt nicht zurück,
+       der Merker bleibt), historyUndo-Kollaps, Live-Konfiguration,
+       Parität zum echten TipTap-Editor; Enter-Fälle des nativen Pfads mit
+       protokollierender `insertText`-Stub-Auswahl, darunter ein Ersatz,
+       der auf einen Umbruch endet OHNE getipptes Enter (nie nativ);
+       Mutationsprüfung der Nachbesserung zu Runde 1 (vom Review
+       bestätigt): Umbruch wieder im Befehl 5 rot, Kollaps-Zweig entfernt 3
+       rot, Guard „innerer Umbruch“ entfernt 1 rot, Cursor hinter dem
+       Umbruch nicht gesetzt 5 rot; Abschluss-Nachbesserung: `nl` ohne
+       raw-Bedingung 1 rot, `!ev.cancelable`-Guard entfernt 2 rot),
+       `tests/quickNotesSync.test.jsx`
+       (+4; die Prop-Zeile im echten App-Baum, Konfiguration aus
+       `state.json`, der E2-Weg ersetzt nichts). Mutationsprüfung
+       (Entwickler, je einzeln zurückgesetzt): `return null` -> `continue`
+       3 Tests rot; `lastIndexOf` -> `indexOf` 1 rot; `onChange` im
+       `applyingRef`-Zweig entfernt 1 rot; Guard `caret === selectionEnd`
+       entfernt 1 rot. Review: 35 Mutanten auf Kopien, 28 rot; 2 der 7
+       Überlebenden verhaltensgleich, 5 kleine Testlücken (🔵, in
+       docs/TODO.md).
+
+135. **v7.58, Link-Popover im Editor: Fokus zurück in den Editor, Enter =
+     Einfügen (offener Punkt aus D7/D7b, docs/TODO.md).**
+     - **Anlass:** Nach „Einfügen“ im Link-Popover lag der Fokus nicht
+       mehr im Editor, weiterzutippen war nicht möglich; Enter im
+       URL-Feld löste nichts aus.
+     - **Root Cause (belegt, beide Hypothesen zusammen):** Experiment
+       gegen den alten Code aus HEAD mit einem `requestAnimationFrame`-Stub,
+       der Callbacks sammelt und nie ausführt (= verdeckter Tab). (1) Im
+       Klick-Handler hält der Einfügen-Knopf den Fokus. (2) Nach dem
+       React-Flush ist `document.activeElement` `<body>` – React entfernt das
+       Popover samt fokussiertem Knopf. (3) In der rAF-Warteschlange steht
+       genau ein Callback, TipTaps `delayedFocus` (`editor.chain().focus()`
+       fokussiert nicht selbst, sondern erst per `requestAnimationFrame`;
+       auf iOS/Android fokussiert TipTap zusätzlich synchron, der
+       verzögerte rAF-Pfad betrifft Desktop-Browser – Quelle:
+       `node_modules/@tiptap/core/src/commands/focus.ts`).
+       Im sichtbaren Tab kommt der Fokus also einen Frame zu spät, im
+       verdeckten Tab nie.
+     - **Fix (`DocEditor.jsx`):** Neuer Helfer `returnFocusToEditor()` ruft
+       `editor.view.focus()` SYNCHRON im Handler auf, also vor dem Rerender,
+       das das Popover entfernt (`view.focus()` zieht die Browser-Selection
+       auf die ProseMirror-Selektion). Genutzt in `applyLink()` und
+       `removeLink()`; das `.focus()` in beiden Ketten entfällt, damit kein
+       rAF-Nachzügler bleibt (er risse beim Zurückwechseln in einen
+       verdeckten Tab den Fokus aus einem inzwischen angeklickten Feld in
+       den Editor). TipTap 2.27.2 macht in `delayedFocus` im rAF `view.focus()`
+       (Desktop-Safari zusätzlich `view.dom.focus({ preventScroll: true })`,
+       iOS/Android vorab synchron `view.dom.focus()`), nirgends ein Scrollen –
+       das Entfernen ist damit keine Regression. Die
+       `preventFocusSteal`-Ausnahme für das Popover (#85) bleibt; die
+       Kommentare dazu sind ergänzt.
+     - **Link-Mark:** `applyLink` hängt `.unsetMark("link")` an die Kette.
+       Die Mark ist wegen `autolink: true` INKLUSIV; ohne den Schritt trüge
+       der Cursor hinter dem neuen Link weiter die Mark und sofort
+       weitergetippter Text wäre Teil des Links (mit dem Mutanten ohne
+       `unsetMark` werden 6 Tests rot). Bei leerer Selektion entfernt
+       `unsetMark` nur die gespeicherte Mark, am Dokument ändert sich nichts.
+     - **Enter:** Neuer Handler `onLinkFieldKeyDown` an Titel- UND URL-Feld.
+       Nur `key === "Enter"`, nicht bei `nativeEvent.isComposing` oder
+       `keyCode === 229` (Safari meldet die IME-Bestätigung teils mit
+       `isComposing: false`, dann bleibt 229). Sonst `preventDefault()`
+       (verhindert einen Absatzumbruch im Editor durch die Enter-Folge-
+       ereignisse nach dem Fokuswechsel) und `applyLink()`. Die Validierung
+       liegt ausschließlich in `applyLink`: bei ungültigem Titel/URL
+       erscheint der Fehlertext, Popover und Fokus im Feld bleiben – EIN
+       Regelwerk für Klick und Enter. Alle vier Popover-Knöpfe tragen
+       `type="button"`; es gibt bewusst KEIN `<form>` (der Editor hängt in
+       `App.jsx` in keinem umgebenden `<form>`), Enter wird ausschließlich
+       vom Handler behandelt, ein implizites Submit kann nicht zusätzlich
+       auslösen. Unverändert: Öffnen, „Titel ermitteln“, Schließen per
+       Klick auf den Link-Knopf, Abbruch des Auto-Fetch (`cancelAutoFetch`),
+       mobiles `fixed`-Popover.
+     - **Zusatz `removeLink` (nicht im Auftrag; Review-Empfehlung
+       „beibehalten“, vom Orchestrator ENTSCHIEDEN: beibehalten):** Nach dem
+       Entfernen wird die Selektion auf das ENDE des ehemaligen Linktexts
+       zusammengezogen (`TextSelection.create(tr.doc, tr.selection.to)`).
+       `extendMarkRange` markiert die ganze Spanne; mit dem Fokus zurück im
+       Editor ersetzte der nächste Tastendruck den link-losen Text
+       (Datenverlust-Risiko). Folge: Wer die Markierung danach weiter
+       nutzen wollte (z. B. sofort fett setzen), muss neu markieren.
+       Begründung der Entscheidung: Mit der sofortigen Fokus-Rückgabe würde
+       sonst der nächste Tastendruck den ehemaligen Linktext ersetzen (im
+       echten Chromium vom Review geprüft).
+     - **Sichtbare Nebenwirkung von `unsetMark`:** Direkt nach dem Einfügen
+       ist `editor.isActive("link")` false: der Link-Knopf ist nicht
+       hervorgehoben, und ein sofortiges erneutes Öffnen zeigt ein frisches
+       „Einfügen“-Formular statt „Übernehmen“. Nach jeder Cursorbewegung gilt
+       wieder das bisherige Verhalten. Bewusst akzeptiert (direkte Folge
+       der Anforderung „Weitertippen landet außerhalb des Links“).
+     - **Alternativen (verworfen):** zusätzlich `chain().focus()` behalten
+       (rAF-Nachzügler, s. o.); ein `<form>` mit Submit (zweiter, nicht in
+       jsdom nachstellbarer Enter-Pfad); Fokus per `setTimeout` (im
+       verdeckten Tab gedrosselt, und der Fokus wäre nicht mehr „vor dem
+       Rerender“).
+     - **Restrisiken:** (1) In jsdom nicht beweisbar, im E2E-Fall D7c zu
+       prüfen: natives Tippen direkt hinter einem Link (Caret-Affinität an
+       der `<a>`-Grenze; der Test spielt nur denselben ProseMirror-Pfad
+       ein), ob `preventDefault` auf dem Enter-`keydown` die Folgeereignisse
+       wirklich unterdrückt (kein Absatzumbruch; bei gehaltenem Enter gehen
+       die Wiederholungen an den Editor), das sichtbare Caret bei offener
+       Bildschirmtastatur (`view.focus()` fokussiert mit `preventScroll`).
+       (2) Android/Gboard: Ein Enter während laufender Wortkomposition kommt
+       teils mit `isComposing`/`keyCode 229` – dort tut Enter nichts, der
+       Knopf funktioniert weiter (Preis der IME-Absicherung). (3) Umschalt/
+       Strg/Alt/Meta+Enter lösen ebenfalls Einfügen aus (unkritisch).
+       (4) Bestand, bewusst nicht angefasst: kein `autoFocus` beim Öffnen
+       (Enter wirkt erst nach einem Klick ins Feld), Escape schließt das
+       Popover nicht; `fetchTitleForLink` (manueller Knopf) prüft nach dem
+       `await` kein Abbruch-Signal; ein Klick in den Editorbereich schließt
+       das Popover über `setPicker(null)` ohne `cancelAutoFetch()` (folgenlos,
+       weil `openLinkPicker` beim nächsten Öffnen abbricht und neu belegt);
+       `openLinkPicker` nutzt bei einem bestehenden Link weiter
+       `chain().focus()` (rAF-verzögert, harmlos, der Nutzer klickt danach
+       ohnehin ins Feld).
+     - **Tests:** `tests/docEditorLinkPopover.test.jsx` (NEU, 40; ECHTER
+       `DocEditor` in jsdom, `requestAnimationFrame` durch einen Stub ersetzt,
+       der nie ausführt): Fokus + Cursor nach Einfügen per Klick, Weitertippen
+       außerhalb des Links (auch am Absatzende), kein rAF-Nachzügler; Enter
+       in beiden Feldern (`defaultPrevented`, genau ein Link/Absatz);
+       Validierung 5 Datenlagen x 3 Auslöser (Klick, Enter Titel, Enter URL);
+       IME (`isComposing`, `keyCode 229`) und Fremdtasten; bestehender Link
+       (Übernehmen, Entfernen mit Cursor-Kollaps, Öffnen); Struktur (alle
+       Knöpfe `type="button"`, kein `<form>`, mobile Klassen); Auto-Fetch mit
+       Fake-Timern (Enter vor Ablauf, spät eintreffendes Ergebnis). Gegen
+       den ALTEN Code aus HEAD: 25 rot, 15 grün (die 15 sind Regressions-
+       schutz für unverändertes Verhalten). Mutationsprüfung Entwickler: 11
+       Mutanten, alle erkannt. Review: 12 Mutanten, 8 erkannt; Überlebende:
+       Fokus per `setTimeout(0)` statt synchron (die Tests belegen „ohne
+       rAF“, nicht „im selben Tick“) und drei Bestandszeilen in
+       `removeLink`/`applyLink` (`cancelAutoFetch`, `setPicker(null)`) – als 🔵
+       in docs/TODO.md. Angepasst: `tests/docEditorLinkEnter.test.jsx`
+       („Ausschluss Variante (c)“ pinnt den Quelltext von `applyLink`: kein
+       `.focus()` mehr in der Kette, jetzt genau 3 Referenzen auf
+       `applyLink`, die dritte in `onLinkFieldKeyDown` ohne Timer – die
+       Absicht des Guards, dass kein Timer `applyLink` aufruft, bleibt).
+
+136. **v7.58, E2E-Befund C28: Tool-Markup-Reste am Ende einer Chat-Antwort
+     werden vor der Anzeige entfernt.**
+     - **Anlass:** Bei einer reinen Rückfrage (Sonnet 5) stand am Ende der
+       Antwortblase wörtlich `</parameter>` und `<parameter name="ops">[]` –
+       das Modell hatte Reste seines eigenen Tool-Aufruf-Formats in den
+       `reply`-STRING geschrieben (Modellverhalten). Behandelt wird nur die
+       ANZEIGE/Speicherung des Antworttexts; `ops` und `commit` bleiben
+       unberührt.
+     - **Umsetzung (`src/lib/anthropic.js`):** Neue exportierte Funktion
+       `stripToolMarkupTail(text)`. Ab dem ersten Format-Tag
+       (`parameter`/`invoke`/`function_calls`, öffnend oder schließend,
+       auch mit Namensraum-Präfix wie `antml:`; der Tag-Rumpf akzeptiert
+       NUR echte Attribut-Syntax – `name="…"`/`name='…'`, Leerraum,
+       optionaler `/` vor dem „>“ –, damit zählt „<parameterized>“ ebenso
+       wenig als Tag wie „Foo<parameter T, U>“) wird geschnitten, sofern
+       von dort bis zum Textende AUSSCHLIESSLICH solche Tags, Leerraum und
+       ein LEERER ops-Wert („[]“) stehen; danach wird der Leerraum am Ende
+       gekappt.
+       Bleibt nichts übrig, greift der „Notiert.“-Default wie bei leerem
+       `reply`. Der Kandidaten-Scan überspringt Positionen, an denen die
+       Kette schon gescheitert ist (linear statt quadratisch).
+     - **Bewusst konservativ** (ein Fehlgriff würde Nutzertext oder
+       verlorene Ops verschlucken): Ein nicht-leerer ops-Wert oder
+       „commit“-Text macht den Rest „nicht rein“ -> Text UNVERÄNDERT (dann
+       sind echte Ops verloren gegangen, das darf nicht unsichtbar
+       werden); Tags MITTEN im Text bleiben (der Nutzer darf über XML
+       reden); ein Rest in einem nie geschlossenen Zaun oder in einem
+       offenen Inline-Codespan bleibt stehen; ohne Rest kommt der Text
+       byte-identisch zurück (auch ohne `trim`); Nicht-Strings unverändert;
+       die Funktion wirft nie.
+     - **Code-Prüfung nur VOR dem Schnitt (Review-Finding 🟡, Runde 1):**
+       `toolTailInsideCode` betrachtet nur den Text vor dem Rest. Klebt der
+       Rest OHNE Zeilenumbruch am Schluss-Zaun eines geschlossenen
+       Codeblocks (die natürliche Form des Lecks), wäre bei einer Prüfung
+       über den ganzen Text die Zeile „Schluss-Zaun + Tag“ kein gültiger
+       Schluss-Zaun mehr; der Block gälte als unterminiert und der Rest
+       bliebe sichtbar. Jetzt: geschlossener Block, der genau auf der
+       Schnittzeile endet -> früher Ausstieg mit „nicht im Code“ (sonst
+       zählte die Backtick-Parität den Schluss-Zaun als offenen Codespan).
+       `anthropic.js` importiert dafür `FENCE_OPEN_RE`/`matchFenceBlock` aus
+       `code.jsx` (kein Zyklus: `code.jsx` importiert nur `react`).
+     - **Verdrahtung an EINER Stelle:** In `finalize()` von `callClaude`
+       dort, wo das `reply`-Feld des Modells übernommen wird (`toolReply`) –
+       nicht erst in `buildChatReply`/beim Return. Alles Folgende arbeitet
+       mit `toolReply` (Substanz-Gate mit 80-Zeichen-Schwelle, Dedup gegen
+       den Vorab-Text, Verweis-Retry, Anzeige/Speicherung): 37 Zeichen
+       Markup könnten sonst eine kurze Rückfrage über die Substanzschwelle
+       heben und einen Vorab-Text verwerfen lassen bzw. den Dedup-Vergleich
+       scheitern lassen. Der frühe `max_tokens`-Zweig (abgeschnittene
+       Antwort) läuft NICHT durch die Bereinigung (unkritisch: dort steht
+       ohnehin eine Warnung, es werden nie Ops angewandt).
+     - **Alternativen (verworfen):** Bereinigung erst im Chat-Rendering
+       (`App.jsx`) – Substanz-Gate/Dedup sähen den Rest weiter; Prompt-Regel
+       „schreibe keine Tool-Tags in den reply“ ohne Code-Netz (das
+       Modellverhalten ist nicht garantierbar, vgl. die Lehre aus #130).
+     - **Teilkürzung (Review 🔵, vom Orchestrator ENTSCHIEDEN: beibehalten
+       und festgeschrieben):** Fremdinhalt im Rest (nicht-leerer ops-Wert,
+       commit-Text) wird NIE entfernt; folgt DAHINTER noch eine REINE
+       Tag-Kette bis zum Textende, fällt nur diese Kette weg. Beispiel:
+       Text + schließendes parameter-Tag + ops-Tag mit echter Op +
+       schließendes parameter-Tag + schließendes invoke-Tag ergibt Text +
+       schließendes parameter-Tag + ops-Tag mit der Op – die Op bleibt
+       sichtbar. Endet der Text dagegen auf den Fremdinhalt, bleibt er
+       unverändert. Der Kopfkommentar von `stripToolMarkupTail` ist
+       entsprechend präzisiert (vorher sprach er von „Rest mit sonstigem
+       Inhalt -> Text unverändert“), ein Pin-Test hält das Verhalten fest.
+     - **Tag-Rumpf (Review 🔵, behoben):** Der Rumpf `[^<>]*` akzeptierte
+       beliebigen Text bis zum „>“, auch über Zeilenumbrüche: „Der Typ ist
+       Foo<parameter T, U>“ oder ein mehrzeiliges Pseudo-Tag am
+       Antwortende wäre zu „Der Typ ist Foo“ gekürzt worden (Textverlust in
+       Blase und Archiv). Jetzt nur echte Attribut-Syntax
+       (`(?:\s+[\w:.-]+\s*=\s*("…"|'…'))*\s*/?>`); zwei Negativ-Tests, alle
+       bisherigen Positivfälle (mit/ohne name-Attribut, Namensraum-Präfix,
+       Leerraum) bleiben grün. Bewusst NICHT mehr erkannt: Attribute ohne
+       Anführungszeichen oder mit „<“/„>“ im Wert (kommen im Format nicht
+       vor).
+     - **Restrisiko (Review, 🔵):** Die Codespan-Erkennung ist eine
+       grobe Backtick-Parität der Schnittzeile und irrt nur in Richtung
+       „Text unverändert“; ein Rest in Blöcken mit CRLF im `reply`-String
+       bleibt ebenfalls unverändert (`FENCE_OPEN_RE` greift bei „\r“ nicht;
+       Modell-Antworten kommen mit LF).
+     - **Tests (`tests/anthropic.test.js`, 456 grün):** `stripToolMarkupTail`
+       pur: Live-Fall C28 (idempotent), Leerraum vor dem Rest, reiner Rest
+       -> leer, Rest mit anderem Inhalt bleibt, Tags im Fließtext bleiben,
+       Tags in Code bleiben (unterminierter Zaun, 4-Backtick-Zaun, Codespan
+       offen/geschlossen), der neue Block „Rest klebt direkt am Schluss-Zaun
+       eines geschlossenen Blocks“ (9 Fälle: Live-Form, nur schließendes Tag
+       und Namensraum, Leerraum, eingerückter Zaun, zwei Blöcke, 4-Backtick-
+       Zaun, Rest am öffnenden Zaun ohne Schluss bleibt, 3-Backtick-Zeile
+       schließt keinen 4-Backtick-Block, Codespan-Parität), byte-identisch
+       ohne Rest, Nicht-Strings, linearer Scan, Teilkürzung (Pin-Test), Tag-
+       Rumpf (2 Negativ-Tests, 5 zusätzliche Positivformen: Leerraum im Tag,
+       mehrere Attribute, Umbruch zwischen Attributen, Selbstschluss); dazu 8
+       Verdrahtungstests über
+       `callClaude` (Live-Fall mit `ops` `[]`/`commit` null, echte Ops +
+       commit byte-gleich, Rest am Schluss-Zaun, reiner Rest -> „Notiert.“,
+       nicht-leere Ops bleiben sichtbar, Tags mitten im `reply`, Substanz-
+       Gate und Dedup sehen den BEREINIGTEN Text). Mutationscheck: mit der
+       alten Funktion schlagen 7 der neuen Tests fehl; Review: 14 eingebaute
+       Fehler, alle erkannt.
+
+137. **v7.58, Nachzug zu #133: der Chat-Pfad zieht die Zaun-Einrückung
+     ebenfalls ab.**
+     - **Anlass:** #133 hatte die Dokument-ANSICHT korrigiert und den
+       Chat-Pfad als offen benannt (`expandFencedCodeInNodes` nutzte
+       `seg.text` unverändert): Ein eingerückter Zaun in einer Chat-Antwort
+       behielt die führenden Leerzeichen im Code-Text.
+     - **Fix (`src/lib/code.jsx`):** `splitFenceSegments` reicht pro
+       Codeblock-Segment zusätzlich `indent` durch (führende Leerzeichen der
+       ÖFFNENDEN Zaun-Zeile, 0-3, aus `matchFenceBlock`);
+       `expandFencedCodeInNodes` rendert
+       `code={stripFenceIndent(seg.text, seg.indent)}` (CommonMark: bis zu
+       `indent` führende Leerzeichen je Zeile, Überschuss bleibt, Leerzeilen
+       bleiben leer). Ohne Einrückung (`indent` 0) unverändert.
+     - **Roundtrip-Sicherheit:** `indent` ist rein ADDITIV – `raw`, `text`
+       und `lang` bleiben byte-gleich. Alle Konsumenten von
+       `splitFenceSegments` (`DocEditor.jsx`, `markdown.jsx`,
+       `filelinks.js`, `linkProviders.jsx`) lesen nur `seg.code`/`seg.raw`;
+       `archive.js` nutzt es nur indirekt über `renumberCitations`. Nur die
+       Chat-Darstellung ändert sich.
+     - **Restgrenze (unverändert aus #133):** Ein Zaun mit 4 Leerzeichen
+       (Listenpunkt der 2. Ebene) matcht `FENCE_OPEN_RE` nicht (CommonMark-
+       Limit 3) und wird weiter als Text gerendert.
+     - **Tests (`tests/code.test.jsx`, 76 grün):** Block „indent-Feld (rein
+       additiv)“: Einrückung je Codeblock aus SEINER öffnenden Zeile (0/1/3),
+       nur die öffnende Zeile zählt, byte-genaue Rekonstruktion, 4 Leerzeichen
+       = kein Zaun. Block „eingerückter Zaun im Chat-Pfad“: 1 und 3
+       Leerzeichen (Überschuss im Code bleibt), Zeile mit weniger Einrückung
+       als der Zaun, Leerzeilen/Tabs, nicht eingerückter Zaun byte-gleich,
+       Live-Fall Listenpunkt, zwei Blöcke mit unterschiedlicher Einrückung,
+       4 Leerzeichen, unterminierter Zaun bleibt literal. Drei bestehende
+       `toEqual`-Erwartungen wurden um `indent` ergänzt (wegen des exakten
+       Objektvergleichs unvermeidbar, nichts abgeschwächt).
+
+138. **v7.58, MAX_FACTS-Deckel im Feedback-Prompt nennt jetzt die Zahl der
+     nicht aufgeführten Zeilen (vertagter Punkt aus #130/#131).**
+     - **Anlass:** Die Feedback-Fakten (#130) werden auf `MAX_FACTS` = 20
+       eigenständige Zeilen gekappt; das Modell erfuhr vom Abschneiden
+       nichts und konnte „nur 20 Fakten“ für „alle Zeilen“ halten.
+     - **Fix (`src/lib/feedback.js`):** Neue Funktion
+       `collectFeedbackFacts(diff, notebooks, activeName)` liefert
+       `{ facts, omitted }`; `buildFeedbackFacts` bleibt als schmale Hülle
+       mit unveränderter Signatur (nur das Fakten-Array).
+       `omitted` zählt die weiteren eigenständigen hinzugefügten Zeilen mit
+       DERSELBEN Regel wie die Fakten (nicht-leer, nach `trim()`
+       dedupliziert, auch gegen bereits aufgeführte). Der Scan bricht am
+       Deckel nicht mehr ab, sondern zählt weiter; für die überzähligen
+       Zeilen wird bewusst NICHTS ermittelt (kein `activeCount`, keine
+       Fundorte). `formatFeedbackFacts(facts, activeName, omitted = 0)`
+       hängt bei einer positiven Ganzzahl EINE Hinweiszeile an
+       („Hinweis: Aufgeführt sind nur die ersten N eigenständigen
+       hinzugefügten Zeilen; für K weitere eigenständige hinzugefügte
+       Zeilen wurden keine Vorkommen ermittelt, sie sind hier nicht
+       aufgeführt.“, Singular/Plural getrennt – bei 1: „… für 1 weitere
+       eigenständige hinzugefügte Zeile wurden keine Vorkommen ermittelt, sie
+       ist hier nicht aufgeführt.“; die erste Fassung „… wurden nicht
+       gezählt“ widersprach der genannten Zahl und wurde im Review-Nachgang
+       (🔵) präzisiert); sonst (0,
+       `undefined`, NaN, negativ, Bruch, String) bleibt die Ausgabe
+       BYTE-IDENTISCH zu vor v7.58 (per Test gepinnt). Ohne Fakten gibt es
+       weiterhin keinen Text. `buildFeedbackRequest` liefert zusätzlich
+       `omitted`; `App.jsx` liest weiter nur `{ trigger }`. Nackte, wahre
+       Aussage ohne Bewertung (Linie aus #130: keine Toleranzlogik).
+     - **Alternativen (verworfen):** Deckel anheben (Kosten/Latenz,
+       „kein kleiner manueller Zusatz“ mehr); Hinweis ohne Zahl (das Modell
+       könnte den Umfang nicht einschätzen).
+     - **Restrisiko:** Der Scan läuft jetzt über den ganzen Diff (durch
+       `DIFF_CAP` begrenzt; die teure Fundort-Ermittlung entfällt für
+       Überzählige).
+     - **Tests (`tests/feedback.test.js`, 73 grün, +16):** Block „MAX_FACTS-
+       Deckel: Hinweis im Fakten-Block“: ohne Kappung (genau 20, wenige)
+       kein Hinweis und Ausgabe byte-identisch; mit Kappung 21 -> „1“
+       (Singular), 20 Fakten + 10 überzählige Zeilen mit Duplikaten und
+       Leerzeilen darunter -> exakt 3, Duplikate INNERHALB der ersten 20
+       verbrauchen keinen
+       Platz, unveränderte/entfernte Zeilen zählen nicht, 120 Zeilen -> 100;
+       `buildFeedbackFacts` behält Signatur; Verdrahtung im Trigger (Hinweis
+       direkt hinter der 20. Fakten-Zeile, ohne kompakten Diff, `diff` null);
+       Randfälle (Fehlerpfade -> `omitted` 0, ungültige `omitted`-Werte, kein
+       Hinweis ohne Fakten, aufgeführte Zahl aus den tatsächlichen Fakten).
+       Der Testtitel dazu nennt jetzt die tatsächliche Datenlage (20 Fakten
+       + 10 überzählige Zeilen, davon 3 eigenständige).
