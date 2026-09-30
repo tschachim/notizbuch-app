@@ -114,6 +114,83 @@ Versions- und DECISIONS-Verweis gestrichen, nicht gelöscht.
       `computeFenceLineMask`, `ops.js` und den Editor-Ladepfad. Siehe
       DECISIONS #133.
 
+## Aus dem E2E-Lauf v7.58 (2026-09-30/10-01)
+
+Lauf im QA-Chrome, verbunden mit `notizbuch-data-qa`: 80 bestanden, 0 rot,
+0 gelb, 6 blau, 37 übersprungen. Die Punkte unten sind die
+produktbezogenen Beobachtungen; Umgebungs-Eigenheiten des QA-Chrome
+(verdecktes Fenster, Timing, Eingabe) stehen bewusst NICHT hier, sondern als
+„Hinweise QA-Chrome (verdecktes Fenster)“ in `docs/TESTFAELLE.md`.
+
+- [ ] **C2 – Entity „&gt;“ in Modellantworten (kein Datenverlust).**
+      Beobachtung: Nach dem Speichern der Zeile „q ->“ über den Editor schrieb
+      das Modell in zwei Chat-Antworten „q -&gt;“; die Dokument-Ansicht zeigt
+      dieselbe Zeile korrekt als „q ->“. Ursache (durch den Code belegt, kein
+      Prüfschritt nötig): Der Text-Node-Serializer von tiptap-markdown
+      (`escapeHTML`) schreibt getipptes „>“ IMMER als „&gt;“ ins gespeicherte
+      Markdown (Kopfkommentar in `src/lib/markdown.jsx` ab Z. 265,
+      gepinnt in `tests/docEditorEntities.test.jsx`). Die Ansicht dekodiert
+      per `decodeBasicEntities` (nur in Anzeige-Pfaden: `markdown.jsx`,
+      Titel-Anzeige in `App.jsx`), der Prompt-Bau nicht:
+      `buildSystemBlocks` in `src/lib/anthropic.js` reicht `nb.doc` roh
+      durch – das Modell sieht „&gt;“ und übernimmt es in seine Antwort.
+      Repro: im QA-Notizbuch eine Zeile „q ->“ über den Editor speichern
+      (damit die AutoKorrektur „->“ nicht zu „→“ macht, vorher die
+      Kategorie „Pfeile“ abwählen, siehe E4b; der im Lauf benutzte
+      Eingabeweg ist nicht festgehalten; im Repo-Markdown steht dann
+      „q -&gt;“), dann im Chat nach dem Inhalt der Zeile fragen.
+      Ansatz: beim Prompt-Bau `decodeBasicEntities` auf die Nicht-Code-
+      Segmente von `nb.doc` anwenden – Fenced-Blöcke per `splitFenceSegments`
+      (`src/lib/code.jsx`) aussparen, Codespans wie im Inline-Pfad von
+      `markdown.jsx` (ca. Z. 720–728: erst Token erkennen, nur den Rest
+      dekodieren); ggf. eine segmentweise Dekodierfunktion aus `markdown.jsx`
+      exportieren. Verworfen: „beim Speichern zurückwandeln“ – bricht die
+      v7.24-Entscheidung (Entities bleiben bewusst im Speicherformat, Schutz
+      davor, dass ein rohes „<“/„>“ beim nächsten Laden mit `html: true` als
+      HTML gelesen wird; die Byte-Stabilität über Lade-/Speicherzyklen ist
+      in `tests/docEditorEntities.test.jsx` gepinnt). Vorsicht beim
+      Dekodieren im Prompt: Ops adressieren Einträge per Text
+      (`findEntryLines` in `src/lib/ops.js` vergleicht `op.entry` mit dem
+      GESPEICHERTEN Zeilentext); zitiert das Modell eine Zeile dekodiert
+      („q ->“), träfe der Match gegen „q -&gt;“ nicht mehr – die Match-Seite
+      müsste dann symmetrisch dekodiert werden (vor Umsetzung klären).
+      Dateien: `src/lib/anthropic.js`, ggf. `src/lib/markdown.jsx` (Export
+      einer segmentweisen Dekodierfunktion), `src/lib/ops.js` (Match).
+- [ ] **Notizbuch anlegen – irreführende Fehlermeldung „SHA-Konflikt“.**
+      Beobachtung: „Anlegen“ (Name „QA-Test Zweitbuch“) hing ca. 90 s in
+      „Lege an …“, die Datei war aber bereits committet; zwei Wiederholungen
+      endeten mit „SHA-Konflikt: Datei wurde zwischenzeitlich geändert“. Nach
+      einem Reload stand das Notizbuch im Dropdown. Ursache der Meldung:
+      `ghPutFile` ohne `sha` auf einen bereits existierenden Pfad liefert
+      422 (Fehlertext mit „sha“) bzw. 409, und beides wird in
+      `src/lib/github.js` als `ShaConflictError` gedeutet. Das hängende erste
+      „Anlegen“ war wahrscheinlich Umgebung (hängende Antwort im verdeckten
+      Tab), die Meldung bleibt für den Nutzer trotzdem falsch. Ansatz: bei 422/409
+      auf dem „Anlegen“-Pfad „Notizbuch existiert bereits“ melden, oder vor
+      dem Anlegen den Pfad per `ghGetFile` prüfen. Repro: der Hänger selbst
+      ist nicht gezielt nachgestellt; die falsche Meldung ist aus dem Code
+      ableitbar (nicht getestet): im Daten-Repo liegt `notizbuecher/<id>.md`
+      schon, die App führt das Notizbuch aber nicht in ihrer Liste (z. B.
+      Datei direkt im Repo angelegt oder Liste vor dem Neuladen veraltet),
+      dann „Anlegen“ mit dem zugehörigen Namen. Dateien: `src/lib/github.js`
+      (`ghPutFile`, 422/409-Zweig), `src/App.jsx` (Notizbuch anlegen,
+      `ghPutFile` mit Slug-ID `notizbuecher/<id>.md`).
+- [ ] **F2 – doppelte, fast identische Absätze in einer Chat-Antwort.**
+      Datei-Anhang `.txt` mit „QA-Dateitest Gamma“, Frage „Was steht in der
+      Datei?“: die Antwort enthielt zwei fast gleichlautende Absätze.
+      Modellqualität, keine Datenwirkung; beobachten, bei Häufung
+      Prompt-Hinweis erwägen.
+- [ ] **C15 – falsche Modellaussage „Kapitel existiert schon im anderen
+      Notizbuch“.** Das Modell behauptete, „QA-Kapitel-Test Theta“ gebe es
+      bereits in einem anderen Notizbuch; das stimmte nicht, der Eintrag
+      landete trotzdem korrekt im Ziel-Notizbuch. Halluzination ohne
+      Wirkung; beobachten (gleiche Klasse wie C26 oben: falscher
+      Kommentartext ohne Datenfolge).
+- [ ] **G1d – Randverweis auf die frühere Löschung.** Die Antwort nannte das
+      wiederhergestellte Kapitel korrekt und erwähnte zusätzlich dessen
+      frühere Löschung; die Pille erschien sofort. Nur ein überflüssiger
+      Randverweis, Fall bestanden; beobachten.
+
 ## Aus früheren DECISIONS-Einträgen (bewusst vertagt)
 
 - [ ] **`raw`-Fallback in `buildFeedbackFacts()`** (DECISIONS #131). Der

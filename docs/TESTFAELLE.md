@@ -40,6 +40,43 @@ anderen Fall – auch wenn der Repo-Name nicht zweifelsfrei gelesen
 werden kann – gilt der **Konservativ-Modus** (echte Nutzerdaten):
 alle Einschränkungen unten strikt einhalten.
 
+**Hinweise QA-Chrome (verdecktes Fenster).** Gelten für Läufe im QA-Chrome
+(Erweiterung „Claude in Chrome“), nicht für das Claude-Browser-Pane. Es sind
+Umgebungs-Eigenheiten, KEINE App-Findings:
+- **(a) Verdecktes Fenster, Renderer wecken.** Das QA-Chrome-Fenster ist
+  meist verdeckt (`document.hidden === true`, `outerWidth`/`outerHeight` 0).
+  Echte Tasten und Klicks kommen im aktiven Tab trotzdem an, aber erst,
+  NACHDEM ein Screenshot oder `zoom` den Renderer geweckt hat – vor
+  Tastatur-Fällen deshalb einmal `zoom` ausführen, sonst werden Eingaben
+  still verworfen. Screenshots laufen oft in den Timeout, `zoom` klappt
+  meist. Werte per javascript_tool bzw. read_page lesen, nicht vom Bild.
+- **(b) `resize_window` wirkt nicht.** Im verdeckten Fenster bleibt
+  `innerWidth` unverändert. Ersatz für die Responsive-Fälle (A3 samt
+  360-px-Header-Probe, C8c, D24): die App in einem 356-px-iframe derselben
+  Seite laden (per javascript_tool einen `<iframe>` mit `width: 356px` und
+  der aktuellen Seiten-URL einfügen; gleiche Herkunft, die Prüfungen laufen
+  über `iframe.contentDocument`/`contentWindow`) und dort prüfen. 356 px ist
+  schmaler als die Soll-Breiten (360/375 px), die Probe ist damit eher
+  strenger als zu lax. Den iframe danach wieder entfernen (zwei App-Instanzen
+  teilen sich `localStorage` und Daten-Repo) und im iframe nichts
+  schreiben, was nicht ohnehin zum Fall gehört.
+- **(c) ProseMirror-Selektion.** Der Editor übernimmt Tastatur-
+  Selektionsänderungen (End, ArrowLeft) im verdeckten Tab verzögert. Stabil:
+  direkt auf den Text klicken, `zoom` ausführen, dann tippen; vor Enter
+  `window.getSelection().isCollapsed` prüfen.
+- **(d) Dauer.** Timer und GitHub-Schreibvorgänge (Speichern, Löschen,
+  Archivieren) dauern im verdeckten Tab 20–90 s, der erste Seitenaufbau rund
+  45 s. Warten nicht per `setTimeout` (im verdeckten Tab gedrosselt), sondern
+  per MessageChannel-Hop (Bedingung in einer Schleife prüfen, dazwischen auf
+  eine `MessageChannel`-Nachricht warten). Knappe Zeitgrenzen einzelner Fälle
+  (z. B. E2: grüner Punkt binnen 10 s) sind hier nicht erfüllbar: gemessene
+  Dauer im Bericht vermerken; ob es ein Umgebungseffekt oder ein echtes
+  „Speichern hängt“ ist, entscheidet der Orchestrator. E2 und E2b verweisen
+  ausdrücklich auf diesen Punkt (keine Doppelerwartung).
+- **(e) Tab-Gruppe.** Den ERSTEN Tab der Gruppe nie schließen (sonst ist die
+  Gruppe weg). `createIfEmpty` nur einmal zu Beginn des Laufs setzen, und
+  erst NACH der Repo-Pflichtprüfung (siehe Datentopf oben).
+
 ---
 
 ## A. Grundgerüst & Erststart
@@ -108,7 +145,9 @@ Hinzufügen).
 Erwartet: Umschalter Chat/Wissensbasis erscheint; Abschnitts-Leiste rechts
 verschwindet; im Dokument-Modus öffnet der Gliederungs-Knopf den Drawer
 von rechts; Abschnitts-Tipp springt und schließt den Drawer; kein
-horizontales Scrollen der Seite.
+horizontales Scrollen der Seite. Im verdeckten QA-Chrome wirkt
+`resize_window` nicht: Ersatz ist ein 356-px-iframe (siehe „Hinweise
+QA-Chrome“ (b) oben, gilt auch für die 360-px-Header-Probe unten).
 
 Zusatzcheck **[VERBUNDEN] 360-px-Header-Probe (Regressionsschutz,
 DECISIONS #117).** NUR mit bestehender Verbindung aussagekräftig – erst
@@ -412,7 +451,9 @@ Math.abs(ta.getBoundingClientRect().bottom - btn.getBoundingClientRect().bottom)
 ```
 Erwartet: `true` – Differenz der Unterkanten unter 1 px (Subpixel-Rundung bei
 DPR ≠ 1 erlaubt; vorher lag die textarea 6 px höher als die Buttons).
-Zusätzlich Sichtprüfung im Mobil-Viewport (375×812) UND im Desktop-Fenster:
+Zusätzlich Sichtprüfung im Mobil-Viewport (375×812; im verdeckten QA-Chrome
+per 356-px-iframe, siehe „Hinweise QA-Chrome“ (b) oben) UND im
+Desktop-Fenster:
 Textfeld, Archiv- (title „Chat archivieren …“), Bild-anhängen- (title „Bild
 oder Datei anhängen“) und Senden-Button schließen unten auf einer Linie ab,
 kein Leerraum unter dem Textfeld. Auch mit
@@ -475,6 +516,21 @@ war.
 Chat (das Dokument nicht ändern) eine Aufzählung mit dem Punkt ‚QA-Punkt‘
 und darunter, um zwei Leerzeichen eingerückt als Teil desselben Punkts,
 einen Codeblock mit der einen Zeile ‚qa code zeile‘.“ (genau 1 API-Aufruf).
+**Vorprüfung (Bedingung fürs Bestehen):** Der Fall gilt NUR dann als
+BESTANDEN, wenn der Zaun in der Antwort tatsächlich EINGERÜCKT war. Das ist
+im DOM NICHT prüfbar: Der Chat rendert Listen nicht als `<li>` (Text
+außerhalb von Codeblöcken bleibt Literaltext), die Zaun-Zeile samt
+Einrückung wird beim Rendern verbraucht, und der Code-Text ist nach dem
+Abziehen für eingerückte und nicht eingerückte Zäune identisch. Beleg ist
+allein der Rohtext: Im QA-Modus liegt der Chat in `data/state.json` des
+Daten-Repos (Feld `chat`, letzter Eintrag mit `role: "assistant"`, Feld
+`text`). Erst nach grünem Speicher-Punkt lesen und den `text` JSON-dekodiert
+prüfen (im Dateiquelltext stehen Zeilenumbrüche als `\n`): er muss eine
+Zeile enthalten, die mit 1–3 Leerzeichen vor den Backticks beginnt
+(`` /^ {1,3}```/m ``). Den Rohtext lässt der Orchestrator prüfen (z. B.
+`gh api repos/<owner>/notizbuch-data-qa/contents/data/state.json --jq
+.content | base64 -d`); ist er nicht zugänglich, den Fall als
+ÜBERSPRUNGEN („Einrückung nicht belegbar“) melden, NICHT als bestanden.
 Erwartet: Die Chat-Antwort zeigt den Codeblock als eigenen monospaced
 Kasten ohne sichtbare ```-Zeichen, und der Code-Text ist OHNE die
 Zaun-Einrückung dargestellt – per javascript_tool im letzten Kasten der
@@ -483,11 +539,16 @@ Antwort prüfen, dass `[...document.querySelectorAll('pre code')].at(-1)
 v7.58 standen dort die 2 Leerzeichen der Zaun-Einrückung). ⚠️ Modellabhängig
 (kein Finding, kurz vermerken): Liefert das Modell den Zaun nicht
 eingerückt (nackter Codeblock nach der Liste) oder antwortet es ohne
-Codeblock, gilt der Fall als ÜBERSPRUNGEN – der Fehler ließe sich dann nicht
-provozieren (Fehlerklasse ist zusätzlich durch Unit-Tests in
-`tests/code.test.jsx` abgedeckt). Bekannte Grenze (KEIN Finding): ein um 4
-Leerzeichen eingerückter Zaun (Listenpunkt 2. Ebene) wird nach CommonMark
-nicht als Codeblock erkannt und bleibt Text (DECISIONS #133).
+Codeblock, gilt der Fall als ÜBERSPRUNGEN, NICHT als bestanden – auch wenn
+die Antwort sonst plausibel aussieht und der Code-Text exakt „qa code
+zeile“ lautet: ohne Einrückung gibt es nichts, was entfernt werden könnte,
+der Fall wäre leer „bestanden“. Im Lauf v7.58 wurde der Rohtext nicht
+geprüft; ob der Zaun eingerückt war, ist daher offen. Ohne eingerückten
+Zaun ließe sich der Fehler nicht provozieren (Fehlerklasse ist zusätzlich
+durch Unit-Tests in `tests/code.test.jsx` abgedeckt). Bekannte Grenze (KEIN
+Finding): ein um 4 Leerzeichen eingerückter Zaun (Listenpunkt 2. Ebene) wird
+nach CommonMark nicht als Codeblock erkannt und bleibt Text (DECISIONS
+#133).
 
 **C11 [VERBUNDEN] Generischer Link in der Dokument-Ansicht.** Voraussetzung:
 Ein Dokument mit einem generischen Link – bei Bedarf über den Editor
@@ -1348,30 +1409,42 @@ last.querySelector('a')?.textContent === 'ktext'`. Editor über
 „Abbrechen“ verlassen (keine der Testeinfügungen wird gespeichert).
 
 **D7c [OFFEN] Link-Popover: Fokus zurück in den Editor und Enter =
-Einfügen (v7.58, DECISIONS #135).** ⚠️ In einem AKTIVEN, sichtbaren Tab im
-Vordergrund ausführen (`document.hasFocus()` muss `true` liefern) – in
-einem verdeckten oder unfokussierten Fenster sagt `document.activeElement`
-nichts aus. Editor öffnen, ans Dokumentende gehen, neuen Absatz anlegen,
-„QA-Link“ tippen, den Text markieren, Link-Knopf klicken, als URL
+Einfügen (v7.58, DECISIONS #135).** ⚠️ Fenster-Fokus (Vorbedingung): Im
+Claude-Browser-Pane in einem AKTIVEN, sichtbaren Tab im Vordergrund
+ausführen (`document.hasFocus()` muss `true` liefern). Im verdeckten
+QA-Chrome (siehe „Hinweise QA-Chrome“ (a)) kann `document.hasFocus()`
+`false` sein; Vorbedingung ist dort stattdessen: vor dem Fall einmal `zoom`
+ausführen (Renderer wecken) und mit einer Tastenprobe sicherstellen, dass
+echte Tasten ankommen – der getippte Text „QA-Link“ muss nach dem Tippen
+(vor dem Markieren) per javascript_tool im Absatz stehen; fehlt er, ist das
+ein Umgebungsproblem (erneut `zoom`, sonst ÜBERSPRUNGEN), KEIN App-Finding.
+Die `activeElement`-Prüfung unten bleibt auch dort gültig (sie misst den
+DOM-Fokus im Dokument, nicht den Fenster-Fokus); den `hasFocus()`-Wert im
+Bericht vermerken. Editor öffnen, ans Dokumentende gehen, neuen Absatz
+anlegen, „QA-Link“ tippen, den Text markieren, Link-Knopf klicken, als URL
 `https://example.com/qa` eingeben und „Einfügen“ mit der MAUS klicken.
 Erwartet (javascript_tool, muss `true` liefern):
 `document.activeElement === document.querySelector('.tiptap-doc')` (der
 Fokus liegt im Editor, NICHT auf `body`; vor v7.58 fehlte er dort), und das
 Popover ist geschlossen. OHNE weiteren Klick sofort per computer-tool die
-Tasten „X“ und „Y“ EINZELN senden (echte Tastenanschläge). Erwartet
-(javascript_tool, muss `true` liefern): `const p =
+Tasten „x“ und „y“ EINZELN senden (echte Tastenanschläge; bewusst
+KLEINBUCHSTABEN – „X“/„Y“ per computer-key erzeugt im QA-Chrome ohnehin
+„x“/„y“, getippt und erwartet wird daher klein). Erwartet (javascript_tool,
+muss `true` liefern): `const p =
 document.querySelector('.tiptap-doc').lastElementChild;
 p.querySelector('a[href="https://example.com/qa"]')?.textContent ===
-'QA-Link' && p.textContent.endsWith('QA-LinkXY')` – der weitergetippte Text
-steht HINTER dem Link und ist NICHT Teil des Links. **Enter im URL-Feld:**
-neuen Absatz anlegen, „QA-Link2“ tippen und markieren, Link-Knopf klicken,
+'QA-Link' && p.textContent.endsWith('QA-Linkxy')` (gleichwertig
+case-insensitiv: `p.textContent.toLowerCase().endsWith('qa-linkxy')`) – der
+weitergetippte Text steht HINTER dem Link und ist NICHT Teil des Links.
+**Enter im URL-Feld:** neuen Absatz anlegen, „QA-Link2“ tippen und
+markieren, Link-Knopf klicken,
 URL `https://example.com/qa2` ins URL-Feld tippen und dort die
 computer-tool-Taste „Return“ senden (echtes Tastenereignis). Vorher die
 Zahl der Kinder von `.tiptap-doc` notieren. Erwartet: Link eingefügt,
 Popover zu, Fokus im Editor, die Zahl der Kinder von `.tiptap-doc` ist
 UNVERÄNDERT (Enter erzeugt keinen zusätzlichen Absatz im Editor); ein
-sofort getipptes „Z“ steht hinter dem Link. Ebenso **Enter im Titelfeld**
-(neuer Absatz „QA-Link3“, URL `https://example.com/qa3`, Titel um „b“
+sofort getipptes „z“ (klein, wie oben) steht hinter dem Link. Ebenso
+**Enter im Titelfeld** (neuer Absatz „QA-Link3“, URL `https://example.com/qa3`, Titel um „b“
 ergänzen, im TITEL-Feld Return): fügt ebenfalls ein. **Enter mit Fehler:**
 neuen Absatz anlegen, „QA-Link4“ tippen und markieren, Link-Knopf klicken,
 als URL `https://example.com/qa4` eintragen, dann den Titel auf „33487“
@@ -1385,7 +1458,7 @@ setzen, Link-Knopf klicken (Knöpfe „Übernehmen“/„Entfernen“/„Öffnen
 „Entfernen“ klicken. Erwartet: der Text „QA-Link“ bleibt stehen, ist aber
 kein Link mehr, der Fokus liegt im Editor und die Selektion ist zu einem
 Cursor am Textende kollabiert (`window.getSelection().isCollapsed ===
-true`); ein sofort getipptes „W“ wird ANGEHÄNGT und ersetzt den Text nicht.
+true`); ein sofort getipptes „w“ wird ANGEHÄNGT und ersetzt den Text nicht.
 Bekannte, bewusste Eigenheiten (KEIN Finding): Direkt nach dem Einfügen ist
 der Link-Knopf nicht hervorgehoben, und ein sofortiges erneutes Öffnen zeigt
 „Einfügen“ statt „Übernehmen“ (der Cursor steht bewusst außerhalb des Links,
@@ -2223,7 +2296,10 @@ sichtbar, Eingabefeld fokussierbar. Tabellen-Knopf: Raster sichtbar.
 Popover schließt bei Klick in den Editor-Text. Danach per resize_window
 auf desktop zurückstellen: Erwartet, die Toolbar bricht wieder mehrzeilig
 um (`flex-wrap`), Popover erscheinen wie bisher direkt unter dem Knopf.
-Fenster am Ende zurücksetzen (Preset desktop).
+Fenster am Ende zurücksetzen (Preset desktop). Im verdeckten QA-Chrome wirkt
+resize_window nicht (siehe „Hinweise QA-Chrome“ (b) oben): Die Mobil-Proben
+laufen dann in einem 356-px-iframe, „zurückstellen“ heißt dort den iframe
+entfernen, und die Desktop-Gegenprobe läuft im Top-Level-Dokument.
 
 ## E. Schnellnotizen
 
@@ -2245,7 +2321,9 @@ vermerken. NIEMALS `ta.value = …` allein verwenden (erreicht React nicht)
 und NIEMALS localStorage direkt beschreiben. VOR dem Reload abwarten, bis
 der Punkt neben der Version grün ist (`span[title="Gespeichert (im
 Daten-Repo)"]`, höchstens 10 s; länger oder gar nicht grün ⇒ eigenes
-Finding „Speichern hängt“). Erst dann neu laden. Erwartet: Post-it samt
+Finding „Speichern hängt“; Ausnahme verdecktes QA-Chrome: gemessene Dauer
+vermerken, Einstufung durch den Orchestrator, siehe „Hinweise QA-Chrome“
+(d) oben). Erst dann neu laden. Erwartet: Post-it samt
 Text wieder da. Zur Kontrolle vor/nach dem Reload die ID aus
 `localStorage["notizbuch:quicknotes"]` (Feld `notes`) notieren und den
 Zeitstempel dekodieren (`new Date(parseInt(id.slice(0,-5),36)).toISOString()`);
@@ -2260,7 +2338,9 @@ ERNEUT abwarten, bis der Punkt grün ist, bevor die Seite verlassen wird
 - **E2b:** Text setzen und SOFORT (< 1 s) neu laden, während der Punkt noch
   amber ist. Erwartet: Text bleibt (vorher: leeres Post-it mit ggf. anderer
   ID – genau der Live-Befund). Innerhalb einiger Sekunden wird der Punkt
-  grün (Nachsynchronisation); ein zweiter Reload zeigt den Text weiterhin.
+  grün (Nachsynchronisation; im verdeckten QA-Chrome dauert das länger,
+  Dauer vermerken, Einstufung durch den Orchestrator, siehe „Hinweise
+  QA-Chrome“ (d) oben); ein zweiter Reload zeigt den Text weiterhin.
 - **E2c:** Post-it löschen und SOFORT neu laden. Erwartet: bleibt gelöscht
   (vorher konnte ein gerade gelöschtes Post-it wieder auftauchen).
 - **E2d (Offline):** DevTools-Netzwerk auf „Offline“, Text ändern, rotes
@@ -2330,10 +2410,12 @@ Ende des Blocks, nicht den Einzug der ersten inhaltstragenden Zeile
 anlegen, das `<textarea>` fokussieren (Klick hinein). ⚠️ Eingabemethode: Die
 Zeichen EINZELN als echte Tastenanschläge senden – je Zeichen eine eigene
 computer-Aktion „key“ (Zeichen bzw. Tastenname, z. B. `-`, `>`), NICHT die
-Aktion „type“ (sie fügt den ganzen String als EIN `insertText`-Ereignis ein
-und ersetzt per Design NICHTS) und NICHT den E2-Weg (nativer Setter +
-`new Event('input')`; ein Event ohne `inputType` ersetzt ebenfalls bewusst
-nichts) – beides ist KEIN Finding. Erwartungen jeweils per javascript_tool am
+Aktion „type“ des Claude-Browser-Panes (sie fügt den ganzen String als EIN
+`insertText`-Ereignis ein und ersetzt per Design NICHTS; in der Chrome-
+Erweiterung „Claude in Chrome“ sendet „type“ dagegen PRO ZEICHEN echte
+Tastenereignisse und ersetzt daher wie echtes Tippen, siehe Gegenprobe unten)
+und NICHT den E2-Weg (nativer Setter + `new Event('input')`; ein Event ohne
+`inputType` ersetzt ebenfalls bewusst nichts) – beides ist KEIN Finding. Erwartungen jeweils per javascript_tool am
 Wert von `textarea[placeholder="Kurz notieren …"]` (`.value`,
 `.selectionStart`, `.selectionEnd`) prüfen; jede Probe in einer NEUEN, leeren
 Zeile beginnen (Enter, Zeilenanfang), damit Text davor keinen Trigger
@@ -2366,15 +2448,26 @@ verlängert:
   der Cursor am Ende der Symbol-Zeile vor dem Umbruch (KEIN Finding); die
   nächste Probe mit Enter beginnen. Backspace direkt nach der Ersetzung
   (statt Strg+Z) -> Rohtext samt Umbruch, Cursor dahinter.
-- Gegenprobe: per Aktion „type“ eingefügtes „x->“ bleibt buchstäblich „x->“
-  (kein Finding, Design: nur echtes Tippen löst aus).
+- Gegenprobe „Mehrzeichen-Einfügung in EINEM Ereignis bleibt roh“ (kein
+  Finding, Design: nur echtes Tippen löst aus). Weg UND Erwartung hängen vom
+  Werkzeug ab; die Erwartung des jeweils anderen Werkzeugs gilt dort NICHT:
+  - Claude-Browser-Pane: die Aktion „type“ mit „x->“ fügt den String als EIN
+    `insertText`-Ereignis ein -> Wert bleibt buchstäblich „x->“ (bestanden).
+  - Chrome-Erweiterung („Claude in Chrome“, QA-Chrome): „type“ sendet PRO
+    ZEICHEN echte Tastenereignisse, „x->“ wird dort also ERSETZT („x→“) –
+    das ist korrekt und KEIN Finding (und zugleich KEINE Gegenprobe).
+    Die Gegenprobe dort per javascript_tool nachstellen: das `<textarea>`
+    fokussieren (Klick hinein, in einer NEUEN leeren Zeile) und
+    `document.execCommand('insertText', false, 'y->')` ausführen -> der Wert
+    endet wörtlich auf „y->“ (bestanden).
 - Danach: Tab-Einzug funktioniert weiter (wie E3), und **Chat-Eingabefeld
   vorher leeren**, dann OK: die ersetzten Symbole landen unverändert im
   Chat-Eingabefeld (per javascript_tool: der Wert ENTHÄLT „x→“ und „©“ aus
-  den Schritten oben). Dass der Wert wegen der Gegenprobe auf „x->“ endet
-  und noch weiteren Rohtext aus den Rücknahme-Schritten enthält (z. B.
-  „ab-“), ist erwartet und KEIN Finding – das Chat-Feld ersetzt nichts, der
-  Post-it-Text wird 1:1 übernommen.
+  den Schritten oben). Dass der Wert wegen der Gegenprobe auf den rohen
+  Text („x->“ bzw. in der Chrome-Erweiterung „y->“) endet und noch weiteren
+  Rohtext aus den Rücknahme-Schritten enthält (z. B. „ab-“), ist erwartet
+  und KEIN Finding – das Chat-Feld ersetzt nichts, der Post-it-Text wird
+  1:1 übernommen.
 ⚠️ Kommen echte Tasten im Post-it nicht an (bekanntes Automationsproblem,
 siehe E2/DECISIONS #119): je Zeichen den Wert per nativem Prototyp-Setter
 setzen, den Cursor DAHINTER setzen (`setSelectionRange`) und `new
