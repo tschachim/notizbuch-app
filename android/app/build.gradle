@@ -2,6 +2,13 @@ plugins {
     id "com.android.application"
 }
 
+// Release-Signatur (DECISIONS #140): fester Schlüssel aus den GitHub-Secrets,
+// vom Workflow (android/tools/ci-release-build.sh) als Datei plus
+// Umgebungsvariablen bereitgestellt. Ohne NOTIZBUCH_KEYSTORE_PATH (lokal,
+// Prüf-Job, Fork-PR) entsteht ein UNSIGNIERTES Release-APK – nie ein
+// falsch signiertes; veröffentlicht wird nur nach Fingerabdruck-Prüfung.
+def releaseKeystore = System.getenv("NOTIZBUCH_KEYSTORE_PATH")
+
 android {
     namespace "io.github.tschachim.notizbuch"
     compileSdk 34
@@ -9,16 +16,38 @@ android {
     defaultConfig {
         applicationId "io.github.tschachim.notizbuch"
         minSdk 26
+        // Bewusst 34 (nicht 35): ab 35 erzwingt Android Edge-to-Edge, die
+        // WebView läge dann unter Status- und Navigationsleiste. Kein
+        // Play-Store-Vertrieb, die Play-Zielvorgabe gilt nicht (lint.xml).
         targetSdk 34
-        // Die App ist nur ein Rahmen um die Website – Updates der App sind
-        // nicht nötig, die Website aktualisiert sich selbst.
-        versionCode 1
-        versionName "1.0"
+        // Bei JEDER Änderung unter android/ um 1 erhöhen: Android spielt ein
+        // Update nur bei gleicher Signatur und ohne Versions-Rückschritt ein;
+        // der Release-Job prüft das gegen das veröffentlichte APK.
+        versionCode 2
+        versionName "2.0"
+    }
+
+    signingConfigs {
+        if (releaseKeystore) {
+            release {
+                storeFile = file(releaseKeystore)
+                storeType = "pkcs12"
+                storePassword = System.getenv("NOTIZBUCH_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("NOTIZBUCH_KEY_ALIAS")
+                // PKCS12 aus OpenSSL: Schlüssel-Passwort = Store-Passwort
+                keyPassword = System.getenv("NOTIZBUCH_KEYSTORE_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
         release {
+            // Kein R8/ProGuard: die @JavascriptInterface-Methoden der
+            // SpeechBridge müssen unverändert erhalten bleiben.
             minifyEnabled false
+            if (releaseKeystore) {
+                signingConfig = signingConfigs.release
+            }
         }
     }
 

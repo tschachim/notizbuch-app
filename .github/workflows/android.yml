@@ -1,27 +1,53 @@
-# Baut die Android-WebView-Hülle als APK und veröffentlicht sie als
-# GitHub-Release "android-apk" (fester Download-Link). Die App lädt nur die
-# Live-Website – sie muss also praktisch nie neu gebaut werden.
+# Baut die Android-WebView-Huelle (android/), DECISIONS #30 und #140.
 #
-# Hinweis Signatur: signiert wird mit einem pro Lauf erzeugten Debug-Key.
-# Ein NEU gebautes APK hat dadurch eine andere Signatur; vor einer
-# Neuinstallation muss die alte App deinstalliert werden. Da die App nur
-# ein Browser-Rahmen ist, ist das bewusst so gewählt (kein privater
-# Schlüssel im öffentlichen Repo).
+# check   - Push auf einen Branch AUSSER main sowie Pull-Requests mit
+#           Aenderungen unter android/: Debug-Build + Lint und - wenn die
+#           Signier-Secrets verfuegbar sind - ein signierter Release-
+#           PROBEbuild mit allen Pflichtpruefungen. Es wird NICHTS
+#           veroeffentlicht; das Debug-APK liegt nur als Artefakt (andere
+#           Signatur: NICHT installieren).
+# smoke   - (optional, nicht blockierend) Emulator-Smoke-Test der
+#           Spracheingabe-Bruecke mit dem Debug-APK.
+# release - Push auf main bzw. manueller Start auf main: Release-Build mit dem
+#           festen Schluessel, Pruefungen (Zertifikat-Fingerabdruck,
+#           RECORD_AUDIO, nicht debuggable, versionCode groesser als
+#           veroeffentlicht), erst DANACH Veroeffentlichung als Release
+#           "android-apk" (fester Download-Link). Fehlen die Secrets oder
+#           scheitert eine Pruefung, bleibt das bisherige Release unberuehrt.
 name: Android APK
 
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    # Nur Branches: Tag-Pushes (z. B. der Tag "android-apk" beim manuellen
+    # Anlegen eines Releases) sollen keinen Lauf ausloesen - fuer Tags
+    # wuerde GitHub den paths-Filter ohnehin nicht auswerten.
+    branches: ["**"]
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  pull_request:
     paths:
       - "android/**"
       - ".github/workflows/android.yml"
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  APP_ID: io.github.tschachim.notizbuch
+  # Oeffentlicher SHA-256-Fingerabdruck des Signier-ZERTIFIKATS (nicht
+  # geheim), ausgegeben von android/tools/signierschluessel-erzeugen.ps1.
+  # Platzhalter bis zum Erzeugen: scheitert absichtlich an der Formatpruefung.
+  EXPECTED_CERT_SHA256: "FINGERABDRUCK-AUS-DEM-SKRIPT-EINTRAGEN"
+  # Alias des Schluessels im PKCS12 (android/tools/signierschluessel-erzeugen.ps1).
+  # Bewusst KEIN Secret: er ist kein Geheimnis, und als Secret maskierte GitHub
+  # jedes "notizbuch" im Log (Paketname, Repo, APK-Name wuerden zu "***").
+  NOTIZBUCH_KEY_ALIAS: notizbuch
 
 jobs:
-  build:
+  check:
+    if: github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,17 +61,96 @@ jobs:
         with:
           gradle-version: "8.7"
 
-      - name: APK bauen (debug-signiert)
-        run: gradle -p android assembleDebug
+      - name: Debug-Build und Lint
+        run: gradle -p android assembleDebug lintRelease
 
-      - name: APK umbenennen
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk notizbuch.apk
+      - name: Signierter Probebuild mit Pflichtpruefungen (ohne Veroeffentlichung)
+        env:
+          NOTIZBUCH_KEYSTORE_BASE64: ${{ secrets.NOTIZBUCH_KEYSTORE_BASE64 }}
+          NOTIZBUCH_KEYSTORE_PASSWORD: ${{ secrets.NOTIZBUCH_KEYSTORE_PASSWORD }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash android/tools/ci-release-build.sh probe
 
-      - name: Als Release "android-apk" veröffentlichen (fester Link)
+      - name: Debug-APK und Lint-Bericht als Artefakt (NICHT installieren)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: notizbuch-debug-NICHT-INSTALLIEREN
+          path: |
+            android/app/build/outputs/apk/debug/app-debug.apk
+            android/app/build/reports/lint-results-release.html
+          retention-days: 7
+          if-no-files-found: warn
+
+  smoke:
+    needs: check
+    if: github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: notizbuch-debug-NICHT-INSTALLIEREN
+          path: smoke
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: KVM fuer den Emulator freischalten
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Emulator-Smoke-Test der Spracheingabe-Bruecke
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis_playstore
+          arch: x86_64
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          # Pfad per find: die Verzeichnisstruktur des Artefakts haengt davon ab,
+          # welche Dateien der Upload-Schritt gefunden hat (gemeinsamer Vorfahre).
+          script: node android/tools/smoke-cdp.mjs "$(find smoke -name app-debug.apk | head -n 1)"
+
+  release:
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: android-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: "8.7"
+
+      - name: Release-APK bauen und pruefen
+        env:
+          NOTIZBUCH_KEYSTORE_BASE64: ${{ secrets.NOTIZBUCH_KEYSTORE_BASE64 }}
+          NOTIZBUCH_KEYSTORE_PASSWORD: ${{ secrets.NOTIZBUCH_KEYSTORE_PASSWORD }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash android/tools/ci-release-build.sh release
+
+      - name: Als Release "android-apk" veroeffentlichen (fester Link)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete android-apk --yes --cleanup-tag || true
           gh release create android-apk notizbuch.apk \
+            --target "$GITHUB_SHA" \
             --title "Notizbuch Android-App" \
-            --notes "WebView-Hülle um https://tschachim.github.io/notizbuch-app/ – die App lädt immer die aktuelle Website, ein App-Update ist nicht nötig. Installation: APK herunterladen, Installation aus unbekannten Quellen erlauben. Bei Neuinstallation eines neueren APK vorher die alte App deinstallieren (wechselnde Debug-Signatur)."
+            --notes "WebView-Huelle um https://tschachim.github.io/notizbuch-app/ mit Spracheingabe (Mikrofon-Knopf). Die App laedt immer die aktuelle Website. Signiert mit festem Schluessel (Zertifikat SHA-256 ${EXPECTED_CERT_SHA256}). Updates: neues APK herunterladen und ueber die installierte App installieren - Verbindung, PAT und API-Key bleiben erhalten. EINMALIG beim Umstieg von Version 1.0: alte App vorher deinstallieren (andere Signatur), danach PAT und API-Key neu eingeben. Anleitung: android/README.md im Repo."

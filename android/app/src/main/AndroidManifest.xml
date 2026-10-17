@@ -2,6 +2,21 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Spracheingabe (DECISIONS #140): Laufzeit-Berechtigung, abgefragt erst
+         beim ersten Antippen des Mikrofon-Knopfs. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Normale Berechtigung (ohne Dialog), braucht die Audio-Aufnahme der
+         WebView im Rückfall-Weg "WebView-Erkenner". -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+
+    <!-- Paket-Sichtbarkeit (Pflicht ab Android 11): ohne diesen Eintrag
+         findet SpeechRecognizer keinen Erkennungsdienst. -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
 
     <!-- Kein Auto-Backup: im WebView-localStorage liegen PAT und API-Key –
          die dürfen nicht in Cloud-Backups wandern. -->
