@@ -21,6 +21,13 @@
 //   Übernahme, Wiederherstellung nach Sendefehler) werden so nie
 //   überschrieben; passt das Endstück nicht mehr, bleibt das Feld
 //   unverändert (das Diktat "koppelt sich ab").
+// - Android-App (v7.60, DECISIONS #140): Der Controller bleibt unverändert.
+//   Die eigene APK stellt über window.NotizbuchAndroid eine native Brücke
+//   bereit; lib/androidSpeech.js liefert dazu eine SpeechRecognition-
+//   kompatible Klasse, getDictationCtor() wählt sie bzw. die Web Speech API,
+//   und die Hinweistexte unten kennen die Brücken-Fehlercodes.
+
+import { getAndroidBridge, createBridgeRecognitionClass, sanitizeSpeechPrefs } from "./androidSpeech.js";
 
 export const DICTATION_TIMEOUTS = Object.freeze({
   STOP_MS: 3000, // nach stop(): so lange auf "end" warten, dann abort()
@@ -50,9 +57,10 @@ export function getSpeechRecognitionCtor(win) {
   }
 }
 
-// Die eigene Android-APK-Hülle (android/) ist eine WebView ohne RECORD_AUDIO
-// und ohne onPermissionRequest: der Knopf würde dort nur Fehler erzeugen.
-// WebViews erkennt man am "; wv)" im User-Agent.
+// WebViews erkennt man am "; wv)" im User-Agent. Die ALTE APK (versionCode 1,
+// ohne Brücke) ist eine WebView ohne RECORD_AUDIO und ohne
+// onPermissionRequest: dort bleibt der Knopf aus. Die neue APK erkennt man
+// an der Brücke window.NotizbuchAndroid (DECISIONS #140).
 export function isAndroidWebView(userAgent) {
   return typeof userAgent === "string" && /;\s*wv\)/.test(userAgent);
 }
@@ -61,15 +69,38 @@ export function isAndroidWebView(userAgent) {
 // Mikrofon-Berechtigung wird hier bewusst NICHT geprüft (sie ist erst beim
 // Antippen entscheidbar, und permissions.query() ist nicht überall für das
 // Mikrofon verfügbar) - das passiert nur nach einem not-allowed-Fehler.
+// Die Brücken-Prüfung sind reine typeof-Abfragen (kein Java-Aufruf), also
+// pro Render vertretbar.
 export function isDictationAvailable(win) {
   try {
     if (!win || win.isSecureContext === false) return false;
+    if (getAndroidBridge(win)) return true; // eigene APK ab versionCode 2
     if (!getSpeechRecognitionCtor(win)) return false;
     const ua = win.navigator && win.navigator.userAgent;
     return !isAndroidWebView(ua);
   } catch {
     return false;
   }
+}
+
+// Konstruktor für createDictation({ getCtor }): in der eigenen APK die
+// Brücken-Klasse (natives android.speech.SpeechRecognizer), außer der
+// Nutzer hat in den Einstellungen "WebView-Erkenner" gewählt (Rückfall/
+// Diagnose ohne APK-Update); sonst die Web Speech API. getPrefs wird bei
+// JEDEM Aufruf gelesen (Umschalten wirkt beim nächsten Antippen).
+export function getDictationCtor(win, getPrefs) {
+  try {
+    if (getAndroidBridge(win)) {
+      let prefs = null;
+      try { prefs = typeof getPrefs === "function" ? getPrefs() : null; } catch { prefs = null; }
+      if (sanitizeSpeechPrefs(prefs).engine !== "webview") {
+        return createBridgeRecognitionClass(win, getPrefs);
+      }
+    }
+  } catch {
+    /* weiter mit der Web Speech API */
+  }
+  return getSpeechRecognitionCtor(win);
 }
 
 /* ---------- Sprache ---------- */
@@ -188,8 +219,9 @@ export function dictationStep(current, fromSpoken, toSpoken) {
 
 /* ---------- Fehlertexte ---------- */
 
-// Liefert { kind, text } für die Hinweiszeile über dem Eingabefeld oder null
-// (still). "aborted" ist der normale Abbruch (App-Wechsel, abort()) und kein
+// Liefert { kind, text[, action] } für die Hinweiszeile über dem Eingabefeld
+// oder null (still). action gibt es nur bei Brücken-Codes (Android-App) und
+// steuert den Knopf "Einstellungen öffnen" in App.jsx. "aborted" ist der normale Abbruch (App-Wechsel, abort()) und kein
 // Fehler. permissionState (granted/denied/prompt/unknown) unterscheidet nur
 // bei not-allowed: Android meldet auch einen belegten oder nicht
 // erreichbaren Erkenner als not-allowed, obwohl die Berechtigung erteilt ist.
@@ -228,6 +260,30 @@ export function dictationErrorInfo(code, permissionState) {
       return { kind: "warn", text: "Spracheingabe wird von diesem Browser nicht unterstützt." };
     case "timeout":
       return { kind: "warn", text: "Die Spracherkennung hat nicht reagiert und wurde beendet." };
+    // Nur aus der Android-App (Brücke, DECISIONS #140). action: optionaler
+    // Knopf "Einstellungen öffnen" in der Hinweiszeile (openAndroidSettings).
+    case "app-mic-denied":
+      return { kind: "warn", text: "Mikrofon-Zugriff abgelehnt. Zum Diktieren erneut antippen und „Bei Nutzung der App zulassen“ wählen." };
+    case "app-mic-blocked":
+      return {
+        kind: "warn",
+        text: "Die App darf das Mikrofon nicht verwenden. Freigeben: „Einstellungen öffnen“ → Berechtigungen → Mikrofon → „Bei Nutzung der App zulassen“.",
+        action: "app-settings",
+      };
+    case "recognizer-mic-denied":
+      return {
+        kind: "warn",
+        text: "Der Spracherkennung des Geräts fehlt der Mikrofon-Zugriff. In den Android-Einstellungen „Speech Services by Google“ (bzw. der Google-App) das Mikrofon erlauben; außerdem prüfen, ob der Mikrofon-Zugriff in den Schnelleinstellungen gesperrt ist.",
+        action: "recognizer-settings",
+      };
+    case "recognizer-busy":
+      return { kind: "info", text: "Die Spracherkennung ist noch belegt – kurz warten und erneut antippen." };
+    case "recognizer-unavailable":
+      return { kind: "warn", text: "Die Spracherkennung des Geräts ist nicht erreichbar. Ist „Speech Services by Google“ (oder die Google-App) installiert und aktiviert?" };
+    case "no-recognizer":
+      return { kind: "warn", text: "Auf diesem Gerät ist keine Spracherkennung installiert (z. B. „Speech Services by Google“ aus dem Play Store)." };
+    case "language-unavailable":
+      return { kind: "warn", text: "Deutsch ist für die Spracherkennung auf diesem Gerät nicht verfügbar – in „Speech Services by Google“ das deutsche Sprachpaket laden." };
     default:
       // Den Code nur einsetzen, wenn er wie ein Fehlercode aussieht: kein
       // Fremdtext/HTML/Riesenstring in der Oberfläche.

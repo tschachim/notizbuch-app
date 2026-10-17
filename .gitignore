@@ -5,3 +5,9 @@ coverage
 .DS_Store
 docs/reviews/
 tools/*.log*
+# Android: Signierschluessel nie ins Repo (DECISIONS #140). Der Schluessel liegt
+# ausserhalb des Repos (Dokumente\Notizbuch-Signatur) bzw. als GitHub-Secret.
+*.p12
+*.jks
+*.keystore
+keystore.properties

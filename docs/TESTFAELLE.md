@@ -1142,6 +1142,17 @@ Ergebnisse feuert man mit `__fire('result', __res(['eins']))` (Interim) bzw.
 `__res(['Eins', true])` (Final); `__fire('start')`, `__fire('error', {
 error: '…' })` und `__fire('end')` für die übrigen Ereignisse.
 
+**Vorspann-Nachtrag (v7.60, E2E-Erfahrung).** (a) UNVERBUNDEN öffnet die
+App direkt nach dem Laden den Einstellungs-Dialog; dessen Overlay schluckt den
+ersten Klick auf den Mikro-Knopf. Dann startet der Fake nie, `__recs` bleibt
+leer und `__fire` wirft einen TypeError (`__rec()` ist `undefined`, weil keine
+Fake-Instanz existiert). Den Dialog VOR dem ersten Mikro-Klick über den
+X-Knopf des Dialogs schließen; ein Neuladen der Seite reicht nicht, der
+Dialog öffnet sich danach wieder. (b) Die Hinweiszeile trägt seit v7.60 kein
+`role="status"` mehr (der `aria-live`-Wrapper darum bleibt, DECISIONS #140):
+Prüfungen auf die Hinweiszeile verwenden den Selektor
+`[data-dictation-hint]`, nie `[role="status"]`.
+
 **C35 [OFFEN] Mikrofon-Knopf: Sichtbarkeit und Layout.** Desktop-Chrome:
 Der Knopf ist sichtbar, Reihenfolge Archiv, Bild, Mikro, Feld, Senden;
 `data-dictation` „idle“, `aria-pressed` „false“, `title` beginnt mit
@@ -1189,6 +1200,26 @@ Warn-Hinweis; ein nächstes Antippen des Mikro-Knopfs leert ihn ebenfalls.
 Danach `delete navigator.permissions.query`. Der globale Banner oben bleibt
 unverändert (kein Diktat-Hinweis dort). 🟡 bei unverständlichem Text.
 
+**C37b [VERBUNDEN][API] Hinweis bleibt beim aufgeschobenen Senden stehen
+(v7.60, Nachzug zu DECISIONS #139, #140).** Nur im QA-Modus (sonst
+übersprungen). Unverbunden ist der Fall nicht prüfbar: `send()` kehrt dort
+VOR dem Löschen des Hinweises zurück. Teilt sich den einen erlaubten
+Diktat-Prompt „QA-Test Diktat: Was ist zwei plus zwei? Bitte nichts notieren.“
+mit der verbundenen Variante von C38 (gefahren wird nur einer der beiden
+Fälle). Fake aus dem Vorspann installieren, Klick, `__fire('start')`,
+`__fire('result', __res(['QA-Test Diktat: Was ist zwei plus zwei? Bitte nichts
+notieren.', true]))`. Den Senden-Knopf klicken → `calls` enthält 'stop', es
+ist noch KEINE Nachricht gesendet (aufgeschobenes Senden). Dann in EINEM
+Aufruf `__fire('error', { error: 'network' })` und `__fire('end')`, danach
+zwei bis drei `__tick()` abwarten. Erwartet: Das Senden läuft (die Nachricht
+„QA-Test Diktat: …“ steht im Chat, die Antwort folgt) UND der Hinweis „Die
+Spracherkennung ist nicht erreichbar. Bitte Internetverbindung prüfen.“
+(`[data-dictation-hint]`) bleibt sichtbar, obwohl `send()` gestartet ist; vor
+v7.60 löschte `send()` ihn sofort. 🟡, wenn der Hinweis fehlt. Kontrolle
+(beiläufig, ohne zusätzlichen Prompt): Beim nächsten NORMALEN Senden in diesem
+Lauf (z. B. C2) verschwindet ein noch offener Diktat-Hinweis wie bisher.
+Aufräumen wie C38 (Hinweis per X schließen, Fake entfernen).
+
 **C38 [OFFEN] Senden während des Diktats (unverbunden bzw. ohne
 API-Kosten).** Nur wenn die App NICHT verbunden ist (sonst übersprungen;
 die Variante [VERBUNDEN][API] ist im QA-Modus optional, mit genau einem
@@ -1224,8 +1255,9 @@ App-Wechsel während des Diktats → der Text bleibt stehen; Berechtigung
 ablehnen → Hinweis mit Freigabe-Weg; Flugmodus; Satzzeichen und
 Großschreibung, gesprochenes „Komma“; Senden während des Sprechens → kommt
 der vollständige Text an?; Feldbreite und Lesbarkeit der Knopfreihe. Nach
-dem Update auf Chrome 157 wiederholen. In der Android-WebView-App (APK):
-kein Mikro-Knopf (erwartet).
+dem Update auf Chrome 157 wiederholen. In der Android-App (APK): die alte
+Version 1.0 zeigt keinen Mikro-Knopf (erwartet); ab Version 2.0 gelten die
+Fälle I0–I14 (v7.60, DECISIONS #140).
 
 ## D. Manuelles Bearbeiten (WYSIWYG)
 
@@ -2733,6 +2765,182 @@ E2E-testbar, ohne `state.json` manuell zu manipulieren.
 **H2 [OFFEN] Keine Konsolen-Fehler.** Während des gesamten Laufs:
 Browser-Konsole am Ende auf Fehler prüfen und diese als Findings melden.
 
+## I. Android-App (APK 2.0, v7.60, DECISIONS #140)
+
+I0 prüft die Web-Verdrahtung der Brücke OHNE Gerät mit einer Fake-Brücke im
+Browser. I1–I14 laufen am Android-Handy des Nutzers mit der neuen APK 2.0
+(Release „android-apk“, Anleitung `android/README.md`; vorher einmalig die
+alte APK 1.0 deinstallieren) und sind [MANUELL][NUTZER]: Der Tester-Agent hat
+kein Gerät und meldet sie immer als ÜBERSPRUNGEN, nie als Fehlschlag. Bei
+Problemen fügt der Nutzer den Text aus „Diagnose anzeigen“ (I10) in den Chat
+ein.
+
+**I0 [OFFEN] Brücken-Simulation im Browser (v7.60).** Prüft die
+App-Verdrahtung `getDictationCtor` → Brücken-Klasse → Controller, den Hinweis
+mit „Einstellungen öffnen“ und den Einstellungs-Abschnitt, NICHT die echte
+Android-Erkennung. Vorbereitung wie im Diktat-Vorspann (C35–C40): bei
+unverbundener App zuerst den Einstellungs-Dialog über den X-Knopf schließen,
+Mikro-Klicks nie ohne Fake, Werte per nativem Setter setzen, Warten per
+MessageChannel-Ticks (`__tick`). Ereignisse werden NICHT per Timer, sondern
+von Hand eingespielt (im verdeckten Tab sind Timer gedrosselt). Snippet:
+```js
+window.__fakeCalls = [];
+window.__lastSid = null;
+window.NotizbuchAndroid = {
+  getInfo: () => JSON.stringify({ bridge: 1, sdk: 34, mic: "granted", autoProvider: "com.google.android.tts/x" }),
+  getLog: () => JSON.stringify(["+0.1s fake"]),
+  speechStart: (sid, json) => { window.__fakeCalls.push(["start", sid, json]); window.__lastSid = sid; },
+  speechStop: (sid) => window.__fakeCalls.push(["stop", sid]),
+  speechAbort: (sid) => window.__fakeCalls.push(["abort", sid]),
+  openSettings: (t) => window.__fakeCalls.push(["settings", t]),
+};
+window.__bf = (type, x) => window.__notizbuchAndroidSpeech(JSON.stringify({ v: 1, sid: window.__lastSid, type, ...(x || {}) }));
+window.__tick = () => new Promise((r) => { const c = new MessageChannel(); c.port1.onmessage = () => r(); c.port2.postMessage(0); });
+```
+Die Brücke gilt erst als vorhanden, wenn ALLE Pflichtmethoden (`getInfo`,
+`speechStart`, `speechStop`, `speechAbort`) da sind; der Verteiler
+`window.__notizbuchAndroidSpeech` wird erst beim Start einer Sitzung
+installiert, `__bf` also erst NACH dem Mikro-Klick aufrufen.
+(a) Sichtbarkeit und Start: „QA-Test vorher“ ins Feld setzen, Fake
+installieren, Re-Render erzwingen (Vergrößern-Knopf zweimal klicken, wie in
+C39). Der Mikro-Knopf `button[data-dictation]` ist sichtbar. Klick →
+`__fakeCalls[0][0]` ist „start“, die sid passt auf `^[A-Za-z0-9_-]{1,64}$`,
+das Options-JSON enthält `"lang":"de-` (z. B. `de-DE`), `"partial":true` und
+`"provider":"auto"`; `data-dictation` ist „starting“ (die Brücke hat noch
+nicht geantwortet), das Feld `readOnly`.
+(b) Ablauf: `__bf('listening')` → „listening“, `__bf('ready')` ändert nichts
+Sichtbares. `__bf('partial', { texts: ['hallo'], unstable: ' welt' })` → Feld
+„QA-Test vorher hallo welt“ (stabiler Teil plus unsicherer Rest hinter dem
+Vortext). `__bf('results', { texts: ['Hallo Welt'] })` → „QA-Test vorher Hallo
+Welt“ (Endtext ersetzt den Zwischentext, nichts doppelt). `__bf('end')` →
+„idle“, `readOnly` weg, Zahl der Chat-Nachrichten unverändert (nichts
+gesendet), kein Hinweis. 🔴 bei überschriebenem Vortext, doppeltem Text oder
+automatischem Senden.
+(c) Fehler -2 (App darf das Mikrofon nicht verwenden): Klick, `__bf('error', {
+code: -2 })`, `__bf('end')` → Hinweis `[data-dictation-hint]` beginnt mit „Die
+App darf das Mikrofon nicht verwenden“ und enthält den Knopf
+`button[data-dictation-settings]` „Einstellungen öffnen“; Klick darauf →
+`__fakeCalls` endet mit `["settings","app"]`. Hinweis per X schließen.
+Fehler 9 (Spracherkennung des Geräts ohne Mikrofon-Zugriff): Klick, `__bf(
+'error', { code: 9 })`, `__bf('end')` → Hinweis beginnt mit „Der
+Spracherkennung des Geräts fehlt der Mikrofon-Zugriff“, ebenfalls mit dem
+Knopf; Klick → `["settings","com.google.android.tts"]` (Paket aus
+`autoProvider`). Ein Hinweis OHNE `action` (z. B. `__bf('error', { code: 6 })`
+→ „Nichts gehört …“) zeigt den Knopf NICHT.
+(d) Einstellungen und Diagnose: Zahnrad → Abschnitt `[data-android-speech]`
+„Spracheingabe (Android-App)“ ist sichtbar, mit den Auswahlfeldern Erkenner,
+Dienst und Satzzeichen sowie „Möglichst ohne Internet erkennen“. „Diagnose
+anzeigen“ → `textarea[data-android-speech-diag]` enthält `"bridge":1`, die
+Zeile „Einstellungen:“ und „+0.1s fake“, aber KEINEN gesprochenen Text (weder
+„hallo“ noch „Hallo Welt“) und keine Zugangsdaten (kein „ghp_“, „github_pat_“,
+„sk-ant“); der Knopf „Kopieren“ erscheint. Eine Einstellung ändern (z. B.
+Satzzeichen) → die angezeigte Diagnose verschwindet.
+(e) Engine „WebView-Erkenner“: Erkenner auf „WebView-Erkenner (Rückfall/Test)“
+stellen → `localStorage.getItem('notizbuch.androidSpeech.v1')` enthält
+`"engine":"webview"`. Dialog schließen, die Fake-Web-Speech-API aus dem
+Diktat-Vorspann installieren (`window.SpeechRecognition = class …`,
+`__recs`, `__fire`), `__fakeCalls.length` merken. Mikro-Klick → `__recs.length`
+ist 1, `__fakeCalls.length` UNVERÄNDERT (die Brücke wurde nicht benutzt);
+`__fire('start')`, `__fire('end')` → „idle“. Zurück auf „Android-
+Spracherkennung (empfohlen)“ stellen, Mikro-Klick → `__fakeCalls` hat einen
+neuen „start“-Eintrag, `__recs.length` bleibt 1; `__bf('error', { code: -5 })`
+und `__bf('end')` beenden die Sitzung still (kein Hinweis).
+(f) Ohne Brücke: Fake entfernen (siehe unten „Aufräumen“), Einstellungs-Dialog
+schließen und neu öffnen → der Abschnitt `[data-android-speech]` ist NICHT
+vorhanden (Normalfall im Browser).
+
+**I1 [MANUELL][NUTZER] Umstieg auf die APK 2.0.** PAT und API-Key vorher
+bereitlegen, dann `android/README.md` Schritt für Schritt: alte App
+deinstallieren, `notizbuch.apk` von der Release-Seite installieren (Play-
+Protect-Hinweis bestätigen), im Einstellungs-Dialog Owner, Repo, PAT und
+API-Key eintragen, „Speichern & Verbinden“. Erwartet: Verbindung gelingt, der
+Mikro-Knopf ist sichtbar (die APK 1.0 zeigte keinen). Einstellungen →
+„Spracheingabe (Android-App)“ → „Diagnose anzeigen“ nennt
+`"appVersionName":"2.0"`, `"bridge":1` und `"mic":"not-granted"` (vor dem
+ersten Antippen). Das ist die EINZIGE Neuinstallation; danach reichen Updates
+über die bestehende App (I14).
+
+**I2 [MANUELL][NUTZER] Erstes Antippen: Dialog und Live-Text (Hauptfall).**
+Mikro-Knopf antippen → Android-Dialog „Mikrofon“ erscheint → „Bei Nutzung der
+App zulassen“ wählen. Erwartet: Der Dialog bricht das Diktat NICHT ab (Abbruch
+gibt es nur beim Unsichtbarwerden der App); der Knopf wird rot und pulsiert
+(Signalton), ein deutscher Satz erscheint beim Sprechen live im Feld, eine
+Sprechpause (ca. 1 s) beendet den Abschnitt. Der Text wird mit genau einem
+Leerzeichen an vorhandenen Text angehängt, NICHTS wird gesendet, die Tastatur
+geht nicht auf. Notieren: Beginnt das Diktat direkt nach „Zulassen“ oder muss
+erneut angetippt werden?
+
+**I3 [MANUELL][NUTZER] Antippen beendet.** Diktat starten, sprechen, den
+Mikro-Knopf während des Zuhörens erneut antippen. Erwartet: Der Abschnitt endet
+(„Wird abgeschlossen …“), das Endergebnis bleibt im Feld stehen, die letzten
+Wörter gehen nicht verloren.
+
+**I4 [MANUELL][NUTZER] Senden während des Diktats.** Diktat starten, einen
+Satz sprechen, noch während „Hört zu“ den Senden-Knopf antippen. Erwartet:
+Erst endet der Abschnitt, dann wird die Nachricht inklusive Endergebnis
+gesendet (der vollständige Satz kommt an).
+
+**I5 [MANUELL][NUTZER] App-Wechsel während des Diktats.** Diktat starten,
+sprechen, per Home-Taste oder Zuletzt-benutzt in eine andere App wechseln,
+zurückkehren. Erwartet: Das Diktat ist beendet, der Zwischentext bleibt im
+Feld stehen, KEIN Hinweis; ein neues Diktat funktioniert wieder.
+
+**I6 [MANUELL][NUTZER] Mikrofon-Berechtigung: Ablehnen, gesperrt,
+freigeben.** Vorher die Berechtigung zurücksetzen (App-Info → Berechtigungen
+→ Mikrofon → Nicht zulassen). (a) Antippen, im Dialog ablehnen → Hinweis
+„Mikrofon-Zugriff abgelehnt …“. (b) Erneut antippen und erneut ablehnen (bzw.
+„Nicht mehr fragen“; auch das Wegwischen des Dialogs zählt ab Android 11 so) →
+Hinweis „Die App darf das Mikrofon nicht verwenden …“ MIT dem Knopf
+„Einstellungen öffnen“ → öffnet die App-Info der Notizbuch-App. (c)
+Mikrofon dort auf „Bei Nutzung der App zulassen“ stellen, zurück in die App,
+antippen → Diktat funktioniert.
+
+**I7 [MANUELL][NUTZER] Stille.** Antippen und nichts sagen. Erwartet: Der
+Info-Hinweis „Nichts gehört. Mikrofon antippen und direkt lossprechen.“
+erscheint und verschwindet nach ca. 6 s.
+
+**I8 [MANUELL][NUTZER] Flugmodus.** Flugmodus einschalten, diktieren.
+Erwartet: ein Hinweis zur Netzverbindung („Die Spracherkennung ist nicht
+erreichbar …“) oder, je nach installiertem Sprachpaket, ein Offline-Ergebnis.
+Notieren, was passiert. Flugmodus danach ausschalten.
+
+**I9 [MANUELL][NUTZER] Gerät drehen.** Während des Diktats das Gerät drehen.
+Erwartet: Das Diktat läuft weiter (die Activity wird beim Drehen nicht neu
+erzeugt), kein Hinweis.
+
+**I10 [MANUELL][NUTZER] Diagnose kopieren.** Einstellungen → „Spracheingabe
+(Android-App)“ → „Diagnose anzeigen“ → „Kopieren“, in eine Notiz einfügen.
+Erwartet: Der Text nennt Web-App-Version, Android-/WebView-Version, die
+installierten Erkennungsdienste, den gewählten Dienst, die Einstellungen und
+das Brücken-Protokoll – aber KEINE Transkripte (kein gesprochener Text) und
+KEINE Zugangsdaten. Bei Problemen diesen Text in den Chat einfügen.
+
+**I11 [MANUELL][NUTZER] Umschalten auf den WebView-Erkenner.** Erkenner auf
+„WebView-Erkenner (Rückfall/Test)“ stellen, EINMAL diktieren, dann auf „Android-
+Spracherkennung (empfohlen)“ zurückstellen. Ergebnis berichten (funktioniert
+es, erscheint Live-Text, welcher Hinweis kommt?). Die Umschaltung gilt ohne
+App-Neustart beim nächsten Antippen.
+
+**I12 [MANUELL][NUTZER] Satzzeichen (Android 13+).** Satzzeichen auf „Ein
+(Qualität)“ stellen, einen Satz mit gesprochenem „Komma“ und Satzende
+diktieren. Beobachtung berichten: Erscheinen Satzzeichen und Großschreibung?
+(Wirkung je Dienst, laut Android-Doku „may have no effect“; unbelegt.) Bei
+Störungen zurück auf „Aus“. Auf Geräten unter Android 13 ist die Einstellung
+wirkungslos.
+
+**I13 [MANUELL][NUTZER] Bildschirm aus während des Diktats.** Diktat starten,
+sprechen, die Sperrtaste drücken, entsperren. Erwartet wie I5: Das Diktat ist
+beendet, der Zwischentext bleibt stehen, kein Hinweis, ein neues Diktat
+funktioniert.
+
+**I14 [MANUELL][NUTZER] Künftiges APK-Update ohne Datenverlust.** Erst beim
+nächsten APK (versionCode 3 oder höher, gleicher Download-Link): Datei
+öffnen und „Aktualisieren“ wählen, NICHT vorher deinstallieren. Erwartet:
+Die Installation klappt, Verbindung, PAT und API-Key bleiben erhalten, die
+Diagnose nennt den neuen `appVersionCode`. Schlägt sie wegen der Signatur
+fehl, ist das ein Fehler der Release-Kette (Fingerabdruck in den Release-Notes
+prüfen).
+
 ---
 
 ## Aufräumen (Pflicht am Ende jedes Laufs)
@@ -2749,7 +2957,7 @@ Browser-Konsole am Ende auf Fehler prüfen und diese als Findings melden.
    prüfen, dass KEIN QA-Testeintrag mehr im Abschnitt „Globales
    Gedächtnis“ steht (siehe Cleanup-Hinweis dort) – das Gedächtnis ist
    global und überlebt anders als QA-Notizbücher keinen Löschen-Knopf.
-6. Wurden C36–C39 (Diktat-Fake) ausgeführt: die Fake-Erkennung entfernen
+6. Wurden C36–C39 (Diktat-Fake, auch C37b) ausgeführt: die Fake-Erkennung entfernen
    (`window.SpeechRecognition = window.__origSR`, falls in C39 gesichert
    auch `window.webkitSpeechRecognition = window.__origWebkitSR`), die
    Hilfsfunktionen löschen (`delete window.__recs, window.__rec,
@@ -2757,3 +2965,11 @@ Browser-Konsole am Ende auf Fehler prüfen und diese als Findings melden.
    löschen (`delete navigator.permissions.query`), offene Diktat-Hinweise
    schließen und den QA-Text aus dem Chat-Eingabefeld löschen (in C38
    zusätzlich den Einstellungs-Dialog schließen).
+7. Wurde I0 (Fake-Brücke) ausgeführt: `delete window.NotizbuchAndroid;`
+   `delete window.__fakeCalls;` `delete window.__lastSid;`
+   `delete window.__bf;` und `localStorage.removeItem(
+   'notizbuch.androidSpeech.v1')`; war in (e) die Fake-Web-Speech-API
+   installiert, sie wie unter 6 entfernen. Offene Diktat-Hinweise schließen,
+   den QA-Text aus dem Chat-Eingabefeld löschen und den Einstellungs-Dialog
+   schließen. Zur Kontrolle den Einstellungs-Dialog neu öffnen: der Abschnitt
+   „Spracheingabe (Android-App)“ darf NICHT mehr erscheinen.

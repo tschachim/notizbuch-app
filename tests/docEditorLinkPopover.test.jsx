@@ -38,6 +38,14 @@ import { createRoot } from "react-dom/client";
 import DocEditor, { normalizeLinkUrl, validateLinkTitle, unescapeMd } from "../src/components/DocEditor.jsx";
 import { setLinkProviders } from "../src/lib/linkProviders.jsx";
 
+// Großzügiges Timeout für die ganze Datei (v7.60, Nachzug aus den v7.59-
+// Reviews): jeder Test mountet einen echten DocEditor (TipTap/ProseMirror in
+// jsdom). Unter der v8-Coverage-Last von `npm run test:coverage` brauchte
+// "Einfügen per Klick ... activeElement liegt sofort im Editor" schon 5348 ms
+// und riss das Standard-Timeout von 5000 ms - ein reines Lastproblem, keine
+// Logikabweichung (derselbe Test ist ohne Coverage in unter 1 s grün).
+vi.setConfig({ testTimeout: 20000 });
+
 // ---------- Aufbau / Aufräumen ----------
 
 const mounted = [];

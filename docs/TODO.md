@@ -4,31 +4,146 @@ Sammelstelle für 🔵-Findings aus E2E-/Review-Läufen und bewusst
 vertagte Punkte aus DECISIONS.md. Erledigte Einträge werden mit
 Versions- und DECISIONS-Verweis gestrichen, nicht gelöscht.
 
+## Aus der v7.60-Runde (APK 2.0, 2026-10-17)
+
+Stand: Web-Seite und Android-Dateien liegen im Arbeitsbaum, die APK ist noch
+nicht gebaut oder veröffentlicht. DECISIONS #140 enthält Begründung und
+Restrisiken; die Fälle I0–I14 stehen in `docs/TESTFAELLE.md`.
+
+- [ ] **Ausrollen der APK 2.0 (Reihenfolge, DECISIONS #140).** (1) Nutzer:
+      `pwsh -ExecutionPolicy Bypass -File android\tools\signierschluessel-erzeugen.ps1`
+      ausführen, Passwort im Passwortmanager ablegen, Ordner
+      `Dokumente\Notizbuch-Signatur` zusätzlich sichern, Fingerabdruck
+      weitergeben; `gh secret list --repo tschachim/notizbuch-app` muss die
+      zwei Namen `NOTIZBUCH_KEYSTORE_BASE64` und
+      `NOTIZBUCH_KEYSTORE_PASSWORD` zeigen (der Alias steht als Konstante im
+      Workflow, kein Secret; ein früher angelegtes `NOTIZBUCH_KEY_ALIAS`
+      wird nicht gebraucht und kann per `gh secret delete` weg). (2)
+      `EXPECTED_CERT_SHA256` in
+      `.github/workflows/android.yml` eintragen (steht auf einem Platzhalter,
+      der absichtlich an der Formatprüfung scheitert). (3) Web v7.60
+      deployen, Tester (I0). (4) Android auf Branch `android-v2`: Der Job
+      `check` ist der ERSTE echte Compiler- und Lint-Lauf (kein JDK, kein
+      Android-SDK lokal), bis er grün ist iterieren; das Log des Jobs `smoke`
+      lesen (KVM auf Standard-Runnern und ein Sprachdienst im Emulator-Image
+      sind unbelegt; ein grüner Workflow allein sagt nichts). (5)
+      Fast-forward nach `main`, `gh release view android-apk` prüfen (neues
+      Datum, Fingerabdruck in den Notes, Asset). (6) Nutzer: Umstieg nach
+      `android/README.md`.
+- [ ] **Geräte-Test der APK 2.0 durch den Nutzer (I1–I14).** Erst am Gerät
+      zeigt sich, ob Dienstwahl (Google-Dienst wie Chrome), `UNSTABLE_TEXT`,
+      Satzzeichen (Android 13+), Signalton und Sprechpause (~1 s) wie erwartet
+      laufen. Bei Problemen den Text aus „Diagnose anzeigen“ in den Chat
+      geben; Korrekturen bevorzugt im Web (Mapping, Engine, Dienst, Optionen),
+      ein APK-Fix bekommt `versionCode` 3. DECISIONS #140.
+- [ ] **CI (🔵, Entscheidung nötig): `release` bei unverändertem `versionCode`
+      nicht rot werden lassen.** Nach dem ersten 2.0-Release macht jeder Push
+      auf `main`, der `android/**` oder den Workflow berührt, ohne
+      `versionCode`-Erhöhung den Job `release` absichtlich rot (steht in
+      `android/README.md`): Fehl-Mails und ein rotes `main` bei reinen
+      Workflow-/README-/Skript-Änderungen, obwohl nichts veröffentlicht werden
+      soll (das Release bleibt dabei korrekt unberührt). Vorschlag in
+      `android/tools/ci-release-build.sh` (ca. Z. 88, vor dem `-gt`-Vergleich),
+      Modus `release`: `if [ "$vc" -eq "$oldvc" ] && [ "$oldcert" =
+      "$EXPECTED_CERT_SHA256" ]; then echo '::notice::versionCode
+      unverändert – keine Veröffentlichung.'; echo 'publish=false' >>
+      "$GITHUB_OUTPUT"; exit 0; fi`; im Workflow dem Bau-Schritt `id: build`
+      geben und den Veröffentlichen-Schritt mit `if: steps.build.outputs.
+      publish != 'false'` versehen. Ein KLEINERER `versionCode` bleibt ein
+      Fehler. Alternative: Ist-Zustand beibehalten.
+- [ ] **CI (🔵): Asset ersetzen statt Release löschen und neu anlegen.**
+      `.github/workflows/android.yml` (Schritt „Als Release "android-apk"
+      veröffentlichen“, ca. Z. 150-154): Zwischen `gh release delete` und
+      `gh release create` liefert der feste Download-Link einige Sekunden 404;
+      scheitert `gh release create` (Netz/API), ist das Release weg, bis der
+      Lauf wiederholt wird (Muster stammt aus #30). Vorschlag: `if gh release
+      view android-apk >/dev/null 2>&1; then gh release upload android-apk
+      notizbuch.apk --clobber && gh release edit android-apk --title … --notes
+      "…"; else gh release create … --target "$GITHUB_SHA" …; fi`.
+      Abwägung: Der Tag `android-apk` bliebe dann auf dem Commit des
+      Erst-Releases; soll er mitwandern, den Ist-Zustand lassen.
+- [ ] **Schlüsselskript (🔵): Secrets über stdin statt als Argument.**
+      `android/tools/signierschluessel-erzeugen.ps1` (ca. Z. 88-90, `gh secret
+      set … --body $Pw`): Base64-Keystore und Passwort stehen für die Laufzeit
+      von `gh` in der Prozessliste (Task-Manager, `Get-CimInstance
+      Win32_Process`); nur lokal beim Nutzer und kurz, aber vermeidbar. Gewählt
+      wurde `--body` wegen „kein angehängter Zeilenumbruch“. Vorschlag: `$Pw |
+      & gh secret set NOTIZBUCH_KEYSTORE_PASSWORD --repo $Repo` (`gh` entfernt
+      abschließende Zeilenumbrüche selbst), in `Invoke-Native` ein optionaler
+      `-Stdin`-Parameter. Vorher einmal mit `gh secret set TEST --repo
+      <qa-repo>` und `gh api` prüfen, dass kein Zeilenumbruch anhängt; sonst
+      Ist-Zustand lassen.
+- [ ] **Versionsstring steht in `src/App.jsx` zweimal (🔵).** Kopfzeile
+      (`font-mono text-xs text-slate-400`) und `appVersion="v7.60"` am
+      `SettingsDialog` (die Diagnose braucht ihn); beim Bump müssen BEIDE
+      Literale geändert werden, sonst wird der Versions-Test in
+      `tests/androidSpeech.test.js` (ca. Z. 749-758) rot und die Diagnose
+      nennt eine falsche Version. Der Test koppelt außerdem an die
+      Header-Klassen und scheitert bei geändertem Header-Styling mit
+      „Versionsstring in der Kopfzeile nicht gefunden“. Sauberer: `const
+      APP_VERSION = "v7.60";` auf Modulebene, Kopfzeile `{APP_VERSION}` und
+      `appVersion={APP_VERSION}`, den Test auf `/const APP_VERSION =
+      "(v\d+\.\d+(?:\.\d+)?)"/` umstellen und prüfen, dass kein weiteres
+      Versions-Literal im Header-JSX steht. DECISIONS #140, Restrisiko (11).
+- [ ] **Test (🔵): Interaktion im Einstellungs-Abschnitt „Spracheingabe
+      (Android-App)“ nur statisch gerendert.** `tests/androidSpeech.test.js`
+      rendert den Abschnitt nur serverseitig (sichtbar nur mit Brücke,
+      Standardwerte, kaputter Speicher). Ändern eines Auswahlfelds (schreibt
+      `localStorage`), „Diagnose anzeigen“ und „Kopieren“ laufen nur über
+      I0 (d)/(e) und am Gerät (I10, I11). Interaktionstests in jsdom bräuchten
+      eine neue Testdatei (`@testing-library`-Muster wie in den anderen
+      `*.test.jsx`). `src/components/SettingsDialog.jsx`.
+- [ ] **CI (🔵): „Release nicht gefunden“ wird am `gh`-Fehlertext erkannt.**
+      `android/tools/ci-release-build.sh` unterscheidet beim Laden des
+      veröffentlichten APK „nicht gefunden“ (`not found`, `no assets match`,
+      `HTTP 404`) von Netz-/API-Fehlern. Weicht der Text einer künftigen
+      `gh`-Version ab, scheitert `release` vorsichtshalber (das Release bleibt
+      unberührt). Heute existiert das 1.0-Release samt Asset, der Fall tritt
+      also nicht auf. Bei einem unerwarteten Rot im Log nach dem
+      `gh`-Fehlertext schauen.
+- [ ] **Hygiene (🔵): `.gitignore` und README-Wortlaut.** (1) Die
+      `.gitignore` enthält für `android/` nur die Signatur-Muster (`*.p12`,
+      `*.jks`, `*.keystore`, `keystore.properties`), nicht die
+      Build-Ordner-Muster `android/.gradle/` und `android/**/build/` aus dem
+      Entwurf; sie wären bei einem lokalen Gradle-Lauf nötig (heute baut nur
+      die CI). (2) `android/README.md` nennt UI-Texte („Spracheingabe
+      (Android-App)“, „Diagnose anzeigen“, „Speichern & Verbinden“); bei einer
+      Umbenennung in `SettingsDialog.jsx` dort nachziehen.
+- [ ] **APK: `targetSdk` 35 (Edge-to-Edge) – eigene Runde mit Geräte-Test.**
+      `android/app/build.gradle` bleibt bei `targetSdk 34`: Ab 35 erzwingt
+      Android Edge-to-Edge, die WebView läge unter Status- und
+      Navigationsleiste; ein Layout-Risiko ohne Gerät. `android/app/lint.xml`
+      ignoriert `ExpiredTargetSdkVersion`/`OldTargetApi` (kein Play-Store).
+      Bei der Umstellung `MainActivity.java` um Fenster-Insets ergänzen und am
+      Gerät prüfen; `versionCode` erhöhen. DECISIONS #140.
+- [ ] **Diktat: längeres Diktat über segmentierte Sitzungen – nach
+      Nutzer-Feedback.** Die Brücke kann es schon (`segmentedMs` in
+      `speechStart`, ab Android 13, `buildStartOptions` setzt es bei
+      `continuous = true`, bis 300 s), die Web-Seite nutzt es noch nicht (der
+      Controller fährt `continuous = false`). Ein „längeres Diktat“ wäre damit
+      ein reiner Web-Deploy; erst nach Feedback aus den Geräte-Fällen (I2, I3,
+      I12) und vorher den Nutzer fragen. Siehe auch den v7.59-Punkt „längeres
+      Diktat über Sprechpausen hinweg“. DECISIONS #139, #140.
+
 ## Aus der v7.59-Runde (2026-10-17)
 
-- [ ] **Diktat: die Android-WebView-App (APK) hat keinen Mikrofon-Knopf.** Die
-      Hülle (`android/`) hat weder `RECORD_AUDIO` noch `onPermissionRequest`;
-      der Knopf wird dort über die Erkennung `; wv)` im User-Agent
-      ausgeblendet (`isAndroidWebView` in `src/lib/dictation.js`). Variante
-      „Hülle erweitern“: `RECORD_AUDIO` ergänzen, Laufzeit-Anfrage,
-      `onPermissionRequest` nur für `tschachim.github.io`. Ob die Web Speech
-      API in der WebView dann überhaupt funktioniert, ist unbelegt;
-      Alternative: ein nativer Bridge über `RecognizerIntent`. Eigene Runde
-      mit APK-Neuinstallation (PAT und API-Key müssen danach neu eingegeben
-      werden, DECISIONS #30). Nur auf Nutzerwunsch. DECISIONS #139.
 - [ ] **Diktat: längeres Diktat über Sprechpausen hinweg.** Heute endet ein
       Abschnitt nach ca. 0,5–1 s Pause (eine Sitzung pro Antippen,
       `continuous = false`). Optionen: Googles Neustart-Muster (bei jedem
       `end` neu starten, `no-speech`/`no-match` ignorieren, Abbruch nach 5
       erfolglosen Neustarts) oder `continuous` ab Chrome 157 (Stable geplant
       2026-11-03; Android-Fix Commit becd144). Erst nach Nutzer-Feedback aus
-      Testfall C40, vorher fragen. DECISIONS #139.
+      Testfall C40, vorher fragen. DECISIONS #139. In der Android-App (APK
+      2.0) kann die Brücke das schon über segmentierte Sitzungen, siehe den
+      v7.60-Punkt oben (DECISIONS #140).
 - [ ] **Diktat: Großschreibung am Satzanfang und Satzzeichen.** Der Browser
       liefert das Erkannte roh; ob Chrome Android Satzzeichen und
       Großschreibung setzt oder gesprochenes „Komma“ umsetzt, ist unbelegt.
       Erst Testfall C40 auswerten, dann entscheiden, ob `appendDictation`
       (`src/lib/dictation.js`) den ersten Buchstaben nach leerem Feld bzw.
-      nach `.`/`!`/`?` großschreiben soll. DECISIONS #139.
+      nach `.`/`!`/`?` großschreiben soll. DECISIONS #139. In der Android-App
+      (APK 2.0) gibt es dazu die Geräte-Einstellung „Satzzeichen“ (Testfall
+      I12, DECISIONS #140).
 - [ ] **Diktat: schneller Neustart direkt nach einem Abschnittsende kann auf
       Android „belegt“ melden.** Android liefert einen belegten Erkenner als
       `not-allowed`; die App zeigt dann den Hinweis „gerade nicht verfügbar“
@@ -308,6 +423,34 @@ produktbezogenen Beobachtungen; Umgebungs-Eigenheiten des QA-Chrome
 
 ## Erledigt
 
+- [x] **Wirkungslose Zusicherung im Diagnose-Test (`tests/androidSpeech.test.js`)** → v7.60-Nachbesserung: durch vier echte Zusicherungen ersetzt (u. a. `getItem` wird nie aufgerufen).
+- [x] **🟡 Review-Entscheidung: `fin`-Flag in der Einzel-Sitzung** (Orchestrator,
+      2026-10-17) → v7.60, DECISIONS #140, Restrisiko (4): das undokumentierte
+      Google-Flag `final_result` zählt in `androidSpeech.js` nur noch bei
+      `continuous === true` als Final; bei `continuous = false` (so fährt der
+      Controller immer) ist ein `fin`-Partial ein normaler Zwischenstand, das
+      Endergebnis kommt per `results` (kein Doppel „Einkauf hallo welt Hallo
+      Welt.“). Tests in `tests/androidSpeech.test.js`, jeder per Mutant
+      nachgewiesen.
+- [x] **CI (🔵): Alias „notizbuch“ als Klartext statt als Secret** (Orchestrator,
+      2026-10-17) → v7.60 / APK 2.0, DECISIONS #140: `NOTIZBUCH_KEY_ALIAS` ist
+      eine Konstante in `.github/workflows/android.yml`; das Schlüsselskript
+      setzt nur noch `NOTIZBUCH_KEYSTORE_BASE64` und
+      `NOTIZBUCH_KEYSTORE_PASSWORD`; `ci-release-build.sh` prüft nur diese
+      zwei (Alias-Standard „notizbuch“). GitHub maskiert „notizbuch“ im Log
+      nicht mehr.
+- [x] **Diktat: die Android-WebView-App (APK) hatte keinen Mikrofon-Knopf**
+      → v7.60 / APK 2.0, DECISIONS #140: native Sprach-Brücke
+      (`SpeechBridge.java`), WebView-Erkenner als Rückfall, fester
+      Signierschlüssel (ersetzt die Signatur-Regel aus #30). Der Geräte-Test
+      durch den Nutzer (I1–I14) steht noch aus, siehe „Aus der v7.60-Runde“.
+- [x] **Nachzüge aus den v7.59-Reviews (🔵)** → v7.60, DECISIONS #140:
+      (1) das aufgeschobene Senden löscht einen eben eingetroffenen
+      Diktat-Hinweis nicht mehr (`keepDictHintRef` in `src/App.jsx`, E2E-Fall
+      C37b); (2) `role="status"` an der Hinweiszeile entfernt (der
+      `aria-live`-Wrapper bleibt, keine verschachtelten Live-Regionen);
+      (3) `tests/docEditorLinkPopover.test.jsx` mit `vi.setConfig({
+      testTimeout: 20000 })` gegen den 5000-ms-Timeout unter Coverage-Last.
 - [x] **Mikrofon-Knopf am Chat-Eingabefeld (Spracheingabe über die Web
       Speech API, Nutzerwunsch)** → v7.59, DECISIONS #139.
 - [x] **Testlücken AutoKorrektur im Post-it, Teile (1)–(3)** (Handler des

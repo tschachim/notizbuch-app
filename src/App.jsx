@@ -47,9 +47,10 @@ import { setLinkProviders, resolveProviderLinkTitles } from "./lib/linkProviders
 import { sanitizeAutocorrectConfig } from "./lib/autocorrect.js";
 import { trimNoteBlock } from "./lib/textIndent.js";
 import {
-  createDictation, dictationStep, getSpeechRecognitionCtor, isDictationAvailable,
+  createDictation, dictationStep, getDictationCtor, isDictationAvailable,
   pickDictationLang, queryMicPermission, resolveDictationError,
 } from "./lib/dictation.js";
+import { getAndroidBridge, openAndroidSettings, readSpeechPrefs } from "./lib/androidSpeech.js";
 import SettingsDialog from "./components/SettingsDialog.jsx";
 import DocEditor from "./components/DocEditor.jsx";
 import QuickNotes from "./components/QuickNotes.jsx";
@@ -63,6 +64,13 @@ const loadLocal = (key, fallback) => {
     const v = JSON.parse(localStorage.getItem(key));
     return v && typeof v === "object" ? v : fallback;
   } catch (e) { return fallback; }
+};
+
+// Geräte-Einstellungen der Spracheingabe in der Android-App (DECISIONS #140,
+// lib/androidSpeech.js). Der Zugriff auf localStorage kann werfen (gesperrter
+// Speicher): dann null, readSpeechPrefs fällt auf die Standardwerte zurück.
+const speechPrefsStorage = () => {
+  try { return window.localStorage; } catch (e) { return null; }
 };
 
 // Schnellnotizen-Cache (v7.57.1, DECISIONS #119): Notizen UND die zugehörige
@@ -908,12 +916,18 @@ export default function NotizbuchApp() {
   // Berechtigungsabfrage zum Fehlertext ist asynchron). sendAfterDictRef
   // merkt ein während des Diktats ausgelöstes Senden bis zum Abschnittsende.
   const [dictState, setDictState] = useState("idle");
-  const [dictHint, setDictHint] = useState(null); // { kind: "info"|"warn", text }
+  const [dictHint, setDictHint] = useState(null); // { kind: "info"|"warn", text, action? } (action: nur Android-App, DECISIONS #140)
   const dictRef = useRef(null);
   const dictErrSeq = useRef(0);
   const chatInputRef = useRef(null);
   const micBtnRef = useRef(null);
   const sendAfterDictRef = useRef(false);
+  // Nur während des SYNCHRONEN Teils eines aufgeschobenen Sendens (Effekt auf
+  // dictState) gesetzt: send() löscht dann den Diktat-Hinweis nicht. Der
+  // Abschnitt kann mit Fehler enden ("timeout", "network" ...); der Hinweis
+  // kommt als Microtask im selben Render an und würde sonst sofort von
+  // send() gelöscht - der Nutzer sähe nie, warum der letzte Teil fehlt.
+  const keepDictHintRef = useRef(false);
   const prevDictStateRef = useRef("idle");
   const dictActive = dictState !== "idle";
   // PRO RENDER, nicht memoisiert: die Abfrage ist billig, und die API kann zur
@@ -2134,7 +2148,11 @@ export default function NotizbuchApp() {
   // auf input schreiben, nicht überschrieben werden.
   useEffect(() => {
     const d = createDictation({
-      getCtor: () => getSpeechRecognitionCtor(window),
+      // DECISIONS #140: In der Android-App (Brücke window.NotizbuchAndroid)
+      // liefert getDictationCtor die native Brücken-Klasse, sonst die Web
+      // Speech API. Die Geräte-Einstellungen werden bei JEDEM Start frisch
+      // gelesen (Umschalten wirkt beim nächsten Antippen, ohne Neuladen).
+      getCtor: () => getDictationCtor(window, () => readSpeechPrefs(speechPrefsStorage())),
       lang: pickDictationLang(navigator.languages),
       onText: (prev, next) => setInput((cur) => dictationStep(cur, prev, next)),
       onState: (s) => {
@@ -2263,7 +2281,10 @@ export default function NotizbuchApp() {
     setPendingImg(null);
     setPendingFile(null);
     setImgError(null);
-    setDictHint(null);
+    // Ein normales Senden räumt einen alten Diktat-Hinweis weg. Beim
+    // AUFGESCHOBENEN Senden (Effekt auf dictState) bleibt er stehen: er
+    // erklärt gerade, warum das Ende des Diktats fehlt (keepDictHintRef).
+    if (!keepDictHintRef.current) setDictHint(null);
     setBusy(true);
 
     try {
@@ -2769,7 +2790,16 @@ export default function NotizbuchApp() {
     const was = prevDictStateRef.current;
     prevDictStateRef.current = dictState;
     if (dictState !== "idle" || was === "idle") return;
-    if (sendAfterDictRef.current) { sendAfterDictRef.current = false; send(); return; }
+    if (sendAfterDictRef.current) {
+      sendAfterDictRef.current = false;
+      // send() läuft bis zum ersten await synchron (dort liegt auch das
+      // Löschen des Hinweises): das Flag gilt nur für diesen Aufruf und wird
+      // in jedem Fall wieder zurückgesetzt, auch bei den frühen Rückkehrpfaden
+      // von send() (leer, busy, nicht verbunden).
+      keepDictHintRef.current = true;
+      try { send(); } finally { keepDictHintRef.current = false; }
+      return;
+    }
     const ta = chatInputRef.current;
     if (!ta) return;
     // Mobil (grober Zeiger) bleibt die Tastatur zu; und fremden Fokus nie
@@ -4252,7 +4282,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.59</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.60</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -4628,7 +4658,10 @@ export default function NotizbuchApp() {
             )}
             {/* Diktat-Status und -Hinweise (v7.59, DECISIONS #139). Der Wrapper
                 ist IMMER gerendert (eine aria-live-Region muss schon vor ihrem
-                Inhalt existieren) und nimmt leer keinen Platz ein. */}
+                Inhalt existieren) und nimmt leer keinen Platz ein. Die
+                Hinweiszeile selbst trägt bewusst KEIN eigenes role="status":
+                zwei verschachtelte Live-Regionen können doppelt angesagt
+                werden (v7.60). */}
             <div aria-live="polite">
               {dictActive && (
                 <div className="mb-1.5 flex items-center gap-1.5 text-xs text-rose-700" data-dictation-status>
@@ -4639,11 +4672,20 @@ export default function NotizbuchApp() {
                 </div>
               )}
               {!dictActive && dictHint && (
-                <div role="status" data-dictation-hint
+                <div data-dictation-hint
                   className={"mb-1.5 flex items-start gap-2 px-2 py-1.5 rounded-lg text-xs border " +
                     (dictHint.kind === "warn" ? "bg-amber-50 border-amber-200 text-amber-800" : "bg-slate-50 border-slate-200 text-slate-600")}>
                   {dictHint.kind === "warn" ? <AlertTriangle size={14} className="shrink-0 mt-0.5" /> : <Mic size={14} className="shrink-0 mt-0.5" />}
                   <span className="flex-1">{dictHint.text}</span>
+                  {/* Nur in der Android-App (DECISIONS #140): springt in die
+                      Android-Einstellungen der App bzw. des Erkennungsdienstes. */}
+                  {dictHint.action && getAndroidBridge(window) && (
+                    <button type="button" data-dictation-settings
+                      onClick={() => openAndroidSettings(window, dictHint.action === "recognizer-settings" ? "recognizer" : "app")}
+                      className="shrink-0 px-2 py-0.5 rounded border border-amber-300 bg-white text-amber-800 hover:bg-amber-100">
+                      Einstellungen öffnen
+                    </button>
+                  )}
                   <button type="button" onClick={() => setDictHint(null)} aria-label="Hinweis schließen" title="Hinweis schließen"
                     className="shrink-0 p-0.5 rounded hover:bg-black/5"><X size={13} /></button>
                 </div>
@@ -5394,6 +5436,11 @@ export default function NotizbuchApp() {
           onMemorySave={handleMemorySave}
           autocorrect={autocorrect}
           onAutocorrectChange={handleAutocorrectChange}
+          // DECISIONS #140: Versionsstring für die Diagnose der Spracheingabe
+          // (Android-App). MUSS beim Versions-Bump zusammen mit dem Literal im
+          // Header geändert werden; tests/androidSpeech.test.js vergleicht
+          // beide und schlägt bei Abweichung fehl.
+          appVersion="v7.60"
         />
       )}
     </div>

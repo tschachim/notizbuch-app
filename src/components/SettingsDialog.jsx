@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Settings, X, Loader2, LogOut, Check, Link2, Plus, Pencil, Trash2, Sparkles } from "lucide-react";
+import { Settings, X, Loader2, LogOut, Check, Link2, Plus, Pencil, Trash2, Sparkles, Mic } from "lucide-react";
 import { MODELS } from "../lib/anthropic.js";
 import { PROVIDER_TYPE_INFO, ProviderIcon, hostOf } from "../lib/linkProviders.jsx";
 import { MEMORY_SOFT_LIMIT } from "../lib/memory.js";
@@ -7,6 +7,16 @@ import {
   AUTOCORRECT_CATEGORIES, isCategoryEnabled, sanitizeAutocorrectConfig,
   validateCustomTrigger, validateCustomReplacement,
 } from "../lib/autocorrect.js";
+import {
+  getAndroidBridge, readSpeechPrefs, writeSpeechPrefs, sanitizeSpeechPrefs, buildDiagnosticsText,
+} from "../lib/androidSpeech.js";
+
+// Geräte-lokaler Speicher der Spracheingabe-Einstellungen (DECISIONS #140).
+// Der localStorage-Zugriff selbst kann werfen (gesperrter Speicher) und fehlt
+// in der node-Testumgebung: dann null, readSpeechPrefs nimmt die Standardwerte.
+const speechStorage = () => {
+  try { return typeof window !== "undefined" ? window.localStorage : null; } catch (e) { return null; }
+};
 
 // Neuer, leerer Provider-Formularzustand für den gewählten Typ (v7.9,
 // Nutzerwunsch "Link-Provider konfigurierbar"). id bleibt null, solange kein
@@ -83,7 +93,7 @@ export function removeProvider(list, id) {
 export default function SettingsDialog({
   initial, model, onModelChange, onSave, onProvidersChange = () => {}, onLogout, onClose,
   connecting, error, hasSettings, memory = "", onMemorySave = () => {},
-  autocorrect, onAutocorrectChange = () => {},
+  autocorrect, onAutocorrectChange = () => {}, appVersion = "",
 }) {
   const [owner, setOwner] = useState((initial && initial.owner) || "");
   const [repo, setRepo] = useState((initial && initial.repo) || "notizbuch-data");
@@ -137,6 +147,33 @@ export default function SettingsDialog({
   };
   const removeCustomAutocorrect = (idx) =>
     applyAutocorrect({ ...ac, custom: ac.custom.filter((_, i) => i !== idx) });
+
+  // Spracheingabe in der Android-App (DECISIONS #140): GERÄTE-Einstellung im
+  // localStorage (lib/androidSpeech.js), deshalb unabhängig von hasSettings
+  // und ohne Speichern-Knopf - jede Änderung gilt sofort, der Controller
+  // liest sie bei jedem Antippen des Mikrofons neu. Der Abschnitt erscheint
+  // nur, wenn die Brücke window.NotizbuchAndroid da ist (billige typeof-
+  // Prüfung, kein Java-Aufruf). typeof window: node-Tests ohne DOM.
+  const hasSpeechBridge = typeof window !== "undefined" && !!getAndroidBridge(window);
+  const [speechPrefs, setSpeechPrefs] = useState(() => readSpeechPrefs(speechStorage()));
+  const [speechDiag, setSpeechDiag] = useState("");
+  const changeSpeechPref = (key, value) => {
+    const next = sanitizeSpeechPrefs({ ...speechPrefs, [key]: value });
+    writeSpeechPrefs(speechStorage(), next); // gesperrter Speicher: gilt nur bis zum Neuladen
+    setSpeechPrefs(next);
+    // Eine bereits angezeigte Diagnose nennt die alten Einstellungen: lieber
+    // ausblenden als einen veralteten Text kopieren lassen.
+    setSpeechDiag("");
+  };
+  const copySpeechDiag = async () => {
+    try { await navigator.clipboard.writeText(speechDiag); return; } catch (e) { /* WebView ohne Zwischenablage-API: Rückfall */ }
+    const ta = document.querySelector("[data-android-speech-diag]");
+    if (ta) {
+      ta.focus();
+      ta.select();
+      try { document.execCommand("copy"); } catch (e) { /* Nutzer kopiert den markierten Text selbst */ }
+    }
+  };
 
   const complete = owner.trim() && repo.trim() && pat.trim() && apiKey.trim();
 
@@ -644,6 +681,97 @@ export default function SettingsDialog({
                 </button>
               </div>
               {customForm.error && <div className="mt-1 text-xs text-rose-700">{customForm.error}</div>}
+            </div>
+          )}
+
+          {/* Spracheingabe (Android-App) (DECISIONS #140): NUR mit Brücke
+              sichtbar (hasSpeechBridge), unabhängig von hasSettings - es ist
+              eine Geräte-Einstellung. Änderungen gelten sofort (siehe
+              changeSpeechPref). Die Diagnose enthält weder Transkripte noch
+              Zugangsdaten (buildDiagnosticsText) und ist für die
+              Fern-Fehlersuche ohne neue APK gedacht. */}
+          {hasSpeechBridge && (
+            <div className="mt-5 pt-3 border-t border-slate-200" data-android-speech>
+              <div className="flex items-center gap-1.5 mb-1">
+                <Mic size={14} className="text-indigo-700" />
+                <span className="text-sm font-semibold text-slate-800">Spracheingabe (Android-App)</span>
+              </div>
+              <p className="text-xs text-slate-400 mb-2">
+                Gilt nur für dieses Gerät und wirkt beim nächsten Antippen des Mikrofons.
+              </p>
+
+              <label className="block text-xs text-slate-600 mb-2">
+                Erkenner
+                <select
+                  className="mt-0.5 w-full border border-slate-300 rounded-lg px-2 py-1.5 text-sm bg-white"
+                  value={speechPrefs.engine}
+                  onChange={(e) => changeSpeechPref("engine", e.target.value)}
+                >
+                  <option value="native">Android-Spracherkennung (empfohlen)</option>
+                  <option value="webview">WebView-Erkenner (Rückfall/Test)</option>
+                </select>
+              </label>
+              <label className="block text-xs text-slate-600 mb-2">
+                Dienst
+                <select
+                  className="mt-0.5 w-full border border-slate-300 rounded-lg px-2 py-1.5 text-sm bg-white"
+                  value={speechPrefs.provider}
+                  onChange={(e) => changeSpeechPref("provider", e.target.value)}
+                >
+                  <option value="auto">Automatisch (Google, wie Chrome)</option>
+                  <option value="default">System-Standard</option>
+                  <option value="ondevice">Nur auf dem Gerät (ab Android 12)</option>
+                </select>
+              </label>
+              <label className="block text-xs text-slate-600 mb-2">
+                Satzzeichen (ab Android 13, je nach Dienst)
+                <select
+                  className="mt-0.5 w-full border border-slate-300 rounded-lg px-2 py-1.5 text-sm bg-white"
+                  value={speechPrefs.formatting}
+                  onChange={(e) => changeSpeechPref("formatting", e.target.value)}
+                >
+                  <option value="off">Aus</option>
+                  <option value="quality">Ein (Qualität)</option>
+                  <option value="latency">Ein (schnell)</option>
+                </select>
+              </label>
+              <label className="flex items-center gap-2 text-xs text-slate-600 mb-2">
+                <input
+                  type="checkbox"
+                  checked={speechPrefs.preferOffline}
+                  onChange={(e) => changeSpeechPref("preferOffline", e.target.checked)}
+                />
+                Möglichst ohne Internet erkennen
+              </label>
+
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  className="text-xs px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50"
+                  onClick={() => setSpeechDiag(buildDiagnosticsText(window, speechPrefs, appVersion))}
+                >
+                  Diagnose anzeigen
+                </button>
+                {speechDiag && (
+                  <button
+                    type="button"
+                    className="text-xs px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50"
+                    onClick={copySpeechDiag}
+                  >
+                    Kopieren
+                  </button>
+                )}
+              </div>
+              {speechDiag && (
+                <textarea
+                  readOnly
+                  rows={8}
+                  value={speechDiag}
+                  data-android-speech-diag
+                  onFocus={(e) => e.target.select()}
+                  className="mt-2 w-full font-mono text-[11px] border border-slate-300 rounded-lg p-2"
+                />
+              )}
             </div>
           )}
 

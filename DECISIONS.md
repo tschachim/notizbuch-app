@@ -269,6 +269,7 @@ aus `referenz-app.jsx` übernommen.
     im öffentlichen Repo: jeder Build hat eine neue Debug-Signatur, vor
     Neuinstallation muss die alte App runter – akzeptiert, weil die App
     praktisch nie neu gebaut werden muss.
+    **Signatur-Regel ersetzt durch #140 (v7.60 / APK 2.0).**
 
 31. **Bildgröße im Editor** (v6.2, Nutzerwunsch): Bilder lassen sich im
     WYSIWYG-Editor per Anfasser unten rechts skalieren (eigene NodeView).
@@ -18408,3 +18409,521 @@ aus `referenz-app.jsx` übernommen.
        nur aus dem gemeinsamen Chromium-Code abgeleitet. (7) Die installierte
        PWA läuft vermutlich wie der Tab (gleiche Engine, gleicher Origin);
        dazu gibt es keine Quelle.
+
+140. **v7.60 / APK 2.0: Spracheingabe in der Android-App über eine native
+     Brücke; fester Signierschlüssel (ersetzt die Signatur-Regel aus #30).**
+     - **Ausgangslage.** Die APK-Hülle (`android/`, #30) hatte weder
+       `RECORD_AUDIO` noch `onPermissionRequest`; #139 blendet den
+       Mikrofon-Knopf in der WebView deshalb aus (User-Agent `; wv)`). Der
+       Nutzer arbeitet am Handy NUR mit der App, nie mit Chrome – ohne diese
+       Runde gäbe es dort kein Diktat. Außerdem war #30 an einer Stelle
+       überholt: „App muss praktisch nie neu gebaut werden“ stimmt nicht mehr,
+       sobald die Hülle Geräte-APIs braucht.
+     - **Nutzer-Entscheidungen 2026-10-17.** (1) Der Nutzer nutzt am Handy
+       ausschließlich die APK. (2) Der feste Signierschlüssel darf als
+       GitHub-Secret im öffentlichen Repo `tschachim/notizbuch-app` liegen;
+       der Nutzer erzeugt ihn SELBST per Skript in seinem PowerShell-Fenster
+       (kein Agent sieht Schlüssel oder Passwort). Aus dem Entwurf
+       übernommen, ohne dass hier eine ausdrückliche Einzelzusage
+       festgehalten ist: Emulator-Smoke-Job (optional, nicht blockierend),
+       Einstellungs- und Diagnose-Abschnitt in der Web-App, Android-Änderungen
+       erst auf einen Branch (`android-v2`) und nach grünem Job `check` nach
+       `main` (weicht vom üblichen direkten main-Commit ab).
+     - **Entscheidung: `SpeechBridge.java` (native Brücke) als Hauptweg.**
+       `window.NotizbuchAndroid` (`addJavascriptInterface`, VOR `loadUrl`/
+       `restoreState` angemeldet) startet pro Sitzung einen NEUEN
+       `android.speech.SpeechRecognizer`. Dienstwahl und Intent folgen Chrome
+       Android (Chromium `SpeechRecognitionImpl.java`): ab Android 12
+       `com.google.android.tts`, darunter die Google-App
+       (`com.google.android.googlequicksearchbox` ab Version 300207030),
+       sonst der System-Standarderkenner; `ACTION_RECOGNIZE_SPEECH` mit
+       `EXTRA_LANGUAGE`, `EXTRA_PARTIAL_RESULTS`, `DICTATION_MODE` false. Java
+       liefert nur einen ROHEN Ereignisstrom (`listening`, `ready`,
+       `beginning`, `endofspeech`, `partial` mit optionalem `unstable`/`fin`/
+       `scores`, `segment`, `results`, `error` mit Zahlencode, `end`) und
+       garantiert GENAU EIN `end` pro angenommener Sitzungs-ID (`finish()` ist
+       der einzige Endpfad; die Ablehnung mit -6 ohne Session ist der zweite,
+       disjunkte Emitter). Semantik, Texte und Fehler-Mapping stehen NICHT in
+       Java, sondern in `src/lib/androidSpeech.js`: dort testbar und per
+       Pages-Deploy ohne APK-Update änderbar („die APK ändert sich fast nie,
+       die Web-App oft“). `createDictation` (#139) bleibt UNVERÄNDERT;
+       `getDictationCtor` (`dictation.js`) hängt die SpeechRecognition-
+       kompatible Brücken-Klasse ein, `isDictationAvailable` lässt die WebView
+       NUR mit Brücke zu – die alte APK 1.0 ohne Brücke zeigt weiter keinen
+       Knopf (präzisiert die WebView-Ausblendung aus #139).
+     - **Vertrag Java <-> JS (ab jetzt stabil).** JS -> Java:
+       `getInfo()`, `getLog()` (beide ohne Transkripte und Zugangsdaten),
+       `speechStart(sid, optionsJson)`, `speechStop(sid)`, `speechAbort(sid)`,
+       `openSettings(target)` mit `target` = „app“ oder dem Paketnamen eines
+       installierten Erkennungsdienstes; `sid` passt auf `[A-Za-z0-9_-]{1,64}`.
+       Optionen (Java prüft und klemmt jeden Wert erneut): `lang`, `partial`,
+       `provider` (auto | default | ondevice | Paketname), `formatting`
+       (quality | latency), `preferOffline`, `segmentedMs` u. a. Java -> JS:
+       `window.__notizbuchAndroidSpeech(jsonString)` mit `{v:1, sid, type, …}`,
+       nur im Hauptframe und nur vom UI-Thread. Fehlercodes: positiv =
+       `SpeechRecognizer.ERROR_*` (1-15), negativ = brückeneigen: -1 Dialog
+       abgelehnt, -2 gesperrt/weggewischt, -3 Start fehlgeschlagen, -4 App
+       unsichtbar, -5 abgebrochen/ersetzt/Seite neu geladen/Dialog
+       unterbrochen, -6 keine App-Seite, -7 kein Erkennungsdienst, -8
+       Sicherheitsdeckel 330 s. Mapping in `mapNativeError` (JS): 1/2/4
+       `network`, 3 `audio-capture`, 5 vor `ready` ohne eigenes Stopp
+       `recognizer-unavailable`, sonst `aborted`, 6 `no-speech`, 7 `nomatch`,
+       8/10 `recognizer-busy`, 9 `recognizer-mic-denied`, 11
+       `recognizer-unavailable`, 12/13 `language-unavailable`, -1
+       `app-mic-denied`, -2 `app-mic-blocked`, -3 `start-failed`, -4/-5
+       `aborted`, -6 `service-not-allowed`, -7 `no-recognizer`, -8 `timeout`,
+       sonst `android-error` – alle Namen passen auf `^[a-z][a-z-]{0,39}$`
+       (Fehlercode-Regel aus #139). Gegenüber Chrome ist das eindeutiger:
+       Chrome macht aus 8 und 9 beides `not-allowed` und lässt unbekannte
+       Codes hängen (`default: assert false; return;`); jeder Fehlercode
+       beendet hier die Sitzung.
+     - **Warum nicht die WebView-eigene Web Speech API als Hauptweg.** Laut
+       Chromium-Code ist sie in der WebView aktiv (`aw_main_delegate.cc`
+       schaltet nur die Synthese ab; Berechtigungskette bis
+       `WebChromeClient.onPermissionRequest`), aber: kein positiver
+       Praxisbericht (die gefundenen Berichte sind negativ oder ungeprüft),
+       keine Chromium-Tests für den WebView-Pfad, der System-Standarderkenner
+       statt Google (`VOICE_RECOGNITION_SERVICE`; `initialize()` wird nur von
+       Chrome aufgerufen), mehrdeutige Codes (8/9 -> `not-allowed`),
+       `navigator.permissions.query` liefert dort immer „prompt“. Sie bleibt
+       als per Geräte-Einstellung umschaltbarer RÜCKFALL (Engine „WebView-
+       Erkenner“): dafür gibt `onPermissionRequest` das Mikrofon NUR für die
+       App-Origin (`https`, `tschachim.github.io`), NUR für
+       `RESOURCE_AUDIO_CAPTURE` und erst nach erteilter Android-Laufzeit-
+       berechtigung frei (nie `grant(getResources())`, sonst `deny()`).
+       Verworfen: (a) nur WebView-Pfad (wenig Java, aber unbelegt); (b)
+       `RecognizerIntent`-Dialog (modal, Text erst am Ende, passt nicht zur
+       vereinbarten Bedienung); (c) AndroidX `addWebMessageListener`
+       (Ursprungsfilter pro Frame, aber neue Abhängigkeit und kein Nutzen, da
+       die App keine iframes lädt).
+     - **Lebenszyklus.** Abbruch in `onStop` (App unsichtbar: App-Wechsel,
+       Bildschirm aus), NICHT in `onPause`: Der Android-
+       Berechtigungsdialog pausiert die Activity; ein Abbruch in `onPause`
+       beendete jedes erste Diktat direkt nach „Zulassen“ (der kritische
+       Ersttest). `onStop` entspricht Chromes Abbruch bei verborgener Seite;
+       ab Android 9 bekäme eine Hintergrund-App vom Mikrofon ohnehin nur
+       Stille. Ein Wartender auf den Dialog (`WAITING_FOR_MIC`) bleibt
+       bestehen; sein Ergebnis prüft `canUseMic()`. Neuladen der Seite
+       (`onPageStarted`) beendet die Sitzung der alten Seite (`pageGen`).
+       `onDestroy` zerstört alles (`destroy()` in `try/catch`, wie Chrome
+       wegen Samsung). Sicherheitsdeckel 330 s gegen ein „vergessenes“
+       Mikrofon. Mikrofon-Berechtigung zentral in `MainActivity.withMic` mit
+       Warteschlange: `Activity.requestPermissions` erlaubt nur EINE Anfrage
+       gleichzeitig (eine zweite bekäme sofort leere Ergebnisse); leere
+       Ergebnis-Arrays zählen als „Dialog unterbrochen“ (-5), nie als
+       erteilt; `shouldShowRequestPermissionRationale` trennt -1 (Dialog darf
+       wieder erscheinen) von -2 („nicht mehr fragen“ bzw. weggewischt).
+       Alle `SpeechRecognizer`- und `WebView`-Aufrufe laufen auf dem
+       Main-Thread; die `@JavascriptInterface`-Methoden (JavaBridge-Thread)
+       prüfen nur Argumente und posten, sie blockieren nie. Im Multi-Window
+       läuft das Diktat bei Fokusverlust weiter, solange die App sichtbar
+       bleibt (gewollt).
+     - **Sicherheit.** Auslösende Aufrufe (`speechStart`, `openSettings`)
+       wirken nur, wenn die Hauptseite der WebView `https://tschachim.github.io`
+       ist (Prüfung auf dem Main-Thread per `WebView.getUrl()`, robust gegen
+       das Timing der Rückrufe nach `restoreState`; ein volatile-Flag aus
+       `onPageStarted` hätte dort einen möglichen Fehl-Negativ). Rückkanal
+       per `evaluateJavascript` nur in den Hauptframe, Nachricht als JSON-
+       String (`JSONObject.quote` plus Ersatz für U+2028/U+2029; der Ersatz
+       wird im Quelltext aus dem Zeichen 0x5C zusammengesetzt, damit dort
+       kein Backslash-u-Literal steht – das Write-Werkzeug wandelt solche
+       Folgen um, und javac wertet sie sogar in Kommentaren aus). Das Log der
+       Brücke enthält nur Längen und Codes, nie Transkripte. WebView-
+       Debugging (`setWebContentsDebuggingEnabled`) nur bei debuggable
+       Build (Emulator-Smoke-Test); das veröffentlichte Release-APK ist nie
+       debuggable. `MODIFY_AUDIO_SETTINGS` und `onPermissionRequest` vergrößern
+       die Angriffsfläche minimal (`getUserMedia`-Audio für die eigene
+       Origin); sie sind nur für den Rückfallweg nötig. Restrisiko:
+       `addJavascriptInterface` erreicht ALLE Frames, die App-Seite wird nur
+       über die Hauptseite geprüft. Die App lädt heute keine iframes
+       (externe Links öffnen im System-Browser); ein künftig eingebetteter
+       Fremd-iframe könnte höchstens eine Sitzung starten (Mikrofon kurz
+       aktiv, Systemanzeige sichtbar), erhielte aber nie Text.
+     - **Satzzeichen und längeres Diktat.** `EXTRA_ENABLE_FORMATTING` (ab
+       Android 13) und segmentierte Sitzungen (ab Android 13) sind in der APK
+       eingebaut (per `SDK_INT` geschützt), aber standardmäßig AUS und nur auf
+       Wunsch der Web-Seite aktivierbar. Laut Doku liefert der Dienst bei
+       Formatierung zwei Hypothesen, die formatierte zuerst (wir nehmen [0]);
+       „this value may have no effect“ – ob der Google-Online-Erkenner es
+       beachtet, ist unbelegt (Geräte-Einstellung „Satzzeichen“, Testfall
+       I12). Segmentiert wird nur bei `continuous = true`, das der Controller
+       in v1 nicht setzt (der Chrome-Bug bis 156, Grund für `continuous =
+       false` in #139, gilt für die Brücke nicht). Ein späteres „längeres
+       Diktat“ wäre damit ein reiner Web-Deploy (docs/TODO.md).
+     - **Leeres Endergebnis.** `onResults` ohne Text -> `nomatch`, wenn vorher
+       gar kein Text kam (Rückmeldung statt „nichts passiert“); kam schon
+       Text, bleibt der letzte Zwischenstand still stehen (wie Chrome). Der
+       Controller unterdrückt `nomatch` nach einem Nutzer-Stopp oder wenn
+       schon Text kam.
+     - **`fin`-Flag (`final_result`) nur im Dauer-Modus (Orchestrator-
+       Entscheidung nach dem Review der Web-Seite).** Ein Teilergebnis mit
+       `fin` zählt in `androidSpeech.js` NUR bei `continuous === true` als
+       Final (abgeschlossener Abschnitt im Dauer-Modus des Google-Dienstes).
+       Bei `continuous = false` – so fährt der Controller IMMER – ist es ein
+       normaler Zwischenstand (ersetzt den vorigen); das Endergebnis kommt
+       regulär per `results`. Grund: Zählte das `fin`-Partial dort schon als
+       Final und wich der Endtext ab (Satzzeichen/Großschreibung bei
+       Formatierung, Re-Ranking), stünden zwei Finals im Feld („Einkauf hallo
+       welt Hallo Welt.“); die Netz-Regel aus #139 fängt nur gleichen Text
+       bzw. ein Präfix an der Wortgrenze ab. Im Einzelmodus geht dadurch
+       nichts verloren: der zuletzt angezeigte Zwischentext bleibt im Feld,
+       bis `results` ihn ersetzt, und bleibt auch stehen, wenn gar kein
+       `results` kommt. Ohne `interimResults` wird ein `fin`-Partial bei
+       `continuous = false` verschluckt (wie jedes Partial). Verworfen:
+       Restrisiko tragen (Parität zu Chromium ab 157.0.8102) – die Parität
+       würde im Einzelmodus nur das mögliche Doppel bringen. Die Prüfung
+       steht bewusst VOR der `interimResults`-Sperre (Dauer-Modus ohne
+       Zwischenstände soll Abschnitte weiter bekommen).
+     - **Hinweise und „Einstellungen öffnen“.** Sieben neue Hinweistexte in
+       `dictationErrorInfo` (`app-mic-denied`, `app-mic-blocked`,
+       `recognizer-mic-denied`, `recognizer-busy`, `recognizer-unavailable`,
+       `no-recognizer`, `language-unavailable`) mit optionalem Feld `action`:
+       `app-mic-blocked` -> `app-settings`, `recognizer-mic-denied` ->
+       `recognizer-settings`. Nur mit Brücke zeigt die Hinweiszeile den Knopf
+       „Einstellungen öffnen“ (`data-dictation-settings`): „app“ öffnet die
+       App-Info der Hülle, „recognizer“ die des Erkennungsdienstes (Paketname
+       aus `getInfo().autoProvider`; Java prüft ihn erneut gegen die
+       installierten `RecognitionService`-Pakete). Ein plain `not-allowed`
+       gibt es in der App nicht mehr (die Brücke liefert eindeutige Codes,
+       `permissions.query` wäre dort immer „prompt“).
+     - **Geräte-Einstellungen und Diagnose.** Neuer Abschnitt
+       „Spracheingabe (Android-App)“ im Einstellungs-Dialog, NUR mit Brücke
+       sichtbar und unabhängig von `hasSettings` (Geräte-Einstellung):
+       Erkenner (Android-Spracherkennung | WebView-Erkenner), Dienst
+       (Automatisch | System-Standard | Nur auf dem Gerät), Satzzeichen (Aus |
+       Ein Qualität | Ein schnell), „Möglichst ohne Internet erkennen“, dazu
+       „Diagnose anzeigen“ und „Kopieren“. Gespeichert im `localStorage`
+       (`notizbuch.androidSpeech.v1`, nur dieses Gerät, nicht in
+       `state.json`), gilt sofort und wird bei JEDEM Start frisch gelesen
+       (`getCtor` ruft `readSpeechPrefs`); fehlender oder werfender Speicher
+       fällt auf die Standardwerte zurück. Eine bereits angezeigte Diagnose
+       wird bei jeder Änderung ausgeblendet (sonst nennte und kopierte sie
+       die alten Einstellungen). Die Diagnose enthält Web-App-Version
+       (Prop `appVersion`), User-Agent, `getInfo()` (SDK, Gerät, WebView-
+       Version, Mikrofon-Stand, installierte Erkennungsdienste, gewählter
+       Dienst, Fähigkeiten), die sanitisierten Einstellungen und das
+       Java-Protokoll – KEINE Transkripte, KEINE Zugangsdaten. Zweck: Es gibt
+       kein Testgerät; schlägt der erste Versuch fehl, liefert „Kopieren“ alles
+       Nötige, und der Nutzer kann ohne neues APK Alternativen probieren.
+     - **Signatur: fester Schlüssel (ersetzt die Signatur-Regel aus #30).**
+       #30 setzte bewusst auf einen Debug-Schlüssel pro Build („kein privater
+       Schlüssel im öffentlichen Repo“). Der alte Schlüssel existierte nur
+       auf dem flüchtigen Runner und ist unwiederbringlich; Android erlaubt
+       ein Update nur bei gleichem Zertifikat (eine Schlüsselrotation
+       bräuchte den alten Schlüssel). Die EINE Neuinstallation (Deinstallation
+       von 1.0, danach PAT und API-Key neu eingeben, `allowBackup=false`) ist
+       also unvermeidbar; mit festem Schlüssel wird sie die LETZTE, jede
+       spätere APK-Korrektur ist ein Update an Ort und Stelle (Verbindung,
+       PAT, API-Key bleiben). Der Schlüssel: RSA 4096, PKCS12 (OpenSSL 3 aus
+       Git for Windows: PBES2, AES-256-CBC, HMAC-SHA256), Alias `notizbuch`,
+       vom Nutzer lokal per `android/tools/signierschluessel-erzeugen.ps1`
+       erzeugt (reines ASCII, damit Windows PowerShell 5.1 nicht abbricht;
+       läuft unter 5.1 und pwsh 7). Das Skript überschreibt nie, legt ein
+       24-Byte-Zufallspasswort (Hex) nur in die Zwischenablage (nie in die
+       Ausgabe), wartet auf das Ablegen im Passwortmanager, leert die
+       Zwischenablage, schreibt `LIESMICH.txt` OHNE Passwort nach
+       `Dokumente\Notizbuch-Signatur` und setzt die ZWEI Secrets
+       `NOTIZBUCH_KEYSTORE_BASE64` und `NOTIZBUCH_KEYSTORE_PASSWORD` per
+       `gh secret set`; der Alias `notizbuch` ist KEIN Secret, sondern die
+       Konstante `NOTIZBUCH_KEY_ALIAS` im Workflow (als Secret maskierte
+       GitHub jedes „notizbuch“ im Log: aus `io.github.tschachim.notizbuch`,
+       `tschachim/notizbuch-app` und `notizbuch.apk` wurde `***`, die
+       Fehlermeldungen des Prüfskripts waren schwer lesbar; Entscheidung des
+       Orchestrators nach dem Review, vor dem Setzen der Secrets).
+       `-NurSecretsSetzen` setzt sie
+       aus einem vorhandenen Schlüssel neu, `-OhneSecrets` erzeugt nur den
+       Schlüssel. Am Ende steht der öffentliche SHA-256-Fingerabdruck
+       (64 Hex, klein, ohne Doppelpunkte); er gehört als
+       `EXPECTED_CERT_SHA256` in `.github/workflows/android.yml`. Backup beim
+       Nutzer (Passwortmanager plus zweiter Ablageort für den Ordner).
+       Zwischenablage abgesichert (Abschluss-Review): Das Passwort liegt NUR
+       dort, ein einzelner Fehlschlag (transientes CLIPBRD_E_CANT_OPEN durch
+       Zwischenablage-/Passwortmanager mit Überwachung) darf es nicht
+       verloren gehen lassen. `Set-ClipboardSicher` versucht das Setzen bis
+       zu 5-mal (300 ms Pause). VOR der Schlüsselerzeugung prüft eine Probe
+       (ein Leerzeichen, nicht das Passwort) die Zwischenablage – schlägt sie
+       fehl, entsteht gar kein Schlüssel. Scheitert das Setzen des Passworts
+       nach der Erzeugung trotzdem endgültig, löscht das Skript `.p12`,
+       Zertifikat und `LIESMICH.txt` wieder (ein Schlüssel ohne bekanntes
+       Passwort ist wertlos und würde per Nie-überschreiben-Schutz den
+       Neustart blockieren; `-NurSecretsSetzen` fragt ja nach genau diesem
+       Passwort). Das Leeren am Ende ist nur eine Warnung und verhindert das
+       Setzen der Secrets nicht. Geprüft mit einem Wegwerf-Wrapper, der
+       `Set-Clipboard` überschreibt (Windows PowerShell 5.1, früher Fehler
+       => 0 Dateien, später Fehler => 0 Dateien und Meldung, Leer-Fehler =>
+       Warnung und Lauf endet normal, Normalfall => 3 Dateien); pwsh 7 im
+       Normalfall. Echt-Zwischenablage bleibt im Agent-Sandbox-Test
+       unzuverlässig (einmal Fehler, einmal OK), daher nicht belegbar.
+       Abwägung öffentliches Repo: Wer Schreibrechte oder Kontozugriff
+       erlangt, kann die Secrets abgreifen und manipulierte Updates
+       signieren, die den `localStorage` (PAT/Key) lesen; derselbe Angreifer
+       kann aber schon die Web-App auf GitHub Pages ändern, das Zusatzrisiko
+       ist gering. Der Schlüssel selbst liegt nie im Repo (`.gitignore`:
+       `*.p12`, `*.jks`, `*.keystore`, `keystore.properties`). Empfehlung an
+       den Nutzer: 2FA für das GitHub-Konto prüfen. Verworfen: (a) JDK
+       installieren und `keytool` nutzen (braucht Zustimmung, sonst
+       gleichwertig); (b) Debug-Keystore fest ins Repo (jeder könnte
+       „Updates“ signieren); (c) Schlüssel im CI erzeugen (kein Backup,
+       Artefakte öffentlicher Repos sind für angemeldete Nutzer abrufbar);
+       (d) weiter wechselnde Debug-Schlüssel (jede Korrektur kostete PAT/Key).
+       Googles Developer Verification wird ab 2026-09-30 in einzelnen Ländern
+       (BR, ID, SG, TH) und global ab 2027 durchgesetzt; der stabile
+       Schlüssel ist Voraussetzung, das Paket später registrieren zu können
+       (ADB-Installationen sind ausgenommen, für Hobby-Nutzung gibt es einen
+       gebührenfreien Account mit Verteilung an bis zu 20 Geräte; für
+       Deutschland ist vor 2027 nichts angekündigt, die genauen Pflichten
+       sind nur in Grundzügen belegt). Geht der Schlüssel verloren, ist
+       wieder eine Neuinstallation fällig, und die Registrierung ginge nicht
+       mehr.
+     - **CI (`.github/workflows/android.yml`, `android/tools/`).** Drei Jobs,
+       workflow-weit `permissions: contents: read`, nur `release` mit
+       `contents: write` und `concurrency: android-release`; die gemeinsame
+       Prüflogik steckt in `android/tools/ci-release-build.sh`. `check` (Push
+       auf Nicht-main-Branches, Pull-Requests; Pfade `android/**` und der
+       Workflow): `gradle -p android assembleDebug lintRelease`, mit Secrets
+       zusätzlich `ci-release-build.sh probe` (signierter Probebuild mit
+       ALLEN Prüfungen, aber ohne Veröffentlichung; Fork-PRs haben keine
+       Secrets und überspringen den Schritt), Debug-APK und Lint-Bericht als
+       Artefakt „notizbuch-debug-NICHT-INSTALLIEREN“ (andere Signatur). Ohne
+       lokales JDK/Android-SDK ist `check` der ERSTE echte Compiler- und
+       Lint-Lauf; dort wird iteriert, bis er grün ist, ehe `main` betroffen
+       ist. `smoke` (nach `check`, `continue-on-error`): Emulator (API 34,
+       `google_apis_playstore`) und `android/tools/smoke-cdp.mjs` (Brücke
+       vorhanden, `getInfo`, jede Sitzung genau ein `end`, `abort` -> -5,
+       Ersetzen -> je ein `end`, ungültige sid -> keine Ereignisse, HOME ->
+       -4, `getLog`). `release` (nur Push/`workflow_dispatch` auf `main`):
+       `ci-release-build.sh release` mit der Prüfkette in fester Reihenfolge –
+       die zwei Secrets vorhanden (sonst Fehler, nie debug-signiert
+       veröffentlichen; der Alias kommt aus der Workflow-Umgebung, Standard
+       `notizbuch`),
+       Format des Fingerabdrucks, `keytool`-Ladeprobe, signierter
+       `assembleRelease`, `apksigner`: genau EIN Signer mit
+       `EXPECTED_CERT_SHA256`, `aapt2`: Paketname, `RECORD_AUDIO`, nicht
+       debuggable, `versionCode` größer als der des veröffentlichten APK
+       (Warnung „Umstieg“ bei anderer Signatur) – erst DANACH wird das Release
+       „android-apk“ gelöscht und neu angelegt. Scheitert etwas, bleibt das
+       bisherige Release unberührt. Secrets werden nie ausgegeben (kein
+       `set -x`, `keytool` mit `-storepass:env`). Nach einem Netz-/API-Fehler
+       beim Laden des veröffentlichten APK scheitert `release` (ein Netzfehler
+       darf den `versionCode`-Vergleich nicht stillschweigend aushebeln),
+       `probe` warnt nur. `versionCode` ist jetzt 2 (`versionName` „2.0“) und
+       muss bei JEDER Änderung unter `android/` um 1 steigen.
+       `targetSdk` bleibt 34: ab 35 erzwingt Android Edge-to-Edge, die
+       WebView läge unter den Systemleisten (Layout-Risiko ohne Gerät, eigene
+       Runde, docs/TODO.md); `android/app/lint.xml` ignoriert
+       `ExpiredTargetSdkVersion` und `OldTargetApi`, weil `assembleRelease`
+       `lintVital` enthält und Lint 34 im Oktober 2026 sonst als abgelaufen
+       (fatal) werten könnte – für ein sideloaded APK ohne Play-Store
+       irrelevant. `minifyEnabled false` bleibt (sonst Keep-Regeln für die
+       `@JavascriptInterface`-Methoden). Keine neue Abhängigkeit (plain
+       `android.app.Activity`, kein AndroidX).
+     - **Erfolgsabschätzung (ohne Gerätetest).** Gesamt etwa 80-85 %, dass
+       beim ersten Geräte-Test alles wie vereinbart läuft (Antippen,
+       Android-Dialog „Bei Nutzung der App zulassen“, Live-Text, Ende bei
+       Sprechpause oder erneutem Antippen, Text angehängt); etwa 95 %, dass
+       Installation und Umstieg klappen und jedes verbleibende Problem OHNE
+       weitere Deinstallation behebbar ist (meist per Web-Deploy, sonst per
+       APK-Update). Je Baustein: (1) Kompilieren und Lint ~100 % nach
+       Iteration im Branch; (2) Signaturkette ~95 % (Restrisiko Bedienfehler
+       des Nutzers; `keytool -list` und Fingerabdruck-Prüfung fangen
+       Ladeprobleme vor `main`); (3) Brücke (Threads, JSON, Lebenszyklus)
+       ~90-95 %; (4) Erkennung auf dem Gerät ~90 % (gleiche Dienstwahl und
+       Extras wie Chrome, das Gboard-Mikrofon des Nutzers spricht für
+       vorhandene Google-Sprachdienste; Android-Version und Hersteller sind
+       unbekannt); (5) Abweichungen im Detail (Satzzeichen, Pause ~1 s,
+       Signalton) sind kein Fehlschlag, sondern dieselben wie in Chrome.
+     - **Rückfallweg ohne APK-Update.** Bleibt etwas hängen, reicht in den
+       meisten Fällen eine Einstellung auf dem Gerät: Erkenner „WebView-
+       Erkenner“ (Web Speech API der WebView statt Brücke; die Engine wird bei
+       jedem Start frisch gelesen), Dienst „System-Standard“ oder „Nur auf
+       dem Gerät“, Satzzeichen „Aus“. Mapping, Texte und Optionen ändert ein
+       Web-Deploy. Ein APK-Fix bekommt `versionCode` 3 und wird über die
+       bestehende App installiert (kein Datenverlust, Testfall I14).
+     - **Ausrollreihenfolge.** 0. Freigabe: der Nutzer führt das Skript aus,
+       legt das Passwort im Passwortmanager ab, sichert den Ordner ein
+       zweites Mal und gibt den Fingerabdruck weiter; der Orchestrator prüft
+       `gh secret list --repo tschachim/notizbuch-app` (die zwei Namen) und
+       trägt den Fingerabdruck als `EXPECTED_CERT_SHA256` ein (bis dahin steht
+       im Workflow ein Platzhalter, der absichtlich an der Formatprüfung
+       scheitert). 1. Web zuerst (v7.60): ändert im Browser nichts, die alte
+       APK zeigt weiter KEINEN Knopf (keine Brücke). 2. Android auf Branch
+       `android-v2`: Job `check` muss grün sein (Kompilieren, Lint, Probebuild
+       mit Fingerabdruck, `versionCode` 2 > 1); das Log des Jobs `smoke` wird
+       gelesen (ein grüner Workflow allein sagt nichts); startet der erste
+       Push eines neuen Branches den Lauf wegen des Pfad-Filters nicht:
+       `gh workflow run android.yml --ref android-v2`. 3. Fast-forward-Merge
+       nach `main`: `release` baut, prüft, veröffentlicht; der Orchestrator
+       prüft `gh release view android-apk` (neues Datum, Fingerabdruck in den
+       Notes, Asset). 4. Nutzer: Umstieg nach `android/README.md`, Fälle
+       I1-I14. 5. Probleme: Diagnose kopieren; Korrekturen bevorzugt im Web.
+       Das Release wird nur von `main` nach allen Prüfungen ersetzt.
+     - **Nachzüge aus v7.59 (🔵, hier miterledigt).** (1) Aufgeschobenes
+       Senden löschte einen gerade eingetroffenen Diktat-Hinweis: Endet ein
+       Abschnitt mit Fehler (`timeout`, `network`) während ein Senden
+       aufgeschoben ist, setzt `finish()` `idle`, `onError` liefert den
+       Hinweis (Microtask) im selben Render, der `dictState`-Effekt ruft
+       `send()` auf – und `send()` löschte den Hinweis per `setDictHint(null)`
+       sofort wieder; der Nutzer sah nie, warum der letzte Teil fehlte. Fix
+       (`src/App.jsx`): Ref `keepDictHintRef`; der Effekt setzt sie vor dem
+       aufgeschobenen `send()` und räumt sie per `try/finally` direkt nach dem
+       SYNCHRONEN Teil von `send()` wieder weg (auch bei den frühen
+       Rückkehrpfaden: leer, `busy`, nicht verbunden); `setDictHint(null)`
+       liegt vor dem ersten `await`. Normales Senden löscht den Hinweis wie
+       bisher. (2) Zwei verschachtelte Live-Regionen: Die Hinweiszeile trug
+       `role="status"` innerhalb des `aria-live="polite"`-Wrappers (doppelte
+       Ansage möglich); `role="status"` ist entfernt, Wrapper und Selektor
+       `[data-dictation-hint]` bleiben (korrigiert die Angabe in #139).
+       (3) Flaky Bestandstest `tests/docEditorLinkPopover.test.jsx`
+       („Einfügen per Klick: Fokus zurück im Editor …“ lief unter
+       v8-Coverage-Last mit 5348 ms in den 5000-ms-Timeout): `vi.setConfig({
+       testTimeout: 20000 })` für die ganze Datei, keine Logik geändert; per
+       Scratch-Test belegt, dass `setConfig` greift.
+     - **Quellen** (Recherche 2026-10-17, ohne Gerätetest; Chromium-Quellen
+       als Datei@Tag bzw. Commit-/Issue-Nummer, eine URL steht nur, wo sie
+       belegt ist): Chromium `SpeechRecognitionImpl.java` (Provider-Wahl,
+       Extras, Fehler-Mapping, `UNSTABLE_TEXT`; Tag 155.0.8059.84 und main,
+       Oktober 2026; `final_result` ab 157.0.8102.0), WebView-Pfad
+       `aw_main_delegate.cc`, `aw_speech_recognition_manager_delegate.cc`,
+       `aw_permission_manager.cc`, `WebViewContentsClientAdapter.java`;
+       AOSP `SpeechRecognizerImpl.java`, `RecognitionService.java`,
+       `SpeechRecognitionManagerServiceImpl.java` (Rückrufe über den
+       Main-Handler, `RECORD_AUDIO` des Aufrufers, Sitzungszähler pro UID);
+       Chromium-Bug https://issues.chromium.org/issues/40417848 (Kommentar
+       #68: „doesn't seem to work for Android System WebView 99“); negative
+       Praxisberichte zum WebView-Pfad: hermes-webui/hermes-android#1,
+       woaiys3/deepseek-harness-android-app#23, isopen-io/meeshy#9446
+       (letztere beiden nach eigener Aussage ungeprüft). Android-Doku:
+       https://developer.android.com/reference/android/speech/SpeechRecognizer,
+       https://developer.android.com/reference/android/speech/RecognizerIntent
+       (`EXTRA_ENABLE_FORMATTING`, `EXTRA_SEGMENTED_SESSION`),
+       https://developer.android.com/reference/android/speech/RecognitionListener,
+       https://developer.android.com/reference/android/webkit/PermissionRequest,
+       https://developer.android.com/reference/android/webkit/WebChromeClient,
+       https://developer.android.com/reference/android/webkit/WebView,
+       https://developer.android.com/training/package-visibility (`<queries>`
+       ab Android 11 Pflicht),
+       https://developer.android.com/about/versions/pie/android-9.0-changes-all
+       (kein Hintergrund-Mikrofon ab Android 9),
+       https://developer.android.com/studio/publish/app-signing und
+       https://developer.android.com/tools/apksigner (Signatur).
+     - **Tests.** `tests/androidSpeech.test.js` (60 Tests, node-Umgebung):
+       Brücke erkennen (halbe Objekte, werfender Getter), `getInfo`/`getLog`
+       (kaputtes JSON, `bridge` < 1), `openAndroidSettings` (unbrauchbarer
+       `autoProvider`, Wurf), Einstellungen (sanitize, lesen/schreiben mit
+       kaputtem und werfendem Speicher), `buildStartOptions`, `mapNativeError`
+       (alle Codes, jeder Name passt auf die Regel aus #139), die Klasse
+       (sid/Optionen, zweiter Start wirft, `speechStart` wirft, Normalablauf
+       mit `UNSTABLE_TEXT`, Final ersetzt Interim, leeres Endergebnis (ganz
+       ohne Text -> `nomatch`; nach Zwischentext oder Final KEIN `nomatch`),
+       Segmente, `fin`-Partial bei `continuous = true` (Final, auch ohne
+       `interimResults`) und `continuous = false` (nur Zwischenstand, genau
+       ein Final aus `results`), Fehler 5 vor/nach `ready`, stop/abort mit
+       werfender Brücke, Verteiler-Robustheit), Integration mit dem ECHTEN
+       `createDictation` (Dialog-Wartezeit ohne Wächter, App-Wechsel -4, -2
+       mit `action`, Nutzer-Stopp, Antippen in `starting`, Java antwortet
+       nicht, `fin`-Partial mit abweichendem Endtext: Satz genau einmal im
+       Feld, `fin`-Partial ohne Endergebnis: Text bleibt, leeres Endergebnis,
+       `start-failed`, Engine „webview“ nimmt die Web Speech API,
+       Einstellungen reichen bis `speechStart`), `getDictationCtor`/
+       `isDictationAvailable` (alte APK aus, neue an), Hinweistexte, Diagnose
+       (Einstellungen: ein Objekt mit Fremdfeldern `pat`/`apiKey`/`token`
+       ergibt EXAKT die vier bekannten Felder; weder `localStorage` noch
+       `sessionStorage` wird gelesen; ein gültiges `getInfo`-JSON erscheint
+       unverändert, ein ungültiges nie), den Einstellungs-Abschnitt (statisch
+       gerendert: nur mit Brücke, Standardwerte, kaputter Speicher) und einen
+       Versions-Test: das Header-Literal in `App.jsx` muss dem `appVersion`-
+       Literal am Einstellungs-Dialog entsprechen (per Mutation rot gesehen).
+       Die 193 Tests aus `tests/dictation.test.js` blieben unverändert grün.
+       Coverage (`npm run test:coverage`, 63 Dateien, 3537 Tests grün):
+       `androidSpeech.js` Zeilen 100 %, Statements 99,56 %, Branches 98,33 %;
+       `dictation.js` Zeilen 100 %, Statements 99,4 %, Branches 96,59 %;
+       gesamt `src/lib` Zeilen 96,47 %, Statements 94,42 %, Branches 89,25 %
+       (Gate 60 %). Mutanten (kurz eingebaut, sofort zurückgesetzt)
+       nachgewiesen: `&& !this._interim` entfernt (leeres Endergebnis nach
+       Zwischentext löste `nomatch` aus – laut Review vorher von KEINEM Test
+       bemerkt), `!this._finals.
+       length` entfernt, `fin`-Guard entfernt/invertiert, rohe statt
+       sanitisierte Einstellungen in der Diagnose, Diagnose liest
+       `localStorage`, Diagnose gibt ungültiges `getInfo`-JSON roh aus – jeder
+       färbt mindestens einen Test rot. Java-Unit-Tests (JUnit/Robolectric) gibt es bewusst
+       NICHT: Die Logik mit Gewicht (Semantik, Mapping) liegt in JS und ist
+       dort voll getestet; Mocks für Android-Klassen testeten genau das
+       Kritische (Threading, Rückrufe des Systemdienstes) nicht. Stattdessen:
+       Kompilieren und Lint im Job `check`, Code-Review gegen feste
+       Invarianten (genau ein `end` pro sid, Main-Thread, veraltete Rückrufe
+       verworfen, kein Abbruch in `onPause`, keine Transkripte im Log,
+       Backslash-u-Freiheit, Multi-Catch-Typen) und der Emulator-Smoke-Test.
+       Der Java-Code wurde nur gelesen und mit Ersatzprüfungen geprüft
+       (Klammerbilanz, Byte-Scan, Methodensignaturen gegen die lokale
+       Android-Doku, `bash -n`, `node --check`, YAML-Struktur, 25 Fälle des
+       Prüfskripts gegen Attrappen, Schlüsselskript unter Windows PowerShell
+       5.1 und pwsh 7 in den Modi `-OhneSecrets`/`-NurSecretsSetzen` mit
+       Attrappen für `gh` und Zwischenablage). Nach der Alias-Änderung
+       (zwei Secrets) erneut: `bash -n`, Workflow-YAML per Parser (Alias als
+       Konstante auf Workflow-Ebene, in keinem Schritt ein `secrets.`-Bezug
+       darauf), die Secret-Prüfung des Prüfskripts (ohne alles: `probe`
+       überspringt, `release` scheitert; nur ein Secret: `release` scheitert;
+       beide Secrets ohne Alias: weiter zur nächsten Prüfung), Parser-Check
+       des Schlüsselskripts unter Windows PowerShell 5.1 und pwsh 7 (0 Fehler,
+       reines ASCII) und `Set-RepoSecrets` mit Attrappe für `gh` in beiden
+       Editionen (genau zwei `gh secret set`).
+       Die Verdrahtung in `App.jsx` (Knopf „Einstellungen öffnen“,
+       `keepDictHintRef`) und die Interaktion im Einstellungs-Abschnitt
+       liegen außerhalb von `src/lib` bzw. sind nur statisch gerendert
+       getestet; sie laufen über die E2E-Fälle I0 (Brücken-Simulation) und
+       I1-I14 (Gerät) in `docs/TESTFAELLE.md`.
+     - **Restrisiken.** (1) Java ist NIRGENDS kompiliert (kein JDK, kein
+       Android-SDK lokal); der erste echte Compiler- und Lint-Lauf ist der Job
+       `check` auf dem Branch, dort können noch Funde auftauchen. (2) Das
+       Verhalten am Gerät (Dienstwahl, `UNSTABLE_TEXT`, Satzzeichen, Pause
+       ~1 s, Signalton, Hersteller ohne Google-Sprachdienst – dort greift der
+       System-Standarderkenner mit anderem Verhalten, ohne Teilergebnisse) ist
+       ungeprüft; die Diagnose zeigt die echten Werte. (3) `UNSTABLE_TEXT` und
+       `final_result` sind undokumentierte Google-Extras (belegt nur durch
+       Chromium-Kommentare); fehlen sie, zeigt der Live-Text nur den stabilen
+       Teil, das Endergebnis ist trotzdem vollständig. (4) `fin`-Flag
+       (ENTSCHIEDEN, siehe „`fin`-Flag nur im Dauer-Modus“ oben): Im
+       Einzelmodus (`continuous = false`) zählt es nicht mehr als Final.
+       Restrisiko: Ob der Google-Dienst im Einzelmodus überhaupt `fin` setzt,
+       ist unbelegt (dann ist die Regel wirkungslos, aber harmlos). Liefert
+       `results` im Einzelmodus weniger Text als zuvor als `fin`-Partial
+       angezeigt wurde, gilt das Endergebnis (wie bei jedem Zwischenstand).
+       Ein späteres „längeres Diktat“ mit `continuous = true`
+       (docs/TODO.md) bekommt `fin`-Abschnitte als Finals wie bisher.
+       (5) Im öffentlichen Repo
+       liegen Signier-Secrets (siehe Abwägung oben); das Passwort liegt kurz in
+       der Windows-Zwischenablage und eventuell im Verlauf (Win+V), das Skript
+       weist darauf hin und leert sie (Fehlschlag beim Leeren = Warnung,
+       Restrisiko: das Passwort bliebe dann bis zum Überschreiben darin); Base64-Keystore und Passwort gehen
+       als `gh`-Kommandozeilenargumente (kurz in der Prozessliste lesbar, nur
+       lokal beim Nutzer). (6) Der Alias „notizbuch“ steht im Klartext im
+       öffentlichen Workflow (Konstante `NOTIZBUCH_KEY_ALIAS`); ohne
+       Schlüssel und Passwort ist er wertlos. Er muss mit dem Alias im
+       PKCS12 übereinstimmen (`$Alias` im Schlüsselskript, `-name` bei
+       `openssl pkcs12 -export`); die `keytool`-Ladeprobe im CI fängt eine
+       Abweichung vor der Veröffentlichung ab. Ein früher angelegtes Secret
+       `NOTIZBUCH_KEY_ALIAS` wird nicht gebraucht und kann weg (README
+       nennt den `gh secret delete`-Befehl). (7) Ein Push auf `main`, der nur
+       `android/**` oder den Workflow ändert, macht `release` absichtlich rot,
+       weil `versionCode` nicht größer ist als der veröffentlichte; das
+       Release bleibt unberührt, Fehl-Mails und ein rotes `main` sind die
+       Folge (steht in `android/README.md`). (8) Release löschen und neu
+       anlegen: Der feste Download-Link liefert einige Sekunden 404; scheitert
+       `gh release create` (Netz/API), ist das Release weg, bis der Lauf
+       wiederholt wird. (9) „Release nicht gefunden“ wird am `gh`-Fehlertext
+       erkannt (`not found`, `no assets match`, `HTTP 404`); weicht er ab,
+       scheitert `release` vorsichtshalber. (10) Der Smoke-Job ist ungeprüft
+       (KVM auf Standard-Runnern und ein Sprachdienst im Emulator-Image sind
+       unbelegt; der Emulator hat kein Mikrofonsignal); er ist nicht
+       blockierend, sein Log muss gelesen werden. (11) Der Versionsstring
+       steht in `App.jsx` zweimal (Kopfzeile und `appVersion` am
+       Einstellungs-Dialog, die Diagnose braucht ihn); beide müssen zusammen
+       geändert werden, ein Test vergleicht sie. (12) Nachzug 1
+       (`keepDictHintRef`) liegt in `App.jsx` und ist nicht unit-testbar; der
+       E2E-Fall C37b prüft ihn mit einem Fake-Erkenner. (13) Verliert der
+       Nutzer Schlüssel oder Passwort, ist wieder eine Neuinstallation
+       fällig, und das Paket ließe sich nicht mehr bei Googles Developer
+       Verification registrieren.
+     - **Betroffene Altentscheidungen.** #30 (Signatur-Regel ersetzt, siehe
+       dort); #139 (WebView-Ausblendung nur noch OHNE Brücke, `role="status"`
+       an der Hinweiszeile entfällt, Hinweistexte um die App-Codes erweitert).
