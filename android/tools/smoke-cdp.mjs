@@ -51,23 +51,53 @@ function connect(url) {
   return { ready, evaluate, close: () => ws.close() };
 }
 
+// Seite bereit? Dokument fertig geladen UND React-App gerendert (die
+// Kopfzeile mit dem Einstellungen-Knopf, title="Einstellungen", steht in
+// App.jsx unbedingt - auch im unverbundenen Zustand). Waehrend eines
+// Kontextwechsels (Neuladen/Navigation) wirft evaluate -> waitFor wartet weiter.
+const PAGE_READY = `document.readyState === "complete" && !!document.querySelector('button[title^="Einstellungen"]')`;
+
 // Sammler in der Seite: haengt sich VOR einen evtl. vorhandenen Verteiler.
-const SETUP = `(() => {
+// Idempotent und selbstheilend: installiert nur, wenn window.__smoke fehlt
+// (z. B. weil das Dokument nach dem SETUP ersetzt wurde - Navigation oder
+// Neuladen; so geschehen im CI-Lauf, als die Seite noch lud). Liefert true,
+// wenn NEU installiert wurde. Steht am Anfang JEDES Ausdrucks, der den
+// Sammler braucht; ein Neuaufbau mitten in einer Sitzungsreihe geht dabei nicht
+// still durch, sondern wird als "reinstalled" gemeldet (siehe noteReinstall).
+const INSTALL = `const __smokeInstall = () => {
+  if (window.__smoke) return false;
   window.__smoke = { ev: {} };
   const prev = window.__notizbuchAndroidSpeech;
   window.__notizbuchAndroidSpeech = (raw) => {
     try { const m = JSON.parse(raw); (window.__smoke.ev[m.sid] = window.__smoke.ev[m.sid] || []).push(m); } catch (e) {}
     if (typeof prev === "function") { try { prev(raw); } catch (e) {} }
   };
+  return true;
+};`;
+
+const SETUP = `(() => {
+  ${INSTALL}
+  const installed = __smokeInstall();
   const b = window.NotizbuchAndroid;
   const ok = !!b && typeof b.speechStart === "function";
-  return { hasBridge: ok, info: ok ? JSON.parse(b.getInfo()) : null, webkit: typeof window.webkitSpeechRecognition };
+  return { installed, hasBridge: ok, info: ok ? JSON.parse(b.getInfo()) : null, webkit: typeof window.webkitSpeechRecognition };
 })()`;
+
+// Hinweis, wenn der Sammler waehrend des Laufs neu aufgebaut werden musste:
+// bis dahin gesammelte Ereignisse sind dann weg, ein Folgefehler ("0x end")
+// hat also vermutlich diese Ursache und nicht die Bruecke.
+const noteReinstall = (name, r) => {
+  if (r && r.reinstalled) {
+    console.log(`${name}: Hinweis - Sammler war weg und wurde neu installiert (Seite neu geladen/ersetzt? Fruehere Ereignisse sind verloren)`);
+  }
+};
 
 const fmt = (m) => m.type + (m.code !== undefined ? ":" + m.code : "") + (Array.isArray(m.texts) ? "[" + m.texts.length + "]" : "");
 
 // Startet sid, bricht optional nach abortAfterMs ab, wartet auf end (+1 s Nachlauf).
 const RUN = (sid, opts, abortAfterMs, waitMs) => `(async () => {
+  ${INSTALL}
+  const reinstalled = __smokeInstall();
   const b = window.NotizbuchAndroid, E = window.__smoke.ev, sid = ${JSON.stringify(sid)};
   b.speechStart(sid, ${JSON.stringify(JSON.stringify(opts))});
   const t0 = Date.now(); let aborted = false;
@@ -77,7 +107,7 @@ const RUN = (sid, opts, abortAfterMs, waitMs) => `(async () => {
     await new Promise((r) => setTimeout(r, 100));
   }
   await new Promise((r) => setTimeout(r, 1000));
-  return { aborted, events: (E[sid] || []) };
+  return { aborted, events: (E[sid] || []), reinstalled };
 })()`;
 
 function checkSession(name, r, abortCode) {
@@ -116,6 +146,15 @@ async function main() {
 
   const cdp = connect(page.webSocketDebuggerUrl);
   await cdp.ready;
+  // Die Seite wird oft schon "gefunden", waehrend sie noch laedt; ein
+  // Neuladen/Dokumentwechsel nach dem SETUP vernichtet den Sammler. Darum
+  // erst auf fertiges Dokument + gerenderte App warten (kurze Einzel-Timeouts,
+  // damit ein haengender evaluate im Kontextwechsel die Schleife nicht blockiert),
+  // dann kurz zur Ruhe kommen lassen.
+  if (!(await waitFor(() => cdp.evaluate(PAGE_READY, 10000), 120000))) {
+    throw new Error("App-Seite nicht bereit (readyState/Einstellungen-Knopf nach 120 s)");
+  }
+  await sleep(1000);
   const setup = await cdp.evaluate(SETUP);
   console.log("Setup: " + JSON.stringify(setup));
   if (!setup.hasBridge) throw new Error("window.NotizbuchAndroid fehlt");
@@ -123,41 +162,63 @@ async function main() {
   if (setup.info.mic !== "granted") fail("getInfo().mic = " + setup.info.mic + " (pm grant?)");
 
   // 1) Natuerlicher Lauf (Abbruch nach 20 s, falls der Dienst haengt)
-  checkSession("S1 natuerlich", await cdp.evaluate(RUN("smoke1", { lang: "de-DE", partial: true }, 20000, 25000)), -5);
+  const s1 = await cdp.evaluate(RUN("smoke1", { lang: "de-DE", partial: true }, 20000, 25000));
+  noteReinstall("S1 natuerlich", s1);
+  checkSession("S1 natuerlich", s1, -5);
   // 2) Abbruch nach 1,5 s
-  checkSession("S2 abort", await cdp.evaluate(RUN("smoke2", { lang: "de-DE", partial: true }, 1500, 6000)), -5);
+  const s2 = await cdp.evaluate(RUN("smoke2", { lang: "de-DE", partial: true }, 1500, 6000));
+  noteReinstall("S2 abort", s2);
+  checkSession("S2 abort", s2, -5);
   // 3) Ersetzen: zweiter Start beendet den ersten mit genau einem end
   const rep = await cdp.evaluate(`(async () => {
+    ${INSTALL}
+    const reinstalled = __smokeInstall();
     const b = window.NotizbuchAndroid, E = window.__smoke.ev;
     b.speechStart("smoke3", "{}"); b.speechStart("smoke4", "{}");
     const t0 = Date.now();
     while (Date.now() - t0 < 4000 && !(E.smoke3 || []).some((m) => m.type === "end")) await new Promise((r) => setTimeout(r, 100));
     b.speechAbort("smoke4");
     await new Promise((r) => setTimeout(r, 2000));
-    return { s3: E.smoke3 || [], s4: E.smoke4 || [] };
+    return { s3: E.smoke3 || [], s4: E.smoke4 || [], reinstalled };
   })()`);
+  noteReinstall("S3/S4", rep);
   checkSession("S3 ersetzt", { events: rep.s3, aborted: true }, -5);
   checkSession("S4 ersetzend", { events: rep.s4, aborted: true }, -5);
   // 4) Ungueltige sid / kaputte Optionen: keine Ereignisse bzw. Standardwerte, kein Absturz
   const bad = await cdp.evaluate(`(async () => {
+    ${INSTALL}
+    const reinstalled = __smokeInstall();
     const b = window.NotizbuchAndroid;
     b.speechStart("bad sid!", "{}"); b.speechStart("smoke5", "{kaputt");
     await new Promise((r) => setTimeout(r, 1500)); b.speechAbort("smoke5");
     await new Promise((r) => setTimeout(r, 1500));
-    return { badSid: window.__smoke.ev["bad sid!"] || null, s5: window.__smoke.ev.smoke5 || [] };
+    return { badSid: window.__smoke.ev["bad sid!"] || null, s5: window.__smoke.ev.smoke5 || [], reinstalled };
   })()`);
+  noteReinstall("S5 kaputte Optionen", bad);
   if (bad.badSid) fail("Ereignisse fuer ungueltige sid");
   checkSession("S5 kaputte Optionen", { events: bad.s5, aborted: true }, -5);
 
   // 5) Lebenszyklus: App in den Hintergrund -> error:-4 + end
-  await cdp.evaluate(`(() => { window.NotizbuchAndroid.speechStart("smoke6", "{}"); return true; })()`);
+  // (Sammler auch hier absichern: er muss beim Start von smoke6 vorhanden sein.)
+  const s6start = await cdp.evaluate(`(() => {
+    ${INSTALL}
+    const reinstalled = __smokeInstall();
+    window.NotizbuchAndroid.speechStart("smoke6", "{}");
+    return { reinstalled };
+  })()`);
+  noteReinstall("S6 Start", s6start);
   await sleep(2000);
   adb("shell", "input", "keyevent", "KEYCODE_HOME");
   await sleep(3000);
   adb("shell", "am", "start", "-n", `${APP}/.MainActivity`);
   await sleep(3000);
-  const s6 = await cdp.evaluate(`window.__smoke.ev.smoke6 || []`);
-  checkSession("S6 Hintergrund", { events: s6, aborted: true }, -4);
+  const s6 = await cdp.evaluate(`(() => {
+    ${INSTALL}
+    const reinstalled = __smokeInstall();
+    return { events: window.__smoke.ev.smoke6 || [], reinstalled };
+  })()`);
+  noteReinstall("S6 Hintergrund", s6);
+  checkSession("S6 Hintergrund", { events: s6.events, aborted: true }, -4);
 
   // 6) Protokoll lesbar, enthaelt Eintraege
   const log = await cdp.evaluate(`JSON.parse(window.NotizbuchAndroid.getLog())`);
