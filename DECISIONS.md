@@ -18132,3 +18132,279 @@ aus `referenz-app.jsx` übernommen.
        Hinweis ohne Fakten, aufgeführte Zahl aus den tatsächlichen Fakten).
        Der Testtitel dazu nennt jetzt die tatsächliche Datenlage (20 Fakten
        + 10 überzählige Zeilen, davon 3 eigenständige).
+
+139. **v7.59, Nutzerwunsch: Mikrofon-Knopf am Chat-Eingabefeld
+     (Spracheingabe über die Web Speech API des Browsers).**
+     - **Anlass/Ziel.** Der Nutzer will Notizen und Fragen auch einsprechen
+       können. Ein Mikrofon-Knopf in der Chat-Eingabezeile startet die
+       Spracherkennung des Browsers; der erkannte Text erscheint schon
+       während des Sprechens im Feld, wird an vorhandenen Text ANGEHÄNGT
+       (nichts wird überschrieben) und nie automatisch gesendet. Ohne
+       Browser-Unterstützung erscheint kein Knopf; bei Problemen gibt es
+       einen deutschen Hinweis. Neu: `src/lib/dictation.js` (reine Logik
+       plus Controller, ohne React und ohne globale window/navigator/
+       document), Verdrahtung in `src/App.jsx`.
+     - **Wahl der Technik (Nutzerentscheidung 2026-10-16).** Web Speech API
+       (`SpeechRecognition`, unpräfixiert ab Chrome 139, sonst
+       `webkitSpeechRecognition`; der Konstruktor wird bei JEDEM Antippen
+       frisch gelesen) statt Cloud-STT (Whisper o. Ä.) oder On-Device-WASM:
+       kostenlos, kein Schlüssel, kein Modell-Download, keine neue
+       Abhängigkeit.
+     - **Einzelabschnitte statt Dauerdiktat.** Pro Antippen GENAU EINE
+       Sitzung (`continuous = false`, `interimResults = true`,
+       `maxAlternatives = 1`), kein automatischer Neustart, pro Diktat eine
+       NEUE Erkenner-Instanz (ein zweites `start()` auf derselben Instanz
+       wirft `InvalidStateError`; das Flag fällt erst mit `end`). Grund:
+       Chrome Android macht im continuous-Modus bis einschließlich Chrome
+       156 aus jedem Teilergebnis des Android-Erkenners ein FINALES
+       Ergebnis (Chromium `SpeechRecognitionImpl.java` @155,
+       `handleResults`: `if (mContinuous && provisional) { provisional =
+       false; }`); `event.results` wächst dann kumulativ („hallo“, „hallo
+       wie“, „hallo wie geht’s“) und ergäbe doppelten Text. Der Fix
+       (Commit becd144 vom 2026-10-12, „Fix Android Web Speech API
+       continuous mode, partials, and confidence“) steckt erst in Tag
+       157.0.8102.0; Chrome 157 Stable ist für 2026-11-03 geplant,
+       Samsung Internet u. a. folgen später. Mit `continuous = false`
+       sind Teilergebnisse auf Android korrekt vorläufig, das Endergebnis
+       kommt genau einmal, danach `end`. Folge: Ein Abschnitt endet nach
+       etwa 0,5–1 s Sprechpause (Desktop: 0,5 s Stille bei weniger als 3 s
+       Sprechen, sonst 1 s; Android bestimmt der Google-Systemerkenner,
+       ca. 1 s). Spätere Optionen, VORHER den Nutzer fragen: Googles
+       Neustart-Muster (bei jedem `end` neu starten, `no-speech`/
+       `no-match` ignorieren, Abbruch nach 5 erfolglosen Neustarts) bzw.
+       `continuous` ab Chrome 157.
+     - **Quellen** (Recherche 2026-10-15/16, ohne Gerätetest):
+       Chromium-Quelltext Tag 155.0.8059.84 (Stable-Stand 2026-10-15;
+       Android `SpeechRecognitionImpl.java`, Desktop
+       `speech_recognizer_impl.cc`, Blink-Ergebnisaufbau), Commits becd144
+       und 0d78015 (beide 2026-10-12; letzterer: Android beendet Sessions
+       nach jeder Äußerung); Chromium-Bug
+       https://issues.chromium.org/issues/40948113 („Web Speech API
+       recognition doesn't work properly on Chrome on Android“);
+       https://developer.mozilla.org/en-US/docs/Web/API/SpeechRecognition
+       (Datenschutz-Einordnung, Browser-Kompatibilität);
+       https://github.com/JamesBrill/react-speech-recognition (Workaround
+       `continuous: false`, Issue #18; Signalton, Issue #213). Die
+       Recherche nennt Chromium-Quellen als Datei@Tag bzw. Commit-/Issue-
+       Nummer; eine URL steht hier nur, wo sie belegt ist.
+     - **Sprache.** `lang` wird immer explizit gesetzt
+       (`pickDictationLang(navigator.languages)`): erster deutscher
+       Eintrag, nur DE/AT/CH werden übernommen, reines „de“, „de-LU“ u. Ä.
+       und „kein deutscher Eintrag“ ergeben `de-DE`. Chrome ignoriert
+       `<html lang>`; ohne Angabe nähme es den ersten Accept-Language-
+       Eintrag bzw. `en-US` – auf einem englisch eingestellten Handy würde
+       Englisch erkannt.
+     - **Einspleißen ohne Basis-Schnappschuss (`dictationStep`).** Jedes
+       Zwischen-/Endergebnis wird per funktionalem
+       `setInput(cur => dictationStep(cur, vorher, nachher))` in den
+       AKTUELLEN Feldtext eingespleißt. Ersetzt wird NUR das eigene
+       Endstück des vorigen Schritts: das Feld muss genau so enden, wie
+       `appendDictation(Anfang, vorher)` es erzeugt hat (`cur.endsWith(
+       vorher)` UND `appendDictation(cur ohne Endstück, vorher) === cur`).
+       Der damals eingefügte Trenner steckt im verbleibenden Anfang
+       („Einkauf “ bei „Einkauf milch“); deshalb passt es für JEDE Basis,
+       auch „x  “ mit zwei Leerzeichen oder eine öffnende Klammer. Passt
+       das Endstück nicht mehr (Nutzer oder Code hat es verändert oder
+       etwas dahinter angehängt), bleibt das Feld UNVERÄNDERT: das Diktat
+       „koppelt sich ab“, nichts geht verloren, nichts wird doppelt
+       geschrieben. Änderungen VOR dem Endstück koppeln dagegen nicht ab
+       (das Endstück passt weiter und wird ersetzt). Warum kein
+       Schnappschuss (Vorschlag der Recherche): Es gibt weitere Schreiber
+       auf `input` – `submitQuickNote` (hängt die Schnellnotiz an) und die
+       Wiederherstellung in `send()` nach einem Fehler (`setInput(prev =>
+       prev.trim() ? prev : text)`); ein Schnappschuss überschriebe deren
+       Text beim nächsten Ergebnis. `appendDictation` trimmt die Basis nie
+       (Nutzertext bleibt byte-gleich), setzt genau ein Leerzeichen (keins
+       nach Leerraum/Zeilenumbruch oder nach `(`, `[`, `{`, „ und ‚) und
+       macht weder Großschreibung noch Satzzeichen. Es wird keine RegExp
+       aus Nutzertext gebaut (`$&`, `.*`, Klammern, Backslash bleiben
+       wörtlich). Der Auftragsentwurf schleifte in `dictationStep` über
+       zwei Trenner (`" "` und `""`); die Schleife entfiel (es bleibt
+       der Trenner `""`), weil das zusätzliche Abschneiden von `" "` nie
+       etwas ändert: `appendDictation(Anfang, vorher) === cur` trifft nur,
+       wenn der Anfang leer ist oder auf Leerraum/öffnende Klammer endet;
+       dann liefert `appendDictation(Anfang, nachher)` bereits Anfang +
+       nachher, also dasselbe wie die Variante mit abgeschnittenem
+       Trenner, und diese kann nie treffen, wo die einfache nicht trifft.
+       Belegt per Brute-Force über rund 112.000 Kombinationen und per
+       unabhängigem Fuzz im Review (80.000 Zufallsfälle, identisch zur
+       Zwei-Trenner-Fassung). Während
+       des Diktats ist das Feld `readOnly` (keine Bildschirmtastatur, keine
+       Tastatur-Komposition gegen die programmatischen Änderungen); beim
+       Start wird ein fokussiertes Feld per `blur()` verlassen.
+     - **Transkript-Aufbau.** `transcriptFromResults` baut das Transkript
+       bei jedem `result`-Ereignis IMMER ab Index 0 neu auf (kein
+       `resultIndex`, keine Deltas): doppelt zugestellte Ereignisse bleiben
+       folgenlos. KEIN Konfidenz-Filter (Finals mit confidence 0 sind auf
+       Android legitim). Netz-Regel gegen kumulative/doppelte Finals
+       (Android-continuous-Fehler, Safari 14.1–17): Ist ein Final –
+       kleingeschrieben verglichen – gleich dem vorigen oder beginnt mit
+       „voriges + Leerzeichen“, ERSETZT es das vorige; nur an der
+       Wortgrenze („ja“ + „jawohl“ bleibt „ja jawohl“, „ok“ + „OK“ wird
+       „OK“). Interims werden verkettet; unsinnige `length`-Werte (NaN,
+       Infinity, Bruch) laufen nicht endlos (`Number.isInteger`).
+     - **Aufgeschobenes Senden.** Senden (Knopf oder Enter) während eines
+       Diktats sendet NICHT sofort, sondern ruft `stop()` auf und merkt sich
+       das Senden (`sendAfterDictRef`); ist der Zustand wieder `idle`
+       (Effekt auf `dictState`), läuft `send()` mit dem dann vollständigen
+       Feldtext. Grund: Auf Chrome Android ≤ 156 fehlt den
+       Zwischenergebnissen der instabile Schluss, sofortiges Senden verlöre
+       die letzten Wörter. Das Senden hat der Nutzer selbst ausgelöst – es
+       ist kein „automatisches Senden“ des Diktats. Der Guard sitzt in
+       `send()` HINTER den bestehenden Guards (leeres Feld, `busy`,
+       `archiving`): dort läuft das Diktat unbeeinflusst weiter. Die
+       `send()`-Version des Renders, in dem `dictState` auf `idle` wechselt,
+       sieht das Endergebnis bereits (`onresult` kommt vor `onend`). Nach
+       dem Antippen des Mikro-Knopfs liegt der Fokus auf dem Knopf: Enter
+       beendet dann nur das Diktat (kein aufgeschobenes Senden); das
+       aufgeschobene Senden per Enter greift im fokussierten Feld. Hauptpfad
+       ist der Senden-Knopf (Testfall C38).
+     - **Hinweiszeile statt `setBanner`.** Diktat-Hinweise erscheinen in
+       einer eigenen Zeile direkt über der Eingabezeile
+       (`data-dictation-hint`, `role="status"` in einer `aria-live`-Hülle,
+       die immer gerendert wird), nicht im oberen Banner (nur ein Platz,
+       „info“ sähe wie „ok“ aus). Info-Hinweise verschwinden nach 6 s,
+       Warnungen bleiben bis X, nächstem Antippen oder Senden; `dictErrSeq`
+       verwirft Hinweise, die erst nach einem neuen Antippen aufgelöst
+       würden (die Berechtigungsabfrage ist asynchron). `aborted` ist still
+       (normaler Abbruch, z. B. App-Wechsel auf Android); `no-speech`/
+       `nomatch` bleiben still, wenn der Nutzer selbst beendet hat oder
+       schon Text kam. Der Code im Fallback-Text „Spracherkennung
+       fehlgeschlagen (…)“ erscheint nur, wenn er auf
+       `/^[a-z][a-z-]{0,39}$/` passt (kein Fremdtext/HTML/Riesenstring).
+     - **not-allowed-Deutung.** Android meldet auch einen BELEGTEN Erkenner
+       (ERROR_RECOGNIZER_BUSY) und fehlende Systemberechtigung als
+       `not-allowed`. Deshalb fragt die App NUR nach einem `not-allowed`
+       per `navigator.permissions.query({ name: "microphone" })` (Zeitlimit
+       1 s, Fehler/unbekannt → „unknown“) und wählt den Text: `denied` →
+       „blockiert“ samt Freigabe-Weg, `granted` → „gerade nicht verfügbar
+       (belegt oder ohne Mikrofon-Berechtigung)“, sonst → „Beim nächsten
+       Antippen bitte ‚Zulassen‘ wählen“. Die Abfrage steuert nie die
+       Sichtbarkeit des Knopfs. Chrome sperrt die Anfrage nach dreimaligem
+       Wegklicken des Dialogs für 7 Tage; Freigabe dann nur über die
+       Website-Einstellungen.
+     - **Zeitwächter.** `STOP_MS` 3000 (nach `stop()` auf `end` warten,
+       dann `abort()`), `ABORT_MS` 1500 (nach `abort()`/Fehler auf `end`
+       warten, dann Zwangs-Ende mit Hinweis „hat nicht reagiert“), `MAX_MS`
+       60000 (Deckel pro Abschnitt ab `listening`), `TAP_GUARD_MS` 400
+       (ein zweiter Tipp so kurz nach dem Start wird ignoriert). Grund der
+       Kette: Neuere Android-Fehlercodes (TOO_MANY_REQUESTS,
+       SERVER_DISCONNECTED, LANGUAGE_NOT_SUPPORTED …) landen im Chromium-
+       Code in `default: assert false; return;` – nach der Ableitung aus dem
+       Quelltext (nicht beobachtet) kommen dann weder `error` noch `end`;
+       erst `abort()` beendet sicher. Bewusst KEIN Wächter in `starting`
+       (der Berechtigungsdialog darf beliebig lange offen sein; Antippen in
+       `starting` bricht still ab) und KEIN Wächter in `idle`. Nach jedem
+       Weg nach `idle` läuft kein Timer mehr. `cancel()` ist idempotent: ein
+       zweites `cancel()` ruft `abort()` nicht erneut; `cancel()` nach
+       `stop()` funktioniert weiter.
+     - **Kein `visibilitychange`-/`pagehide`-Handler.** Android bricht die
+       Erkennung bei unsichtbarer Seite selbst ab (Blink: `abort()` nur
+       unter `IS_ANDROID`; Ergebnis `error: aborted` + `end`, der bisherige
+       Zwischentext bleibt stehen, kein Hinweis). Der QA-Chrome läuft
+       verdeckt (`document.hidden === true`) und würde mit so einem Handler
+       jeden E2E-Lauf abbrechen. Der Wechsel der mobilen Ansicht weg vom
+       Chat (`view !== "chat"`) beendet das Diktat per `stop()` (die
+       Chat-Sektion bleibt nur per CSS versteckt gemountet; das
+       Endergebnis kommt noch an); ein Notizbuch-Wechsel tut nichts
+       (`input` ist global).
+     - **Layout.** Der Knopf sitzt LINKS vom Feld (Reihenfolge Archiv,
+       Bild, Mikro, Feld, Senden): ein hastiger Tipp beim Beenden soll
+       nicht auf „Senden“ landen; im Feld wäre das Tippziel nur 24–28 px
+       (oben rechts belegen Vergrößern-Knopf und `pr-9` den Platz).
+       Zustände: `idle` neutral; `starting` hell-rosé OHNE Pulsieren
+       (evtl. ist der Berechtigungsdialog offen); `listening` rot
+       pulsierend (`motion-safe`) = „jetzt sprechen“; `stopping` gedimmt und
+       `disabled` (verhindert den Schnell-Neustart, der auf Android
+       `not-allowed`/BUSY auslöst). `aria-label` bleibt konstant
+       „Diktieren“, der Zustand steckt in `aria-pressed` (ein wechselndes
+       Label dazu läse ein Screenreader widersprüchlich), `data-dictation`
+       trägt ihn für E2E. Kompaktraster unter `sm`: Archiv-, Bild- und
+       Mikro-Knopf 40 px (`p-2.5`) statt 44 px, Zeilenabstand `gap-1.5`;
+       „Senden“ bleibt unverändert. Gemessene Feldbreite (Inhalt) bei
+       360 px: heute 140 px, mit viertem Knopf ohne Anpassung 88 px, mit
+       Kompaktraster 108 px. Beim Abschnittsende bekommt das Feld auf dem
+       Desktop den Fokus zurück (Cursor am Ende), aber nur, wenn der Fokus
+       nirgends oder auf dem Mikro-Knopf lag (fremden Fokus nie stehlen);
+       bei grobem Zeiger (`pointer: coarse`) bleibt die Tastatur zu.
+       Während des Diktats wird das Textende sichtbar gehalten (das Feld hat
+       2 Zeilen). Die Klassen stehen als vollständige Literale in
+       `DICT_BTN_CLASS` (Tailwind-Scanner).
+     - **Sichtbarkeit.** Der Knopf wird NICHT gerendert ohne Konstruktor
+       (Firefox Release: Web Speech nur in Nightly; Opera Android), bei
+       `isSecureContext === false` und in der Android-WebView (User-Agent
+       enthält `; wv)`): die eigene APK-Hülle (`android/`) hat weder
+       `RECORD_AUDIO` noch `onPermissionRequest`, der Knopf erzeugte dort
+       nur Fehler. Die Prüfung läuft PRO RENDER (`isDictationAvailable`,
+       nicht memoisiert), damit der E2E-Tester die API per JS entfernen
+       oder ersetzen kann. Die Variante „Hülle erweitern“ wäre eine eigene
+       Runde mit APK-Neuinstallation (docs/TODO.md).
+     - **Datenschutz.** Das Audio geht an den Erkenner des
+       Browser-Anbieters (Chrome Desktop: Google-Webdienst; Chrome Android:
+       Google-Systemdienst „Speech Services by Google“, laut Chromium-
+       Kommentar mit lokalem Fallback ohne Datenverbindung; Edge:
+       Microsoft, laut Drittquellen) – nicht an Anthropic und nicht ins
+       Daten-Repo. Kein API-Schlüssel, keine Kosten. Die Mikrofon-Freigabe
+       gilt pro Origin, also für ganz `tschachim.github.io` (andere
+       Pages-Projekte desselben Kontos teilen sie). Der Titel des Knopfs
+       nennt die Herkunft („Spracherkennung des Browsers“); einen
+       zusätzlichen Einmal-Hinweis gibt es nicht.
+     - **Nicht in v1.** `processLocally`, `SpeechRecognition.available()`/
+       `install()`, `phrases`, `unspokenPunctuation`: Android hat On-Device
+       im Web fest abgeschaltet (`on_device_available = false` unter
+       `IS_ANDROID`), `processLocally = true` führte dort zu
+       `language-not-supported`; `phrases` ohne `processLocally` liefert
+       `phrases-not-supported`; `unspokenPunctuation` wirkt nur in der
+       Desktop-On-Device-Engine; `install()` braucht eine frische
+       Nutzergeste und hing in Brave. Keine Großschreibung am Satzanfang und
+       keine Satzzeichen-Nachbearbeitung, kein Vibrieren: erst den
+       manuellen Testfall C40 auswerten (ob Android Satzzeichen und
+       Großschreibung liefert, ist unbelegt).
+     - **Verworfene Alternativen.** Basis-Schnappschuss (Vorschlag der
+       Recherche; überschriebe Text anderer Schreiber); sofortiges Senden
+       mit `cancel()` (verlöre die letzten Wörter); Knopf im Feld (Tippziel
+       24–28 px); `setBanner` für Hinweise; IDLE-Wächter und Start-Wächter
+       (Berechtigungsdialog); `visibilitychange`-`cancel()`; Einspleißen per
+       `lastIndexOf` (fände fremden, gleich lautenden Text); Konfidenz-
+       Filter; wechselndes `aria-label`.
+     - **Tests.** `tests/dictation.test.js` (193 Tests, node-
+       Umgebung, Fake-Erkennerklasse und Fake-Timer, alle Pflichtfälle des
+       Auftrags inklusive der 19 Controller-Szenarien; zusätzlich
+       Tap-Guard-Grenze 399/400 ms, Sonderzeichen `$&`/`.*`/Backslash,
+       unsinnige `length`-Werte, Längengrenze 40/41 beim Fehlercode,
+       verspätete Antwort nach dem Zeitlimit, Sitzungsisolation, kein
+       Durchsickern von `userStopped`/`hadText`). Coverage von
+       `src/lib/dictation.js` allein: Zeilen 100 %, Statements
+       99,37 %, Branches 96,81 % (ungedeckt nur defensive
+       Fallbacks). Mutantennachweis des Entwicklers: 126 handgeschriebene
+       Mutanten plus Nachläufe, Lücken mit neuen Fällen geschlossen. Im
+       Review zusätzlich zwei eigene Fuzz-Läufe: Einspleißen (280.814
+       Faltungsschritte: vorhandener Text bleibt Präfix, nichts doppelt,
+       nichts verloren) und Controller (2 × 5.000 Zufallsläufe mit
+       Doppel-Tipp, Ereignissen in beliebiger Reihenfolge, späten
+       Ereignissen alter Instanzen, werfenden start/stop/abort, dispose
+       und externen Feldschreibern): 0 Verstöße. Die Verdrahtung in
+       `App.jsx` liegt außerhalb von `src/lib` und ist nicht unit-getestet;
+       sie wird über die E2E-Fälle C35–C39 (Fake-Erkenner per
+       javascript_tool) und C40 (manuell, Handy) in `docs/TESTFAELLE.md`
+       geprüft.
+     - **Restrisiken.** (1) Das Verhalten auf Chrome Android (Ereignis-
+       reihenfolge, `abort`/`end`-Semantik, Berechtigungsdialog,
+       Signalton, nicht unterdrückbar) ist nicht am Gerät geprüft; der
+       Code folgt dem Chromium-Quelltext und ist gegen Fakes getestet
+       (C40 manuell). (2) Ein schneller Neustart direkt nach dem
+       Abschnittsende kann auf Android als `not-allowed` („belegt“)
+       gemeldet werden (Hinweistext der `granted`-Variante). (3) Eine
+       bewusst wiederholte, gleich lautende Äußerung innerhalb EINER
+       Sitzung („nein“ zweimal als Final) macht die Netz-Regel zu einer –
+       der Preis des Schutzes gegen kumulative Finals; mit `continuous =
+       false` ist ein zweites Final pro Sitzung ohnehin nicht zu erwarten.
+       (4) Das aufgeschobene Senden läuft ins Leere, wenn `busy` oder
+       `archiving` erst NACH dem Tippen auf „Senden“ wahr wird: `send()`
+       kehrt dann an den Guards zurück, das Feld bleibt gefüllt, der Nutzer
+       sendet erneut. (5) Satzzeichen und Großschreibung fehlen vermutlich.
+       (6) Brave Desktop liefert keine Cloud-Ergebnisse (Fehler `network`,
+       Hinweistext); Samsung Internet, Edge Android und Brave Android sind
+       nur aus dem gemeinsamen Chromium-Code abgeleitet. (7) Die installierte
+       PWA läuft vermutlich wie der Tab (gleiche Engine, gleicher Origin);
+       dazu gibt es keine Quelle.

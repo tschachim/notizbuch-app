@@ -58,6 +58,23 @@ function Harness({ initialNotes, initialAc }) {
   return <QuickNotes notes={notes} autocorrect={ac} onChange={onChange} onRemove={() => {}} onSubmit={() => {}} />;
 }
 
+// Harness mit UMSCHALTBAREM onChange-Handler (nur für den Test zur Aktualität
+// der Closure im beforeinput-Listener): der Handler wechselt per Re-Render von
+// spyA auf spyB, ohne dass sich dabei ein Text ändert. Der State wird wie im
+// Harness oben übernommen, damit das Feld konsistent bleibt.
+let swapApi = null; // { switchToB }
+function SwapHarness({ initialNotes, spyA, spyB }) {
+  const [notes, setNotes] = useState(initialNotes);
+  const [useB, setUseB] = useState(false);
+  swapApi = { switchToB: () => setUseB(true) };
+  const spy = useB ? spyB : spyA;
+  const onChange = (id, patch) => {
+    spy(id, patch);
+    setNotes((prev) => prev.map((n) => (n.id === id ? { ...n, ...patch } : n)));
+  };
+  return <QuickNotes notes={notes} onChange={onChange} onRemove={() => {}} onSubmit={() => {}} />;
+}
+
 function mount(notes, ac) {
   calls = [];
   frozen = false;
@@ -389,6 +406,127 @@ describe("AutoKorrektur im Post-it: Zustandsweg (jsdom hat kein document.execCom
       const ev = beforeInput(el, "deleteContentBackward");
       expect(ev.defaultPrevented).toBe(true);
       expect(el.value).toBe("ab->XYZ");
+    });
+
+    // Der native beforeinput-Listener ist nur EINMAL registriert und erreicht
+    // die Rücknahme über tryRevertRef. Die Zuweisung im Layout-Effekt (läuft
+    // nach jedem Render, ohne deps) hält das Ref auf der Closure des letzten
+    // Renders. Mutanten: Zuweisung fehlt -> keine Rücknahme; Ref nur im ersten
+    // Render gesetzt oder deps [note.text] -> die Rücknahme meldet an den
+    // ALTEN Handler. Jeder Handler-Wechsel ohne Textänderung entlarvt das.
+    it("beforeinput-Rücknahme meldet an den Handler des LETZTEN Renders, nicht an den des ersten (tryRevertRef im Layout-Effekt)", () => {
+      const spyA = vi.fn();
+      const spyB = vi.fn();
+      calls = [];
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+      act(() => { root.render(<SwapHarness initialNotes={[note("n1", "")]} spyA={spyA} spyB={spyB} />); });
+      const el = container.querySelector("textarea");
+
+      typeText(el, "ab->");
+      expect(el.value).toBe("ab→");
+      expect(spyA.mock.calls.at(-1)).toEqual(["n1", { text: "ab→" }]); // Vorbedingung: A hat das Tippen bekommen
+      const aCalls = spyA.mock.calls.length;
+
+      act(() => swapApi.switchToB()); // Re-Render mit neuem Handler, Text und Merker unverändert
+      expect(spyB).not.toHaveBeenCalled();
+      expect(el.value).toBe("ab→");
+
+      const ev = beforeInput(el, "deleteContentBackward");
+
+      expect(ev.defaultPrevented).toBe(true);
+      expect(el.value).toBe("ab->");
+      expect(spyB.mock.calls).toEqual([["n1", { text: "ab->" }]]); // genau eine Meldung, an B
+      expect(spyA.mock.calls.length).toBe(aCalls); // A hört nichts mehr
+    });
+
+    // Zwei Verteidigungslinien verwerfen den Merker bei Textänderungen: das
+    // Leeren in handleChange (jedes fremde input-Event) und der Layout-Effekt
+    // (note.text weicht ab). Folgt der State dem Event, fängt der Layout-Effekt
+    // schon ab – die Zeile in handleChange wird erst sichtbar, wenn der State
+    // den Zwischenstand NIE sieht (hier: der Aufrufer übernimmt ihn nicht, React
+    // setzt das Feld auf den Prop-Wert zurück). Text und Cursor passen dann
+    // wieder exakt zum Merker, und beforeinput prüft (anders als keydown) nur
+    // gegen revertAutocorrect – der Merker allein trägt die Entscheidung.
+    it("Merker verfällt durch ein fremdes input-Event, auch wenn der Aufrufer den Zwischenstand nicht übernimmt und Text/Cursor danach wieder zum Merker passen", () => {
+      const el = typedNote(); // 'ab→|XYZ', Merker {text 'ab→XYZ', caret 3}
+      frozen = true;
+      insert(el, "z");
+      expect(lastText()).toBe("ab→zXYZ"); // das Event kam in handleChange an …
+      expect(el.value).toBe("ab→XYZ"); // … und React hat das Feld zurückgesetzt
+      el.setSelectionRange(3, 3);
+
+      const ev = beforeInput(el, "deleteContentBackward");
+
+      expect(ev.defaultPrevented).toBe(false); // keine Rücknahme mehr
+      expect(el.value).toBe("ab→XYZ");
+      expect(lastText()).toBe("ab→zXYZ"); // und nichts Neues gemeldet
+    });
+
+    // Der Normalfall derselben Linie: der State folgt jedem Event, der Text
+    // kehrt per Löschen-Event exakt auf den Merker-Zustand zurück. Reiner
+    // Verhaltensschutz (beide Verfall-Zeilen fangen es einzeln ab, rot wird der
+    // Test erst, wenn BEIDE fehlen) – siehe Test darüber für die Einzellinie.
+    it("z getippt und per Löschen-Event wieder entfernt: Text und Cursor passen exakt zum alten Merker – trotzdem keine Rücknahme mehr", () => {
+      const el = typedNote(); // 'ab→|XYZ'
+      insert(el, "z");
+      expect(el.value).toBe("ab→zXYZ");
+      act(() => {
+        nativeSetter.call(el, "ab→XYZ"); // wie der Browser (am React-Tracker vorbei)
+        el.setSelectionRange(3, 3);
+        el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+      });
+      expect(el.value).toBe("ab→XYZ");
+      expect(sel(el)).toEqual([3, 3]);
+      expect(lastText()).toBe("ab→XYZ");
+
+      expect(beforeInput(el, "deleteContentBackward").defaultPrevented).toBe(false);
+      expect(keydown(el, "Backspace").defaultPrevented).toBe(false);
+      expect(el.value).toBe("ab→XYZ");
+    });
+
+    // tryRevert verbraucht den Merker in JEDEM Fall (recordRef.current = null
+    // vor der Prüfung). Nach einer erfolgreichen Rücknahme erledigt das sonst
+    // der Layout-Effekt (der neue Text weicht ab); sichtbar wird der Verbrauch
+    // erst, wenn die Rücknahme nicht im State landet: Feld und Cursor stehen
+    // danach unverändert auf dem Merker-Zustand.
+    it("Verbrauch nach erfolgreicher Rücknahme: übernimmt der Aufrufer sie nicht, löst ein zweites Backspace an derselben Stelle KEINE zweite aus", () => {
+      const el = typedNote(); // 'ab→|XYZ'
+      frozen = true;
+
+      const first = keydown(el, "Backspace");
+
+      expect(first.defaultPrevented).toBe(true);
+      expect(lastText()).toBe("ab->XYZ"); // die Rücknahme wurde gemeldet …
+      expect(el.value).toBe("ab→XYZ"); // … aber nicht übernommen: Feld und Cursor unverändert
+      expect(sel(el)).toEqual([3, 3]);
+      const reports = calls.length;
+
+      const second = keydown(el, "Backspace");
+
+      expect(second.defaultPrevented).toBe(false); // der Browser löscht normal
+      expect(calls).toHaveLength(reports); // keine zweite Meldung
+    });
+
+    // Auch ein GESCHEITERTER Versuch verbraucht den Merker. Android-
+    // Bildschirmtastaturen bewegen den Cursor (Leertaste wischen) ohne
+    // pointerdown/keydown: der Merker lebt weiter, beforeinput prüft nur gegen
+    // revertAutocorrect. Kehrt der Cursor später exakt auf die Merker-Stelle
+    // zurück, darf das alte Ersetzungs-Ereignis nicht wieder zünden.
+    it("Verbrauch nach gescheitertem Versuch: beforeinput bei bewegtem Cursor nimmt nicht zurück und verbraucht den Merker – auch nicht, wenn der Cursor zurückkehrt", () => {
+      const el = typedNote(); // 'ab→|XYZ', Merker {caret 3}
+      el.setSelectionRange(1, 1); // ohne pointerdown/keydown bewegt
+
+      expect(beforeInput(el, "deleteContentBackward").defaultPrevented).toBe(false); // Merker passt nicht -> nichts zu tun
+      expect(el.value).toBe("ab→XYZ");
+
+      el.setSelectionRange(3, 3); // Text und Cursor passen wieder exakt zum Merker
+      const again = beforeInput(el, "deleteContentBackward");
+
+      expect(again.defaultPrevented).toBe(false);
+      expect(el.value).toBe("ab→XYZ");
+      expect(lastText()).toBe("ab→XYZ"); // nie eine Rücknahme gemeldet
     });
   });
 
@@ -772,6 +910,65 @@ describe("AutoKorrektur im Post-it: NATIVER Pfad (execCommand gestubbt, Feld fok
     expect(el.value).toBe("ab->XYZ");
     expect(lastText()).toBe("ab->XYZ");
     expect(sel(el)).toEqual([4, 4]);
+  });
+
+  // Die Stubs oben feuern ein verschachteltes input-Event – dort meldet schon
+  // handleChange den neuen Text, der äußere onChange nach dem nativen Pfad ist
+  // redundant verdeckt. Ein STUMMER Befehl (Wert ändert sich, KEIN input-Event)
+  // macht ihn zur einzigen Meldung: ohne sie bliebe der State beim Rohtext und
+  // das Feld würde beim nächsten Render darauf zurückgesetzt.
+  describe("stummer nativer Befehl (Wert ändert sich ohne input-Event): der äußere onChange ist die einzige Meldung", () => {
+    // Zwingt einen Re-Render von QuickNotes (neue Regel-Identität) und zeigt so,
+    // was der Aufrufer-State wirklich hält: React schreibt den Prop-Wert zurück,
+    // wenn er vom Feldinhalt abweicht.
+    const rerender = () => act(() => api.setAc({ enabled: true, categories: {}, custom: [] }));
+
+    it("insertText ohne input-Event: Ersetzung 'ab→XYZ' wird genau EINMAL gemeldet, Cursor 3, der State hält den Ersatz (Re-Render lässt das Feld stehen)", () => {
+      installExec({
+        insertText: (el, arg) => {
+          el.setRangeText(arg, el.selectionStart, el.selectionEnd, "end"); // stumm
+          return true;
+        },
+      });
+      const el = focused();
+      typeText(el, "ab->");
+
+      expect(execCalls("insertText")).toEqual([["insertText", false, "→"]]);
+      expect(el.value).toBe("ab→XYZ");
+      expect(sel(el)).toEqual([3, 3]);
+      // je Taste ein Bericht; der letzte kommt NUR aus dem äußeren onChange
+      expect(reported()).toEqual(["aXYZ", "abXYZ", "ab-XYZ", "ab→XYZ"]);
+      rerender();
+      expect(el.value).toBe("ab→XYZ"); // der State hält den Ersatz (sonst zurück auf 'ab-XYZ')
+    });
+
+    it("undo ohne input-Event: Rücknahme 'ab->XYZ' wird gemeldet (lastText == Feldinhalt), Cursor 4 kollabiert, der State hält den Rohtext", () => {
+      installExec({
+        undo: (el, stack) => {
+          const prev = stack.pop();
+          if (!prev) return false;
+          nativeSetter.call(el, prev.value); // stumm: am React-Tracker vorbei, kein Event
+          el.setSelectionRange(prev.start, prev.end);
+          return true;
+        },
+      });
+      const el = focused();
+      typeText(el, "ab->");
+      // Vorbedingung: Feld und zuletzt gemeldeter Stand sind synchron
+      expect(el.value).toBe("ab→XYZ");
+      expect(lastText()).toBe(el.value);
+      expect(sel(el)).toEqual([3, 3]);
+
+      const ev = keydown(el, "Backspace");
+
+      expect(ev.defaultPrevented).toBe(true);
+      expect(execCalls("undo")).toHaveLength(1);
+      expect(el.value).toBe("ab->XYZ");
+      expect(sel(el)).toEqual([4, 4]); // Chromium-Markierung 2..4 auf den Cursor kollabiert
+      expect(lastText()).toBe(el.value); // ohne den äußeren onChange bliebe hier 'ab→XYZ' stehen
+      rerender();
+      expect(el.value).toBe("ab->XYZ"); // der State hält den Rohtext (sonst zurück auf 'ab→XYZ')
+    });
   });
 
   // insertText-Stub mit Protokoll: welche Auswahl stand beim Aufruf? (Sonst

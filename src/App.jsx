@@ -3,7 +3,7 @@ import {
   BookOpen, Send, Pencil, X, Check, History, Download, Copy,
   RotateCcw, GitCommit, ChevronDown, Loader2, Upload, ImagePlus,
   Settings, AlertTriangle, StickyNote, Paperclip, Trash2, FileUp,
-  ArrowUp, ArrowDown, Plus, ListTree, Archive, Maximize2, Minimize2, Info,
+  ArrowUp, ArrowDown, Plus, ListTree, Archive, Maximize2, Minimize2, Info, Mic,
 } from "lucide-react";
 
 import { applyOpsDetailed, dispHead, PLACEHOLDER_LINE, stripInboxPlaceholder } from "./lib/ops.js";
@@ -46,6 +46,10 @@ import { loadSettings, saveSettings, clearSettings } from "./lib/settings.js";
 import { setLinkProviders, resolveProviderLinkTitles } from "./lib/linkProviders.jsx";
 import { sanitizeAutocorrectConfig } from "./lib/autocorrect.js";
 import { trimNoteBlock } from "./lib/textIndent.js";
+import {
+  createDictation, dictationStep, getSpeechRecognitionCtor, isDictationAvailable,
+  pickDictationLang, queryMicPermission, resolveDictationError,
+} from "./lib/dictation.js";
 import SettingsDialog from "./components/SettingsDialog.jsx";
 import DocEditor from "./components/DocEditor.jsx";
 import QuickNotes from "./components/QuickNotes.jsx";
@@ -76,6 +80,24 @@ const loadQuickNotesCache = () => {
 const saveQuickNotesCache = (notes, base) => {
   try { localStorage.setItem(QUICKNOTES_KEY, JSON.stringify(serializeQuickNotesCache(notes, base))); }
   catch (e) { /* Speicher voll o. ä. – Cache bleibt eben stehen */ }
+};
+
+// Mikrofon-Knopf am Chat-Eingabefeld (v7.59, DECISIONS #139): Klassen und
+// Titel je Diktat-Zustand. Die Klassen stehen als VOLLSTÄNDIGE Literale hier
+// (nie zusammengesetzt), damit der Tailwind-Scanner sie findet. "starting"
+// pulsiert bewusst NICHT: dort ist evtl. noch der Berechtigungsdialog offen,
+// und pulsierendes Rot soll "jetzt sprechen" heißen.
+const DICT_BTN_CLASS = {
+  idle: "p-2.5 sm:p-3 rounded-xl border border-slate-300 bg-white text-slate-600 hover:bg-slate-50",
+  starting: "p-2.5 sm:p-3 rounded-xl border border-rose-300 bg-rose-50 text-rose-600",
+  listening: "p-2.5 sm:p-3 rounded-xl border border-rose-600 bg-rose-600 text-white motion-safe:animate-pulse",
+  stopping: "p-2.5 sm:p-3 rounded-xl border border-rose-600 bg-rose-600 text-white opacity-60",
+};
+const DICT_TITLE = {
+  idle: "Diktieren (Spracherkennung des Browsers, wird an den Text angehängt)",
+  starting: "Mikrofon startet … – antippen bricht ab",
+  listening: "Diktat beenden",
+  stopping: "Diktat wird abgeschlossen …",
 };
 
 /* ---------- Multi-Notizbuch-Helfer ---------- */
@@ -878,6 +900,25 @@ export default function NotizbuchApp() {
   // v7.2: Eingabefeld per Knopf vergrößerbar (lange Prompts) – rein lokaler
   // UI-Zustand, kein Persistieren nötig (Bildschirmgröße/Vorliebe pro Sitzung).
   const [inputExpanded, setInputExpanded] = useState(false);
+  // v7.59 (Spracheingabe am Chat-Eingabefeld, DECISIONS #139): Zustand des
+  // Diktat-Controllers (lib/dictation.js), der letzte Hinweis dazu (eigene
+  // Zeile über dem Eingabefeld statt setBanner, siehe dort) und die Refs, mit
+  // denen Effekte/Handler an Controller und Feld kommen. dictErrSeq verwirft
+  // Hinweise, die erst nach einem neuen Antippen aufgelöst würden (die
+  // Berechtigungsabfrage zum Fehlertext ist asynchron). sendAfterDictRef
+  // merkt ein während des Diktats ausgelöstes Senden bis zum Abschnittsende.
+  const [dictState, setDictState] = useState("idle");
+  const [dictHint, setDictHint] = useState(null); // { kind: "info"|"warn", text }
+  const dictRef = useRef(null);
+  const dictErrSeq = useRef(0);
+  const chatInputRef = useRef(null);
+  const micBtnRef = useRef(null);
+  const sendAfterDictRef = useRef(false);
+  const prevDictStateRef = useRef("idle");
+  const dictActive = dictState !== "idle";
+  // PRO RENDER, nicht memoisiert: die Abfrage ist billig, und die API kann zur
+  // Laufzeit verschwinden/ersetzt werden (E2E-Tests, Browser-Erweiterungen).
+  const dictSupported = isDictationAvailable(typeof window !== "undefined" ? window : null);
   const [busy, setBusy] = useState(false);
   const [busyLabel, setBusyLabel] = useState("strukturiert …");
   // v7.54 (Verify-then-Commit-Gate, DECISIONS #112): der zuletzt verworfene
@@ -2084,6 +2125,33 @@ export default function NotizbuchApp() {
     };
   }, [refreshMeta]);
 
+  /* ---------- Spracheingabe: Controller (v7.59, DECISIONS #139) ---------- */
+  // Einmalig angelegt; die Callbacks benutzen nur stabile Setter/Refs (deshalb
+  // leere Abhängigkeiten). Jedes Zwischen-/Endergebnis wird per FUNKTIONALEM
+  // setInput in den aktuellen Feldtext eingespleißt (dictationStep ersetzt nur
+  // das eigene, unveränderte Endstück) - kein Schnappschuss, damit
+  // submitQuickNote und die Fehler-Wiederherstellung in send(), die ebenfalls
+  // auf input schreiben, nicht überschrieben werden.
+  useEffect(() => {
+    const d = createDictation({
+      getCtor: () => getSpeechRecognitionCtor(window),
+      lang: pickDictationLang(navigator.languages),
+      onText: (prev, next) => setInput((cur) => dictationStep(cur, prev, next)),
+      onState: (s) => {
+        setDictState(s);
+        if (s === "starting") { dictErrSeq.current++; setDictHint(null); }
+      },
+      onError: (code) => {
+        const seq = dictErrSeq.current;
+        resolveDictationError(code, () => queryMicPermission(navigator)).then((info) => {
+          if (info && seq === dictErrSeq.current) setDictHint(info); // kein veralteter Hinweis
+        });
+      },
+    });
+    dictRef.current = d;
+    return () => { d.dispose(); if (dictRef.current === d) dictRef.current = null; };
+  }, []);
+
   /* ---------- Chat-Autoscroll ---------- */
   useEffect(() => {
     if (chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: "smooth" });
@@ -2158,6 +2226,17 @@ export default function NotizbuchApp() {
     // archiving-Guard: sonst könnte eine während des Archivierens gesendete
     // Nachricht vom anschließenden setChat([WELCOME]) verschluckt werden.
     if ((!text && !pendingImg && !pendingFile) || busy || archiving) return;
+    // v7.59 (Spracheingabe, DECISIONS #139): aufgeschobenes Senden. Läuft ein
+    // Diktat, wird NICHT sofort gesendet, sondern das Diktat beendet; der
+    // Effekt auf dictState (unten) ruft send() erneut auf, sobald der
+    // Abschnitt zu Ende ist. Grund: Auf Chrome Android fehlt den
+    // Zwischenergebnissen der instabile Schluss, sofortiges Senden verlöre die
+    // letzten Wörter. Das Senden hat der Nutzer selbst ausgelöst (Knopf oder
+    // Enter) - es ist kein "automatisches Senden" des Diktats. Diese Zeile
+    // steht bewusst HINTER den Guards oben: bei leerem Feld/busy/archiving
+    // läuft das Diktat unbeeinflusst weiter.
+    const d = dictRef.current;
+    if (d && d.getState() !== "idle") { sendAfterDictRef.current = true; d.stop(); return; }
     if (!connected || !settingsRef.current) { setShowSettings(true); return; }
     const cfg = settingsRef.current;
     // v7.54 (Verify-then-Commit-Gate, DECISIONS #112, Spec 5.1 Schritt 1):
@@ -2184,6 +2263,7 @@ export default function NotizbuchApp() {
     setPendingImg(null);
     setPendingFile(null);
     setImgError(null);
+    setDictHint(null);
     setBusy(true);
 
     try {
@@ -2664,6 +2744,65 @@ export default function NotizbuchApp() {
       setBusy(false);
     }
   };
+
+  /* ---------- Spracheingabe: Verhalten rund um das Feld (v7.59, DECISIONS #139) ---------- */
+  const toggleDictation = () => {
+    const d = dictRef.current;
+    if (!d) return;
+    // Beim Start die Bildschirmtastatur schließen und eine laufende
+    // Tastatur-Komposition beenden (sonst kämpft sie gegen die
+    // programmatischen Textänderungen des Diktats). Nur beim START, nicht beim
+    // Beenden.
+    if (d.getState() === "idle") {
+      const ta = chatInputRef.current;
+      if (ta && document.activeElement === ta) ta.blur();
+    }
+    d.toggle();
+  };
+
+  // Abschnitt beendet: aufgeschobenes Senden ODER (nur feiner Zeiger) Fokus
+  // zurück ins Feld. Die send()-Version dieses Renders sieht schon das
+  // Endergebnis in input (result kommt vor end, beide Zustandsänderungen sind
+  // spätestens in diesem Render angewendet). send ist absichtlich NICHT in den
+  // Abhängigkeiten, sonst feuerte der Effekt bei jedem Render.
+  useEffect(() => {
+    const was = prevDictStateRef.current;
+    prevDictStateRef.current = dictState;
+    if (dictState !== "idle" || was === "idle") return;
+    if (sendAfterDictRef.current) { sendAfterDictRef.current = false; send(); return; }
+    const ta = chatInputRef.current;
+    if (!ta) return;
+    // Mobil (grober Zeiger) bleibt die Tastatur zu; und fremden Fokus nie
+    // stehlen (nur wenn er auf dem Mikrofon-Knopf oder nirgends liegt).
+    const coarse = typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
+    const ae = document.activeElement;
+    if (coarse || (ae && ae !== document.body && ae !== micBtnRef.current)) return;
+    ta.focus();
+    const n = ta.value.length;
+    try { ta.setSelectionRange(n, n); } catch (e) { /* egal */ }
+  }, [dictState]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Während des Diktats das Textende sichtbar halten (das Feld hat nur 2 Zeilen).
+  useEffect(() => {
+    if (!dictActive) return;
+    const ta = chatInputRef.current;
+    if (ta) ta.scrollTop = ta.scrollHeight;
+  }, [input, dictActive]);
+
+  // Mobil: Der Wechsel in die Notizbuch-Ansicht beendet das Diktat (die
+  // Chat-Sektion bleibt nur per CSS versteckt gemountet; das Endergebnis
+  // kommt noch an). Ein Notizbuch-Wechsel tut nichts: input ist global.
+  useEffect(() => {
+    if (view !== "chat" && dictRef.current) dictRef.current.stop();
+  }, [view]);
+
+  // Info-Hinweise verschwinden nach 6 s; Warnungen bleiben bis X, nächstes
+  // Antippen oder Senden.
+  useEffect(() => {
+    if (!dictHint || dictHint.kind !== "info") return;
+    const t = setTimeout(() => setDictHint((h) => (h === dictHint ? null : h)), 6000);
+    return () => clearTimeout(t);
+  }, [dictHint]);
 
   /* ---------- Override eines verworfenen Turns (v7.54, Spec 5.5) ---------- */
   // "Trotzdem übernehmen"/"Ohne Lösch-/Ersetz-Ops übernehmen": committet
@@ -4113,7 +4252,7 @@ export default function NotizbuchApp() {
         )}
         {/* Version auf sehr schmalen Screens ausblenden – der Header muss
             samt Historie/Einstellungen in 360 px passen (QA-Finding A3). */}
-        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.58</span>
+        <span className="hidden sm:inline font-mono text-xs text-slate-400">v7.59</span>
         <span className={"w-2 h-2 rounded-full ml-1 " + dotClass}
           title={
             saveState === "saved" ? "Gespeichert (im Daten-Repo)"
@@ -4487,11 +4626,34 @@ export default function NotizbuchApp() {
                 </button>
               </div>
             )}
-            <div className="flex items-end gap-2">
+            {/* Diktat-Status und -Hinweise (v7.59, DECISIONS #139). Der Wrapper
+                ist IMMER gerendert (eine aria-live-Region muss schon vor ihrem
+                Inhalt existieren) und nimmt leer keinen Platz ein. */}
+            <div aria-live="polite">
+              {dictActive && (
+                <div className="mb-1.5 flex items-center gap-1.5 text-xs text-rose-700" data-dictation-status>
+                  <span className="w-2 h-2 shrink-0 rounded-full bg-rose-600 motion-safe:animate-pulse" />
+                  <span>{dictState === "starting" ? "Mikrofon wird gestartet … (ggf. Zugriff erlauben)"
+                    : dictState === "listening" ? "Hört zu – Sprechpause oder erneutes Antippen beendet."
+                    : "Wird abgeschlossen …"}</span>
+                </div>
+              )}
+              {!dictActive && dictHint && (
+                <div role="status" data-dictation-hint
+                  className={"mb-1.5 flex items-start gap-2 px-2 py-1.5 rounded-lg text-xs border " +
+                    (dictHint.kind === "warn" ? "bg-amber-50 border-amber-200 text-amber-800" : "bg-slate-50 border-slate-200 text-slate-600")}>
+                  {dictHint.kind === "warn" ? <AlertTriangle size={14} className="shrink-0 mt-0.5" /> : <Mic size={14} className="shrink-0 mt-0.5" />}
+                  <span className="flex-1">{dictHint.text}</span>
+                  <button type="button" onClick={() => setDictHint(null)} aria-label="Hinweis schließen" title="Hinweis schließen"
+                    className="shrink-0 p-0.5 rounded hover:bg-black/5"><X size={13} /></button>
+                </div>
+              )}
+            </div>
+            <div className="flex items-end gap-1.5 sm:gap-2">
               <button
                 onClick={() => setConfirmArchive((v) => !v)}
                 disabled={!chat.some((m) => m.ts)}
-                className={"p-3 rounded-xl border border-slate-300 bg-white text-slate-600 " +
+                className={"p-2.5 sm:p-3 rounded-xl border border-slate-300 bg-white text-slate-600 " +
                   (chat.some((m) => m.ts) ? "hover:bg-slate-50" : "opacity-40")}
                 title="Chat archivieren: als Markdown im Daten-Repo ablegen und leeren"
               >
@@ -4499,7 +4661,7 @@ export default function NotizbuchApp() {
               </button>
               <button
                 onClick={() => imgInputRef.current && imgInputRef.current.click()}
-                className="p-3 rounded-xl border border-slate-300 bg-white text-slate-600 hover:bg-slate-50"
+                className="p-2.5 sm:p-3 rounded-xl border border-slate-300 bg-white text-slate-600 hover:bg-slate-50"
                 title="Bild oder Datei anhängen"
               >
                 <ImagePlus size={18} />
@@ -4510,9 +4672,35 @@ export default function NotizbuchApp() {
                 onChange={(e) => { attachAny(e.target.files && e.target.files[0]); e.target.value = ""; }}
                 className="hidden"
               />
+              {/* Mikrofon-Knopf (v7.59, DECISIONS #139): links vom Feld, damit
+                  ein hastiger Tipp beim Beenden nicht auf "Senden" landet. Ohne
+                  Browser-Unterstützung (Firefox, WebView, unsicherer Kontext)
+                  gar nicht gerendert. aria-label bleibt konstant, der Zustand
+                  steckt in aria-pressed (ein wechselndes Label dazu läse ein
+                  Screenreader widersprüchlich vor). */}
+              {dictSupported && (
+                <button
+                  ref={micBtnRef}
+                  type="button"
+                  onClick={toggleDictation}
+                  disabled={dictState === "stopping"}
+                  aria-label="Diktieren"
+                  aria-pressed={dictActive}
+                  title={DICT_TITLE[dictState]}
+                  data-dictation={dictState}
+                  className={DICT_BTN_CLASS[dictState]}
+                >
+                  <Mic size={18} />
+                </button>
+              )}
               <div className="relative flex-1 min-w-0">
                 <textarea
+                  ref={chatInputRef}
                   value={input}
+                  // v7.59 (DECISIONS #139): während des Diktats schreibgeschützt
+                  // - keine Bildschirmtastatur, keine Tastatur-Komposition
+                  // gegen die programmatischen Textänderungen.
+                  readOnly={dictActive}
                   onChange={(e) => setInput(e.target.value)}
                   onPaste={handlePaste}
                   onKeyDown={(e) => {

@@ -106,14 +106,23 @@ afterEach(async () => {
 
 // Maus-Klick inkl. Browser-Default "mousedown fokussiert das (fokussierbare)
 // Ziel, es sei denn, mousedown wurde per preventDefault abgebrochen".
+// Rückgabe (v7.59): document.activeElement, gelesen im SELBEN Tick direkt
+// nach dem click-Dispatch – vor jedem await, Timer und Microtask. Nur so
+// lässt sich belegen, dass ein Handler den Fokus SYNCHRON setzt: nach
+// "await act(...)" ist durch den act-Abschluss (setImmediate) bereits Zeit
+// vergangen, ein per setTimeout(0)/queueMicrotask verzögerter Fokus wäre
+// dort schon angekommen und nicht mehr vom synchronen zu unterscheiden.
 async function browserClick(el) {
+  let activeRightAfter = null;
   await act(async () => {
     const down = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
     el.dispatchEvent(down);
     if (!down.defaultPrevented) el.focus();
     el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
     el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    activeRightAfter = document.activeElement;
   });
+  return activeRightAfter;
 }
 
 // Nutzer klickt ins Feld (Fokus) und ersetzt dessen Inhalt. Der native
@@ -127,12 +136,20 @@ async function typeInto(input, value) {
   });
 }
 
-async function pressKey(el, init) {
+// Wie pressKey, liefert aber zusätzlich den Fokus im SELBEN Tick direkt nach
+// dem keydown-Dispatch (Begründung siehe browserClick).
+async function pressKeyProbe(el, init) {
   const ev = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+  let activeRightAfter = null;
   await act(async () => {
     el.dispatchEvent(ev);
+    activeRightAfter = document.activeElement;
   });
-  return ev;
+  return { ev, activeRightAfter };
+}
+
+async function pressKey(el, init) {
+  return (await pressKeyProbe(el, init)).ev;
 }
 
 // Lässt Promise-Ketten (fetch-Mock, await in fetchLinkTitle) auslaufen.
@@ -451,6 +468,35 @@ describe("Bestehender Link (Übernehmen / Entfernen)", () => {
     expect(markdownOf(editor)).toBe("Vorher Alter TitelX nachher");
   });
 
+  it("Nach Entfernen öffnet EIN Klick auf den Link-Knopf das Popover wieder (kein 'erster Klick schließt nur')", async () => {
+    // Nach dem Entfernen muss der Picker-Zustand ("link") zurückgesetzt sein.
+    // Bliebe er stehen, wäre das Popover zwar weg (linkForm = null), der
+    // Öffner-Knopf hielte es aber weiter für offen und würde beim nächsten
+    // Klick nur closeLinkPicker() aufrufen: der Nutzer müsste ZWEIMAL klicken.
+    const { container, editor } = await openExistingLinkPopover();
+    await browserClick(buttonByText(container, "Entfernen"));
+    expect(popoverOpen(container)).toBe(false);
+    expect(linkRuns(editor)).toEqual([]);
+
+    await browserClick(opener(container));
+
+    expect(popoverOpen(container)).toBe(true);
+    // Frisches "Einfügen"-Formular: der Cursor steht hinter dem jetzt
+    // link-losen Text, dort ist kein Link aktiv -> nichts vorbelegt, keine
+    // Bearbeiten-Knöpfe.
+    expect(titleInput(container).value).toBe("");
+    expect(urlInput(container).value).toBe("");
+    expect(buttonByText(container, "Einfügen")).toBeTruthy();
+    expect(() => buttonByText(container, "Übernehmen")).toThrow();
+    expect(() => buttonByText(container, "Entfernen")).toThrow();
+    // Und das wiedergeöffnete Popover ist voll funktionsfähig.
+    await typeInto(titleInput(container), "Neu");
+    await typeInto(urlInput(container), "https://example.org/neu");
+    await browserClick(buttonByText(container, "Einfügen"));
+    expect(popoverOpen(container)).toBe(false);
+    expect(markdownOf(editor)).toBe("Vorher Alter Titel[Neu](https://example.org/neu) nachher");
+  });
+
   it("Öffnen bleibt unverändert: öffnet die URL, das Popover bleibt offen, der Fokus wandert NICHT in den Editor", async () => {
     const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
     const { container, pm, editor } = await openExistingLinkPopover();
@@ -475,6 +521,56 @@ describe("Bestehender Link (Übernehmen / Entfernen)", () => {
 
     expect(openSpy).not.toHaveBeenCalled();
     expect(popoverOpen(container)).toBe(true);
+  });
+});
+
+// ---------- Fokus SYNCHRON im Handler (v7.59) ----------
+
+// Die Tests oben lesen activeElement erst NACH "await act(...)". Dazwischen
+// läuft act-Abschluss (setImmediate) – ein Fokus, der erst per
+// setTimeout(0)/queueMicrotask NACH dem Handler gesetzt wird, wäre dort
+// längst angekommen und bestünde diese Tests, obwohl er den Fokus nicht
+// synchron im Handler setzt. Genau das ist aber der Zweck von
+// returnFocusToEditor(): der Fokus wandert VOR dem React-Rerender, der das
+// Popover entfernt, vom Knopf/Feld in den Editor (sonst fällt er kurz auf
+// <body>). Hier daher: activeElement im selben Tick wie der Dispatch lesen
+// (activeRightAfter aus browserClick/pressKeyProbe, kein await, kein
+// Vorspulen von Timern).
+describe("Fokus kommt SYNCHRON im Handler im Editor an (nicht erst per Timer/Microtask danach)", () => {
+  const fillNew = async (c) => {
+    await typeInto(titleInput(c), "Sofort");
+    await typeInto(urlInput(c), "https://example.org/sofort");
+  };
+  const enterIn = (field) => async (c) => {
+    await browserClick(field(c)); // Nutzer steht im Feld, in dem er Enter drückt
+    return (await pressKeyProbe(field(c), { key: "Enter" })).activeRightAfter;
+  };
+
+  it.each([
+    ["Einfügen per Klick", openNewLinkPopover, fillNew, (c) => browserClick(buttonByText(c, "Einfügen"))],
+    ["Enter im Titel-Feld (neuer Link)", openNewLinkPopover, fillNew, enterIn(titleInput)],
+    ["Enter im URL-Feld (neuer Link)", openNewLinkPopover, fillNew, enterIn(urlInput)],
+    ["Übernehmen per Klick", openExistingLinkPopover, (c) => typeInto(titleInput(c), "Geändert"),
+      (c) => browserClick(buttonByText(c, "Übernehmen"))],
+    ["Enter im URL-Feld (bestehender Link)", openExistingLinkPopover, (c) => typeInto(titleInput(c), "Geändert"),
+      enterIn(urlInput)],
+    ["Entfernen per Klick", openExistingLinkPopover, async () => {}, (c) => browserClick(buttonByText(c, "Entfernen"))],
+  ])("%s: activeElement ist im selben Tick direkt nach dem Dispatch der Editor", async (_label, open, prepare, trigger) => {
+    const { container, pm } = await open();
+    await prepare(container);
+    // Vorbedingung: Der Fokus liegt vor der Aktion im Popover. Sonst könnte
+    // die Prüfung unten auch bei einem Handler bestehen, der den Fokus gar
+    // nicht anfasst.
+    expect(document.activeElement).not.toBe(pm);
+    expect(popoverOpen(container)).toBe(true);
+
+    const activeRightAfter = await trigger(container);
+
+    expect(activeRightAfter).toBe(pm);
+    // Und er bleibt dort, wenn React das Popover danach aus dem DOM nimmt
+    // (kein Zwischenstopp auf <body> mit späterem Nachholen).
+    expect(popoverOpen(container)).toBe(false);
+    expect(document.activeElement).toBe(pm);
   });
 });
 
@@ -572,6 +668,30 @@ describe("Titel ermitteln / Auto-Fetch bleiben mit dem neuen Schließen-Weg kons
 
     await pressKey(urlInput(container), { key: "Enter" });
     expect(linkRuns(editor).map((r) => [r.text, r.href])).toEqual([["Mein Ticket", AZURE_URL]]);
+
+    await act(async () => { vi.advanceTimersByTime(10_000); });
+    await flush();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("Entfernen vor Ablauf der Debounce-Zeit verwirft den wartenden Auto-Fetch: es geht nie ein Request raus", async () => {
+    // Bestehender Link, dessen URL der Nutzer auf eine Provider-URL ändert
+    // (plant den Auto-Fetch) und dann sofort "Entfernen" klickt. Ohne
+    // cancelAutoFetch() in removeLink feuerte der Timer nach 600 ms trotzdem
+    // und schickte einen Request samt PAT für einen Link, den es nicht mehr gibt.
+    setLinkProviders([PROVIDER_AZURE]);
+    const { container, editor } = await openExistingLinkPopover();
+    installFakeTimers();
+    const fetchMock = vi.fn(async () => azureResponse("sollte nie geholt werden"));
+    vi.stubGlobal("fetch", fetchMock);
+    await typeInto(urlInput(container), AZURE_URL); // plant den Auto-Fetch (600 ms)
+    await act(async () => { vi.advanceTimersByTime(599); });
+    expect(fetchMock).not.toHaveBeenCalled(); // Timer wartet noch (Vorbedingung)
+
+    await browserClick(buttonByText(container, "Entfernen"));
+    expect(popoverOpen(container)).toBe(false);
+    expect(linkRuns(editor)).toEqual([]);
+    expect(markdownOf(editor)).toBe("Vorher Alter Titel nachher");
 
     await act(async () => { vi.advanceTimersByTime(10_000); });
     await flush();

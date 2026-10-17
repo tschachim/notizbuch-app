@@ -459,6 +459,20 @@ oder Datei anhängen“) und Senden-Button schließen unten auf einer Linie ab,
 kein Leerraum unter dem Textfeld. Auch mit
 aufgeklapptem Eingabefeld (Vergrößern-Button im Feld) prüfen.
 
+Ergänzung ab v7.59 (DECISIONS #139, Mikrofon-Knopf): Ist der Mikro-Knopf
+vorhanden (`button[data-dictation]`; er fehlt in Firefox und in der
+Android-WebView-App, dann entfällt dieser Teil), gehört er in die
+Unterkanten-Prüfung und in die Sichtprüfung der Reihe (375 und 356 px):
+Reihenfolge Archiv, Bild, Mikro, Feld, Senden, alle Unterkanten auf einer
+Linie. Konsole (im iframe über `contentDocument`):
+```
+const row = ['button[title^="Chat archivieren"]', 'button[title="Bild oder Datei anhängen"]', 'button[data-dictation]', 'textarea[placeholder^="Notiz eintippen"]', 'button[title="Senden"]'].map((s) => document.querySelector(s)).filter(Boolean);
+row.every((e) => Math.abs(e.getBoundingClientRect().bottom - row[row.length - 1].getBoundingClientRect().bottom) < 1)
+```
+Erwartet: `true`. Die Beschreibung in C7 („Archiv-Knopf links neben dem
+Anhang-Knopf“) stimmt weiter: Archiv bleibt ganz links, der Mikro-Knopf
+sitzt rechts vom Anhang-Knopf. Layout-Details und Abmessungen: C35.
+
 **C9a [VERBUNDEN][API] Formel im Chat (reine Frage, kein Speicherauftrag).** Im
 QA-Notizbuch per Chat: „Erkläre kurz den Satz des Pythagoras mit Formel –
 nur erklären, nichts speichern.“ (genau 1 API-Aufruf). Erwartet: Die
@@ -1099,6 +1113,119 @@ Versuch ebenfalls ein Verwerfungs-/Atomaritäts-Fall, gilt der LETZTE
 Versuch mit dem v7.54-Verhalten (Pille, Diff, Override, KEIN
 ℹ️-Nachbesserungs-Hinweis, da der Turn insgesamt verworfen bleibt); (c) wie
 C32(c). 🔴 bei Zeilenverlust oder -duplikat.
+
+**Diktat-Fälle C35–C40 (v7.59, DECISIONS #139) – Vorspann, Pflicht für
+C36–C39.** Der Tester klickt den Mikro-Knopf NIE ohne Fake: Sonst öffnet
+Chrome den Mikrofon-Berechtigungsdialog, den der Tester nicht beantworten
+darf. Den Fake per javascript_tool VOR jedem Mikro-Klick installieren; die
+App liest den Konstruktor bei jedem Antippen neu. Jedes Szenario möglichst
+in EINEM javascript_tool-Aufruf mit MessageChannel-Ticks ausführen
+(verdecktes Fenster, gedrosselte Timer, siehe „Hinweise QA-Chrome“ (a) und
+(d) oben). Am Ende das Original wiederherstellen (`window.SpeechRecognition
+= window.__origSR`), die Stubs entfernen und den QA-Text aus dem Feld
+löschen. Snippet:
+```js
+window.__origSR = window.__origSR || window.SpeechRecognition;
+window.__recs = [];
+window.SpeechRecognition = class { constructor(){ this.calls=[]; window.__recs.push(this); } start(){ this.calls.push('start'); } stop(){ this.calls.push('stop'); } abort(){ this.calls.push('abort'); } };
+window.__rec = () => window.__recs[window.__recs.length - 1];
+window.__fire = (n, ev) => { const h = window.__rec()['on' + n]; if (h) h(ev || {}); };
+window.__res = (...parts) => ({ resultIndex: 0, results: parts.map(([t, f]) => Object.assign([{ transcript: t, confidence: 0 }], { isFinal: !!f })) });
+window.__tick = () => new Promise((r) => { const c = new MessageChannel(); c.port1.onmessage = () => r(); c.port2.postMessage(0); });
+```
+Selektoren: Feld `textarea[placeholder^="Notiz eintippen"]`, Knopf
+`button[data-dictation]` (aria-label „Diktieren“), Hinweis
+`[data-dictation-hint]`, Status `[data-dictation-status]`. Werte im Feld
+per nativem Setter (`Object.getOwnPropertyDescriptor(
+HTMLTextAreaElement.prototype, 'value').set`) plus `input`-Event setzen.
+Ergebnisse feuert man mit `__fire('result', __res(['eins']))` (Interim) bzw.
+`__res(['Eins', true])` (Final); `__fire('start')`, `__fire('error', {
+error: '…' })` und `__fire('end')` für die übrigen Ereignisse.
+
+**C35 [OFFEN] Mikrofon-Knopf: Sichtbarkeit und Layout.** Desktop-Chrome:
+Der Knopf ist sichtbar, Reihenfolge Archiv, Bild, Mikro, Feld, Senden;
+`data-dictation` „idle“, `aria-pressed` „false“, `title` beginnt mit
+„Diktieren“. Im 356-px-iframe (siehe „Hinweise QA-Chrome“ (b)): Inhaltsbreite
+des Felds (`clientWidth` minus Padding) ≥ 100 px; Mikro-Knopf ≥ 40×40 px;
+die Unterkanten von Feld, Archiv, Bild, Mikro und Senden weichen um < 1 px
+ab. Ab `sm` (Desktop-Breite): Archiv, Bild und Mikro 44×44 px.
+
+**C36 [OFFEN] Diktat-Ablauf (Fake).** (a) Start: „QA-Test vorher“ ins Feld
+setzen, Fake installieren, Mikro-Knopf klicken → `data-dictation`
+„starting“, `__rec().calls` = ['start'], `lang` beginnt mit „de-“,
+`continuous` false, `interimResults` true, Feld `readOnly`, Statuszeile
+„Mikrofon wird gestartet …“. `__fire('start')` → „listening“, die
+Knopf-Klasse enthält `animate-pulse` (genau: `motion-safe:animate-pulse`),
+Statuszeile „Hört zu – …“.
+(b) Ergebnisse: `__res(['eins'])` → Feld „QA-Test vorher eins“;
+`__res(['eins zwei'], ['drei'])` → „QA-Test vorher eins zwei drei“;
+`__res(['Eins zwei drei', true])` → „QA-Test vorher Eins zwei drei“ (Final
+ersetzt Interim, nichts doppelt). (c) Vergrößern-Knopf (oben rechts im Feld)
+während „listening“ klicken → das Diktat läuft weiter (Zustand bleibt
+„listening“). (d) `__fire('end')` → „idle“, `readOnly` weg, Text bleibt,
+Zahl der Chat-Nachrichten unverändert (nichts gesendet), kein Hinweis.
+(e) Zweites Diktat: Klick, `__fire('start')` → `__recs.length === 2`
+(neue Instanz); Final „danke“ + `__fire('end')` → Feld „… Eins zwei drei
+danke“. (f) Erneutes Antippen beendet: Klick, `__fire('start')`, per
+Tick-Schleife mindestens 400 ms warten (Doppel-Tipp-Schutz: ein Tipp
+innerhalb von 400 ms nach dem Start wird ignoriert), Klick → `calls`
+enthält 'stop', „stopping“, Knopf `disabled`; Final + `__fire('end')` →
+„idle“, Text angehängt. (g) Abbruch ohne Final: Klick, `__fire('start')`,
+Interim „zwischen“, `__fire('error', { error: 'aborted' })`,
+`__fire('end')` → „zwischen“ bleibt im Feld, kein Hinweis. 🔴 bei
+überschriebenem Vortext, doppeltem Text oder automatischem Senden.
+
+**C37 [OFFEN] Diktat-Hinweise (Fake).** (a) `no-speech`: Klick,
+`__fire('start')`, `__fire('error', { error: 'no-speech' })`,
+`__fire('end')` → Hinweis „Nichts gehört …“ direkt über der Eingabezeile
+(`[data-dictation-hint]`, NICHT im oberen Banner); er verschwindet nach ca.
+6 s (im verdeckten Tab Dauer notieren, kein Finding). (b) `not-allowed`
+mit gestubbter Berechtigungsabfrage: `navigator.permissions.query = async
+() => ({ state: 'denied' })`, Klick, `__fire('error', { error:
+'not-allowed' })`, `__fire('end')` → Hinweis enthält „blockiert“; mit
+'granted' → „nicht verfügbar“; mit 'prompt' → beginnt mit „Kein Zugriff“
+und nennt „Zulassen“. (c) Das X („Hinweis schließen“) schließt einen
+Warn-Hinweis; ein nächstes Antippen des Mikro-Knopfs leert ihn ebenfalls.
+Danach `delete navigator.permissions.query`. Der globale Banner oben bleibt
+unverändert (kein Diktat-Hinweis dort). 🟡 bei unverständlichem Text.
+
+**C38 [OFFEN] Senden während des Diktats (unverbunden bzw. ohne
+API-Kosten).** Nur wenn die App NICHT verbunden ist (sonst übersprungen;
+die Variante [VERBUNDEN][API] ist im QA-Modus optional, mit genau einem
+Prompt „QA-Test Diktat: Was ist zwei plus zwei? Bitte nichts notieren.“):
+Fake installieren, Klick, `__fire('start')`, Interim „test“, dann den
+Senden-Knopf klicken (Hauptpfad) → `calls` enthält 'stop', sonst passiert
+noch nichts (Einstellungen NICHT geöffnet, keine neue Chat-Nachricht).
+Final „test fertig“ + `__fire('end')` → jetzt öffnet `send()` (unverbunden)
+die Einstellungen bzw. (verbunden) enthält die gesendete Nachricht „test
+fertig“. Enter-Variante: Vorher ins Feld klicken (es ist `readOnly`, aber
+fokussierbar) und dort Enter drücken – gleiches Ergebnis. Enter auf dem
+fokussierten Mikro-Knopf (Fokus liegt nach dem Antippen dort) beendet nur
+das Diktat und sendet nicht – das ist kein Finding. Danach Einstellungen
+schließen und den QA-Text aus dem Feld löschen.
+
+**C39 [OFFEN] Ohne Browser-Unterstützung kein Knopf.** Originale sichern
+(`window.__origSR` aus dem Vorspann, außerdem `window.__origWebkitSR =
+window.__origWebkitSR || window.webkitSpeechRecognition`), dann
+`window.SpeechRecognition = undefined; window.webkitSpeechRecognition =
+undefined;`, danach den Vergrößern-Knopf zweimal klicken (erzwingt ein
+Re-Render) → kein Mikro-Knopf, die Zeile hat drei Knöpfe (Archiv, Bild,
+Senden), C8c-Ausrichtung unverändert. Originale wiederherstellen und
+Vergrößern erneut zweimal klicken → der Knopf ist wieder da. Optional
+Firefox: dort fehlt der Knopf von Haus aus.
+
+**C40 [MANUELL][NUTZER] Echtes Diktat auf dem Android-Handy (Chrome, einmal
+auch die installierte PWA).** Zu notieren: Erst-Dialog „Zulassen“ (ggf.
+zusätzlich der Android-Systemdialog – danach muss der Knopf evtl. erneut
+angetippt werden) und Signalton; deutsches Diktat erscheint beim Sprechen;
+eine Sprechpause beendet den Abschnitt, die Tastatur geht nicht auf;
+erneutes Antippen direkt nach dem Ende – meldet es „belegt“, wie oft?;
+App-Wechsel während des Diktats → der Text bleibt stehen; Berechtigung
+ablehnen → Hinweis mit Freigabe-Weg; Flugmodus; Satzzeichen und
+Großschreibung, gesprochenes „Komma“; Senden während des Sprechens → kommt
+der vollständige Text an?; Feldbreite und Lesbarkeit der Knopfreihe. Nach
+dem Update auf Chrome 157 wiederholen. In der Android-WebView-App (APK):
+kein Mikro-Knopf (erwartet).
 
 ## D. Manuelles Bearbeiten (WYSIWYG)
 
@@ -2622,3 +2749,11 @@ Browser-Konsole am Ende auf Fehler prüfen und diese als Findings melden.
    prüfen, dass KEIN QA-Testeintrag mehr im Abschnitt „Globales
    Gedächtnis“ steht (siehe Cleanup-Hinweis dort) – das Gedächtnis ist
    global und überlebt anders als QA-Notizbücher keinen Löschen-Knopf.
+6. Wurden C36–C39 (Diktat-Fake) ausgeführt: die Fake-Erkennung entfernen
+   (`window.SpeechRecognition = window.__origSR`, falls in C39 gesichert
+   auch `window.webkitSpeechRecognition = window.__origWebkitSR`), die
+   Hilfsfunktionen löschen (`delete window.__recs, window.__rec,
+   window.__fire, window.__res, window.__tick`), den Berechtigungs-Stub
+   löschen (`delete navigator.permissions.query`), offene Diktat-Hinweise
+   schließen und den QA-Text aus dem Chat-Eingabefeld löschen (in C38
+   zusätzlich den Einstellungs-Dialog schließen).
